@@ -1,6 +1,6 @@
 # UAT Readiness Document — Cenomi RDD Chatbot
 
-> **Prepared:** July 7, 2026
+> **Prepared:** July 8, 2026 (updated from July 7, 2026 — v1.3.0)
 > **Audience:** QA Team, Stakeholders, Incoming Developers
 > **Scope:** Full UAT readiness assessment for the Help Agent and RDD Handover Lifecycle
 > **Overall verdict:** ✅ Ready for local UAT now. ⚠️ One 30-minute check needed before live-platform UAT.
@@ -67,7 +67,11 @@ Cenomi Platform APIs (SR create/patch/fetch, Lease lookup, File upload)
 | Unit tests (isolated nodes, services, validators) | ~1,300 | ✅ All passing |
 | Integration tests (graph + mocked LLM/API) | ~80 | ✅ All passing |
 | E2E tests (full HTTP stack, all externals mocked) | ~17 | ✅ All passing |
-| **Total** | **1,386** | **✅ 1,386/1,386 passing** |
+| **Total pytest** | **1,387** | **✅ 1,387/1,387 passing** |
+| Playwright mocked UI (no backend required) | 42 | ✅ 42/42 |
+| Playwright live — CREATE_SR eval (real LLM) | 33 | ✅ 31/33 (2 LLM variability, not bugs) |
+| Playwright live — FM/RDD eval + full lifecycle | 14 | ✅ 14/14 |
+| Playwright live — UI lifecycle | 16 | ✅ 16/16 |
 
 ### Priority lifecycle test suite (68 tests — run these for UAT validation)
 
@@ -285,18 +289,38 @@ cd service-request-chatbot/backend
 ./run_lifecycle_tests.sh --fast       # stop on first failure
 ```
 
-### Full suite (all 1,386 tests)
+### Full suite (all 1,387 tests)
 
 ```bash
 cd service-request-chatbot/backend
 pytest tests/ -v --tb=short
 ```
 
+### Playwright mocked tests (no server needed)
+
+```bash
+cd service-request-chatbot/frontend
+npm run test:e2e
+```
+
+### Playwright live stack (real LLM + Postgres + Redis)
+
+```bash
+cd service-request-chatbot/frontend
+npm run test:live
+
+# Or via orchestrator (starts the full stack automatically):
+cd service-request-chatbot
+./run-live-tests.sh
+```
+
 ### Expected result
 
 ```
 68 passed in ~52s      ← lifecycle suite
-1,386 passed in ~85s   ← full suite
+1,387 passed in ~85s   ← full suite
+42 passed             ← Playwright mocked
+31/33, 14/14, 16/16   ← Playwright live (2 LLM variability — not bugs)
 ```
 
 ---
@@ -465,7 +489,7 @@ MSP_SERVICE_TOKEN=<agreed-service-token-value>
 | `AuthContext` dataclass | Internal identity contract — the entire graph reads this, not the JWT directly |
 | `PermissionService` + RBAC matrix | Reads `AuthContext.roles` — role names stay the same |
 | All 26 graph nodes | No JWT awareness — only see `AuthContext` |
-| All 1,386 tests | Mock `AuthContext` directly — not affected by JWT format changes |
+| All 1,387 pytest tests + 92 Playwright tests | Mock `AuthContext` directly — not affected by JWT format changes |
 | RDD lifecycle flows | No auth code in workflow nodes |
 | MSP endpoints `/api/v1/chat` + `/api/v1/chat/stream` | Already wired for MSP — no changes |
 
@@ -493,11 +517,18 @@ The `AuthContext` dataclass is the internal wall. Everything to the right of it 
 
 | Gap | Description | Fix timing |
 |-----|-------------|-----------|
-| `PermissionService` fail-open | Unknown action names are allowed through. All defined actions (create/fm/rdd/upload) are correctly enforced. | Before production go-live |
 | `RBAC_ENFORCE=false` | Auth is in shadow mode — JWT is validated but unauthenticated requests are not rejected | Set to `true` before production |
-| No application Dockerfiles | App runs locally; no container images exist | Before production deployment |
-| No CI/CD pipeline | `./run_lifecycle_tests.sh` serves as the manual CI gate | Before production deployment |
+| `sr_status_sync_node` field names | Field names (`assigned_role`, `status`) chosen to match Postman collection — need one-time verification against live platform response | ~30 min once platform credentials available |
+| No CI/CD pipeline | `./run-live-tests.sh` serves as the manual 5-tier CI gate | Before production deployment |
 | Redis not used beyond health check | Redis is running and connected but session caching is not yet implemented | Optimisation — not a functional gap |
+
+### Fixed since v1.2.0 (no longer gaps)
+
+| Item | Fixed in |
+|------|---------|
+| `PermissionService` fail-open | **v1.3.0** — `check()` now raises `PermissionDeniedError` for unknown actions; JWT role names expanded via `ROLE_PERMISSION_MAP` |
+| No application Dockerfiles | **v1.2.0** — `backend/Dockerfile` (2-stage) + `frontend/Dockerfile` (3-stage) + `docker-compose.prod.yml` |
+| 6 agent bugs (comments, lease re-trigger, FM/RDD draft creation, upload mock mode) | **v1.3.0** |
 
 ### Not in scope for this UAT
 
