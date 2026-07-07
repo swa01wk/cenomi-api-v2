@@ -131,6 +131,7 @@ stages:
                 az containerapp update \
                   --name $(container_name) \
                   --resource-group $(AZURE_RG) \
+                  --container-name cenomi-ai-v2-api-stage \
                   --image "$IMAGE"
 
           - task: CmdLine@2
