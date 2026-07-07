@@ -141,11 +141,9 @@ export function ServiceRequestChat() {
         if (res.workflowStage !== undefined) setWorkflowStage(res.workflowStage);
         if (res.srId) setSrId(res.srId);
 
-        // Track rdd_status from backend_refs if present in preview data
-        const previewData = res.draftPreview ?? (res.responseUI.type === "sr_preview_card" ? res.responseUI : null);
-        if (previewData?.status) {
-          setRddStatus(previewData.status);
-        }
+        // Track rdd_status from the backend's ChatStatePayload (reliable source).
+        // draftPreview.status is "SUBMITTED"/"DRAFT" — never "REPORT_SUBMITTED".
+        if (res.rddStatus !== undefined) setRddStatus(res.rddStatus);
 
         if (res.draftPreview) {
           setLatestSRPreview(res.draftPreview);
@@ -195,10 +193,12 @@ export function ServiceRequestChat() {
   );
 
   const handleConfirm = useCallback(
-    (fields: Record<string, unknown>) => {
+    (fields: Record<string, unknown>, confirmAction?: string) => {
       sendTurn("Confirmed. Please submit.", {
         correctedFields: fields,
-        action: "confirm",
+        // Use the stage-specific confirm action embedded in the card; fall back
+        // to the generic "confirm" for CREATE_SR where no confirmAction is set.
+        action: (confirmAction ?? "confirm") as ChatAction,
       });
     },
     [sendTurn],

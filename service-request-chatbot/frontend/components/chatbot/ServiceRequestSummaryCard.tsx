@@ -5,7 +5,7 @@ import type { ConfirmationField, ResponseUIConfirmationCard } from "@/lib/types/
 
 type Props = {
   data: ResponseUIConfirmationCard;
-  onConfirm: (fields: Record<string, unknown>) => void;
+  onConfirm: (fields: Record<string, unknown>, confirmAction?: string) => void;
   onCancel: () => void;
   /** When true, field inputs and action buttons are hidden (past-turn view). */
   readOnly?: boolean;
@@ -25,21 +25,44 @@ function FieldRow({
   const displayValue =
     field.value === null || field.value === undefined ? "—" : String(field.value);
 
+  // Human-readable labels for known enum values
+  const ENUM_LABELS: Record<string, string> = {
+    APPROVED: "Approve",
+    APPROVED_WITH_CHANGES: "Approve with Changes",
+  };
+
+  const displayLabel = ENUM_LABELS[displayValue] ?? displayValue;
+
   return (
     <div className="flex items-start justify-between gap-3 py-2">
       <span className="shrink-0 text-xs font-medium text-zinc-500 dark:text-zinc-400">
         {field.label}
       </span>
       {field.editable && !readOnly ? (
-        <input
-          type="text"
-          value={editedValue}
-          onChange={(e) => onChange(e.target.value)}
-          className="w-1/2 rounded border border-zinc-300 bg-transparent px-2 py-1 text-right text-xs outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-500/20 dark:border-zinc-700"
-        />
+        field.options ? (
+          <select
+            value={editedValue}
+            onChange={(e) => onChange(e.target.value)}
+            className="w-1/2 rounded border border-zinc-300 bg-transparent px-2 py-1 text-right text-xs outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-500/20 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
+          >
+            <option value="">Select…</option>
+            {field.options.map((opt) => (
+              <option key={opt} value={opt}>
+                {ENUM_LABELS[opt] ?? opt}
+              </option>
+            ))}
+          </select>
+        ) : (
+          <input
+            type="text"
+            value={editedValue}
+            onChange={(e) => onChange(e.target.value)}
+            className="w-1/2 rounded border border-zinc-300 bg-transparent px-2 py-1 text-right text-xs outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-500/20 dark:border-zinc-700"
+          />
+        )
       ) : (
         <span className="text-right text-xs text-zinc-800 dark:text-zinc-100">
-          {field.editable ? editedValue || displayValue : displayValue}
+          {field.editable ? (ENUM_LABELS[editedValue] ?? editedValue) || displayLabel : displayLabel}
         </span>
       )}
     </div>
@@ -66,7 +89,9 @@ export function ServiceRequestSummaryCard({ data, onConfirm, onCancel, readOnly 
     data.fields.forEach((f) => {
       merged[f.key] = f.editable ? (editedFields[f.key] ?? f.value) : f.value;
     });
-    onConfirm(merged);
+    // Pass the stage-specific confirmAction from the card so the parent can
+    // send the right action string instead of the generic "confirm".
+    onConfirm(merged, data.confirmAction);
   }
 
   return (

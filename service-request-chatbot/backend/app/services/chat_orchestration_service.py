@@ -71,6 +71,8 @@ class ChatTurnState:
     workflow_stage: str | None
     missing_fields: list[str]
     ready_to_submit: bool
+    rdd_status: str | None = None
+    fm_status: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -360,6 +362,9 @@ class ChatOrchestrationService:
         # 12. Build and return result ------------------------------------------
         missing_fields: list[str] = result_state.get("missing_fields") or []
         ready_to_submit = graph_status in ("READY_TO_SUBMIT", "SUBMITTED")
+        final_backend_refs: dict[str, Any] = result_state.get("backend_refs") or {}
+        rdd_status: str | None = final_backend_refs.get("rdd_status")
+        fm_status: str | None = final_backend_refs.get("fm_status")
         # faq_sources already extracted in step 9 above
 
         # Build a preview snapshot from collected_data on every turn.
@@ -391,6 +396,8 @@ class ChatOrchestrationService:
                 workflow_stage=result_state.get("workflow_stage"),
                 missing_fields=missing_fields,
                 ready_to_submit=ready_to_submit,
+                rdd_status=rdd_status,
+                fm_status=fm_status,
             ),
             trace_id=trace_id,
             draft_preview=draft_preview,

@@ -18,6 +18,7 @@ from app.agents.schemas.handover_schema import (
     FM_ALLOWED_DOCUMENTS,
     FM_REVIEW_STAGE,
     PERMISSION_MAP,
+    RDD_ALLOWED_DOCUMENTS,
     RDD_REQUIRED_DOCUMENTS,
     RDD_REVIEW_STAGE,
     SERVICE_CATEGORY,
@@ -91,7 +92,10 @@ class TestCreateSRStage:
         "startDate",
         "endDate",
         "inspection_done_by",
-        "comments",
+        "notes",
+        # "comments" removed: the bot no longer proactively asks for it.
+        # It is still extractable and stored when provided inline, but
+        # "notes" is the single optional catch-all field for CREATE_SR.
     )
 
     def test_role(self) -> None:
@@ -103,6 +107,10 @@ class TestCreateSRStage:
     def test_required_fields_count(self) -> None:
         assert len(CREATE_SR_STAGE.required_fields) == len(self._EXPECTED_FIELDS)
 
+    def test_comments_not_in_required_fields(self) -> None:
+        """comments must not be a proactively-asked field — it causes a double optional question."""
+        assert "comments" not in CREATE_SR_STAGE.required_fields
+
     def test_no_required_documents(self) -> None:
         assert CREATE_SR_STAGE.required_documents == ()
 
@@ -111,11 +119,15 @@ class TestCreateSRStage:
 
 
 class TestFMReviewStage:
-    _EXPECTED_FIELDS = ("unit_readiness_date",)  # expected_handover_date is auto-computed
+    _EXPECTED_FIELDS = (
+        "unit_readiness_date",
+        # "comments" removed: same Option B fix as CREATE_SR — bot no longer proactively asks
+    )
     _EXPECTED_DOCS = (
         "SR_HANDOVER_CHECKLIST",
         "SR_HANDOVER_SITE_SURVEY",
         "SR_COP_CHECKLIST_OTHER",
+        "SR_HANDOVER_OTHER",  # optional additional upload accepted at FM stage
     )
 
     def test_role(self) -> None:
@@ -128,7 +140,7 @@ class TestFMReviewStage:
         assert set(FM_REVIEW_STAGE.required_documents) == set(self._EXPECTED_DOCS)
 
     def test_required_documents_count(self) -> None:
-        assert len(FM_REVIEW_STAGE.required_documents) == 3
+        assert len(FM_REVIEW_STAGE.required_documents) == 4
 
 
 # ── RDD_REVIEW stage ──────────────────────────────────────────────────────────
@@ -137,12 +149,18 @@ class TestFMReviewStage:
 class TestRDDReviewStage:
     _EXPECTED_FIELDS = (
         "guideLineLink",
+        "document_status",    # APPROVED | APPROVED_WITH_CHANGES — chosen by RDD PM
         "actual_handover_date",
         "fitout_start_date",
         "fitout_end_date",
-        "trading_date",
+        # trading_date intentionally excluded — auto-computed as fitout_end_date + 8 days
+        # "comments" removed: Option B fix — bot no longer proactively asks
     )
-    _EXPECTED_DOCS = ("DR_SR_HANDOVER_REPORT",)
+    _EXPECTED_DOCS = (
+        "DR_SR_HANDOVER_REPORT",         # mandatory
+        "SR_REJECTED_HANDOVER_REPORT",   # optional additional
+        "SR_HANDOVER_OTHER",             # optional additional
+    )
 
     def test_role(self) -> None:
         assert RDD_REVIEW_STAGE.role == "DD_ENGINEER"
@@ -154,7 +172,7 @@ class TestRDDReviewStage:
         assert set(RDD_REVIEW_STAGE.required_documents) == set(self._EXPECTED_DOCS)
 
     def test_required_documents_count(self) -> None:
-        assert len(RDD_REVIEW_STAGE.required_documents) == 1
+        assert len(RDD_REVIEW_STAGE.required_documents) == 3
 
 
 # ── Derived field sets ────────────────────────────────────────────────────────
@@ -202,10 +220,12 @@ class TestDocumentRegistries:
         assert FM_ALLOWED_DOCUMENTS == FM_REVIEW_STAGE.required_documents
 
     def test_rdd_required_documents_matches_rdd_stage(self) -> None:
-        assert RDD_REQUIRED_DOCUMENTS == RDD_REVIEW_STAGE.required_documents
+        # RDD_REQUIRED_DOCUMENTS is the mandatory subset; RDD_REVIEW_STAGE also
+        # lists optional uploads (SR_REJECTED_HANDOVER_REPORT, SR_HANDOVER_OTHER).
+        assert frozenset(RDD_REQUIRED_DOCUMENTS) <= frozenset(RDD_REVIEW_STAGE.required_documents)
 
     def test_all_document_types_is_union(self) -> None:
-        expected = frozenset(FM_ALLOWED_DOCUMENTS + RDD_REQUIRED_DOCUMENTS)
+        expected = frozenset(FM_ALLOWED_DOCUMENTS) | frozenset(RDD_ALLOWED_DOCUMENTS)
         assert ALL_DOCUMENT_TYPES == expected
 
     def test_fm_and_rdd_docs_disjoint(self) -> None:
@@ -217,7 +237,7 @@ class TestDocumentRegistries:
 
 class TestPermissionMap:
     def test_all_roles_present(self) -> None:
-        assert set(PERMISSION_MAP.keys()) == {"MALL_MANAGER", "FM_MANAGER", "DD_ENGINEER"}
+        assert set(PERMISSION_MAP.keys()) == {"MALL_MANAGER", "FM_MANAGER", "DD_ENGINEER", "OPERATIONS"}
 
     def test_mall_manager_can_act_on_create_sr(self) -> None:
         assert "CREATE_SR" in PERMISSION_MAP["MALL_MANAGER"]
@@ -272,20 +292,21 @@ class TestHelperUtilities:
         assert set(missing) == set(FM_REVIEW_STAGE.required_fields)
 
     def test_get_missing_fields_partial(self) -> None:
-        # expected_handover_date is auto-computed from unit_readiness_date; not user-required
-        collected = {"unit_readiness_date": "2025-01-01"}
+        # expected_handover_date is auto-computed from unit_readiness_date; not user-required.
+        # comments is optional — an empty string (user declined) satisfies the requirement.
+        collected = {"unit_readiness_date": "2025-01-01", "comments": ""}
         missing = get_missing_fields("FM_REVIEW", collected)
-        assert missing == []  # unit_readiness_date is present; expected_handover_date is auto-computed
+        assert missing == []
 
     def test_get_missing_fields_integer_zero_is_not_missing(self) -> None:
         """0 is a valid value — must not appear in missing fields."""
-        collected = {"unit_readiness_date": 0, "expected_handover_date": "2025-06-01"}
+        collected = {"unit_readiness_date": 0, "comments": ""}
         missing = get_missing_fields("FM_REVIEW", collected)
         assert missing == []
 
     def test_get_missing_fields_false_is_not_missing(self) -> None:
         """False is a valid value — must not appear in missing fields."""
-        collected = {"unit_readiness_date": False, "expected_handover_date": "2025-06-01"}
+        collected = {"unit_readiness_date": False, "comments": ""}
         missing = get_missing_fields("FM_REVIEW", collected)
         assert missing == []
 

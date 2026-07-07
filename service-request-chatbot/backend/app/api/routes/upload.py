@@ -163,7 +163,13 @@ async def upload_document(
             )
 
     # 5. Platform upload (when sr_id and backend refs are available) ----------
-    if draft_sr_id and draft_backend.get("lease_id"):
+    # In mock mode (no SERVICE_REQUEST_API_BASE_URL) backend refs may be absent
+    # for FM/RDD sessions that don't carry the CREATE_SR collected_data.
+    # The DocumentUploadService.upload_document already short-circuits to a
+    # mock document ID in mock mode, so relaxing the lease_id guard is safe.
+    from app.core.config import settings as _settings
+    _in_mock_mode = not bool(_settings.service_request_api_base_url)
+    if draft_sr_id and (draft_backend.get("lease_id") or _in_mock_mode):
         file_bytes = await file.read()
         filename = file.filename or "unknown"
 
@@ -200,23 +206,38 @@ async def upload_document(
             try:
                 draft_repo = ServiceRequestDraftRepository(db)
                 draft = await draft_repo.get_by_session(resolved_session_id)
+                doc_entry: dict[str, Any] = {
+                    "document_id": document_id,
+                    "document_type_id": document_type,
+                    "filename": file.filename or "unknown",
+                    "signed_url": upload_result.signed_url,
+                    "file_path": upload_result.file_path,
+                }
                 if draft:
                     existing_docs: list[dict[str, Any]] = list(draft.documents or [])
-                    doc_entry: dict[str, Any] = {
-                        "document_id": document_id,
-                        "document_type_id": document_type,
-                        "filename": file.filename or "unknown",
-                        "signed_url": upload_result.signed_url,
-                        "file_path": upload_result.file_path,
-                    }
                     existing_docs.append(doc_entry)
                     await draft_repo.update(draft.id, {"documents": existing_docs})
-                    await db.commit()
-                    logger.info(
-                        "upload_document: document_id=%s written to draft session_id=%s",
-                        document_id,
-                        session_id,
+                else:
+                    # FM/RDD sessions may not have a draft yet (no service_category
+                    # set during sr_status_sync entry).  Create a minimal draft so
+                    # the document is persisted and visible to subsequent turns.
+                    await draft_repo.create(
+                        session_id=resolved_session_id,
+                        service_category="FIT_OUT_AND_HANDOVER",
+                        sub_category="HANDOVER",
+                        workflow_stage="FM_REVIEW",
+                        collected_data={},
+                        missing_fields=[],
+                        documents=[doc_entry],
+                        ready_to_submit=False,
+                        sr_id=draft_sr_id or None,
                     )
+                await db.commit()
+                logger.info(
+                    "upload_document: document_id=%s written to draft session_id=%s",
+                    document_id,
+                    session_id,
+                )
             except Exception as exc:
                 logger.warning(
                     "upload_document: failed to write document_id to draft — %s (non-fatal)",

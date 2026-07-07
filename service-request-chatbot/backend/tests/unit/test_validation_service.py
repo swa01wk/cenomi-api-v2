@@ -494,6 +494,7 @@ class TestValidationServiceDraft:
             "startDate": "2025-01-01",
             "endDate": "2025-06-01",
             "inspection_done_by": "FM_MANAGER",
+            "notes": "",
             "comments": "All good",
         }
 
@@ -734,7 +735,10 @@ class TestValidationNode:
             "collected_data": {
                 "unit_readiness_date": "2025-03-01",
                 "expected_handover_date": "2025-04-01",
+                "comments": "",  # optional — empty string satisfies the requirement
             },
+            # FM_REVIEW requires at least one document before save/approve
+            "documents": [{"document_type": "SR_HANDOVER_CHECKLIST", "document_id": "doc-001"}],
         }
         result = await validation_node(state)
         assert result["status"] == "READY_TO_SUBMIT"

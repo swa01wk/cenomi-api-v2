@@ -26,5 +26,13 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 
+# Playwright — generated reports and test artifacts, never commit
+playwright-report/
+playwright-report-live/
+test-results/
+playwright-report-live/observability/
+playwright-report-live/session-ids.json
+playwright-report-live/lifecycle-session-ids.json
+
 # OS
 .DS_Store

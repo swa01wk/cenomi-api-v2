@@ -333,7 +333,7 @@ class TestRDDApiSubmissionFinalApprove:
             result = await rdd_api_submission_node(state)
 
         assert result["workflow_stage"] == "SR_COMPLETED"
-        assert result["status"] == "SUBMITTED"
+        assert result["status"] == "COMPLETED"
 
     @pytest.mark.asyncio
     async def test_final_approve_success_sets_rdd_status_approved(self) -> None:

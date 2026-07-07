@@ -42,29 +42,34 @@ _FIELD_LABELS: dict[str, str] = {
     "startDate": "Inspection Start Date",
     "endDate": "Inspection End Date",
     "inspection_done_by": "Inspection Done By",
+    "notes": "Notes",
     "comments": "Comments",
     # FM_REVIEW
     "unit_readiness_date": "Unit Readiness Date",
     "expected_handover_date": "Expected Handover Date",
     # RDD_REVIEW
     "guideLineLink": "Guidelines Link",
+    "document_status": "Document Status",
     "actual_handover_date": "Actual Handover Date",
     "fitout_start_date": "Fitout Start Date",
     "fitout_end_date": "Fitout End Date",
-    "trading_date": "Trading Start Date",
+    "trading_date": "Trading Start Date (Auto)",
 }
 
 # Fields the user may inline-edit on the CREATE_SR card.
 _CREATE_SR_EDITABLE: frozenset[str] = frozenset(
-    {"title", "description", "startDate", "endDate", "inspection_done_by", "comments"}
+    {"title", "description", "startDate", "endDate", "inspection_done_by", "notes", "comments"}
 )
 
 # Fields the user may inline-edit on the FM_REVIEW card.
-_FM_REVIEW_EDITABLE: frozenset[str] = frozenset({"unit_readiness_date"})
+_FM_REVIEW_EDITABLE: frozenset[str] = frozenset({"unit_readiness_date", "comments"})
 
 # Fields the user may inline-edit on the RDD_REVIEW card.
+# trading_date is intentionally excluded — it is auto-computed (read-only display).
+# document_status renders as a <select> on the frontend (options emitted separately).
 _RDD_REVIEW_EDITABLE: frozenset[str] = frozenset(
-    {"guideLineLink", "actual_handover_date", "fitout_start_date", "fitout_end_date", "trading_date"}
+    {"guideLineLink", "document_status", "actual_handover_date",
+     "fitout_start_date", "fitout_end_date", "comments"}
 )
 
 # Ordered display fields per stage (backend-only IDs excluded).
@@ -80,6 +85,7 @@ _CREATE_SR_DISPLAY_FIELDS: tuple[str, ...] = (
     "startDate",
     "endDate",
     "inspection_done_by",
+    "notes",
     "comments",
 )
 
@@ -89,6 +95,7 @@ _FM_REVIEW_DISPLAY_FIELDS: tuple[str, ...] = (
     "mall",
     "unit_readiness_date",
     "expected_handover_date",
+    "comments",
 )
 
 _RDD_REVIEW_DISPLAY_FIELDS: tuple[str, ...] = (
@@ -96,10 +103,12 @@ _RDD_REVIEW_DISPLAY_FIELDS: tuple[str, ...] = (
     "brand",
     "mall",
     "guideLineLink",
+    "document_status",
     "actual_handover_date",
     "fitout_start_date",
     "fitout_end_date",
-    "trading_date",
+    "trading_date",    # read-only — auto-computed value shown here
+    "comments",
 )
 
 # Backward-compat alias — imported by existing unit tests and external consumers.
@@ -121,8 +130,9 @@ _STAGE_DISPLAY_CONFIG: dict[str, tuple[tuple[str, ...], frozenset[str], str]] = 
     "RDD_REVIEW": (
         _RDD_REVIEW_DISPLAY_FIELDS,
         _RDD_REVIEW_EDITABLE,
-        "RDD review details are ready. Please confirm the handover and fitout dates, "
-        "guidelines link, and ensure the handover report is uploaded.",
+        "RDD review details are ready. Please confirm the dates, document status, "
+        "guidelines link, and ensure the handover report is uploaded. "
+        "Trading start date has been auto-calculated as fitout end + 8 days.",
     ),
 }
 
@@ -135,9 +145,21 @@ _REQUEST_TYPE_LABELS: dict[str, str] = {
 # ── Internal helpers ───────────────────────────────────────────────────────────
 
 
+# Maps (workflow_stage, fm_action/rdd_action) → the confirmAction string the
+# frontend must send back so the entry node sets the action AND confirms in
+# one turn (avoids the multi-turn persistence problem).
+_CONFIRM_ACTION_MAP: dict[tuple[str, str], str] = {
+    ("FM_REVIEW", "save_progress"): "confirm_fm_save",
+    ("FM_REVIEW", "approve"):       "confirm_fm_approve",
+    ("RDD_REVIEW", "submit"):       "confirm_rdd_submit",
+    ("RDD_REVIEW", "final_approve"): "confirm_rdd_final_approve",
+}
+
+
 def _build_confirmation_card(
     collected_data: dict[str, Any],
     workflow_stage: str,
+    backend_refs: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build a deterministic, stage-specific confirmation card from *collected_data*.
 
@@ -150,6 +172,9 @@ def _build_confirmation_card(
         The current draft field values.
     workflow_stage:
         Determines which fields and labels are shown on the card.
+    backend_refs:
+        Optional backend_refs dict; used to embed ``confirmAction`` for
+        FM/RDD stages so the frontend sends the correct single-turn confirm.
 
     Returns
     -------
@@ -161,23 +186,44 @@ def _build_confirmation_card(
         (_CREATE_SR_DISPLAY_FIELDS, _CREATE_SR_EDITABLE, _STAGE_DISPLAY_CONFIG["CREATE_SR"][2]),
     )
 
-    fields: list[dict[str, Any]] = [
-        {
+    # Enum fields that must render as a <select> dropdown on the frontend.
+    _ENUM_OPTIONS: dict[str, list[str]] = {
+        "document_status": ["APPROVED", "APPROVED_WITH_CHANGES"],
+    }
+
+    fields: list[dict[str, Any]] = []
+    for field_key in display_fields:
+        row: dict[str, Any] = {
             "key": field_key,
             "label": _FIELD_LABELS.get(field_key, field_key),
             "value": collected_data.get(field_key),
             "editable": field_key in editable_fields,
         }
-        for field_key in display_fields
-    ]
+        if field_key in _ENUM_OPTIONS:
+            row["options"] = _ENUM_OPTIONS[field_key]
+        fields.append(row)
 
-    return {
+    card: dict[str, Any] = {
         "type": "confirmation_card",
         "requestType": _REQUEST_TYPE_LABELS.get(workflow_stage, "Handover Service Request"),
         "stage": workflow_stage,
         "fields": fields,
         "message": message,
     }
+
+    # Embed the stage-specific confirmAction so the frontend knows which action
+    # string to send back instead of the generic "confirm".
+    if backend_refs:
+        stage_action: str = ""
+        if workflow_stage == "FM_REVIEW":
+            stage_action = backend_refs.get("fm_action", "")
+        elif workflow_stage == "RDD_REVIEW":
+            stage_action = backend_refs.get("rdd_action", "")
+        confirm_action = _CONFIRM_ACTION_MAP.get((workflow_stage, stage_action))
+        if confirm_action:
+            card["confirmAction"] = confirm_action
+
+    return card
 
 
 # ── Node ───────────────────────────────────────────────────────────────────────
@@ -220,6 +266,7 @@ async def confirmation_node(state: ServiceRequestState) -> dict[str, Any]:
 
     collected_data: dict[str, Any] = state.get("collected_data") or {}
     workflow_stage: str = state.get("workflow_stage") or "CREATE_SR"
+    backend_refs: dict[str, Any] = dict(state.get("backend_refs") or {})
 
     missing = get_missing_fields(workflow_stage, collected_data)
 
@@ -237,7 +284,7 @@ async def confirmation_node(state: ServiceRequestState) -> dict[str, Any]:
         workflow_stage,
     )
 
-    confirmation_card = _build_confirmation_card(collected_data, workflow_stage)
+    confirmation_card = _build_confirmation_card(collected_data, workflow_stage, backend_refs)
 
     return {
         "confirmation_required": True,

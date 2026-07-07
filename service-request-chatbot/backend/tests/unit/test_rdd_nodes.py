@@ -220,7 +220,10 @@ class TestRDDApiSubmissionNode:
     @pytest.mark.asyncio
     async def test_api_error_returns_failed(self) -> None:
         from app.agents.services.service_request_api_service import ServiceRequestCreationResult
-        backend_refs = _rdd_backend_refs(rdd_payload={"status": "REPORT_SUBMITTED"})
+        # rdd_action must be "submit" so the fixed guard reaches the API call
+        backend_refs = _rdd_backend_refs(
+            rdd_payload={"status": "REPORT_SUBMITTED"}, rdd_action="submit"
+        )
         state = _state(backend_refs=backend_refs)
 
         mock_result = ServiceRequestCreationResult(
@@ -245,7 +248,12 @@ class TestRDDApiSubmissionNode:
     @pytest.mark.asyncio
     async def test_success_sets_completed(self) -> None:
         from app.agents.services.service_request_api_service import ServiceRequestCreationResult
-        backend_refs = _rdd_backend_refs(rdd_payload={"status": "REPORT_SUBMITTED"})
+        # rdd_action="submit" → Phase 3a (report submitted); workflow_stage stays
+        # RDD_REVIEW and rdd_status is set to REPORT_SUBMITTED.  SR is only fully
+        # completed after the separate "final_approve" turn.
+        backend_refs = _rdd_backend_refs(
+            rdd_payload={"status": "REPORT_SUBMITTED"}, rdd_action="submit"
+        )
         state = _state(backend_refs=backend_refs)
 
         mock_result = ServiceRequestCreationResult(
@@ -265,5 +273,9 @@ class TestRDDApiSubmissionNode:
             result = await rdd_api_submission_node(state)
 
         assert result["status"] == "SUBMITTED"
-        assert result["workflow_stage"] == "SR_COMPLETED"
+        assert result.get("workflow_stage") != "SR_COMPLETED", (
+            "Phase 3a (submit_report) must NOT advance to SR_COMPLETED — "
+            "that only happens after final_approve."
+        )
+        assert result["backend_refs"]["rdd_status"] == "REPORT_SUBMITTED"
         assert "sr-456" in result["response_message"]

@@ -295,9 +295,26 @@ class HttpServiceRequestAPIService(AbstractServiceRequestAPIService):
 # Mock adapter (local POC / testing)
 # ---------------------------------------------------------------------------
 
+# Module-level store so SR state survives across HTTP requests in mock mode.
+# Tests that instantiate MockServiceRequestAPIService directly with
+# force_error/force_status_code always get their own fresh _sr_states via the
+# instance override, so test isolation is not affected.
+_MOCK_PERSISTENT_SR_STATES: dict[str, dict[str, Any]] = {}
+
 
 class MockServiceRequestAPIService(AbstractServiceRequestAPIService):
-    """In-memory SR service mock for local POC development and unit tests."""
+    """In-memory SR service mock for local POC development and unit tests.
+
+    When ``SERVICE_REQUEST_API_BASE_URL`` is not set the factory returns this
+    mock.  SR state (operations list, status) is stored in the module-level
+    ``_MOCK_PERSISTENT_SR_STATES`` dict so that status-sync works across
+    multiple HTTP turns — enabling full lifecycle testing without a live
+    platform connection.
+
+    Pass ``isolated=True`` (or any ``force_*`` argument) to get a fresh
+    per-instance state dict; this is what unit/integration tests do when they
+    patch the service directly.
+    """
 
     _MOCK_ENDPOINT_BASE = "mock://service-request-api/service-requests"
 
@@ -306,6 +323,7 @@ class MockServiceRequestAPIService(AbstractServiceRequestAPIService):
         simulated_latency_ms: int = 15,
         force_error: str | None = None,
         force_status_code: int | None = None,
+        isolated: bool = False,
     ) -> None:
         self._latency_ms = simulated_latency_ms
         self._force_error = force_error
@@ -313,8 +331,11 @@ class MockServiceRequestAPIService(AbstractServiceRequestAPIService):
         self._created: list[dict[str, Any]] = []
         self._patched: list[dict[str, Any]] = []
         self._submitted: list[dict[str, Any]] = []
-        # Simulate platform SR state for status sync
-        self._sr_states: dict[str, dict[str, Any]] = {}
+        # Use the shared persistent store unless explicitly isolated (tests).
+        if isolated or force_error or force_status_code:
+            self._sr_states: dict[str, dict[str, Any]] = {}
+        else:
+            self._sr_states = _MOCK_PERSISTENT_SR_STATES
 
     @property
     def created_requests(self) -> list[dict[str, Any]]:
@@ -452,6 +473,12 @@ class MockServiceRequestAPIService(AbstractServiceRequestAPIService):
         self._submitted.append({"sr_id": sr_id, "payload": payload})
         if sr_id in self._sr_states:
             self._sr_states[sr_id]["status"] = "REPORT_SUBMITTED"
+            # Keep DD_ENGINEER IN_PROGRESS so sr_status_sync_node continues
+            # to route to RDD_REVIEW for the final-approve turn.
+            ops = self._sr_states[sr_id].get("service_request_operations", [])
+            for op in ops:
+                if op["assigned_role"] == "DD_ENGINEER":
+                    op["status"] = "IN_PROGRESS"
         return ServiceRequestCreationResult(
             sr_id=sr_id,
             endpoint=endpoint,
@@ -472,3 +499,13 @@ def get_service_request_api_service() -> AbstractServiceRequestAPIService:
     if settings.service_request_api_base_url:
         return HttpServiceRequestAPIService()
     return MockServiceRequestAPIService()
+
+
+def reset_mock_sr_state() -> None:
+    """Clear the persistent mock SR state store.
+
+    Call this between lifecycle test runs (e.g. via a dev admin endpoint or
+    directly in test teardown) to start fresh without restarting the server.
+    Only has effect when running in mock mode (no SERVICE_REQUEST_API_BASE_URL).
+    """
+    _MOCK_PERSISTENT_SR_STATES.clear()

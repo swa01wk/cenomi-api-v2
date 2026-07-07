@@ -19,6 +19,8 @@ const FM_DOC_TYPES: DocTypeConfig[] = [
 
 const RDD_DOC_TYPES: DocTypeConfig[] = [
   { id: "DR_SR_HANDOVER_REPORT", label: "Handover Meeting Report" },
+  { id: "SR_REJECTED_HANDOVER_REPORT", label: "Rejected Fitout and Handover Report" },
+  { id: "SR_HANDOVER_OTHER", label: "Other" },
 ];
 
 function getDocTypes(userRole: string | null | undefined): DocTypeConfig[] {

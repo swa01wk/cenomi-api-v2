@@ -190,8 +190,11 @@ async def test_trace_created_for_every_turn() -> None:
     from app.db.models import ChatSession
     from uuid import uuid4 as u4
 
-    # Build a minimal ChatSession stub returned by the session repo
+    # Build a minimal ChatSession stub returned by the session repo.
+    # Set id explicitly: SQLAlchemy default=uuid4 is only applied during DB flush,
+    # which the mock never performs.
     mock_chat_session = ChatSession(user_id=u4())
+    mock_chat_session.id = u4()
 
     mock_db = AsyncMock(spec=AsyncSession)
     mock_db.add = MagicMock()
@@ -217,7 +220,9 @@ async def test_trace_created_for_every_turn() -> None:
 
     trace_create_call_count = 0
 
-    async def _mock_trace_repo_create(**kwargs: Any) -> Any:
+    async def _mock_trace_repo_create(self_or_first: Any = None, **kwargs: Any) -> Any:
+        # When patched with `new=` on the class method, `self` is passed as the
+        # first positional argument — accept and discard it.
         nonlocal trace_create_call_count
         trace_create_call_count += 1
         row = MagicMock()
@@ -365,8 +370,10 @@ async def test_llm_call_logged() -> None:
         f"got {llm_create_count}"
     )
 
-    # Verify the LLM call recorded token counts
-    call_kwargs = repos["llm"].create.call_args.kwargs
+    # Verify the first LLM call (supervisor) recorded token counts.
+    # Use call_args_list[0] to get the first call — subsequent nodes (e.g.
+    # field_extraction) also log LLM calls and would be returned by call_args.
+    call_kwargs = repos["llm"].create.call_args_list[0].kwargs
     assert call_kwargs.get("input_tokens") is not None
     assert call_kwargs.get("output_tokens") is not None
     assert call_kwargs.get("prompt_name") == "supervisor_prompt"
@@ -495,6 +502,7 @@ async def test_audit_log_created() -> None:
     from uuid import uuid4 as u4
 
     mock_chat_session = ChatSession(user_id=u4())
+    mock_chat_session.id = u4()  # Set id explicitly — mock DB never flushes
 
     mock_db = AsyncMock(spec=AsyncSession)
     mock_db.add = MagicMock()
@@ -519,7 +527,9 @@ async def test_audit_log_created() -> None:
 
     audit_log_calls: list[dict] = []
 
-    async def _mock_audit_create(**kwargs: Any) -> Any:
+    async def _mock_audit_create(self_or_first_kwarg: Any = None, **kwargs: Any) -> Any:
+        # When patched with `new=` on the class method, Python passes the repo
+        # instance as the first positional argument — accept and discard it.
         audit_log_calls.append(kwargs)
         return MagicMock()
 

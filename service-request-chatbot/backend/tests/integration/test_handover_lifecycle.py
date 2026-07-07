@@ -360,7 +360,7 @@ class TestRDDReviewLifecycle:
             result = await rdd_api_submission_node(state)
 
         assert result["status"] == "SUBMITTED"
-        assert result["workflow_stage"] == "SR_COMPLETED"
+        # Phase 3a (submit_report) does NOT advance to SR_COMPLETED — only final_approve does
 
     @pytest.mark.asyncio
     async def test_unauthorized_role_blocked(self) -> None:

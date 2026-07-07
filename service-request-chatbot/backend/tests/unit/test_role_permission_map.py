@@ -38,6 +38,7 @@ class TestRolePermissionMapShape:
             "FM_MANAGER",
             "OPERATIONS",
             "DD_ENGINEER",
+            "ADMIN",
         }
 
     def test_all_values_are_frozensets(self) -> None:

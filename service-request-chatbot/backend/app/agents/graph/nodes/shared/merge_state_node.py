@@ -42,13 +42,17 @@ BACKEND_PROTECTED_FIELDS: frozenset[str] = frozenset(
 
 # Fields that are auto-computed from other collected values during merge.
 # These are never asked of the user directly.
-BACKEND_COMPUTED_FIELDS: frozenset[str] = frozenset({"expected_handover_date"})
+BACKEND_COMPUTED_FIELDS: frozenset[str] = frozenset({
+    "expected_handover_date",
+    "trading_date",    # auto-computed as fitout_end_date + 8 days in RDD_REVIEW
+})
 
 # ---------------------------------------------------------------------------
 # Date utility
 # ---------------------------------------------------------------------------
 
-_AUTO_COMPUTE_DAYS = 7  # expected_handover_date = unit_readiness_date + 7 days
+_AUTO_COMPUTE_DAYS = 7           # expected_handover_date = unit_readiness_date + 7 days
+_AUTO_COMPUTE_TRADING_DAYS = 8  # trading_date = fitout_end_date + 8 days
 
 
 def _add_days(date_str: str, days: int) -> str:
@@ -161,6 +165,21 @@ async def merge_state_node(state: ServiceRequestState) -> dict[str, Any]:
     if corrections:
         collected["_corrections"] = corrections
 
+    # ── Synchronise notes ↔ comments ──────────────────────────────────────────
+    # Both fields represent the same UX concept ("any additional notes/comments?").
+    # The LLM maps answers to whichever field name appears in the user's message
+    # (e.g. "no additional comments" → comments; "no notes" → notes). Syncing
+    # them ensures that filling either field satisfies the proactive optional
+    # prompt for `notes`, preventing the bot from asking twice.
+    #
+    # Sync rules (only when one side is already set and the other is still None):
+    #   notes is None  + comments set → copy comments → notes
+    #   comments is None + notes set  → copy notes   → comments
+    if collected.get("notes") is None and collected.get("comments") is not None:
+        collected["notes"] = collected["comments"]
+    elif collected.get("comments") is None and collected.get("notes") is not None:
+        collected["comments"] = collected["notes"]
+
     # ── Auto-generate title when lease_code + description are now available ──
     # Title is system-generated in the format:
     #   handover-{lease_code}-{description_slug}
@@ -189,6 +208,19 @@ async def merge_state_node(state: ServiceRequestState) -> dict[str, Any]:
     ):
         collected["expected_handover_date"] = _add_days(
             str(collected["unit_readiness_date"]), _AUTO_COMPUTE_DAYS
+        )
+
+    # ── Auto-compute trading_date from fitout_end_date ────────────────────────
+    # RDD_REVIEW: trading_date = fitout_end_date + 8 days (per product spec).
+    # The user is never asked for this value; it is derived automatically once
+    # fitout_end_date is present, and shown read-only on the confirmation card.
+    if (
+        workflow_stage == "RDD_REVIEW"
+        and collected.get("fitout_end_date")
+        and not collected.get("trading_date")
+    ):
+        collected["trading_date"] = _add_days(
+            str(collected["fitout_end_date"]), _AUTO_COMPUTE_TRADING_DAYS
         )
 
     return {"collected_data": collected}

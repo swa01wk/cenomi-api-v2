@@ -718,6 +718,43 @@ Fix:
 - [ ] RBAC: `MALL_MANAGER` can trigger `CREATE_RDD_SERVICE_REQUEST`
 - [ ] RBAC: `FM_MANAGER` cannot trigger `CREATE_RDD_SERVICE_REQUEST`
 
+### E.3 FM_REVIEW Stage
+
+- [ ] Login as `khalid@cenomi.com` (FM_MANAGER) — JWT contains `roles: ["FM_MANAGER"]`
+- [ ] Open existing SR with `sr_id` → `sr_status_sync_node` detects `IN_PROGRESS` (FM_MANAGER) → `workflow_stage = FM_REVIEW`
+- [ ] `state.workflow_stage` in response is `"FM_REVIEW"`
+- [ ] `DocumentUploadPanel` visible with FM doc types: Handover Checklist, Site Survey, COP Checklist
+- [ ] `StageActions` shows "Save Progress" and "Approve Review" buttons (not for MALL_MANAGER or DD_ENGINEER)
+- [ ] Upload FM document → backend `PUT /files?document_type_id=SR_HANDOVER_CHECKLIST` succeeds
+- [ ] Sending `action: "save_fm_progress"` → backend routes through `fm_review_entry_node` → confirmation card returned with `confirmAction: "confirm_fm_save"`
+- [ ] Sending `action: "confirm_fm_save"` → `fm_api_submission_node` calls `PATCH /service-requests/{sr_id}` → `state.fm_status = "IN_PROCESS"`
+- [ ] Sending `action: "approve_fm_review"` → confirmation card returned with `confirmAction: "confirm_fm_approve"`
+- [ ] Sending `action: "confirm_fm_approve"` → `fm_api_submission_node` calls `PATCH /service-requests/{sr_id}` with `APPROVED` → next `sr_status_sync` advances to `RDD_REVIEW`
+- [ ] RBAC: `DD_ENGINEER` is denied FM_REVIEW actions (`CAN_FM_REVIEW_HANDOVER_SR` missing from their role)
+- [ ] RBAC: `OPERATIONS` role has identical FM_REVIEW permissions as `FM_MANAGER` (verify `PERMISSION_MAP["OPERATIONS"]`)
+- [ ] `expected_handover_date` is auto-computed as `unit_readiness_date + 7 days` — never asked of the user
+
+### E.4 RDD_REVIEW Stage
+
+- [ ] Login as `sara@cenomi.com` (DD_ENGINEER) — JWT contains `roles: ["DD_ENGINEER"]`
+- [ ] Open existing SR with `sr_id` → `sr_status_sync_node` detects `IN_PROGRESS` (DD_ENGINEER) → `workflow_stage = RDD_REVIEW`
+- [ ] `state.workflow_stage` in response is `"RDD_REVIEW"`
+- [ ] `DocumentUploadPanel` visible with only `DR_SR_HANDOVER_REPORT` (Handover Meeting Report)
+- [ ] `StageActions` shows "Submit Report" button (not "Approve Review" — that is FM only)
+- [ ] Bot collects: `guideLineLink`, `actual_handover_date`, `fitout_start_date`, `fitout_end_date`, `trading_date`
+- [ ] Date chain validation enforced: `actual_handover_date ≤ fitout_start_date ≤ fitout_end_date ≤ trading_date`
+- [ ] Missing `DR_SR_HANDOVER_REPORT` blocks confirmation (validation error on required document)
+- [ ] Upload `DR_SR_HANDOVER_REPORT` → backend `PUT /files?document_type_id=DR_SR_HANDOVER_REPORT&document_type_status=APPROVED`
+- [ ] Sending `action: "submit_rdd_report"` → confirmation card returned with `confirmAction: "confirm_rdd_submit"`
+- [ ] Sending `action: "confirm_rdd_submit"` → `rdd_api_submission_node` calls `POST /service-requests` with `status: REPORT_SUBMITTED` → `state.rdd_status = "REPORT_SUBMITTED"`
+- [ ] After `REPORT_SUBMITTED`: `StageActions` shows only "Final Approve" button (not "Submit Report")
+- [ ] `StageActions` uses `res.rddStatus` (not `draftPreview.status`) to determine which button to show
+- [ ] Sending `action: "approve_rdd_final"` → confirmation card returned with `confirmAction: "confirm_rdd_final_approve"`
+- [ ] Sending `action: "confirm_rdd_final_approve"` → `rdd_api_submission_node` calls `PATCH /service-requests/{sr_id}` with `APPROVED` → `state.workflow_stage = "SR_COMPLETED"`, `state.rdd_status = "APPROVED"`
+- [ ] `LifecycleStepper` shows all 4 steps green after `SR_COMPLETED`
+- [ ] RBAC: `FM_MANAGER` is denied RDD_REVIEW actions (`CAN_RDD_REVIEW_HANDOVER_SR` missing from their role)
+- [ ] RBAC: `DD_ENGINEER` has no supervisor action intent — entry is via `sr_status_sync_node` only
+
 ### E.2 MSP Platform alignment
 
 - [ ] Response has `sources` field (not `faq_sources`) — **rename required**

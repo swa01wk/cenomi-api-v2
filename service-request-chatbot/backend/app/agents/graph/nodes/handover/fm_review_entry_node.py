@@ -80,6 +80,28 @@ async def fm_review_entry_node(state: ServiceRequestState) -> dict[str, Any]:
         backend_refs["fm_action"] = "approve"
         return {"backend_refs": backend_refs}
 
+    # ── Single-turn confirm actions — set action AND mark CONFIRMED in one turn ──
+    # Required because fm_action is not persisted across turns by the state
+    # service; a generic "confirm" on Turn N+1 would find fm_action empty and
+    # loop back to field_extraction instead of reaching the payload builder.
+    if action_override == "confirm_fm_save":
+        log.info("fm_review_entry.action_confirm_fm_save")
+        backend_refs["fm_action"] = "save_progress"
+        return {"backend_refs": backend_refs, "confirmation_status": "CONFIRMED"}
+
+    if action_override == "confirm_fm_approve":
+        log.info("fm_review_entry.action_confirm_fm_approve")
+        backend_refs["fm_action"] = "approve"
+        return {"backend_refs": backend_refs, "confirmation_status": "CONFIRMED"}
+
+    if action_override in ("cancel", "cancel_fm"):
+        log.info("fm_review_entry.action_cancel")
+        return {
+            "confirmation_status": "REJECTED",
+            "status": "WAITING_FOR_USER",
+            "response_message": "Action cancelled. What would you like to do next?",
+        }
+
     if action_override == "reject_fm_review":
         log.info("fm_review_entry.action_reject")
         return {

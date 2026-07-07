@@ -656,55 +656,57 @@ This drives 9 scenarios from `docs/e2e-test-guide.md` against the real running b
 
 ### What is fully implemented and working
 
+> **Last updated: July 7, 2026**
+
 | Feature | Status |
 |---------|--------|
 | FastAPI backend skeleton | ✅ Complete |
 | Next.js frontend with chat UI | ✅ Complete |
-| LangGraph graph with 25 nodes | ✅ Complete |
+| LangGraph graph with 26 nodes | ✅ Complete |
 | Supervisor intent classification (LLM) | ✅ Complete |
 | Field extraction (LLM, per-stage schemas) | ✅ Complete |
 | Backend field protection in merge_state | ✅ Complete |
-| Lease lookup (HTTP + mock) | ✅ Complete |
-| Deterministic validation for CREATE_SR | ✅ Complete |
+| Lease lookup (HTTP + stateful mock) | ✅ Complete |
+| Deterministic validation for all 3 phases | ✅ Complete |
 | Confirmation gate (keyword + action_override) | ✅ Complete |
-| CREATE_SR payload builder | ✅ Complete (verify exact Postman shape — see Gap 1) |
+| CREATE_SR payload builder — verified against Postman | ✅ Complete |
 | Platform SR creation API call | ✅ Complete |
+| FM_REVIEW — collect dates, upload docs, save/approve | ✅ Complete (14 integration tests) |
+| RDD_REVIEW — Phase 3a submit report + Phase 3b final approve | ✅ Complete (16 integration tests) |
+| SR status sync node — auto-advances lifecycle stage | ✅ Complete |
+| Real file upload — `PUT /files` platform integration | ✅ Complete |
+| Structured UI actions — Save Progress / Approve / Submit Report / Final Approve buttons | ✅ Complete |
 | Conversation state persistence (PostgreSQL) | ✅ Complete |
+| Document tracking — DB write on upload, partitioned per phase | ✅ Complete |
 | Per-turn tracing and observability | ✅ Complete |
 | Admin observability UI | ✅ Complete |
 | Prompt injection guard | ✅ Complete |
-| Role-based permission checks (partial) | ✅ Partial |
-| FM/RDD graph nodes (entry, payload builder, submission) | ✅ Nodes exist |
-| SR status sync node | ✅ Node exists |
-| Alembic migrations | ✅ Complete |
-| Unit test suite (~33 files) | ✅ Complete |
-| E2E test suite (10 scenarios) | ✅ Complete |
-| Docker Compose infrastructure | ✅ Complete |
-| Mock mode for all external APIs | ✅ Complete |
+| JWT authentication + RBAC (shadow + enforce modes) | ✅ Complete |
+| Alembic migrations (4 migrations, 15 tables) | ✅ Complete |
+| Unit test suite (~33 files, ~1,300 tests) | ✅ Complete |
+| E2E + integration lifecycle suite (68 tests) | ✅ Complete |
+| Full suite (1,386 tests, 1,386 passing) | ✅ Complete |
+| Docker Compose — local dev infrastructure | ✅ Complete |
+| Production Dockerfiles — backend + frontend multi-stage | ✅ Complete |
+| Mock mode — stateful across requests for full lifecycle testing | ✅ Complete |
+| Mock state reset endpoint — `POST /dev/mock/reset` | ✅ Complete |
+| Lifecycle test runner script — `./run_lifecycle_tests.sh` | ✅ Complete |
 
 ### What is partially implemented
 
 | Feature | Status | Gap |
 |---------|--------|-----|
-| File upload route | ⚠️ Partial stub | Does not call `PUT /files` on platform yet |
-| FM_REVIEW end-to-end | ⚠️ Nodes exist | Upload + save progress + approve not fully wired |
-| RDD_REVIEW end-to-end | ⚠️ Nodes exist | Upload + submit report not fully wired |
-| Platform status sync | ⚠️ Node exists | Full mapping from platform operation status not verified |
-| Permission enforcement | ⚠️ Partial | Unknown actions fail-open; should fail-closed |
-| Frontend auth | ⚠️ Demo only | `user_id` hardcoded as `"demo_user"` |
-| CREATE_SR payload | ⚠️ Working | Exact Postman field names/shape needs verification |
+| `PermissionService` — unknown actions | ⚠️ Fail-open | Flip to fail-closed before production (~10 min) |
+| Redis session caching | ⚠️ Connected, not used | Performance optimisation only — not a functional gap |
+| True SSE streaming | ⚠️ Pseudo only | Full message emitted as single token event; real token streaming deferred |
 
 ### What is not implemented
 
-| Feature | Status |
-|---------|--------|
-| Real file upload through platform `PUT /files` | ❌ Not done |
-| Structured UI actions (beyond generic confirm/cancel) | ❌ Not done |
-| Token re-authentication on expiry | ❌ Not done |
-| Webhook/polling for platform status changes | ❌ Not done |
-| Application Docker images | ❌ Not done |
-| CI/CD pipeline | ❌ Not done |
-| Redis usage beyond health check | ❌ Not done |
+| Feature | Status | Note |
+|---------|--------|------|
+| CI/CD pipeline | ❌ Not done | `./run_lifecycle_tests.sh` is the manual gate |
+| Webhook/push for platform status changes | ❌ Not done | Status sync is pull-based (called each turn) |
+| "Ask for more information" / "Assign To" SR actions | ❌ Not done | Pending product team clarification |
 
 ---
 
@@ -765,23 +767,28 @@ This drives 9 scenarios from `docs/e2e-test-guide.md` against the real running b
 
 ---
 
-### Open — Gap 4: FM_REVIEW (next sprint)
+### ✅ FIXED — Gap 4: FM_REVIEW (July 2026)
 
-The graph nodes exist (`fm_review_entry`, `fm_confirmation`, `fm_payload_builder`, `fm_api_submission`). Not yet tested end-to-end. Scope:
-- Collect `unit_readiness_date` and `expected_handover_date`
-- Upload FM documents (`SR_HANDOVER_CHECKLIST`, `SR_HANDOVER_SITE_SURVEY`, `SR_COP_CHECKLIST_OTHER`)
-- Call `PATCH /service-requests/{sr_id}` with `status: IN_PROCESS` (save progress)
-- Call `PATCH /service-requests/{sr_id}` with `status: APPROVED` (approve)
+Full FM_REVIEW pipeline implemented and tested end-to-end (14 integration tests):
+- Collects `unit_readiness_date` and `expected_handover_date`
+- Uploads FM documents (`SR_HANDOVER_CHECKLIST`, `SR_HANDOVER_SITE_SURVEY`, `SR_COP_CHECKLIST_OTHER`)
+- `PATCH /service-requests/{sr_id}` with `status: IN_PROCESS` (save progress path)
+- `PATCH /service-requests/{sr_id}` with `status: APPROVED` (approve path)
+- Operations role also permitted to save progress and approve
+- Stage advances to `RDD_REVIEW` on FM approval
 
 ---
 
-### Open — Gap 5: RDD_REVIEW (next sprint)
+### ✅ FIXED — Gap 5: RDD_REVIEW (July 2026)
 
-The graph nodes exist (`rdd_review_entry`, `rdd_confirmation`, `rdd_payload_builder`, `rdd_api_submission`). Not yet tested end-to-end. Scope:
-- Collect `guideLineLink`, `actual_handover_date`, `fitout_start_date`, `fitout_end_date`, `trading_date`
-- Upload `DR_SR_HANDOVER_REPORT` with `document_type_status: APPROVED`
-- Call `POST /service-requests` with `status: REPORT_SUBMITTED` and existing `service_request_id`
-- Date ordering enforced: `actual_handover_date ≤ fitout_start_date ≤ fitout_end_date ≤ trading_date` (already in `ValidationService.validate_rdd_date_order`)
+Full RDD_REVIEW pipeline implemented and tested end-to-end (16 integration tests):
+- Collects `guideLineLink`, `actual_handover_date`, `fitout_start_date`, `fitout_end_date`, `trading_date`
+- Uploads `DR_SR_HANDOVER_REPORT` with `document_type_status: APPROVED`
+- Phase 3a: `POST /service-requests` with `status: REPORT_SUBMITTED`
+- Phase 3b: `PATCH /service-requests/{sr_id}` with `status: APPROVED` → `SR_COMPLETED`
+- Date ordering: `actual ≤ fitout_start ≤ fitout_end ≤ trading` enforced in `ValidationService`
+- `trading_date` auto-computed as `fitout_end_date + 8 days`
+- Dates sent to platform in `DD/MM/YYYY` format
 
 ---
 
@@ -797,9 +804,11 @@ The graph nodes exist (`rdd_review_entry`, `rdd_confirmation`, `rdd_payload_buil
 
 ---
 
-### Open — Gap 8: Structured UI actions
+### ✅ FIXED — Gap 8: Structured UI actions (July 2026)
 
-Frontend supports generic `confirm`/`cancel`. Stage-specific actions for FM/RDD flows are needed once those workflows are completed: `save_fm_progress`, `approve_fm_review`, `submit_rdd_report`.
+`StageActions` component implemented. Role-and-stage-aware buttons appear above the chat input:
+- FM Manager / Operations in FM_REVIEW: **Save Progress**, **Approve Review**
+- DD Engineer in RDD_REVIEW: **Submit Report** (transitions to **Final Approve** after `REPORT_SUBMITTED`)
 
 ---
 

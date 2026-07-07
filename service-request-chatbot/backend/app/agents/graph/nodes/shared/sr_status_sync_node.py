@@ -158,4 +158,10 @@ async def sr_status_sync_node(state: ServiceRequestState) -> dict[str, Any]:
     if new_stage and new_stage != current_stage:
         updates["workflow_stage"] = new_stage
 
+    # When syncing an RDD-stage SR, propagate the platform status as rdd_status
+    # so downstream nodes can read it without re-fetching.
+    _RDD_STATUSES: frozenset[str] = frozenset({"REPORT_SUBMITTED", "APPROVED", "APPROVED_WITH_CHANGES"})
+    if current_stage == "RDD_REVIEW" and platform_status and platform_status in _RDD_STATUSES:
+        backend_refs["rdd_status"] = platform_status
+
     return updates

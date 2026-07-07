@@ -586,7 +586,8 @@ class TestApiSubmissionNodeTracing:
 
         tm = self._make_trace_manager()
         payload = _make_payload()
-        # Inject a sensitive key to verify redaction.
+        # Inject a sensitive key at the top level of create_payload so that
+        # api_submission_node's redact(create_payload) replaces it with "[REDACTED]".
         payload["token"] = "super-secret-token"
         state = _confirmed_state(payload=payload)
         state["trace_manager"] = tm
@@ -601,9 +602,18 @@ class TestApiSubmissionNodeTracing:
 
         # The snapshot call should have been made.
         tm.capture_state_snapshot.assert_called()
-        _call_kwargs = tm.capture_state_snapshot.call_args
-        snapshot_state = _call_kwargs.kwargs.get("state") or _call_kwargs[1].get("state")
-        # The sensitive token must be redacted.
+        # Find the PAYLOAD_BUILDER_OUTPUT snapshot call (not the AFTER_NODE call
+        # from the @trace_node decorator which passes the full graph state).
+        payload_call = next(
+            (c for c in tm.capture_state_snapshot.call_args_list
+             if c.kwargs.get("snapshot_type") == "PAYLOAD_BUILDER_OUTPUT"),
+            None,
+        )
+        assert payload_call is not None, (
+            "Expected a PAYLOAD_BUILDER_OUTPUT capture_state_snapshot call"
+        )
+        snapshot_state = payload_call.kwargs.get("state")
+        # The sensitive token must be redacted in the payload snapshot.
         assert snapshot_state is not None
         assert snapshot_state.get("token") == "[REDACTED]"
 

@@ -21,9 +21,17 @@ export type ChatAction =
   | "reject_fm_review"
   | "upload_document"
   | "cancel_update"
+  // FM_REVIEW single-turn confirm actions (avoid multi-turn persistence issue)
+  | "confirm_fm_save"
+  | "confirm_fm_approve"
+  | "cancel_fm"
   // RDD_REVIEW
   | "submit_rdd_report"
-  | "approve_rdd_final";
+  | "approve_rdd_final"
+  // RDD_REVIEW single-turn confirm actions
+  | "confirm_rdd_submit"
+  | "confirm_rdd_final_approve"
+  | "cancel_rdd";
 
 // ─── Uploaded document (returned by /api/upload) ──────────────────────────────
 
@@ -57,6 +65,8 @@ export type ConfirmationField = {
   label: string;
   value: string | number | boolean | null;
   editable?: boolean;
+  /** When present, the field renders as a <select> dropdown with these values. */
+  options?: string[];
 };
 
 export type FieldError = {
@@ -92,6 +102,10 @@ export type ResponseUIConfirmationCard = {
   message: string;
   requestType: string;
   fields: ConfirmationField[];
+  /** Stage-specific confirm action string embedded by the backend.
+   *  Frontend must send this instead of the generic "confirm" so the
+   *  entry node can set fm_action/rdd_action AND CONFIRMED in one turn. */
+  confirmAction?: string;
 };
 
 export type ResponseUIValidationError = {
@@ -177,6 +191,10 @@ export type ChatServiceResponse = {
   readyToSubmit?: boolean;
   /** RAG citations returned by the FAQ node — present on help/FAQ turns */
   faqSources?: Array<{ source_type: string; title: string }>;
+  /** RDD review status — "REPORT_SUBMITTED" | "APPROVED" | null */
+  rddStatus?: string | null;
+  /** FM review status — "IN_PROCESS" | "APPROVED" | null */
+  fmStatus?: string | null;
 };
 
 // ─── Local UI message ─────────────────────────────────────────────────────────

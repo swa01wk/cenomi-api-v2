@@ -57,7 +57,7 @@ async def rdd_review_entry_node(state: ServiceRequestState) -> dict[str, Any]:
             "status": "WAITING_FOR_USER",
             "response_message": (
                 "You do not have permission to perform RDD review actions. "
-                "This stage requires the DD Engineer role."
+                "This stage requires the RDD Project Manager role."
             ),
         }
 
@@ -71,6 +71,28 @@ async def rdd_review_entry_node(state: ServiceRequestState) -> dict[str, Any]:
         log.info("rdd_review_entry.action_final_approve")
         backend_refs["rdd_action"] = "final_approve"
         return {"backend_refs": backend_refs}
+
+    # ── Single-turn confirm actions — set action AND mark CONFIRMED in one turn ──
+    # Required because rdd_action is not persisted across turns; a generic
+    # "confirm" on Turn N+1 would find rdd_action empty and loop back to
+    # field_extraction instead of reaching the payload builder.
+    if action_override == "confirm_rdd_submit":
+        log.info("rdd_review_entry.action_confirm_rdd_submit")
+        backend_refs["rdd_action"] = "submit"
+        return {"backend_refs": backend_refs, "confirmation_status": "CONFIRMED"}
+
+    if action_override == "confirm_rdd_final_approve":
+        log.info("rdd_review_entry.action_confirm_rdd_final_approve")
+        backend_refs["rdd_action"] = "final_approve"
+        return {"backend_refs": backend_refs, "confirmation_status": "CONFIRMED"}
+
+    if action_override in ("cancel", "cancel_rdd"):
+        log.info("rdd_review_entry.action_cancel")
+        return {
+            "confirmation_status": "REJECTED",
+            "status": "WAITING_FOR_USER",
+            "response_message": "Action cancelled. What would you like to do next?",
+        }
 
     if action_override == "cancel_update":
         log.info("rdd_review_entry.action_cancel")
