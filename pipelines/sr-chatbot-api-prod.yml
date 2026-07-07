@@ -1,0 +1,182 @@
+# Service Request Chatbot API — production build & deploy.
+# Build context is service-request-chatbot/backend (Dockerfile lives there).
+#
+# Requires an Azure DevOps variable group "sr-chatbot-prod-vars" with:
+#   api_repository   — container registry repository name for this image
+#   docker_registry  — registry hostname (e.g. cenomiregistry.azurecr.io)
+#   container_name   — Azure Container App name to deploy
+#   app_url          — public base URL used for the post-deploy health check
+#   AZURE_CLIENT_ID / AZURE_CLIENT_SECRET / AZURE_TENANT_ID / AZURE_SUBSCRIPTION_ID / AZURE_RG
+# and a service connection named "CenomiRegistry" plus an environment named "CenomiProd".
+
+trigger:
+  branches:
+    exclude:
+      - '*'
+  tags:
+    include:
+      - 'release-prod-ai-v2-api-*'
+
+pool:
+  name: Azure Pipelines
+
+variables:
+- group: sr-chatbot-prod-vars
+
+- name: SHORT_HASH
+  value: ''
+
+- name: COMMIT_VER
+  value: ''
+
+parameters:
+- name: ForceImagePushImageWithVulnerability
+  type: boolean
+  default: true
+  displayName: Force Image Push Even With Vulnerability
+
+stages:
+
+- stage: DockerBuildAPI
+  displayName: Build & Push API Image
+  jobs:
+  - job: Build
+    steps:
+
+    - checkout: self
+
+    - task: CmdLine@2
+      displayName: Set SHORT_HASH
+      inputs:
+        script: |
+          SHORT_HASH=$(echo $(Build.SourceVersion) | cut -c1-8)
+          echo "##vso[task.setvariable variable=SHORT_HASH]$SHORT_HASH"
+
+    - task: CmdLine@2
+      displayName: Prepare Version
+      inputs:
+        script: |
+          version_arg=$(git describe --tags --long --dirty 2>/dev/null)
+          if [[ $version_arg =~ -[0-9]+-g[0-9a-f]{7,}$ ]]; then
+            COMMIT_VER="$version_arg"
+          else
+            COMMIT_VER="UNKNOWN"
+          fi
+          echo "##vso[task.setvariable variable=COMMIT_VER]$COMMIT_VER"
+
+    - task: Docker@2
+      displayName: Build & Push Image
+      inputs:
+        containerRegistry: 'CenomiRegistry'
+        repository: $(api_repository)
+        command: 'buildAndPush'
+        Dockerfile: 'service-request-chatbot/backend/Dockerfile'
+        buildContext: 'service-request-chatbot/backend'
+        tags: |
+          $(Build.SourceBranchName)-$(SHORT_HASH)
+        arguments: >
+          --platform linux/amd64
+          --build-arg VERSION=$(COMMIT_VER)
+          --build-arg GIT_SHA=$(SHORT_HASH)
+
+    - task: CmdLine@2
+      displayName: Docker Cleanup
+      inputs:
+        script: |
+          disk_usage=$(df -h / | awk 'NR==2 {print $5}' | sed 's/%//')
+          if [ $disk_usage -gt 80 ]; then
+            echo "Cleaning Docker..."
+            docker system prune -a -f
+          else
+            echo "Disk usage OK: $disk_usage%"
+          fi
+
+- stage: DeployAPI
+  displayName: Deploy to Container App
+  dependsOn: DockerBuildAPI
+  jobs:
+  - deployment: Deploy
+    environment: CenomiProd
+
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+
+          - checkout: self
+
+          - task: CmdLine@2
+            displayName: Deploy Image
+            inputs:
+              script: |
+                set -e
+
+                SHORT_HASH=$(echo $(Build.SourceVersion) | cut -c1-8)
+                IMAGE=$(docker_registry)/$(api_repository):$(Build.SourceBranchName)-$SHORT_HASH
+
+                echo "Deploying image: $IMAGE"
+
+                az login --service-principal \
+                  -u $(AZURE_CLIENT_ID) \
+                  -p $(AZURE_CLIENT_SECRET) \
+                  -t $(AZURE_TENANT_ID)
+
+                az account set --subscription $(AZURE_SUBSCRIPTION_ID)
+
+                az containerapp update \
+                  --name $(container_name) \
+                  --resource-group $(AZURE_RG) \
+                  --image "$IMAGE"
+
+          - task: CmdLine@2
+            displayName: Wait for Revision Healthy
+            inputs:
+              script: |
+                set -e
+
+                echo "Waiting for revision..."
+
+                for i in {1..30}; do
+                  state=$(az containerapp revision list \
+                    --resource-group $(AZURE_RG) \
+                    --name $(container_name) \
+                    --query "[0].properties.runningState" -o tsv)
+
+                  echo "Current state: $state"
+
+                  if [ "$state" == "Running" ]; then
+                    echo "Revision is running"
+                    exit 0
+                  elif [ "$state" == "Failed" ]; then
+                    echo "Revision failed"
+                    exit 1
+                  fi
+
+                  sleep 10
+                done
+
+                echo "Timeout waiting for revision"
+                exit 1
+
+          - task: CmdLine@2
+            displayName: Health Check
+            inputs:
+              script: |
+                set -e
+
+                echo "Checking health endpoint..."
+
+                for i in {1..10}; do
+                  code=$(curl -s -o /dev/null -w "%{http_code}" $(app_url)/api/v1/health)
+
+                  if [ "$code" = "200" ]; then
+                    echo "Health check passed"
+                    exit 0
+                  fi
+
+                  echo "Retrying... ($i)"
+                  sleep 5
+                done
+
+                echo "Health check failed"
+                exit 1
