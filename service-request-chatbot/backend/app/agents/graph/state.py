@@ -58,6 +58,17 @@ class ServiceRequestGraphState(TypedDict, total=False):
     response_message: str
     response_ui: dict[str, Any]
 
+    # ── FAQ RAG citations ─────────────────────────────────────────────────────
+    # Set by faq_node when RAG search succeeds; always a list (never None).
+    # Reset to [] at the start of each turn by load_session_node.
+    faq_sources: list[dict]   # [{source_type: str, title: str}, ...]
+
+    # ── MSP Platform integration fields ──────────────────────────────────────
+    # Injected by the MSP adapter layer (msp_chat.py) before graph invocation.
+    # Never persisted; not set by the existing /api/chat/service-request route.
+    language: str             # "en" | "ar" — from request or auto-detected
+    msp_context: dict         # {current_url_pattern?, help_category?, help_subcategory?}
+
     # ── Overall turn status ───────────────────────────────────────────────────
     status: Literal[
         "IN_PROGRESS",

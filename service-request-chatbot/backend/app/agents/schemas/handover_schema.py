@@ -40,9 +40,14 @@ FMDocumentType = Literal[
     "SR_HANDOVER_CHECKLIST",
     "SR_HANDOVER_SITE_SURVEY",
     "SR_COP_CHECKLIST_OTHER",
+    "SR_HANDOVER_OTHER",
 ]
 
-RDDDocumentType = Literal["DR_SR_HANDOVER_REPORT"]
+RDDDocumentType = Literal[
+    "DR_SR_HANDOVER_REPORT",
+    "SR_REJECTED_HANDOVER_REPORT",
+    "SR_HANDOVER_OTHER",
+]
 
 # ── Stage definition dataclass ────────────────────────────────────────────────
 
@@ -70,6 +75,7 @@ CREATE_SR_STAGE = StageDefinition(
         "brand_id",
         "mall",
         "brand",
+        "lease",          # display label for the lease (same as lease_code; backend-derived)
         "unit_codes",
         "city",
         "contracted_area",
@@ -87,12 +93,15 @@ FM_REVIEW_STAGE = StageDefinition(
     role="FM_MANAGER",
     required_fields=(
         "unit_readiness_date",
-        "expected_handover_date",
+        # expected_handover_date is auto-computed as unit_readiness_date + 7 days
+        # by merge_state_node. It is NOT asked of the user.
     ),
+    # At least one of these must be uploaded before FM save/approve.
     required_documents=(
         "SR_HANDOVER_CHECKLIST",
         "SR_HANDOVER_SITE_SURVEY",
         "SR_COP_CHECKLIST_OTHER",
+        "SR_HANDOVER_OTHER",
     ),
 )
 
@@ -106,7 +115,13 @@ RDD_REVIEW_STAGE = StageDefinition(
         "fitout_end_date",
         "trading_date",
     ),
-    required_documents=("DR_SR_HANDOVER_REPORT",),
+    # DR_SR_HANDOVER_REPORT is mandatory; SR_REJECTED_HANDOVER_REPORT and
+    # SR_HANDOVER_OTHER are optional additional uploads allowed at this stage.
+    required_documents=(
+        "DR_SR_HANDOVER_REPORT",
+        "SR_REJECTED_HANDOVER_REPORT",
+        "SR_HANDOVER_OTHER",
+    ),
 )
 
 # ── Registry / ordered stage list ────────────────────────────────────────────
@@ -138,6 +153,7 @@ BACKEND_DERIVED_FIELDS: frozenset[str] = frozenset(
         "brand_id",
         "mall",
         "brand",
+        "lease",          # display label set alongside lease_code during lease resolution
         "unit_codes",
         "city",
         "contracted_area",
@@ -160,13 +176,24 @@ OPTIONAL_FIELDS: frozenset[str] = frozenset({"description", "comments", "notes"}
 
 # ── Document type registries ──────────────────────────────────────────────────
 
+# All document types accepted at the FM_REVIEW stage (includes optional "Other").
 FM_ALLOWED_DOCUMENTS: tuple[str, ...] = FM_REVIEW_STAGE.required_documents
 
-RDD_REQUIRED_DOCUMENTS: tuple[str, ...] = RDD_REVIEW_STAGE.required_documents
+# All document types accepted at the RDD_REVIEW stage.
+RDD_ALLOWED_DOCUMENTS: tuple[str, ...] = RDD_REVIEW_STAGE.required_documents
+
+# The single document type that MUST be present before RDD submission.
+RDD_REQUIRED_DOCUMENTS: tuple[str, ...] = ("DR_SR_HANDOVER_REPORT",)
 
 ALL_DOCUMENT_TYPES: frozenset[str] = frozenset(
-    FM_ALLOWED_DOCUMENTS + RDD_REQUIRED_DOCUMENTS
+    FM_ALLOWED_DOCUMENTS + RDD_ALLOWED_DOCUMENTS
 )
+
+# ── Auto-computed (backend-computed) field set ────────────────────────────────
+# Fields whose values are derived from other collected data by merge_state_node.
+# These are never asked of the user directly.
+# Re-exported here so that tests and services can import from the schema module.
+from app.agents.graph.nodes.shared.merge_state_node import BACKEND_COMPUTED_FIELDS  # noqa: E402
 
 # ── Permission map: role → stages the role may act on ────────────────────────
 
@@ -261,9 +288,10 @@ EXTRACTABLE_FIELDS: frozenset[str] = frozenset(
         "lease_code",
         "mall",
         "brand",
-        # "title" is intentionally excluded: the system auto-generates it as
-        # "handover-{lease_code}-{description_slug}".  The LLM must not attempt
-        # to extract or override it from user input.
+        # "title" is extractable: the user may provide their own title.
+        # If not provided, merge_state_node auto-generates it as
+        # "handover-{lease_code}-{description_slug}".
+        "title",
         "description",
         "startDate",
         "endDate",

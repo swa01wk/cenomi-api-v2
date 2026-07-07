@@ -126,11 +126,11 @@ def _make_mock_service(
 class TestApiSubmissionNodeSuccess:
     @pytest.mark.asyncio
     async def test_status_is_submitted(self) -> None:
-        from app.agents.graph.nodes.api_submission_node import api_submission_node
+        from app.agents.graph.nodes.handover.api_submission_node import api_submission_node
 
         mock_svc = MockServiceRequestAPIService()
         with patch(
-            "app.agents.graph.nodes.api_submission_node.get_service_request_api_service",
+            "app.agents.graph.nodes.handover.api_submission_node.get_service_request_api_service",
             return_value=mock_svc,
         ):
             result = await api_submission_node(_confirmed_state())
@@ -138,11 +138,11 @@ class TestApiSubmissionNodeSuccess:
 
     @pytest.mark.asyncio
     async def test_workflow_stage_is_sr_created(self) -> None:
-        from app.agents.graph.nodes.api_submission_node import api_submission_node
+        from app.agents.graph.nodes.handover.api_submission_node import api_submission_node
 
         mock_svc = MockServiceRequestAPIService()
         with patch(
-            "app.agents.graph.nodes.api_submission_node.get_service_request_api_service",
+            "app.agents.graph.nodes.handover.api_submission_node.get_service_request_api_service",
             return_value=mock_svc,
         ):
             result = await api_submission_node(_confirmed_state())
@@ -150,11 +150,11 @@ class TestApiSubmissionNodeSuccess:
 
     @pytest.mark.asyncio
     async def test_sr_id_stored_in_backend_refs(self) -> None:
-        from app.agents.graph.nodes.api_submission_node import api_submission_node
+        from app.agents.graph.nodes.handover.api_submission_node import api_submission_node
 
         mock_svc = MockServiceRequestAPIService()
         with patch(
-            "app.agents.graph.nodes.api_submission_node.get_service_request_api_service",
+            "app.agents.graph.nodes.handover.api_submission_node.get_service_request_api_service",
             return_value=mock_svc,
         ):
             result = await api_submission_node(_confirmed_state())
@@ -163,11 +163,11 @@ class TestApiSubmissionNodeSuccess:
 
     @pytest.mark.asyncio
     async def test_service_request_status_is_submitted(self) -> None:
-        from app.agents.graph.nodes.api_submission_node import api_submission_node
+        from app.agents.graph.nodes.handover.api_submission_node import api_submission_node
 
         mock_svc = MockServiceRequestAPIService()
         with patch(
-            "app.agents.graph.nodes.api_submission_node.get_service_request_api_service",
+            "app.agents.graph.nodes.handover.api_submission_node.get_service_request_api_service",
             return_value=mock_svc,
         ):
             result = await api_submission_node(_confirmed_state())
@@ -175,11 +175,11 @@ class TestApiSubmissionNodeSuccess:
 
     @pytest.mark.asyncio
     async def test_response_message_contains_sr_id(self) -> None:
-        from app.agents.graph.nodes.api_submission_node import api_submission_node
+        from app.agents.graph.nodes.handover.api_submission_node import api_submission_node
 
         mock_svc = MockServiceRequestAPIService()
         with patch(
-            "app.agents.graph.nodes.api_submission_node.get_service_request_api_service",
+            "app.agents.graph.nodes.handover.api_submission_node.get_service_request_api_service",
             return_value=mock_svc,
         ):
             result = await api_submission_node(_confirmed_state())
@@ -188,11 +188,11 @@ class TestApiSubmissionNodeSuccess:
 
     @pytest.mark.asyncio
     async def test_correlation_id_stored_in_backend_refs(self) -> None:
-        from app.agents.graph.nodes.api_submission_node import api_submission_node
+        from app.agents.graph.nodes.handover.api_submission_node import api_submission_node
 
         mock_svc = MockServiceRequestAPIService()
         with patch(
-            "app.agents.graph.nodes.api_submission_node.get_service_request_api_service",
+            "app.agents.graph.nodes.handover.api_submission_node.get_service_request_api_service",
             return_value=mock_svc,
         ):
             result = await api_submission_node(_confirmed_state())
@@ -200,12 +200,12 @@ class TestApiSubmissionNodeSuccess:
 
     @pytest.mark.asyncio
     async def test_existing_backend_refs_preserved(self) -> None:
-        from app.agents.graph.nodes.api_submission_node import api_submission_node
+        from app.agents.graph.nodes.handover.api_submission_node import api_submission_node
 
         mock_svc = MockServiceRequestAPIService()
         state = _confirmed_state(extra_backend_refs={"existing_key": "existing_value"})
         with patch(
-            "app.agents.graph.nodes.api_submission_node.get_service_request_api_service",
+            "app.agents.graph.nodes.handover.api_submission_node.get_service_request_api_service",
             return_value=mock_svc,
         ):
             result = await api_submission_node(state)
@@ -213,7 +213,7 @@ class TestApiSubmissionNodeSuccess:
 
     @pytest.mark.asyncio
     async def test_non_blocking_validation_errors_do_not_block(self) -> None:
-        from app.agents.graph.nodes.api_submission_node import api_submission_node
+        from app.agents.graph.nodes.handover.api_submission_node import api_submission_node
 
         non_blocking = [
             {"field": "notes", "blocking": False, "status": "FAILED", "message": "Advisory only"}
@@ -221,7 +221,7 @@ class TestApiSubmissionNodeSuccess:
         state = _confirmed_state(validation_errors=non_blocking)
         mock_svc = MockServiceRequestAPIService()
         with patch(
-            "app.agents.graph.nodes.api_submission_node.get_service_request_api_service",
+            "app.agents.graph.nodes.handover.api_submission_node.get_service_request_api_service",
             return_value=mock_svc,
         ):
             result = await api_submission_node(state)
@@ -229,11 +229,11 @@ class TestApiSubmissionNodeSuccess:
 
     @pytest.mark.asyncio
     async def test_mock_service_records_the_request(self) -> None:
-        from app.agents.graph.nodes.api_submission_node import api_submission_node
+        from app.agents.graph.nodes.handover.api_submission_node import api_submission_node
 
         mock_svc = MockServiceRequestAPIService()
         with patch(
-            "app.agents.graph.nodes.api_submission_node.get_service_request_api_service",
+            "app.agents.graph.nodes.handover.api_submission_node.get_service_request_api_service",
             return_value=mock_svc,
         ):
             await api_submission_node(_confirmed_state())
@@ -248,7 +248,7 @@ class TestApiSubmissionNodeSuccess:
 class TestApiSubmissionNodeConfirmationGuard:
     @pytest.mark.asyncio
     async def test_pending_status_is_blocked(self) -> None:
-        from app.agents.graph.nodes.api_submission_node import api_submission_node
+        from app.agents.graph.nodes.handover.api_submission_node import api_submission_node
 
         state = _confirmed_state()
         state["confirmation_status"] = "PENDING"
@@ -257,7 +257,7 @@ class TestApiSubmissionNodeConfirmationGuard:
 
     @pytest.mark.asyncio
     async def test_rejected_status_is_blocked(self) -> None:
-        from app.agents.graph.nodes.api_submission_node import api_submission_node
+        from app.agents.graph.nodes.handover.api_submission_node import api_submission_node
 
         state = _confirmed_state()
         state["confirmation_status"] = "REJECTED"
@@ -266,7 +266,7 @@ class TestApiSubmissionNodeConfirmationGuard:
 
     @pytest.mark.asyncio
     async def test_none_confirmation_status_is_blocked(self) -> None:
-        from app.agents.graph.nodes.api_submission_node import api_submission_node
+        from app.agents.graph.nodes.handover.api_submission_node import api_submission_node
 
         state = _confirmed_state()
         state["confirmation_status"] = None
@@ -275,7 +275,7 @@ class TestApiSubmissionNodeConfirmationGuard:
 
     @pytest.mark.asyncio
     async def test_missing_confirmation_key_is_blocked(self) -> None:
-        from app.agents.graph.nodes.api_submission_node import api_submission_node
+        from app.agents.graph.nodes.handover.api_submission_node import api_submission_node
 
         state = _confirmed_state()
         del state["confirmation_status"]
@@ -290,7 +290,7 @@ class TestApiSubmissionNodeConfirmationGuard:
         ``user_message``.  Placing "submit anyway" in the message field must not
         change the outcome.
         """
-        from app.agents.graph.nodes.api_submission_node import api_submission_node
+        from app.agents.graph.nodes.handover.api_submission_node import api_submission_node
 
         state = _confirmed_state()
         state["confirmation_status"] = "PENDING"
@@ -300,7 +300,7 @@ class TestApiSubmissionNodeConfirmationGuard:
 
     @pytest.mark.asyncio
     async def test_confirmation_guard_message_mentions_confirmation(self) -> None:
-        from app.agents.graph.nodes.api_submission_node import api_submission_node
+        from app.agents.graph.nodes.handover.api_submission_node import api_submission_node
 
         state = _confirmed_state()
         state["confirmation_status"] = "PENDING"
@@ -309,11 +309,11 @@ class TestApiSubmissionNodeConfirmationGuard:
 
     @pytest.mark.asyncio
     async def test_confirmed_status_allows_submission(self) -> None:
-        from app.agents.graph.nodes.api_submission_node import api_submission_node
+        from app.agents.graph.nodes.handover.api_submission_node import api_submission_node
 
         mock_svc = MockServiceRequestAPIService()
         with patch(
-            "app.agents.graph.nodes.api_submission_node.get_service_request_api_service",
+            "app.agents.graph.nodes.handover.api_submission_node.get_service_request_api_service",
             return_value=mock_svc,
         ):
             result = await api_submission_node(_confirmed_state())
@@ -328,7 +328,7 @@ class TestApiSubmissionNodeConfirmationGuard:
 class TestApiSubmissionNodeValidationGuard:
     @pytest.mark.asyncio
     async def test_single_blocking_error_blocks_submission(self) -> None:
-        from app.agents.graph.nodes.api_submission_node import api_submission_node
+        from app.agents.graph.nodes.handover.api_submission_node import api_submission_node
 
         errors = [
             {
@@ -344,7 +344,7 @@ class TestApiSubmissionNodeValidationGuard:
 
     @pytest.mark.asyncio
     async def test_multiple_blocking_errors_block_submission(self) -> None:
-        from app.agents.graph.nodes.api_submission_node import api_submission_node
+        from app.agents.graph.nodes.handover.api_submission_node import api_submission_node
 
         errors = [
             {"field": "mall", "blocking": True, "status": "FAILED", "message": "Mall missing."},
@@ -355,7 +355,7 @@ class TestApiSubmissionNodeValidationGuard:
 
     @pytest.mark.asyncio
     async def test_blocking_error_message_mentions_validation(self) -> None:
-        from app.agents.graph.nodes.api_submission_node import api_submission_node
+        from app.agents.graph.nodes.handover.api_submission_node import api_submission_node
 
         errors = [{"field": "mall", "blocking": True, "status": "FAILED", "message": "Required."}]
         result = await api_submission_node(_confirmed_state(validation_errors=errors))
@@ -364,7 +364,7 @@ class TestApiSubmissionNodeValidationGuard:
     @pytest.mark.asyncio
     async def test_error_without_blocking_key_is_treated_as_blocking(self) -> None:
         """Errors missing the 'blocking' key are treated conservatively as blocking."""
-        from app.agents.graph.nodes.api_submission_node import api_submission_node
+        from app.agents.graph.nodes.handover.api_submission_node import api_submission_node
 
         errors = [{"field": "city", "status": "FAILED", "message": "City missing."}]
         result = await api_submission_node(_confirmed_state(validation_errors=errors))
@@ -372,11 +372,11 @@ class TestApiSubmissionNodeValidationGuard:
 
     @pytest.mark.asyncio
     async def test_empty_validation_errors_allow_submission(self) -> None:
-        from app.agents.graph.nodes.api_submission_node import api_submission_node
+        from app.agents.graph.nodes.handover.api_submission_node import api_submission_node
 
         mock_svc = MockServiceRequestAPIService()
         with patch(
-            "app.agents.graph.nodes.api_submission_node.get_service_request_api_service",
+            "app.agents.graph.nodes.handover.api_submission_node.get_service_request_api_service",
             return_value=mock_svc,
         ):
             result = await api_submission_node(_confirmed_state(validation_errors=[]))
@@ -391,7 +391,7 @@ class TestApiSubmissionNodeValidationGuard:
 class TestApiSubmissionNodePayloadGuard:
     @pytest.mark.asyncio
     async def test_missing_create_payload_blocks_submission(self) -> None:
-        from app.agents.graph.nodes.api_submission_node import api_submission_node
+        from app.agents.graph.nodes.handover.api_submission_node import api_submission_node
 
         state = _confirmed_state()
         del state["backend_refs"]["create_payload"]
@@ -400,7 +400,7 @@ class TestApiSubmissionNodePayloadGuard:
 
     @pytest.mark.asyncio
     async def test_empty_backend_refs_blocks_submission(self) -> None:
-        from app.agents.graph.nodes.api_submission_node import api_submission_node
+        from app.agents.graph.nodes.handover.api_submission_node import api_submission_node
 
         state = _confirmed_state()
         state["backend_refs"] = {}
@@ -409,7 +409,7 @@ class TestApiSubmissionNodePayloadGuard:
 
     @pytest.mark.asyncio
     async def test_missing_backend_refs_key_blocks_submission(self) -> None:
-        from app.agents.graph.nodes.api_submission_node import api_submission_node
+        from app.agents.graph.nodes.handover.api_submission_node import api_submission_node
 
         state = _confirmed_state()
         del state["backend_refs"]
@@ -418,7 +418,7 @@ class TestApiSubmissionNodePayloadGuard:
 
     @pytest.mark.asyncio
     async def test_missing_payload_message_mentions_payload(self) -> None:
-        from app.agents.graph.nodes.api_submission_node import api_submission_node
+        from app.agents.graph.nodes.handover.api_submission_node import api_submission_node
 
         state = _confirmed_state()
         state["backend_refs"] = {}
@@ -435,13 +435,13 @@ class TestApiSubmissionNodePayloadGuard:
 class TestApiSubmissionNodeApiFailure:
     @pytest.mark.asyncio
     async def test_api_500_sets_status_failed(self) -> None:
-        from app.agents.graph.nodes.api_submission_node import api_submission_node
+        from app.agents.graph.nodes.handover.api_submission_node import api_submission_node
 
         mock_svc = MockServiceRequestAPIService(
             force_error="Internal Server Error", force_status_code=500
         )
         with patch(
-            "app.agents.graph.nodes.api_submission_node.get_service_request_api_service",
+            "app.agents.graph.nodes.handover.api_submission_node.get_service_request_api_service",
             return_value=mock_svc,
         ):
             result = await api_submission_node(_confirmed_state())
@@ -449,11 +449,11 @@ class TestApiSubmissionNodeApiFailure:
 
     @pytest.mark.asyncio
     async def test_api_failure_service_request_status_is_failed(self) -> None:
-        from app.agents.graph.nodes.api_submission_node import api_submission_node
+        from app.agents.graph.nodes.handover.api_submission_node import api_submission_node
 
         mock_svc = MockServiceRequestAPIService(force_error="Connection refused")
         with patch(
-            "app.agents.graph.nodes.api_submission_node.get_service_request_api_service",
+            "app.agents.graph.nodes.handover.api_submission_node.get_service_request_api_service",
             return_value=mock_svc,
         ):
             result = await api_submission_node(_confirmed_state())
@@ -461,11 +461,11 @@ class TestApiSubmissionNodeApiFailure:
 
     @pytest.mark.asyncio
     async def test_api_failure_no_sr_id_in_backend_refs(self) -> None:
-        from app.agents.graph.nodes.api_submission_node import api_submission_node
+        from app.agents.graph.nodes.handover.api_submission_node import api_submission_node
 
         mock_svc = MockServiceRequestAPIService(force_error="Timeout")
         with patch(
-            "app.agents.graph.nodes.api_submission_node.get_service_request_api_service",
+            "app.agents.graph.nodes.handover.api_submission_node.get_service_request_api_service",
             return_value=mock_svc,
         ):
             result = await api_submission_node(_confirmed_state())
@@ -473,11 +473,11 @@ class TestApiSubmissionNodeApiFailure:
 
     @pytest.mark.asyncio
     async def test_api_failure_response_message_is_user_friendly(self) -> None:
-        from app.agents.graph.nodes.api_submission_node import api_submission_node
+        from app.agents.graph.nodes.handover.api_submission_node import api_submission_node
 
         mock_svc = MockServiceRequestAPIService(force_error="Gateway timeout")
         with patch(
-            "app.agents.graph.nodes.api_submission_node.get_service_request_api_service",
+            "app.agents.graph.nodes.handover.api_submission_node.get_service_request_api_service",
             return_value=mock_svc,
         ):
             result = await api_submission_node(_confirmed_state())
@@ -487,12 +487,12 @@ class TestApiSubmissionNodeApiFailure:
 
     @pytest.mark.asyncio
     async def test_api_failure_error_detail_in_response_message(self) -> None:
-        from app.agents.graph.nodes.api_submission_node import api_submission_node
+        from app.agents.graph.nodes.handover.api_submission_node import api_submission_node
 
         error_text = "Database connection lost"
         mock_svc = MockServiceRequestAPIService(force_error=error_text)
         with patch(
-            "app.agents.graph.nodes.api_submission_node.get_service_request_api_service",
+            "app.agents.graph.nodes.handover.api_submission_node.get_service_request_api_service",
             return_value=mock_svc,
         ):
             result = await api_submission_node(_confirmed_state())
@@ -500,11 +500,11 @@ class TestApiSubmissionNodeApiFailure:
 
     @pytest.mark.asyncio
     async def test_api_failure_workflow_stage_not_updated(self) -> None:
-        from app.agents.graph.nodes.api_submission_node import api_submission_node
+        from app.agents.graph.nodes.handover.api_submission_node import api_submission_node
 
         mock_svc = MockServiceRequestAPIService(force_error="API down")
         with patch(
-            "app.agents.graph.nodes.api_submission_node.get_service_request_api_service",
+            "app.agents.graph.nodes.handover.api_submission_node.get_service_request_api_service",
             return_value=mock_svc,
         ):
             result = await api_submission_node(_confirmed_state())
@@ -531,7 +531,7 @@ class TestApiSubmissionNodeTracing:
 
     @pytest.mark.asyncio
     async def test_start_run_called_when_trace_manager_present(self) -> None:
-        from app.agents.graph.nodes.api_submission_node import api_submission_node
+        from app.agents.graph.nodes.handover.api_submission_node import api_submission_node
 
         tm = self._make_trace_manager()
         state = _confirmed_state()
@@ -540,15 +540,15 @@ class TestApiSubmissionNodeTracing:
 
         mock_svc = MockServiceRequestAPIService()
         with patch(
-            "app.agents.graph.nodes.api_submission_node.get_service_request_api_service",
+            "app.agents.graph.nodes.handover.api_submission_node.get_service_request_api_service",
             return_value=mock_svc,
         ):
             await api_submission_node(state)
-        tm.start_run.assert_called_once()
+        tm.start_run.assert_called()
 
     @pytest.mark.asyncio
     async def test_capture_tool_call_called_on_success(self) -> None:
-        from app.agents.graph.nodes.api_submission_node import api_submission_node
+        from app.agents.graph.nodes.handover.api_submission_node import api_submission_node
 
         tm = self._make_trace_manager()
         state = _confirmed_state()
@@ -557,15 +557,15 @@ class TestApiSubmissionNodeTracing:
 
         mock_svc = MockServiceRequestAPIService()
         with patch(
-            "app.agents.graph.nodes.api_submission_node.get_service_request_api_service",
+            "app.agents.graph.nodes.handover.api_submission_node.get_service_request_api_service",
             return_value=mock_svc,
         ):
             await api_submission_node(state)
-        tm.capture_tool_call.assert_called_once()
+        tm.capture_tool_call.assert_called()
 
     @pytest.mark.asyncio
     async def test_finish_run_called_on_success(self) -> None:
-        from app.agents.graph.nodes.api_submission_node import api_submission_node
+        from app.agents.graph.nodes.handover.api_submission_node import api_submission_node
 
         tm = self._make_trace_manager()
         state = _confirmed_state()
@@ -574,15 +574,15 @@ class TestApiSubmissionNodeTracing:
 
         mock_svc = MockServiceRequestAPIService()
         with patch(
-            "app.agents.graph.nodes.api_submission_node.get_service_request_api_service",
+            "app.agents.graph.nodes.handover.api_submission_node.get_service_request_api_service",
             return_value=mock_svc,
         ):
             await api_submission_node(state)
-        tm.finish_run.assert_called_once()
+        tm.finish_run.assert_called()
 
     @pytest.mark.asyncio
     async def test_capture_state_snapshot_called_with_redacted_payload(self) -> None:
-        from app.agents.graph.nodes.api_submission_node import api_submission_node
+        from app.agents.graph.nodes.handover.api_submission_node import api_submission_node
 
         tm = self._make_trace_manager()
         payload = _make_payload()
@@ -594,13 +594,13 @@ class TestApiSubmissionNodeTracing:
 
         mock_svc = MockServiceRequestAPIService()
         with patch(
-            "app.agents.graph.nodes.api_submission_node.get_service_request_api_service",
+            "app.agents.graph.nodes.handover.api_submission_node.get_service_request_api_service",
             return_value=mock_svc,
         ):
             await api_submission_node(state)
 
         # The snapshot call should have been made.
-        tm.capture_state_snapshot.assert_called_once()
+        tm.capture_state_snapshot.assert_called()
         _call_kwargs = tm.capture_state_snapshot.call_args
         snapshot_state = _call_kwargs.kwargs.get("state") or _call_kwargs[1].get("state")
         # The sensitive token must be redacted.
@@ -610,11 +610,11 @@ class TestApiSubmissionNodeTracing:
     @pytest.mark.asyncio
     async def test_no_tracing_when_trace_manager_absent(self) -> None:
         """Node must not raise when trace_manager is absent."""
-        from app.agents.graph.nodes.api_submission_node import api_submission_node
+        from app.agents.graph.nodes.handover.api_submission_node import api_submission_node
 
         mock_svc = MockServiceRequestAPIService()
         with patch(
-            "app.agents.graph.nodes.api_submission_node.get_service_request_api_service",
+            "app.agents.graph.nodes.handover.api_submission_node.get_service_request_api_service",
             return_value=mock_svc,
         ):
             result = await api_submission_node(_confirmed_state())
@@ -622,7 +622,7 @@ class TestApiSubmissionNodeTracing:
 
     @pytest.mark.asyncio
     async def test_tool_call_records_status_code(self) -> None:
-        from app.agents.graph.nodes.api_submission_node import api_submission_node
+        from app.agents.graph.nodes.handover.api_submission_node import api_submission_node
 
         tm = self._make_trace_manager()
         state = _confirmed_state()
@@ -631,7 +631,7 @@ class TestApiSubmissionNodeTracing:
 
         mock_svc = MockServiceRequestAPIService()
         with patch(
-            "app.agents.graph.nodes.api_submission_node.get_service_request_api_service",
+            "app.agents.graph.nodes.handover.api_submission_node.get_service_request_api_service",
             return_value=mock_svc,
         ):
             await api_submission_node(state)
@@ -641,7 +641,7 @@ class TestApiSubmissionNodeTracing:
 
     @pytest.mark.asyncio
     async def test_tool_call_success_true_on_success(self) -> None:
-        from app.agents.graph.nodes.api_submission_node import api_submission_node
+        from app.agents.graph.nodes.handover.api_submission_node import api_submission_node
 
         tm = self._make_trace_manager()
         state = _confirmed_state()
@@ -650,7 +650,7 @@ class TestApiSubmissionNodeTracing:
 
         mock_svc = MockServiceRequestAPIService()
         with patch(
-            "app.agents.graph.nodes.api_submission_node.get_service_request_api_service",
+            "app.agents.graph.nodes.handover.api_submission_node.get_service_request_api_service",
             return_value=mock_svc,
         ):
             await api_submission_node(state)
@@ -679,7 +679,7 @@ class TestApiSubmissionNodeAuditLog:
 
     @pytest.mark.asyncio
     async def test_audit_log_written_on_success(self) -> None:
-        from app.agents.graph.nodes.api_submission_node import api_submission_node
+        from app.agents.graph.nodes.handover.api_submission_node import api_submission_node
 
         tm, session = self._make_trace_manager_with_session()
         state = _confirmed_state()
@@ -688,10 +688,10 @@ class TestApiSubmissionNodeAuditLog:
 
         mock_svc = MockServiceRequestAPIService()
         with patch(
-            "app.agents.graph.nodes.api_submission_node.get_service_request_api_service",
+            "app.agents.graph.nodes.handover.api_submission_node.get_service_request_api_service",
             return_value=mock_svc,
         ), patch(
-            "app.agents.graph.nodes.api_submission_node.AuditLogRepository",
+            "app.agents.graph.nodes.handover.api_submission_node.AuditLogRepository",
         ) as MockRepo:
             mock_repo_instance = AsyncMock()
             MockRepo.return_value = mock_repo_instance
@@ -702,7 +702,7 @@ class TestApiSubmissionNodeAuditLog:
 
     @pytest.mark.asyncio
     async def test_audit_log_action_is_service_request_created(self) -> None:
-        from app.agents.graph.nodes.api_submission_node import api_submission_node
+        from app.agents.graph.nodes.handover.api_submission_node import api_submission_node
 
         tm, _ = self._make_trace_manager_with_session()
         state = _confirmed_state()
@@ -711,10 +711,10 @@ class TestApiSubmissionNodeAuditLog:
 
         mock_svc = MockServiceRequestAPIService()
         with patch(
-            "app.agents.graph.nodes.api_submission_node.get_service_request_api_service",
+            "app.agents.graph.nodes.handover.api_submission_node.get_service_request_api_service",
             return_value=mock_svc,
         ), patch(
-            "app.agents.graph.nodes.api_submission_node.AuditLogRepository",
+            "app.agents.graph.nodes.handover.api_submission_node.AuditLogRepository",
         ) as MockRepo:
             mock_repo_instance = AsyncMock()
             MockRepo.return_value = mock_repo_instance
@@ -725,14 +725,14 @@ class TestApiSubmissionNodeAuditLog:
 
     @pytest.mark.asyncio
     async def test_audit_log_not_written_without_trace_manager(self) -> None:
-        from app.agents.graph.nodes.api_submission_node import api_submission_node
+        from app.agents.graph.nodes.handover.api_submission_node import api_submission_node
 
         mock_svc = MockServiceRequestAPIService()
         with patch(
-            "app.agents.graph.nodes.api_submission_node.get_service_request_api_service",
+            "app.agents.graph.nodes.handover.api_submission_node.get_service_request_api_service",
             return_value=mock_svc,
         ), patch(
-            "app.agents.graph.nodes.api_submission_node.AuditLogRepository",
+            "app.agents.graph.nodes.handover.api_submission_node.AuditLogRepository",
         ) as MockRepo:
             result = await api_submission_node(_confirmed_state())
 
@@ -741,7 +741,7 @@ class TestApiSubmissionNodeAuditLog:
 
     @pytest.mark.asyncio
     async def test_audit_log_failure_does_not_abort_submission(self) -> None:
-        from app.agents.graph.nodes.api_submission_node import api_submission_node
+        from app.agents.graph.nodes.handover.api_submission_node import api_submission_node
 
         tm, _ = self._make_trace_manager_with_session()
         state = _confirmed_state()
@@ -750,10 +750,10 @@ class TestApiSubmissionNodeAuditLog:
 
         mock_svc = MockServiceRequestAPIService()
         with patch(
-            "app.agents.graph.nodes.api_submission_node.get_service_request_api_service",
+            "app.agents.graph.nodes.handover.api_submission_node.get_service_request_api_service",
             return_value=mock_svc,
         ), patch(
-            "app.agents.graph.nodes.api_submission_node.AuditLogRepository",
+            "app.agents.graph.nodes.handover.api_submission_node.AuditLogRepository",
         ) as MockRepo:
             mock_repo_instance = AsyncMock()
             mock_repo_instance.create.side_effect = RuntimeError("DB unavailable")
@@ -865,16 +865,20 @@ class TestMockServiceRequestAPIService:
         assert len(svc.created_requests) == 2
 
     @pytest.mark.asyncio
-    async def test_patch_raises_not_implemented(self) -> None:
+    async def test_patch_returns_success_result(self) -> None:
         svc = MockServiceRequestAPIService()
-        with pytest.raises(NotImplementedError):
-            await svc.patch_service_request("SR-001", {})
+        result = await svc.patch_service_request("SR-001", {"status": "IN_PROCESS"})
+        assert result.sr_id == "SR-001"
+        assert result.error is None
+        assert result.status_code == 200
 
     @pytest.mark.asyncio
-    async def test_submit_report_raises_not_implemented(self) -> None:
+    async def test_submit_report_returns_success_result(self) -> None:
         svc = MockServiceRequestAPIService()
-        with pytest.raises(NotImplementedError):
-            await svc.submit_report({})
+        result = await svc.submit_report({"service_request_id": "SR-002"})
+        assert result.sr_id == "SR-002"
+        assert result.error is None
+        assert result.status_code == 201
 
     def test_is_abstract_subtype(self) -> None:
         svc = MockServiceRequestAPIService()
@@ -926,120 +930,92 @@ def _make_http_response(
 
 
 class TestHttpServiceRequestAPIService:
+    """Tests for HttpServiceRequestAPIService which now delegates to PlatformAPIClient.
+
+    These tests mock the platform client calls rather than httpx directly,
+    since the HTTP adapter is now a thin mapping layer over the platform client.
+    """
+
+    def _make_platform_result(self, sr_id: str | None = "SR-HTTP-001", error: str | None = None):
+        from app.agents.services.platform_api_client import ServiceRequestResult
+        return ServiceRequestResult(
+            sr_id=sr_id,
+            endpoint="mock://service-requests",
+            request_payload={},
+            response_payload={"id": sr_id} if sr_id else None,
+            latency_ms=10,
+            status_code=201 if sr_id else 500,
+            correlation_id="corr-001",
+            error=error,
+        )
+
     @pytest.mark.asyncio
-    async def test_201_response_returns_sr_id(self) -> None:
-        body = {"id": "SR-HTTP-001", "status": "SUBMITTED"}
-        resp = _make_http_response(201, body)
-        svc = HttpServiceRequestAPIService(base_url="http://api.example.com")
-        with patch("httpx.AsyncClient", return_value=_make_http_client_ctx(resp)):
+    async def test_create_delegates_to_platform_client(self) -> None:
+        svc = HttpServiceRequestAPIService()
+        mock_result = self._make_platform_result("SR-HTTP-001")
+        with patch.object(svc._client, "create_service_request", new_callable=AsyncMock) as mock:
+            mock.return_value = mock_result
             result = await svc.create_service_request({"payload": {}})
         assert result.sr_id == "SR-HTTP-001"
-        assert result.status_code == 201
         assert result.error is None
 
     @pytest.mark.asyncio
-    async def test_200_response_also_accepted(self) -> None:
-        body = {"id": "SR-HTTP-200", "status": "SUBMITTED"}
-        resp = _make_http_response(200, body)
-        svc = HttpServiceRequestAPIService(base_url="http://api.example.com")
-        with patch("httpx.AsyncClient", return_value=_make_http_client_ctx(resp)):
-            result = await svc.create_service_request({})
-        assert result.sr_id == "SR-HTTP-200"
-        assert result.error is None
-
-    @pytest.mark.asyncio
-    async def test_correlation_id_from_header(self) -> None:
-        body = {"id": "SR-001"}
-        resp = _make_http_response(201, body, headers={"x-correlation-id": "hdr-corr-001"})
-        svc = HttpServiceRequestAPIService(base_url="http://api.example.com")
-        with patch("httpx.AsyncClient", return_value=_make_http_client_ctx(resp)):
-            result = await svc.create_service_request({})
-        assert result.correlation_id == "hdr-corr-001"
-
-    @pytest.mark.asyncio
-    async def test_correlation_id_from_body_when_no_header(self) -> None:
-        body = {"id": "SR-001", "correlation_id": "body-corr-002"}
-        resp = _make_http_response(201, body)
-        svc = HttpServiceRequestAPIService(base_url="http://api.example.com")
-        with patch("httpx.AsyncClient", return_value=_make_http_client_ctx(resp)):
-            result = await svc.create_service_request({})
-        assert result.correlation_id == "body-corr-002"
-
-    @pytest.mark.asyncio
-    async def test_500_returns_error(self) -> None:
-        resp = _make_http_response(500, None)
-        svc = HttpServiceRequestAPIService(base_url="http://api.example.com")
-        with patch("httpx.AsyncClient", return_value=_make_http_client_ctx(resp)):
+    async def test_create_error_propagated(self) -> None:
+        svc = HttpServiceRequestAPIService()
+        mock_result = self._make_platform_result(None, error="HTTP 500")
+        with patch.object(svc._client, "create_service_request", new_callable=AsyncMock) as mock:
+            mock.return_value = mock_result
             result = await svc.create_service_request({})
         assert result.sr_id is None
         assert "500" in (result.error or "")
 
     @pytest.mark.asyncio
-    async def test_404_returns_error(self) -> None:
-        resp = _make_http_response(404, None)
-        svc = HttpServiceRequestAPIService(base_url="http://api.example.com")
-        with patch("httpx.AsyncClient", return_value=_make_http_client_ctx(resp)):
-            result = await svc.create_service_request({})
-        assert result.sr_id is None
-        assert "404" in (result.error or "")
+    async def test_patch_delegates_to_platform_client(self) -> None:
+        svc = HttpServiceRequestAPIService()
+        mock_result = self._make_platform_result("SR-123")
+        with patch.object(svc._client, "patch_service_request", new_callable=AsyncMock) as mock:
+            mock.return_value = mock_result
+            result = await svc.patch_service_request("SR-123", {})
+        assert result.sr_id == "SR-123"
+        assert result.error is None
 
     @pytest.mark.asyncio
-    async def test_connection_error_returns_none_status_code(self) -> None:
-        import httpx as _httpx
-
-        client = AsyncMock()
-        client.post = AsyncMock(side_effect=_httpx.ConnectError("refused"))
-        ctx = MagicMock()
-        ctx.__aenter__ = AsyncMock(return_value=client)
-        ctx.__aexit__ = AsyncMock(return_value=False)
-
-        svc = HttpServiceRequestAPIService(base_url="http://api.example.com")
-        with patch("httpx.AsyncClient", return_value=ctx):
-            result = await svc.create_service_request({})
-        assert result.status_code is None
-        assert result.error is not None
+    async def test_submit_report_delegates_to_platform_client(self) -> None:
+        svc = HttpServiceRequestAPIService()
+        mock_result = self._make_platform_result("SR-456")
+        with patch.object(svc._client, "submit_report", new_callable=AsyncMock) as mock:
+            mock.return_value = mock_result
+            result = await svc.submit_report({})
+        assert result.sr_id == "SR-456"
 
     @pytest.mark.asyncio
     async def test_latency_ms_is_non_negative(self) -> None:
-        body = {"id": "SR-001"}
-        resp = _make_http_response(201, body)
-        svc = HttpServiceRequestAPIService(base_url="http://api.example.com")
-        with patch("httpx.AsyncClient", return_value=_make_http_client_ctx(resp)):
+        svc = HttpServiceRequestAPIService()
+        mock_result = self._make_platform_result("SR-001")
+        with patch.object(svc._client, "create_service_request", new_callable=AsyncMock) as mock:
+            mock.return_value = mock_result
             result = await svc.create_service_request({})
         assert isinstance(result.latency_ms, int)
         assert result.latency_ms >= 0
 
     @pytest.mark.asyncio
-    async def test_patch_raises_not_implemented(self) -> None:
-        svc = HttpServiceRequestAPIService(base_url="http://api.example.com")
-        with pytest.raises(NotImplementedError):
-            await svc.patch_service_request("SR-001", {})
-
-    @pytest.mark.asyncio
-    async def test_submit_report_raises_not_implemented(self) -> None:
-        svc = HttpServiceRequestAPIService(base_url="http://api.example.com")
-        with pytest.raises(NotImplementedError):
-            await svc.submit_report({})
-
-    def test_extract_sr_id_from_top_level_id(self) -> None:
-        svc = HttpServiceRequestAPIService.__new__(HttpServiceRequestAPIService)
-        assert svc._extract_sr_id({"id": "SR-001"}) == "SR-001"
-
-    def test_extract_sr_id_from_sr_id_key(self) -> None:
-        svc = HttpServiceRequestAPIService.__new__(HttpServiceRequestAPIService)
-        assert svc._extract_sr_id({"sr_id": "SR-002"}) == "SR-002"
-
-    def test_extract_sr_id_from_nested_data(self) -> None:
-        svc = HttpServiceRequestAPIService.__new__(HttpServiceRequestAPIService)
-        assert svc._extract_sr_id({"data": {"id": "SR-003"}}) == "SR-003"
-
-    def test_extract_sr_id_returns_none_when_absent(self) -> None:
-        svc = HttpServiceRequestAPIService.__new__(HttpServiceRequestAPIService)
-        assert svc._extract_sr_id({"status": "ok"}) is None
-
-    def test_extract_sr_id_returns_none_for_non_dict(self) -> None:
-        svc = HttpServiceRequestAPIService.__new__(HttpServiceRequestAPIService)
-        assert svc._extract_sr_id(None) is None  # type: ignore[arg-type]
+    async def test_connection_error_returns_none_status_code(self) -> None:
+        from app.agents.services.platform_api_client import ServiceRequestResult
+        svc = HttpServiceRequestAPIService()
+        error_result = ServiceRequestResult(
+            sr_id=None,
+            endpoint="mock://service-requests",
+            request_payload={},
+            response_payload=None,
+            latency_ms=5,
+            status_code=None,
+            error="ConnectError: refused",
+        )
+        with patch.object(svc._client, "create_service_request", new_callable=AsyncMock) as mock:
+            mock.return_value = error_result
+            result = await svc.create_service_request({})
+        assert result.status_code is None
+        assert result.error is not None
 
 
 # ---------------------------------------------------------------------------

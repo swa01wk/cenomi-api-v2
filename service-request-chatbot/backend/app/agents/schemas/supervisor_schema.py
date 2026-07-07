@@ -20,10 +20,12 @@ class SupervisorDecision(BaseModel):
     """
 
     intent: Literal[
-        "CREATE_HANDOVER_SERVICE_REQUEST",
-        "UPDATE_HANDOVER_SERVICE_REQUEST",
-        "APPROVE_HANDOVER_SERVICE_REQUEST",
+        "ASK_HELP",
+        "CREATE_RDD_SERVICE_REQUEST",
+        "UPDATE_RDD_SERVICE_REQUEST",
+        "APPROVE_RDD_SERVICE_REQUEST",
         "CHECK_SERVICE_REQUEST_STATUS",
+        "PREVIEW_SERVICE_REQUEST",
         "UNKNOWN",
     ] = Field(description="Classified user intent")
 

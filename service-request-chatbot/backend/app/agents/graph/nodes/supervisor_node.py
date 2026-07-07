@@ -32,10 +32,12 @@ from app.agents.prompts.supervisor_prompt import (
     CONFIDENCE_THRESHOLD,
     SUPERVISOR_SYSTEM_PROMPT,
 )
-from app.agents.registries.service_request_registry import lookup_agent
+from app.agents.registry import lookup_agent
+from app.agents.schemas.help_agent_schema import intents_for_roles
 from app.agents.schemas.supervisor_schema import SupervisorDecision
 from app.agents.graph.state import ServiceRequestState
 from app.observability.decorators import trace_node
+from app.types.chat import AuthContext
 
 log = structlog.get_logger(__name__)
 
@@ -58,6 +60,30 @@ _CANCEL_PHRASES: frozenset[str] = frozenset(
     }
 )
 
+# Phrases that request a summary/preview of the current session state.
+# These must bypass the session-continuity shortcut so the supervisor LLM
+# can classify them as PREVIEW_SERVICE_REQUEST rather than blindly continuing
+# the active workflow.
+_PREVIEW_PHRASES: frozenset[str] = frozenset(
+    {
+        "preview",
+        "show me",
+        "show what you have",
+        "what have we collected",
+        "what have you collected",
+        "show details",
+        "show the details",
+        "can you show",
+        "show the request",
+        "show me the request",
+        "show it",
+        "review",
+        "what do you have",
+        "what have we got",
+        "show summary",
+    }
+)
+
 
 # ---------------------------------------------------------------------------
 # Private helpers
@@ -70,11 +96,24 @@ def _user_wants_to_switch(message: str) -> bool:
     return any(phrase in lowered for phrase in _CANCEL_PHRASES)
 
 
+def _user_wants_preview(message: str) -> bool:
+    """Return ``True`` if *message* is a preview/summary request.
+
+    Preview phrases bypass the session-continuity shortcut so the supervisor
+    LLM can classify them as PREVIEW_SERVICE_REQUEST rather than blindly
+    delegating to the active workflow agent.
+    """
+    lowered = message.lower()
+    return any(phrase in lowered for phrase in _PREVIEW_PHRASES)
+
+
 def _build_user_content(state: ServiceRequestState) -> str:
     """Build the user-facing content string sent to the LLM.
 
-    Includes the current message plus lightweight context about the active
-    session so the model can reason about continuity.
+    Includes the current message, lightweight routing hints about the active
+    session, and up to 4 recent conversation turns so the model can classify
+    short follow-up messages in context (e.g. "8th june" when an update
+    workflow is already in progress).
     """
     message = state.get("user_message") or ""
     parts = [f"User message: {message}"]
@@ -86,6 +125,19 @@ def _build_user_content(state: ServiceRequestState) -> str:
     intent = state.get("intent")
     if intent:
         parts.append(f"Previously classified intent: {intent}")
+
+    # Include the last 4 turns of conversation so the supervisor can score
+    # short follow-up messages accurately rather than treating them as
+    # standalone ambiguous openers.
+    conversation_history: list[dict] = state.get("conversation_history") or []  # type: ignore[assignment]
+    recent = conversation_history[-4:]
+    if recent:
+        parts.append("Recent conversation (oldest first):")
+        for turn in recent:
+            role = (turn.get("role") or "unknown").capitalize()
+            content = (turn.get("content") or "").strip()
+            if content:
+                parts.append(f"  {role}: {content}")
 
     return "\n".join(parts)
 
@@ -147,8 +199,12 @@ async def supervisor_node(state: ServiceRequestState) -> dict[str, Any]:  # noqa
 
     # ── 1. Session continuity ──────────────────────────────────────────────
     # If a downstream agent is already handling this session and the user has
-    # not explicitly requested a switch, delegate back immediately.
-    if active_agent and not _user_wants_to_switch(user_message):
+    # not explicitly requested a switch or a preview, delegate back immediately.
+    if (
+        active_agent
+        and not _user_wants_to_switch(user_message)
+        and not _user_wants_preview(user_message)
+    ):
         log.debug(
             "supervisor.session_continuity",
             active_agent=active_agent,
@@ -261,7 +317,45 @@ async def supervisor_node(state: ServiceRequestState) -> dict[str, Any]:  # noqa
             "status": "WAITING_FOR_USER",
         }
 
-    # ── 7. Registry validation ─────────────────────────────────────────────
+    # ── 7a. Preview intent — route to preview_node ────────────────────────
+    # PREVIEW_SERVICE_REQUEST has no downstream agent; preview_node fetches the
+    # submitted SR from the platform API (if sr_id is available) or summarises
+    # the draft collected_data.  Use IN_PROGRESS so _route_after_supervisor
+    # sends the turn to the dedicated "preview" graph node.
+    if decision.intent == "PREVIEW_SERVICE_REQUEST":
+        log.info("supervisor.preview_intent")
+        return {
+            "intent": decision.intent,
+            "status": "IN_PROGRESS",
+        }
+
+    # ── 7b. RBAC check ────────────────────────────────────────────────────
+    # Enforce role-based permissions before activating any agent.  The denial
+    # message is set in returned state here (not in the routing function) so
+    # that LangGraph propagates it correctly to response_generation_node.
+    auth: AuthContext | None = state.get("auth_context")  # type: ignore[assignment]
+    if auth is not None:
+        permitted = intents_for_roles(auth.roles, auth.is_global_admin)
+        if decision.intent not in permitted:
+            log.info(
+                "supervisor.rbac_denied",
+                intent=decision.intent,
+                roles=list(auth.roles),
+            )
+            role_display = ", ".join(sorted(auth.roles)) or "your role"
+            intent_display = decision.intent.replace("_", " ").lower()
+            return {
+                "intent": decision.intent,
+                "status": "WAITING_FOR_USER",
+                "response_message": (
+                    f"Your role ({role_display}) does not permit this action "
+                    f"({intent_display}). "
+                    "I can answer platform questions or help with actions your role allows. "
+                    "For example, I can help you create or check the status of a handover service request."
+                ),
+            }
+
+    # ── 7c. Registry validation ────────────────────────────────────────────
     # Cross-check the LLM's routing against the authoritative registry so a
     # hallucinated agent name never propagates downstream.
     agent_config = None

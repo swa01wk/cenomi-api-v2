@@ -6,26 +6,78 @@ The backend agent system is built on [LangGraph](https://github.com/langchain-ai
 
 ---
 
+## Frontend / Backend Contract
+
+The frontend is a **generic conversational shell**. It does not select agents, does not identify intent, and does not control routing. The full pipeline — intent identification, agent routing, workflow continuation, validation, confirmation gating, payload construction, and API submission — belongs exclusively to the backend.
+
+### What the frontend sends
+
+Every chat turn carries only the following fields:
+
+| Field | Type | Purpose |
+|---|---|---|
+| `session_id` | `str` | Identifies the conversation |
+| `message` | `str` | Raw user text |
+| `attachment_ids` | `list[str]` | Uploaded file references |
+| `selected_lease_id` | `str \| None` | User selection from a lease disambiguation UI |
+| `corrected_fields` | `dict \| None` | Inline field edits from a confirmation card |
+| `action` | `str \| None` | UI interaction: `"confirm"`, `"cancel"`, or omitted |
+
+### What the frontend must never send
+
+The following fields are owned by the backend and **must not be accepted from, or controlled by, the frontend**:
+
+- `active_agent` — resolved by the Agent Registry; persisted to the database and reloaded on the next turn.
+- `intent` — classified by the Supervisor Agent.
+- `service_category` / `sub_category` — extracted by the Supervisor; used deterministically by the registry for routing.
+- `workflow_stage` — advanced by backend graph nodes only.
+
+### How routing works (backend-owned)
+
+```
+User message
+  → Chat API
+  → Injection Guard
+  → ChatOrchestrationService
+  → Load Session State          ← routing fields loaded from DB, never from FE
+  → Intent Identification       ← Supervisor Agent (LLM classification)
+  → Agent Registry / Router     ← deterministic (service_category, sub_category) lookup
+  → Service Request Agent       ← e.g. Handover / FM / RDD
+  → Field Extraction / Validation / Confirmation / Payload Builder / API Submission
+  → Response Generation
+  → Save State                  ← active_agent, intent, workflow_stage persisted to DB
+```
+
+**Workflow continuation:** On subsequent turns where `active_agent` was already resolved and persisted by the backend, `load_session_node` routes directly to the agent's entry node, bypassing the Supervisor. This is backend-driven continuation — the frontend never instructs the backend to resume a specific agent.
+
+**LLM hint vs. registry:** The Supervisor may set a `target_agent` hint in its `SupervisorDecision` output. This hint is advisory only. The `registry_node` always performs a deterministic `(service_category, sub_category)` lookup and its result wins.
+
+**Extensibility:** The current product scope is Service Request / Handover. The Supervisor and Agent Registry are designed so that additional agents can be added in future by registering new `(service_category, sub_category)` entries — without any changes to the frontend contract.
+
+---
+
 ## Supervisor Agent
 
 **File:** `app/agents/graph/nodes/supervisor_node.py`  
 **Schema:** `app/agents/schemas/supervisor_schema.py`
 
-The supervisor runs at the beginning of every turn where no `active_agent` is set. It makes a single LLM call to classify the user's intent and, optionally, extract an initial `service_category` / `sub_category`.
+The Supervisor is the backend's entry point for **intent identification**. It runs at the beginning of every turn where no `active_agent` is set (i.e. the first turn of a new intent, or after a workflow restart). The frontend never identifies intent — it sends only the raw user message, and the Supervisor performs a single LLM call to classify intent and, optionally, extract an initial `service_category` / `sub_category`.
 
 **`SupervisorDecision` schema:**
 
 ```python
 class SupervisorDecision(BaseModel):
     intent: Literal[
-        "CREATE_HANDOVER_SERVICE_REQUEST",
-        "UPDATE_SERVICE_REQUEST",
-        "APPROVE_SERVICE_REQUEST",
+        "CREATE_RDD_SERVICE_REQUEST",
+        "UPDATE_RDD_SERVICE_REQUEST",
+        "APPROVE_RDD_SERVICE_REQUEST",
         "CHECK_SERVICE_REQUEST_STATUS",
+        "PREVIEW_SERVICE_REQUEST",
         "UNKNOWN",
     ]
     service_category: str | None
     sub_category: str | None
+    target_agent: str | None      # optional downstream agent hint
     confidence: float
     reasoning: str  # chain-of-thought, stripped before trace persistence
 ```
@@ -33,7 +85,9 @@ class SupervisorDecision(BaseModel):
 **Behaviour:**
 
 - If confidence < `CONFIDENCE_THRESHOLD` (0.6) the supervisor sets `intent = "UNKNOWN"` and routes to `response_generation` with a clarification prompt.
-- If a prior `active_agent` already exists in state (loaded from `ChatSession`) the supervisor node is **skipped** — `_route_after_load` directly routes to `handover_entry_node`.
+- **Preview bypass:** If `_user_wants_preview(user_message)` is true, `_route_after_load` always sends the turn to `supervisor` — even when `active_agent` is already set — so the LLM can classify `PREVIEW_SERVICE_REQUEST` and route to the `preview` node.
+- **SR status sync bypass:** When `backend_refs.sr_id` is already set (SR has been created), `_route_after_load` routes to `sr_status_sync` first to refresh the platform stage before deciding the next node.
+- If neither of the above applies and `active_agent` is already set, `_route_after_load` skips the supervisor and routes directly to the entry node via `_AGENT_ENTRY_NODES`.
 - The supervisor also handles session continuity: if the session has a saved `intent` and `service_category`, those are injected into the state before the LLM call so the model has context.
 
 **Tracing:** Decorated with `@trace_node("supervisor", "SUPERVISOR")`. Opens a nested `LLM` run and calls `TraceManager.capture_llm_call`.
@@ -49,25 +103,27 @@ The registry maps `(service_category, sub_category)` pairs to a concrete agent n
 ```python
 SERVICE_REQUEST_AGENT_REGISTRY = {
     ("FIT_OUT_AND_HANDOVER", "HANDOVER"): {
-        "agent_name": "handover_service_request_agent",
+        "agent_name": "rdd_agent",
         "schema_key": "handover_service_request_schema",
     },
     # Additional entries for future service categories
 }
 ```
 
+The registry is the **deterministic source of truth for agent routing**. The frontend never selects an agent — the registry resolves it from `(service_category, sub_category)` produced by the Supervisor. Any LLM-provided `target_agent` hint in `SupervisorDecision` is advisory only; the registry result always wins.
+
 **`registry_node` logic:**
 
 1. Calls `lookup_agent(service_category, sub_category)`.
-2. If a registry entry is found, the registry result wins over any LLM-generated agent name — the registry is the single source of truth for agent routing.
-3. Sets `state["active_agent"]` and `state["schema_key"]`.
+2. If a registry entry is found, its result overrides any LLM-generated `target_agent` hint — the registry is the single source of truth for agent routing.
+3. Sets `state["active_agent"]` and `state["schema_key"]`, which are then persisted to the database by `save_state_node` and reloaded on the next turn for workflow continuation.
 4. If no match is found and no `active_agent` is set, routes to `response_generation` with an unsupported category message.
 
 ---
 
 ## Handover Agent
 
-The handover agent is not a separate class — it is the collection of nodes that execute once `active_agent = "handover_service_request_agent"` is set. These nodes share the `HandoverExtractedFields` schema and the `CREATE_SR_STAGE` configuration.
+The handover agent is not a separate class — it is the collection of nodes that execute once `active_agent = "rdd_agent"` is set. These nodes share the `HandoverExtractedFields` schema and the `CREATE_SR_STAGE` configuration.
 
 **`handover_entry_node`** (`app/agents/graph/nodes/handover_entry_node.py`):
 
@@ -86,18 +142,28 @@ The handover agent is not a separate class — it is the collection of nodes tha
 | Node | File | Trace run_type | Description |
 |------|------|---------------|-------------|
 | `load_session_node` | `nodes/load_session_node.py` | — | `ConversationStateService.load` merges draft into state |
+| `sr_status_sync_node` | `nodes/sr_status_sync_node.py` | `TOOL` | Calls `GET /service-requests/{sr_id}`; maps platform `service_request_operations` to `workflow_stage` |
 | `supervisor_node` | `nodes/supervisor_node.py` | `SUPERVISOR` | LLM intent classification |
+| `preview_node` | `nodes/preview_node.py` | `AGENT` | Fetches live SR or summarises draft `collected_data`; routes to `response_generation` |
 | `registry_node` | `nodes/registry_node.py` | `AGENT` | Lookup agent by `(service_category, sub_category)` |
-| `handover_entry_node` | `nodes/handover_entry_node.py` | `AGENT` | Cancel + confirmation parsing |
+| `handover_entry_node` | `nodes/handover_entry_node.py` | `AGENT` | CREATE_SR stage boundary — cancel + confirmation parsing |
+| `fm_review_entry_node` | `nodes/fm_review_entry_node.py` | `AGENT` | FM_REVIEW stage boundary — role check, upload handling, action dispatch |
+| `rdd_review_entry_node` | `nodes/rdd_review_entry_node.py` | `AGENT` | RDD_REVIEW stage boundary — role check, upload handling, action dispatch |
 | `field_extraction_node` | `nodes/field_extraction_node.py` | `AGENT` | LLM field extraction via `FieldExtractionService` |
 | `merge_state_node` | `nodes/merge_state_node.py` | `CHAIN` | Merge extracted fields into `collected_data`; protect backend fields; auto-generate title |
 | `lease_lookup_node` | `nodes/lease_lookup_node.py` | `TOOL` | Resolve tenant lease from Lease-Tenant API |
 | `validation_node` | `nodes/validation_node.py` | `AGENT` | `ValidationService` — required fields, types, constraints |
 | `missing_field_node` | `nodes/missing_field_node.py` | `AGENT` | Generate next clarifying question |
-| `confirmation_node` | `nodes/confirmation_node.py` | `AGENT` | Build `confirmation_card` UI, set `confirmation_status = PENDING` |
+| `confirmation_node` | `nodes/confirmation_node.py` | `AGENT` | CREATE_SR — build `confirmation_card` UI, set `confirmation_status = PENDING` |
+| `fm_confirmation` | `nodes/confirmation_node.py` (shared) | `AGENT` | FM_REVIEW — same node, routes to `fm_payload_builder` on CONFIRMED |
+| `rdd_confirmation` | `nodes/confirmation_node.py` (shared) | `AGENT` | RDD_REVIEW — same node, routes to `rdd_payload_builder` on CONFIRMED |
 | `payload_builder_node` | `nodes/payload_builder_node.py` | `AGENT` | `build_create_handover_payload` → `backend_refs.create_payload` |
-| `api_submission_node` | `nodes/api_submission_node.py` | `TOOL` | POST to Service Request API |
-| `response_generation_node` | `nodes/response_generation_node.py` | `AGENT` | Default message + set `WAITING_FOR_USER` |
+| `fm_payload_builder_node` | `nodes/fm_payload_builder_node.py` | `AGENT` | `build_fm_review_payload` / `build_fm_approve_payload` → `backend_refs.fm_payload` |
+| `rdd_payload_builder_node` | `nodes/rdd_payload_builder_node.py` | `AGENT` | `build_rdd_report_payload` → `backend_refs.rdd_payload` |
+| `api_submission_node` | `nodes/api_submission_node.py` | `TOOL` | POST `/service-requests` — CREATE_SR |
+| `fm_api_submission_node` | `nodes/fm_api_submission_node.py` | `TOOL` | PATCH `/service-requests/{sr_id}` — FM save-progress or approve |
+| `rdd_api_submission_node` | `nodes/rdd_api_submission_node.py` | `TOOL` | POST `/service-requests` with `status=REPORT_SUBMITTED` — RDD submit |
+| `response_generation_node` | `nodes/response_generation_node.py` | `AGENT` | LLM generates natural-language response; sets `WAITING_FOR_USER` |
 | `save_state_node` | `nodes/save_state_node.py` | — | `ConversationStateService.save_checkpoint` |
 
 ---
@@ -119,8 +185,8 @@ class ServiceRequestGraphState(TypedDict, total=False):
     conversation_history: list[dict]  # recent chat history [{role, content}, ...]
 
     # Routing
-    active_agent: str | None      # e.g. "handover_service_request_agent"
-    intent: str | None            # e.g. "CREATE_HANDOVER_SERVICE_REQUEST"
+    active_agent: str | None      # e.g. "rdd_agent"
+    intent: str | None            # e.g. "CREATE_RDD_SERVICE_REQUEST"
     workflow_stage: str | None    # e.g. "CREATE_SR", "SR_CREATED"
     status: str | None            # "IN_PROGRESS" | "WAITING_FOR_USER" | "READY_TO_SUBMIT"
                                   # | "SUBMITTED" | "COMPLETED" | "FAILED"
@@ -177,33 +243,87 @@ class ServiceRequestGraphState(TypedDict, total=False):
 
 All routing is implemented as pure functions in `service_request_graph.py`. No LLM is involved in routing decisions.
 
+**Entry-node dispatch table** (used by `_route_after_load` and `_route_after_registry`):
+
+```python
+_AGENT_ENTRY_NODES = {
+    "rdd_agent": "handover_entry",
+    # FM/RDD are stage-routed by workflow_stage after sr_status_sync, not by active_agent key
+}
+```
+
 ```mermaid
 flowchart TD
-    RL["_route_after_load"] -->|active_agent set| HE["handover_entry"]
-    RL -->|no active_agent| SV["supervisor"]
+    START([START]) --> LS["load_session"]
 
-    RS["_route_after_supervisor"] -->|WAITING_FOR_USER| RG["response_generation"]
-    RS -->|intent classified| REG["registry"]
+    LS -->|"_user_wants_preview(msg)"| SV["supervisor"]
+    LS -->|"backend_refs.sr_id exists"| SS["sr_status_sync"]
+    LS -->|"active_agent set (no sr_id)"| HE["handover_entry"]
+    LS -->|"no active_agent"| SV
 
-    RR["_route_after_registry"] -->|WAITING_FOR_USER| RG
-    RR -->|agent resolved| HE
+    SS -->|"workflow_stage=FM_REVIEW"| FME["fm_review_entry"]
+    SS -->|"workflow_stage=RDD_REVIEW"| RDE["rdd_review_entry"]
+    SS -->|"workflow_stage=SR_CREATED/SR_COMPLETED"| SV
+    SS -->|"CREATE_SR + active_agent"| HE
 
-    RHE["_route_after_handover_entry"] -->|active_agent=None + WAITING_FOR_USER| RG
-    RHE -->|action_override=cancel| MS["merge_state"]
-    RHE -->|normal turn| FE["field_extraction"]
+    SV -->|"intent=PREVIEW_SERVICE_REQUEST"| PV["preview"]
+    SV -->|"WAITING_FOR_USER"| RG["response_generation"]
+    SV -->|"intent classified"| REG["registry"]
 
-    RM["_route_after_merge"] -->|selected_lease set or lease_id missing| LL["lease_lookup"]
-    RM -->|lease_id in collected_data| VA["validation"]
+    PV --> RG
 
-    RLL["_route_after_lease"] -->|WAITING_FOR_USER| RG
-    RLL -->|lease resolved| VA
+    REG -->|"WAITING_FOR_USER"| RG
+    REG -->|"agent resolved"| HE
 
-    RV["_route_after_validation"] -->|blocking validation_errors| MF["missing_field"]
-    RV -->|get_missing_fields returns fields| MF
-    RV -->|no errors + all fields present| CN["confirmation"]
+    HE -->|"active_agent=None + WAITING_FOR_USER"| RG
+    HE -->|"action_override=cancel"| MS["merge_state"]
+    HE -->|"normal turn"| FE["field_extraction"]
 
-    RC["_route_after_confirmation"] -->|confirmation_status == CONFIRMED| PB["payload_builder"]
-    RC -->|not CONFIRMED| RG
+    FME -->|"WAITING_FOR_USER"| RG
+    FME -->|"fm_action set"| MS
+    FME -->|"normal turn"| FE
+
+    RDE -->|"WAITING_FOR_USER"| RG
+    RDE -->|"rdd_action set"| MS
+    RDE -->|"normal turn"| FE
+
+    FE --> MS
+
+    MS -->|"selected_lease set or lease_id missing"| LL["lease_lookup"]
+    MS -->|"lease_id in collected_data"| VA["validation"]
+
+    LL -->|"WAITING_FOR_USER"| RG
+    LL -->|"lease resolved"| VA
+
+    VA -->|"blocking errors"| MF["missing_field"]
+    VA -->|"fields incomplete"| MF
+    VA -->|"stage=FM_REVIEW + all valid"| FC["fm_confirmation"]
+    VA -->|"stage=RDD_REVIEW + all valid"| RC["rdd_confirmation"]
+    VA -->|"stage=CREATE_SR + all valid"| CN["confirmation"]
+    VA -->|"terminal stage (SR_CREATED/SR_COMPLETED)"| RG
+
+    MF --> RG
+
+    CN -->|"CONFIRMED"| PB["payload_builder"]
+    CN -->|"not CONFIRMED"| RG
+
+    FC -->|"CONFIRMED"| FPB["fm_payload_builder"]
+    FC -->|"not CONFIRMED"| RG
+
+    RC -->|"CONFIRMED"| RPB["rdd_payload_builder"]
+    RC -->|"not CONFIRMED"| RG
+
+    PB --> AS["api_submission"]
+    AS --> RG
+
+    FPB --> FAS["fm_api_submission"]
+    FAS --> RG
+
+    RPB --> RAS["rdd_api_submission"]
+    RAS --> RG
+
+    RG --> SAVE["save_state"]
+    SAVE --> END([END])
 ```
 
 **`get_missing_fields(stage, collected_data)`** — utility that diffs `collected_data.keys()` against `stage.required_fields` and returns the list of absent keys. Used by `_route_after_validation` to decide whether all required fields are collected.

@@ -6,21 +6,25 @@ The system implements multiple defence-in-depth layers to prevent unauthorized a
 
 ```mermaid
 flowchart TD
-    MSG["User Message"]
-    IG["1. Injection Guard<br/>injection_guard.scan_message()"]
-    AUTH["2. Permission Check<br/>PermissionService"]
+    MSG["User Message + JWT"]
+    JWT["0. JWT Validation\ncore/security.py\nExtract roles + property_ids"]
+    IG["1. Injection Guard\ninjection_guard.scan_message()"]
+    RBAC["2. Supervisor RBAC\nsupervisor_node — intents_for_roles()"]
     EXTRACT["LLM Field Extraction"]
-    MERGE["3. Backend Field Protection<br/>merge_state_node"]
-    VALID["4. Required Field Enforcement<br/>ValidationService"]
-    CONFIRM["5. Confirmation Enforcement<br/>handover_entry_node + api_submission_node"]
+    LEASE["3. Lease Scoping\nlease_lookup_node\nproperty_ids from JWT"]
+    MERGE["4. Backend Field Protection\nmerge_state_node"]
+    VALID["5. Required Field + Stage Permission\nValidationService"]
+    CONFIRM["6. Confirmation Enforcement\nhandover_entry_node + api_submission_node"]
     SUBMIT["Service Request API"]
 
-    MSG --> IG
-    IG -->|HIGH_RISK score ≥ 0.7| BLOCK["Refusal + fail_trace<br/>audit: security.injection_attempt"]
-    IG -->|clean| AUTH
-    AUTH -->|unauthorized| DENY["Permission denied"]
-    AUTH -->|authorized| EXTRACT
-    EXTRACT --> MERGE
+    MSG --> JWT
+    JWT -->|shadow mode pass / enforce mode 401| IG
+    IG -->|HIGH_RISK score ≥ 0.7| BLOCK["Refusal + fail_trace"]
+    IG -->|clean| RBAC
+    RBAC -->|intent not permitted for role| DENY["Role denial message\nno SR draft created"]
+    RBAC -->|intent permitted| EXTRACT
+    EXTRACT --> LEASE
+    LEASE --> MERGE
     MERGE --> VALID
     VALID -->|blocking errors| QUESTION["Ask user to correct"]
     VALID -->|all valid| CONFIRM
@@ -147,18 +151,23 @@ for field_name, extraction in extracted_fields.items():
 **Module:** `app/core/injection_guard.py`  
 **Called from:** `ChatOrchestrationService` — **before** the user message is persisted or the graph is invoked.
 
-`scan_message(message: str) -> ScanResult` applies a regex catalog against the user message and computes a risk score.
+`scan_message(message: str) -> InjectionScanResult` applies a compiled regex catalog against the lowercased input and returns the maximum risk score across all matched patterns.
 
 ```python
 HIGH_RISK_THRESHOLD = 0.7
 ```
 
-Patterns detected include (non-exhaustive):
-- `ignore (previous|prior|all) instructions?`
-- `you are now .*` / `pretend (to be|you are)`
-- `system:` / `<system>` / injection delimiters
-- `forget everything` / `disregard`
-- Attempts to access `backend_refs`, `create_payload`, internal field names
+**Actual pattern categories (from `_RAW_PATTERNS`):**
+
+| Category | Example patterns | Score |
+|----------|-----------------|-------|
+| Instruction hijack | `ignore previous/all instructions`, `override developer instructions`, `forget previous instructions` | 0.85–0.9 |
+| System-prompt leakage | `reveal the system prompt`, `show your hidden instructions`, `print your prompt` | 0.75–0.9 |
+| Policy / validation bypass | `bypass policy`, `skip validation` | 0.7–0.8 |
+| Confirmation bypass | `submit anyway`, `force submit` | 0.7–0.75 |
+| Credential disclosure | `reveal api key / token / credential / secret` | 0.8–0.85 |
+| Unauthorised execution | `execute unauthorized action`, `run a system command` | 0.75–0.8 |
+| Direct API call injection | `call the api directly`, `POST to /api/...` | 0.75–0.8 |
 
 **On detection (score ≥ `HIGH_RISK_THRESHOLD`):**
 
@@ -168,29 +177,48 @@ Patterns detected include (non-exhaustive):
 4. **User message is NOT persisted** to `chat_messages`.
 5. **Graph is NOT invoked.**
 
-**On clean scan (score < threshold):** Normal flow continues.
+**On clean scan (score < threshold):** Normal flow continues. Messages with at least one match but below threshold are logged as a structured warning but allowed through.
 
 ---
 
 ## Permission Checks
 
-**Module:** `app/core/security.py` and `app/services/permission_service.py`
+**Module:** `app/core/security.py` and `app/agents/services/permission_service.py`
 
-**Authentication:** `HTTPBearer` optional dependency. If no bearer token is provided, `AuthContext` defaults to `"anonymous"` with empty roles.
+**Authentication (user-facing):** `HTTPBearer` optional dependency. `core/security.py` decodes and validates the HS256 JWT from the `Authorization: Bearer` header. The JWT payload carries `roles`, `unique_property_ids`, `mall_names`, `is_global_admin`. If no bearer token is provided and `RBAC_ENFORCE=false` (default / shadow mode), `AuthContext` defaults to anonymous with empty roles. Set `RBAC_ENFORCE=true` to enforce JWT presence (returns HTTP 401 on missing token).
 
-**Action → role mapping** (`PermissionService`):
+**Action → permission mapping** (`ACTION_PERMISSION_MAP` in `PermissionService`):
 
-| Action | Required Role |
-|--------|--------------|
-| `CREATE_HANDOVER_SR` | `MALL_MANAGER` |
-| `UPLOAD_DOCUMENT` | `MALL_MANAGER` |
-| *(unknown action)* | *(no restriction — fail-open)* |
+| Action | Required permission string |
+|--------|--------------------------|
+| `CREATE_HANDOVER_SR` | `CAN_RAISE_HANDOVER_SR` |
+| `UPLOAD_FM_HANDOVER_DOCUMENT` | `CAN_FM_REVIEW_HANDOVER_SR` |
+| `SAVE_FM_HANDOVER_PROGRESS` | `CAN_FM_REVIEW_HANDOVER_SR` |
+| `APPROVE_FM_HANDOVER` | `CAN_APPROVE_FM_HANDOVER_SR` |
+| `REJECT_FM_HANDOVER` | `CAN_APPROVE_FM_HANDOVER_SR` |
+| `UPLOAD_RDD_HANDOVER_REPORT` | `CAN_RDD_REVIEW_HANDOVER_SR` |
+| `SUBMIT_RDD_HANDOVER_REPORT` | `CAN_RDD_REVIEW_HANDOVER_SR` |
+| `VIEW_HANDOVER_SR` | `VIEW_FIT_OUT_HANDOVER` |
+| *(unknown action)* | **fail-closed** — raises `PermissionDeniedError(required_role="UNKNOWN_ACTION")` |
 
-> **Known gap:** Unknown actions currently fail-open (allow). This is documented for future hardening — the default should be fail-closed once all actions are registered.
+**Unknown actions fail-closed.** Any action string not present in `ACTION_PERMISSION_MAP` raises `PermissionDeniedError` immediately. This is enforced in `PermissionService.check()`.
+
+**Convenience wrappers on `PermissionService`:**
+- `ensure_can_create_request(auth)` — checks `CREATE_HANDOVER_SR`
+- `ensure_can_fm_review(auth)` — checks `SAVE_FM_HANDOVER_PROGRESS`
+- `ensure_can_approve_fm(auth)` — checks `APPROVE_FM_HANDOVER`
+- `ensure_can_rdd_review(auth)` — checks `SUBMIT_RDD_HANDOVER_REPORT`
+- `ensure_can_view_trace(auth)` — checks `VIEW_HANDOVER_SR`
 
 **Called from:**
 - `upload.py` route: `PermissionService.ensure_can_create_request` before processing file uploads.
-- Future: `chat_orchestration_service.py` should check `CREATE_HANDOVER_SR` before graph invocation.
+- FM/RDD entry nodes: role checks before FM/RDD actions are dispatched.
+
+**Supervisor RBAC layer (Layer 2):** `supervisor_node` calls `intents_for_roles(auth.roles, auth.is_global_admin)` after LLM intent classification. If the classified intent is not in the user's permitted set, the node returns `{"status": "WAITING_FOR_USER", "response_message": "Your role (X) does not permit this action..."}`. The routing function reads the `WAITING_FOR_USER` status and routes to `response_generation`. This state mutation happens inside the node (not the routing function) so LangGraph propagates it correctly.
+
+**Lease scoping (Layer 6):** `lease_lookup_node` extracts `unique_property_ids` from `auth_context` and passes them to `LeaseLookupQuery.property_ids`. `HttpLeaseLookupService` forwards them as query params to the Lease API so the user only sees leases from their authorised properties.
+
+**Platform service-to-service auth:** `ServiceRequestPlatformClient` uses a separate credential set (`PLATFORM_INTERNAL_API_TOKEN` + `PLATFORM_LOGIN_EMAIL`) to log in to the Cenomi platform via `POST /cenomi-ai/login`. The resulting Bearer token is cached with a 1-hour TTL and refreshed reactively on 401 responses. This is independent of the user-facing JWT system.
 
 ---
 

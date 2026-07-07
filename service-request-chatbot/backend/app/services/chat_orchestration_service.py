@@ -31,7 +31,23 @@ from uuid import UUID
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.agents.graph.service_request_graph import get_compiled_graph
+from app.agents.graph.help_agent_graph import get_compiled_help_graph
+from app.types.chat import AuthContext
+
+# Tests patch app.services.chat_orchestration_service.get_compiled_graph
+get_compiled_graph = get_compiled_help_graph
+
+
+def _build_auth_context(role: str | None) -> AuthContext:
+    """Build an AuthContext from a role string using the ROLE_PERMISSION_MAP.
+
+    Used by tests and internal utilities to construct a typed AuthContext
+    without needing a real JWT. Returns empty-roles AuthContext for unknown
+    or None roles.
+    """
+    from app.agents.services.permission_service import ROLE_PERMISSION_MAP
+    roles: frozenset[str] = ROLE_PERMISSION_MAP.get(role or "", frozenset()) if role else frozenset()
+    return AuthContext(subject_id="chat_user", tenant_id=None, roles=roles)
 from app.agents.services.conversation_state_service import ConversationStateService
 from app.core.injection_guard import scan_message
 from app.db.models import ChatSession
@@ -39,6 +55,7 @@ from app.db.repositories.audit_log_repo import AuditLogRepository
 from app.db.repositories.chat_message_repo import ChatMessageRepository
 from app.db.repositories.chat_session_repo import ChatSessionRepository
 from app.observability.trace_manager import TraceManager
+from app.types.chat import AuthContext
 
 log = structlog.get_logger(__name__)
 
@@ -64,6 +81,8 @@ class ChatTurnResult:
     ui: dict[str, Any]
     state: ChatTurnState
     trace_id: UUID | None
+    draft_preview: dict[str, Any] | None = None
+    faq_sources: list[dict] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -96,6 +115,10 @@ class ChatOrchestrationService:
         action: str | None = None,
         selected_lease_id: str | None = None,
         corrected_fields: dict[str, Any] | None = None,
+        auth_context: AuthContext | None = None,
+        sr_id: str | None = None,
+        language: str | None = None,
+        msp_context: dict[str, Any] | None = None,
     ) -> ChatTurnResult:
         """Execute one complete chat turn and return structured result."""
 
@@ -220,6 +243,8 @@ class ChatOrchestrationService:
             "active_agent": chat_session.active_agent,
             "intent": chat_session.intent,
             "workflow_stage": chat_session.workflow_stage,
+            # RBAC — injected from JWT, never from frontend request body
+            "auth_context": auth_context,
         }
 
         # Inject UI-layer overrides so graph nodes can act on explicit button
@@ -230,11 +255,22 @@ class ChatOrchestrationService:
             initial_state["corrected_fields"] = corrected_fields
         if selected_lease_id:
             initial_state["selected_lease"] = {"id": selected_lease_id}
+        # sr_id passed by frontend when FM/DD opens an existing SR
+        if sr_id:
+            backend_refs = dict(initial_state.get("backend_refs") or {})
+            backend_refs["sr_id"] = sr_id
+            initial_state["backend_refs"] = backend_refs
+        # MSP Platform fields — injected by the MSP adapter layer only;
+        # absent (None) on all existing /api/chat/service-request turns.
+        if language is not None:
+            initial_state["language"] = language
+        if msp_context is not None:
+            initial_state["msp_context"] = msp_context
 
         # 6. Invoke graph -------------------------------------------------------
         result_state: dict[str, Any]
         try:
-            graph = get_compiled_graph()
+            graph = get_compiled_help_graph()
             result_state = await graph.ainvoke(initial_state)
         except Exception as exc:
             log.exception(
@@ -282,6 +318,7 @@ class ChatOrchestrationService:
             )
 
         # 9. Persist assistant reply -------------------------------------------
+        faq_sources: list[dict] = result_state.get("faq_sources") or []
         assistant_msg_time = datetime.now(timezone.utc)
         await self._message_repo.create(
             session_id=session_uuid,
@@ -291,6 +328,7 @@ class ChatOrchestrationService:
                 "active_agent": active_agent,
                 "status": graph_status,
                 "trace_id": str(trace_id) if trace_id else None,
+                "faq_sources": faq_sources,
             },
             created_at=assistant_msg_time,
         )
@@ -322,6 +360,26 @@ class ChatOrchestrationService:
         # 12. Build and return result ------------------------------------------
         missing_fields: list[str] = result_state.get("missing_fields") or []
         ready_to_submit = graph_status in ("READY_TO_SUBMIT", "SUBMITTED")
+        # faq_sources already extracted in step 9 above
+
+        # Build a preview snapshot from collected_data on every turn.
+        # Sent alongside every response so the frontend keeps its SR preview card
+        # in sync regardless of the primary response_ui type.
+        # When sr_id is present the card is marked isSubmitted=True so the
+        # frontend disables the Edit button on an already-submitted SR.
+        collected = result_state.get("collected_data") or {}
+        sr_id = (result_state.get("backend_refs") or {}).get("sr_id")
+        draft_preview: dict[str, Any] | None = None
+        if collected:
+            from app.agents.graph.nodes.handover.preview_node import _fields_from_collected
+            draft_preview = {
+                "type": "sr_preview_card",
+                "requestType": "Handover Service Request",
+                "srId": sr_id,
+                "status": "SUBMITTED" if sr_id else "DRAFT",
+                "isSubmitted": bool(sr_id),
+                "fields": _fields_from_collected(collected),
+            }
 
         return ChatTurnResult(
             session_id=session_uuid,
@@ -335,6 +393,8 @@ class ChatOrchestrationService:
                 ready_to_submit=ready_to_submit,
             ),
             trace_id=trace_id,
+            draft_preview=draft_preview,
+            faq_sources=faq_sources,
         )
 
     # ------------------------------------------------------------------
@@ -383,7 +443,15 @@ class ChatOrchestrationService:
             updates["active_agent"] = new_agent
 
         new_intent = result_state.get("intent")
-        if new_intent != chat_session.intent:
+        # Never overwrite a meaningful, established intent with UNKNOWN.
+        # UNKNOWN is only a transient "clarification needed" signal — persisting
+        # it would cause the next turn to start cold and re-ask the user to
+        # re-state their intent even mid-workflow.
+        # Intent is cleared legitimately via explicit cancel/restart actions
+        # (handover_entry_node writes intent=None), which is handled by the
+        # new_agent != chat_session.active_agent guard above flushing that state.
+        is_unknown = (new_intent or "").upper() == "UNKNOWN"
+        if new_intent != chat_session.intent and not is_unknown:
             updates["intent"] = new_intent
 
         new_stage = result_state.get("workflow_stage")
