@@ -1,7 +1,7 @@
 # Service Request Chatbot API — production build & deploy.
 # Build context is service-request-chatbot/backend (Dockerfile lives there).
 #
-# Requires an Azure DevOps variable group "cenomi-ai-prod-v2-vars" with:
+# Requires an Azure DevOps variable group "v2-ai-prod-vars" with:
 #   api_repository   — container registry repository name for this image
 #   docker_registry  — registry hostname (e.g. cenomiregistry.azurecr.io)
 #   container_name   — Azure Container App name to deploy
@@ -21,7 +21,7 @@ pool:
   name: Azure Pipelines
 
 variables:
-- group: cenomi-ai-prod-v2-vars
+- group: v2-ai-prod-vars
 
 - name: SHORT_HASH
   value: ''
