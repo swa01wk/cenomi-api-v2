@@ -1,7 +1,7 @@
 # Service Request Chatbot API — staging build & deploy.
 # Build context is service-request-chatbot/backend (Dockerfile lives there).
 #
-# Requires an Azure DevOps variable group "sr-chatbot-stage-vars" with:
+# Requires an Azure DevOps variable group "cenomi-ai-stage-v2-vars" with:
 #   api_repository   — container registry repository name for this image
 #   docker_registry  — registry hostname (e.g. cenomiregistry.azurecr.io)
 #   container_name   — Azure Container App name to deploy
@@ -21,7 +21,7 @@ pool:
   name: Azure Pipelines
 
 variables:
-- group: sr-chatbot-stage-vars
+- group: cenomi-ai-stage-v2-vars
 
 - name: SHORT_HASH
   value: ''
