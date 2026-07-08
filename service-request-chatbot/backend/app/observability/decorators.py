@@ -210,7 +210,15 @@ def _extract_uuid(state: dict[str, Any] | None, key: str) -> UUID | None:
 # every state snapshot / diff so that JSON serialisation never fails when the
 # trace layer persists state.
 _RUNTIME_KEYS: frozenset[str] = frozenset(
-    {"conversation_state_service", "trace_manager", "_trace_node_run_id"}
+    {
+        "conversation_state_service",
+        "trace_manager",
+        "_trace_node_run_id",
+        # AuthContext is a non-serialisable dataclass carrying the raw inbound
+        # Bearer JWT. It must never be persisted to trace tables (both to avoid
+        # a JSONB serialisation crash and to keep the token out of audit logs).
+        "auth_context",
+    }
 )
 
 

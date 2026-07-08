@@ -30,6 +30,7 @@ import structlog
 from pydantic import BaseModel
 
 from app.core.config import settings
+from app.core.request_context import get_current_bearer_token
 
 log = structlog.get_logger(__name__)
 
@@ -130,12 +131,26 @@ class HttpLeaseLookupService(AbstractLeaseLookupService):
     async def lookup(self, query: LeaseLookupQuery) -> LeaseLookupResult:
         params = self._build_params(query)
         endpoint = f"{self._base_url}{self._ENDPOINT_PATH}"
-        request_payload: dict[str, Any] = {"endpoint": endpoint, "params": params}
+        bearer = get_current_bearer_token()
+        headers: dict[str, str] = {}
+        if bearer:
+            headers["Authorization"] = f"Bearer {bearer}"
+        else:
+            log.warning(
+                "lease_lookup.http.missing_bearer",
+                endpoint=endpoint,
+                hint="cenomi-api GET /leases requires Authorization: Bearer <ai_token>",
+            )
+        request_payload: dict[str, Any] = {
+            "endpoint": endpoint,
+            "params": params,
+            "has_authorization": bool(bearer),
+        }
 
         wall_start = time.monotonic()
         try:
             async with httpx.AsyncClient(timeout=self._timeout) as client:
-                response = await client.get(endpoint, params=params)
+                response = await client.get(endpoint, params=params, headers=headers)
             latency_ms = int((time.monotonic() - wall_start) * 1000)
 
             raw_text = response.text[:_MAX_RESPONSE_BYTES]
@@ -209,16 +224,29 @@ class HttpLeaseLookupService(AbstractLeaseLookupService):
         return params
 
     @staticmethod
-    def _parse_matches(body: dict[str, Any] | None) -> list[LeaseRecord]:
-        """Parse the API response body into a list of ``LeaseRecord``."""
+    def _parse_matches(body: dict[str, Any] | list[Any] | None) -> list[LeaseRecord]:
+        """Parse the API response body into a list of ``LeaseRecord``.
+
+        Supported response shapes:
+        - ``[{...}, ...]``                        — bare list
+        - ``{"leases": [...]}``
+        - ``{"data": [...]}``
+        - ``{"data": {"leases": [...], ...}}``     — cenomi-api Success envelope
+        """
         if not body:
             return []
         items: list[Any] = []
         if isinstance(body, list):
             items = body
         elif isinstance(body, dict):
-            # Support both {"leases": [...]} and {"data": [...]} envelopes.
-            items = body.get("leases") or body.get("data") or []
+            if isinstance(body.get("leases"), list):
+                items = body["leases"]
+            else:
+                data = body.get("data")
+                if isinstance(data, list):
+                    items = data
+                elif isinstance(data, dict) and isinstance(data.get("leases"), list):
+                    items = data["leases"]
         records: list[LeaseRecord] = []
         for item in items:
             try:

@@ -381,7 +381,7 @@ class TestServiceRequestGraphState:
         # UI-layer overrides (not persisted)
         "action_override", "corrected_fields",
         # Runtime-only services (not serialised)
-        "trace_manager", "conversation_state_service",
+        "trace_manager", "conversation_state_service", "auth_context",
         # MSP Platform integration (injected by MSP adapter; absent on SR turns)
         "language", "msp_context",
     }

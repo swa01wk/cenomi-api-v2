@@ -18,6 +18,9 @@ class AuthContext:
     unique_property_ids: tuple[int, ...] = field(default_factory=tuple)
     mall_names: tuple[str, ...] = field(default_factory=tuple)
     is_global_admin: bool = False
+    # Raw inbound Bearer JWT — forwarded to platform GET /leases and
+    # POST /service-requests (agentic-handover routes). Never logged.
+    bearer_token: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

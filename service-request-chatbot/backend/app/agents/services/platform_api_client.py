@@ -33,12 +33,14 @@ import logging
 import time
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 import structlog
 
 from app.agents.exceptions import PlatformAuthError
 from app.core.config import settings
+from app.core.request_context import get_current_bearer_token
 
 log = structlog.get_logger(__name__)
 logger = logging.getLogger(__name__)
@@ -284,8 +286,9 @@ class ServiceRequestPlatformClient:
 
     async def create_service_request(self, payload: dict[str, Any]) -> PlatformCallResult:
         """POST /service-requests — create a new SR."""
-        await self.ensure_authenticated()
         endpoint = f"{self._base_url}{self._SERVICE_REQUESTS_PATH}"
+        if not self._uses_agentic_bearer("POST", endpoint):
+            await self.ensure_authenticated()
         result = await self._post(endpoint, payload)
         if result.sr_id is None:
             result.sr_id = self._extract_sr_id(result.response_payload)
@@ -301,7 +304,7 @@ class ServiceRequestPlatformClient:
             async with httpx.AsyncClient(timeout=self._timeout) as client:
                 response = await client.get(
                     endpoint,
-                    headers=self._auth_headers(),
+                    headers=self._auth_headers("GET", endpoint),
                 )
             latency_ms = int((time.monotonic() - wall_start) * 1000)
             body = self._parse_body(response)
@@ -359,8 +362,9 @@ class ServiceRequestPlatformClient:
 
     async def submit_report(self, payload: dict[str, Any]) -> PlatformCallResult:
         """POST /service-requests with status=REPORT_SUBMITTED (RDD stage)."""
-        await self.ensure_authenticated()
         endpoint = f"{self._base_url}{self._SERVICE_REQUESTS_PATH}"
+        if not self._uses_agentic_bearer("POST", endpoint):
+            await self.ensure_authenticated()
         result = await self._post(endpoint, payload)
         if result.sr_id is None:
             result.sr_id = self._extract_sr_id(result.response_payload)
@@ -404,7 +408,7 @@ class ServiceRequestPlatformClient:
                     endpoint,
                     content=file_bytes,
                     params=params,
-                    headers=self._auth_headers(),
+                    headers=self._auth_headers("PUT", endpoint),
                 )
             latency_ms = int((time.monotonic() - wall_start) * 1000)
             body = self._parse_body(response)
@@ -469,10 +473,36 @@ class ServiceRequestPlatformClient:
     # Private HTTP helpers
     # ------------------------------------------------------------------
 
-    def _auth_headers(self) -> dict[str, str]:
+    @staticmethod
+    def _normalize_path(url: str) -> str:
+        path = urlparse(url).path.rstrip("/") or "/"
+        if path.startswith("/api/"):
+            path = path[4:]
+        return path
+
+    @classmethod
+    def _is_agentic_route(cls, method: str, url: str) -> bool:
+        path = cls._normalize_path(url)
+        m = method.upper()
+        if m == "GET" and path.endswith("/leases"):
+            return True
+        if m == "POST" and path.endswith("/service-requests"):
+            return True
+        return False
+
+    def _uses_agentic_bearer(self, method: str, url: str) -> bool:
+        return self._is_agentic_route(method, url) and get_current_bearer_token() is not None
+
+    def _auth_headers(self, method: str, url: str) -> dict[str, str]:
+        """Build Authorization for platform calls (AI session Bearer or S2S)."""
         headers: dict[str, str] = {}
-        if self._access_token:
-            headers["Authorization"] = f"Bearer {self._access_token}"
+        token: str | None = None
+        if self._is_agentic_route(method, url):
+            token = get_current_bearer_token()
+        if token is None:
+            token = self._access_token
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
         return headers
 
     async def _get(
@@ -482,7 +512,7 @@ class ServiceRequestPlatformClient:
         try:
             async with httpx.AsyncClient(timeout=self._timeout) as client:
                 response = await client.get(
-                    endpoint, params=params, headers=self._auth_headers()
+                    endpoint, params=params, headers=self._auth_headers("GET", endpoint)
                 )
             latency_ms = int((time.monotonic() - wall_start) * 1000)
             body = self._parse_body(response)
@@ -516,16 +546,25 @@ class ServiceRequestPlatformClient:
     async def _post(self, endpoint: str, payload: dict[str, Any]) -> PlatformCallResult:
         wall_start = time.monotonic()
         try:
-            headers = {**self._auth_headers(), "Content-Type": "application/json"}
+            headers = {
+                **self._auth_headers("POST", endpoint),
+                "Content-Type": "application/json",
+            }
             async with httpx.AsyncClient(timeout=self._timeout) as client:
                 response = await client.post(endpoint, json=payload, headers=headers)
 
             # ── 401 reactive re-auth: token may have expired before TTL ──────
-            if response.status_code == 401:
+            # Only for the S2S path. When a user Bearer is forwarded we must NOT
+            # silently re-login as the service account and retry as a different
+            # principal — surface the 401 honestly instead.
+            if response.status_code == 401 and not self._uses_agentic_bearer("POST", endpoint):
                 log.info("platform_client.post.401_retry_after_reauth", endpoint=endpoint)
                 self._token_acquired_at = 0.0  # force token refresh
                 if await self.ensure_authenticated():
-                    headers = {**self._auth_headers(), "Content-Type": "application/json"}
+                    headers = {
+                        **self._auth_headers("POST", endpoint),
+                        "Content-Type": "application/json",
+                    }
                     wall_start = time.monotonic()
                     async with httpx.AsyncClient(timeout=self._timeout) as client:
                         response = await client.post(endpoint, json=payload, headers=headers)
@@ -562,7 +601,7 @@ class ServiceRequestPlatformClient:
     async def _patch(self, endpoint: str, payload: dict[str, Any]) -> PlatformCallResult:
         wall_start = time.monotonic()
         try:
-            headers = {**self._auth_headers(), "Content-Type": "application/json"}
+            headers = {**self._auth_headers("PATCH", endpoint), "Content-Type": "application/json"}
             async with httpx.AsyncClient(timeout=self._timeout) as client:
                 response = await client.patch(endpoint, json=payload, headers=headers)
 
@@ -571,7 +610,7 @@ class ServiceRequestPlatformClient:
                 log.info("platform_client.patch.401_retry_after_reauth", endpoint=endpoint)
                 self._token_acquired_at = 0.0
                 if await self.ensure_authenticated():
-                    headers = {**self._auth_headers(), "Content-Type": "application/json"}
+                    headers = {**self._auth_headers("PATCH", endpoint), "Content-Type": "application/json"}
                     wall_start = time.monotonic()
                     async with httpx.AsyncClient(timeout=self._timeout) as client:
                         response = await client.patch(endpoint, json=payload, headers=headers)

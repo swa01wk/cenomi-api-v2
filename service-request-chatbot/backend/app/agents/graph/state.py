@@ -94,6 +94,11 @@ class ServiceRequestGraphState(TypedDict, total=False):
     # the tracing helpers in other nodes) can read them from graph state.
     conversation_state_service: Any  # ConversationStateService instance
     trace_manager: Any               # TraceManager instance
+    # AuthContext (RBAC identity + raw inbound Bearer). Injected from the JWT by
+    # ChatOrchestrationService. MUST be declared here or LangGraph drops it,
+    # leaving lease_lookup/supervisor/work_permit nodes with no auth context
+    # (which silently breaks Bearer forwarding to platform GET /leases → 401).
+    auth_context: Any                # AuthContext instance
 
 
 # Backward-compatible alias — existing node files import ServiceRequestState.

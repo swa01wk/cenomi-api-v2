@@ -32,6 +32,7 @@ import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.graph.help_agent_graph import get_compiled_help_graph
+from app.core.request_context import reset_current_auth_context, set_current_auth_context
 from app.types.chat import AuthContext
 
 # Tests patch app.services.chat_orchestration_service.get_compiled_graph
@@ -271,6 +272,7 @@ class ChatOrchestrationService:
 
         # 6. Invoke graph -------------------------------------------------------
         result_state: dict[str, Any]
+        auth_ctx_token = set_current_auth_context(auth_context)
         try:
             graph = get_compiled_help_graph()
             result_state = await graph.ainvoke(initial_state)
@@ -296,6 +298,8 @@ class ChatOrchestrationService:
                 },
             )
             raise
+        finally:
+            reset_current_auth_context(auth_ctx_token)
 
         # 7. Extract response fields from graph result -------------------------
         response_message: str = (

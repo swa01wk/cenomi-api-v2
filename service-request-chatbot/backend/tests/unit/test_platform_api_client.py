@@ -24,6 +24,8 @@ from app.agents.services.platform_api_client import (
     FileUploadMetadata,
     ServiceRequestPlatformClient,
 )
+from app.core.request_context import reset_current_auth_context, set_current_auth_context
+from app.types.chat import AuthContext
 
 
 # ---------------------------------------------------------------------------
@@ -277,6 +279,103 @@ class TestUploadFile:
 # ---------------------------------------------------------------------------
 # _extract_sr_id
 # ---------------------------------------------------------------------------
+
+
+class TestCreateServiceRequestBearer:
+    """Bearer forwarding via request context on agentic POST /service-requests."""
+
+    @pytest.mark.asyncio
+    async def test_create_forwards_bearer_and_skips_login(self) -> None:
+        client = _make_client()
+        mock_resp = _mock_response(201, {"data": {"service_request_id": "SR-1"}})
+        captured: dict = {}
+
+        async def _fake_post(endpoint, json=None, headers=None):  # noqa: ANN001
+            captured["headers"] = headers
+            return mock_resp
+
+        ctx_token = set_current_auth_context(
+            AuthContext(subject_id="u1", bearer_token="ai.jwt.token")
+        )
+        try:
+            with patch("httpx.AsyncClient") as mock_httpx, patch.object(
+                client, "login", new_callable=AsyncMock
+            ) as mock_login:
+                mock_httpx.return_value.__aenter__.return_value.post = AsyncMock(
+                    side_effect=_fake_post
+                )
+                result = await client.create_service_request({"foo": "bar"})
+        finally:
+            reset_current_auth_context(ctx_token)
+
+        mock_login.assert_not_called()
+        assert captured["headers"]["Authorization"] == "Bearer ai.jwt.token"
+        assert result.sr_id == "SR-1"
+
+    @pytest.mark.asyncio
+    async def test_create_bearer_401_does_not_relogin(self) -> None:
+        client = _make_client()
+        mock_resp = _mock_response(401, {"error": "unauthorized"})
+        ctx_token = set_current_auth_context(
+            AuthContext(subject_id="u1", bearer_token="ai.jwt.token")
+        )
+        try:
+            with patch("httpx.AsyncClient") as mock_httpx, patch.object(
+                client, "ensure_authenticated", new_callable=AsyncMock
+            ) as mock_ensure:
+                post_mock = AsyncMock(return_value=mock_resp)
+                mock_httpx.return_value.__aenter__.return_value.post = post_mock
+                result = await client.create_service_request({"foo": "bar"})
+        finally:
+            reset_current_auth_context(ctx_token)
+
+        mock_ensure.assert_not_called()
+        assert post_mock.call_count == 1
+        assert result.error == "HTTP 401"
+
+    @pytest.mark.asyncio
+    async def test_create_without_bearer_uses_s2s_login(self) -> None:
+        client = _make_client()
+        mock_resp = _mock_response(201, {"data": {"service_request_id": "SR-2"}})
+
+        with patch("httpx.AsyncClient") as mock_httpx, patch.object(
+            client, "ensure_authenticated", new_callable=AsyncMock, return_value=True
+        ) as mock_ensure:
+            mock_httpx.return_value.__aenter__.return_value.post = AsyncMock(
+                return_value=mock_resp
+            )
+            result = await client.create_service_request({"foo": "bar"})
+
+        mock_ensure.assert_called_once()
+        assert result.sr_id == "SR-2"
+
+    @pytest.mark.asyncio
+    async def test_submit_report_forwards_bearer(self) -> None:
+        client = _make_client()
+        mock_resp = _mock_response(201, {"data": {"service_request_id": "SR-3"}})
+        captured: dict = {}
+
+        async def _fake_post(endpoint, json=None, headers=None):  # noqa: ANN001
+            captured["headers"] = headers
+            return mock_resp
+
+        ctx_token = set_current_auth_context(
+            AuthContext(subject_id="u1", bearer_token="ai.jwt.token")
+        )
+        try:
+            with patch("httpx.AsyncClient") as mock_httpx, patch.object(
+                client, "login", new_callable=AsyncMock
+            ) as mock_login:
+                mock_httpx.return_value.__aenter__.return_value.post = AsyncMock(
+                    side_effect=_fake_post
+                )
+                result = await client.submit_report({"service_request_id": "SR-3"})
+        finally:
+            reset_current_auth_context(ctx_token)
+
+        mock_login.assert_not_called()
+        assert captured["headers"]["Authorization"] == "Bearer ai.jwt.token"
+        assert result.sr_id == "SR-3"
 
 
 class TestExtractSrId:
