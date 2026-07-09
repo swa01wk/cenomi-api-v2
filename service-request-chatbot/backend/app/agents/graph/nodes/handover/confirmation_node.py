@@ -213,15 +213,16 @@ def _build_confirmation_card(
 
     # Embed the stage-specific confirmAction so the frontend knows which action
     # string to send back instead of the generic "confirm".
-    if backend_refs:
-        stage_action: str = ""
-        if workflow_stage == "FM_REVIEW":
-            stage_action = backend_refs.get("fm_action", "")
-        elif workflow_stage == "RDD_REVIEW":
-            stage_action = backend_refs.get("rdd_action", "")
-        confirm_action = _CONFIRM_ACTION_MAP.get((workflow_stage, stage_action))
-        if confirm_action:
-            card["confirmAction"] = confirm_action
+    # FM_REVIEW defaults to approve when fm_action was never set (e.g. user
+    # reached the card via field collection rather than an Approve chip).
+    stage_action: str = ""
+    if workflow_stage == "FM_REVIEW":
+        stage_action = (backend_refs or {}).get("fm_action") or "approve"
+    elif workflow_stage == "RDD_REVIEW":
+        stage_action = (backend_refs or {}).get("rdd_action") or ""
+    confirm_action = _CONFIRM_ACTION_MAP.get((workflow_stage, stage_action))
+    if confirm_action:
+        card["confirmAction"] = confirm_action
 
     return card
 

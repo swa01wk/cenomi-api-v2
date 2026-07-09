@@ -15,6 +15,7 @@ Non-responsibilities
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any
 
@@ -77,8 +78,9 @@ async def fm_payload_builder_node(state: ServiceRequestState) -> dict[str, Any]:
 
     backend_refs["fm_payload"] = payload
     logger.info(
-        "fm_payload_builder_node: payload built for sr_id=%s fm_action=%s",
+        "fm_payload_builder_node: payload built for sr_id=%s fm_action=%s body=%s",
         sr_id,
         fm_action,
+        json.dumps(payload, default=str, ensure_ascii=False),
     )
     return {"backend_refs": backend_refs}

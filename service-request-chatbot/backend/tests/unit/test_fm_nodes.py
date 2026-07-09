@@ -120,6 +120,29 @@ class TestFMReviewEntryNode:
         assert result == {}
 
     @pytest.mark.asyncio
+    async def test_generic_confirm_approves_in_one_turn(self) -> None:
+        """ConfirmationCard falls back to action=confirm when confirmAction missing."""
+        state = _state(
+            action_override="confirm",
+            backend_refs={"user_role": "FM_MANAGER", "sr_id": "11711"},
+        )
+        result = await fm_review_entry_node(state)
+        assert result["confirmation_status"] == "CONFIRMED"
+        assert result["backend_refs"]["fm_action"] == "approve"
+
+    @pytest.mark.asyncio
+    async def test_pending_text_submit_confirms_approve(self) -> None:
+        state = _state(
+            action_override=None,
+            confirmation_status="PENDING",
+            user_message="Yes, please submit",
+            backend_refs={"user_role": "FM_MANAGER", "sr_id": "11711"},
+        )
+        result = await fm_review_entry_node(state)
+        assert result["confirmation_status"] == "CONFIRMED"
+        assert result["backend_refs"]["fm_action"] == "approve"
+
+    @pytest.mark.asyncio
     async def test_fm_manager_role_allowed(self) -> None:
         state = _state(
             action_override="save_fm_progress",

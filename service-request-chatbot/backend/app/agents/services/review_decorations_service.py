@@ -84,10 +84,21 @@ def payload_to_collected_data(payload: dict[str, Any]) -> dict[str, Any]:
         "fitout_start_date", "fitout_end_date", "trading_date", "comments",
         "guideLineLink", "document_status",
         "lease_code", "brand", "mall", "city", "unit_codes", "contracted_area",
-        "lease_id", "brand_id", "property_id", "tenant_profile_id",
+        "lease_id", "brand_id", "property_id", "tenant_profile_id", "contract_id",
     ):
         if key in payload and payload[key] not in (None, ""):
             mapped[key] = payload[key]
+    # Handover nested payload stores the code as ``lease``, not ``lease_code``.
+    if not mapped.get("lease_code") and payload.get("lease") not in (None, ""):
+        mapped["lease_code"] = payload["lease"]
+    # Detail GET omits top-level lease_id; create payload stores the same value
+    # as contract_id (cenomi-api MapHandoverLeaseLookupRowToDTO sets both equal).
+    if mapped.get("lease_id") in (None, "", 0) and mapped.get("contract_id") not in (
+        None,
+        "",
+        0,
+    ):
+        mapped["lease_id"] = mapped["contract_id"]
     return mapped
 
 

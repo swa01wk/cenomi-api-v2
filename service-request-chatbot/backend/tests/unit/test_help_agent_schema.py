@@ -115,6 +115,14 @@ class TestRolePermittedIntents:
         fm = ROLE_PERMITTED_INTENTS.get("FM_MANAGER", frozenset())
         assert "APPROVE_RDD_SERVICE_REQUEST" in fm
 
+    def test_fm_manager_can_update_sr(self) -> None:
+        fm = ROLE_PERMITTED_INTENTS.get("FM_MANAGER", frozenset())
+        assert "UPDATE_RDD_SERVICE_REQUEST" in fm
+
+    def test_operations_can_update_sr(self) -> None:
+        ops = ROLE_PERMITTED_INTENTS.get("OPERATIONS", frozenset())
+        assert "UPDATE_RDD_SERVICE_REQUEST" in ops
+
     def test_fm_manager_cannot_create_sr(self) -> None:
         fm = ROLE_PERMITTED_INTENTS.get("FM_MANAGER", frozenset())
         assert "CREATE_RDD_SERVICE_REQUEST" not in fm

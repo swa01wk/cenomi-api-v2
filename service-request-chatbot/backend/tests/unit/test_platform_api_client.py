@@ -169,6 +169,78 @@ class TestGetServiceRequest:
         assert result.error is None
 
     @pytest.mark.asyncio
+    async def test_merges_top_level_lease_refs_into_payload(self) -> None:
+        """Platform puts lease_id on the SR DTO, not inside nested payload."""
+        client = _make_client()
+        client._access_token = "tok"
+        client._token_acquired_at = time.monotonic()
+        body = {
+            "data": {
+                "service_request_id": "11711",
+                "status": "IN_PROCESS",
+                "lease_id": 9001,
+                "lease_code": "t0208831",
+                "tenant_profile_id": 55,
+                "property_id": 7,
+                "operations": [{"role": "FM_MANAGER"}],
+                "payload": {
+                    "brand_id": 42,
+                    "description": "Handover for unit A",
+                },
+            }
+        }
+        mock_resp = _mock_response(200, body)
+
+        with patch("httpx.AsyncClient") as mock_httpx:
+            mock_httpx.return_value.__aenter__.return_value.get = AsyncMock(
+                return_value=mock_resp
+            )
+            result = await client.get_service_request("11711")
+
+        assert result.payload is not None
+        assert result.payload["lease_id"] == 9001
+        assert result.payload["lease_code"] == "t0208831"
+        assert result.payload["tenant_profile_id"] == 55
+        assert result.payload["property_id"] == 7
+        assert result.payload["brand_id"] == 42
+        assert result.payload["description"] == "Handover for unit A"
+        assert len(result.service_request_operations) == 1
+
+    @pytest.mark.asyncio
+    async def test_maps_nested_lease_field_to_lease_code(self) -> None:
+        """Detail GET omits top-level lease_id; nested payload uses ``lease``."""
+        client = _make_client()
+        client._access_token = "tok"
+        client._token_acquired_at = time.monotonic()
+        body = {
+            "data": {
+                "service_request_id": "11711",
+                "status": "IN_PROCESS",
+                "tenant_profile_id": 55,
+                "payload": {
+                    "lease": "t0208831",
+                    "brand_id": 42,
+                    "property_id": 7,
+                },
+            }
+        }
+        mock_resp = _mock_response(200, body)
+
+        with patch("httpx.AsyncClient") as mock_httpx:
+            mock_httpx.return_value.__aenter__.return_value.get = AsyncMock(
+                return_value=mock_resp
+            )
+            result = await client.get_service_request("11711")
+
+        assert result.payload is not None
+        assert result.payload["lease_code"] == "t0208831"
+        assert "lease_id" not in result.payload or result.payload.get("lease_id") in (
+            None,
+            "",
+            0,
+        )
+
+    @pytest.mark.asyncio
     async def test_non_2xx_returns_error(self) -> None:
         client = _make_client()
         client._access_token = "tok"
@@ -183,6 +255,68 @@ class TestGetServiceRequest:
 
         assert result.error == "HTTP 404"
         assert result.status is None
+
+    @pytest.mark.asyncio
+    async def test_get_forwards_bearer_and_skips_login(self) -> None:
+        client = _make_client()
+        operations = [{"role": "FM_MANAGER", "status": "IN_PROGRESS"}]
+        body = {"data": {"status": "IN_PROCESS", "service_request_operations": operations}}
+        mock_resp = _mock_response(200, body)
+        captured: dict = {}
+
+        async def _fake_get(endpoint, headers=None, params=None):  # noqa: ANN001
+            captured["headers"] = headers
+            return mock_resp
+
+        ctx_token = set_current_auth_context(
+            AuthContext(subject_id="u1", bearer_token="ai.jwt.token")
+        )
+        try:
+            with patch("httpx.AsyncClient") as mock_httpx, patch.object(
+                client, "login", new_callable=AsyncMock
+            ) as mock_login:
+                mock_httpx.return_value.__aenter__.return_value.get = AsyncMock(
+                    side_effect=_fake_get
+                )
+                result = await client.get_service_request("11172")
+        finally:
+            reset_current_auth_context(ctx_token)
+
+        mock_login.assert_not_called()
+        assert captured["headers"]["Authorization"] == "Bearer ai.jwt.token"
+        assert result.sr_id == "11172"
+        assert result.status == "IN_PROCESS"
+
+    @pytest.mark.asyncio
+    async def test_get_without_bearer_uses_s2s_login(self) -> None:
+        client = _make_client()
+        body = {"data": {"status": "IN_PROCESS", "service_request_operations": []}}
+        mock_resp = _mock_response(200, body)
+
+        with patch("httpx.AsyncClient") as mock_httpx, patch.object(
+            client, "ensure_authenticated", new_callable=AsyncMock, return_value=True
+        ) as mock_ensure:
+            mock_httpx.return_value.__aenter__.return_value.get = AsyncMock(
+                return_value=mock_resp
+            )
+            result = await client.get_service_request("sr-123")
+
+        mock_ensure.assert_called_once()
+        assert result.sr_id == "sr-123"
+
+
+class TestIsAgenticRoute:
+    def test_get_service_request_by_id_is_agentic(self) -> None:
+        url = "http://localhost:8000/api/v1/service-requests/11172"
+        assert ServiceRequestPlatformClient._is_agentic_route("GET", url) is True
+
+    def test_patch_service_request_by_id_is_agentic(self) -> None:
+        url = "http://localhost:8000/api/v1/service-requests/11712"
+        assert ServiceRequestPlatformClient._is_agentic_route("PATCH", url) is True
+
+    def test_get_workflows_is_not_agentic(self) -> None:
+        url = "http://localhost:8000/api/v1/service-requests/workflows"
+        assert ServiceRequestPlatformClient._is_agentic_route("GET", url) is False
 
 
 # ---------------------------------------------------------------------------
@@ -205,6 +339,37 @@ class TestPatchServiceRequest:
             result = await client.patch_service_request("sr-123", {"status": "IN_PROCESS"})
 
         assert result.sr_id == "sr-123"
+        assert result.error is None
+
+    @pytest.mark.asyncio
+    async def test_patch_forwards_bearer_and_skips_login(self) -> None:
+        client = _make_client()
+        mock_resp = _mock_response(200, {"success": True, "id": "11712"})
+        captured: dict = {}
+
+        async def _fake_patch(endpoint, json=None, headers=None):  # noqa: ANN001
+            captured["headers"] = headers
+            return mock_resp
+
+        ctx_token = set_current_auth_context(
+            AuthContext(subject_id="u1", bearer_token="ai.jwt.token")
+        )
+        try:
+            with patch("httpx.AsyncClient") as mock_httpx, patch.object(
+                client, "login", new_callable=AsyncMock
+            ) as mock_login:
+                mock_httpx.return_value.__aenter__.return_value.patch = AsyncMock(
+                    side_effect=_fake_patch
+                )
+                result = await client.patch_service_request(
+                    "11712", {"status": "APPROVED"}
+                )
+        finally:
+            reset_current_auth_context(ctx_token)
+
+        mock_login.assert_not_called()
+        assert captured["headers"]["Authorization"] == "Bearer ai.jwt.token"
+        assert result.sr_id == "11712"
         assert result.error is None
 
     @pytest.mark.asyncio

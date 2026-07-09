@@ -19,6 +19,7 @@ Non-responsibilities
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any
 from uuid import UUID
@@ -145,6 +146,12 @@ async def fm_api_submission_node(state: ServiceRequestState) -> dict[str, Any]:
         )
 
     # ── 5. API call ────────────────────────────────────────────────────────────
+    logger.info(
+        "fm_api_submission_node: PATCH payload sr_id=%s fm_action=%s body=%s",
+        sr_id,
+        fm_action,
+        json.dumps(payload, default=str, ensure_ascii=False),
+    )
     svc = get_service_request_api_service()
     result = await svc.patch_service_request(sr_id, payload)
 

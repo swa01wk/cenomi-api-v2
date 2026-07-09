@@ -35,6 +35,7 @@ from app.agents.prompts.supervisor_prompt import (
 from app.agents.registry import lookup_agent
 from app.agents.schemas.help_agent_schema import intents_for_roles
 from app.agents.schemas.supervisor_schema import SupervisorDecision
+from app.agents.services.sr_reference_parser import parse_sr_reference
 from app.agents.graph.state import ServiceRequestState
 from app.observability.decorators import trace_node
 from app.types.chat import AuthContext
@@ -176,6 +177,34 @@ def _extract_uuid(value: Any) -> UUID | None:
         return None
 
 
+_CREATE_NEW_SR_INTENTS: frozenset[str] = frozenset(
+    {
+        "CREATE_RDD_SERVICE_REQUEST",
+        "CREATE_WORK_PERMIT_SR",
+    }
+)
+
+
+def _extract_sr_id_updates(
+    state: ServiceRequestState,
+    decision: SupervisorDecision,
+) -> dict[str, Any]:
+    """Parse an SR ref from the user message into ``backend_refs.sr_id``."""
+    if decision.intent in _CREATE_NEW_SR_INTENTS:
+        return {}
+    message = state.get("user_message") or ""
+    allow_standalone = decision.intent == "CHECK_SERVICE_REQUEST_STATUS"
+    parsed = parse_sr_reference(message, allow_standalone=allow_standalone)
+    if not parsed:
+        return {}
+    backend_refs: dict[str, Any] = dict(state.get("backend_refs") or {})
+    if backend_refs.get("sr_id"):
+        return {}
+    backend_refs["sr_id"] = parsed
+    log.info("supervisor.sr_id_extracted", sr_id=parsed, intent=decision.intent)
+    return {"backend_refs": backend_refs}
+
+
 # ---------------------------------------------------------------------------
 # Node
 # ---------------------------------------------------------------------------
@@ -301,7 +330,19 @@ async def supervisor_node(state: ServiceRequestState) -> dict[str, Any]:  # noqa
         }
 
     # ── 6. Low-confidence or UNKNOWN → ask clarification ──────────────────
+    sr_id_updates = _extract_sr_id_updates(state, decision)
     if decision.confidence < CONFIDENCE_THRESHOLD or decision.intent == "UNKNOWN":
+        if (sr_id_updates.get("backend_refs") or {}).get("sr_id"):
+            log.info(
+                "supervisor.open_existing_sr_after_extract",
+                intent=decision.intent,
+                confidence=decision.confidence,
+            )
+            return {
+                "intent": decision.intent,
+                **sr_id_updates,
+                "status": "IN_PROGRESS",
+            }
         log.info(
             "supervisor.low_confidence_clarification",
             intent=decision.intent,
@@ -309,6 +350,7 @@ async def supervisor_node(state: ServiceRequestState) -> dict[str, Any]:  # noqa
         )
         return {
             "intent": decision.intent,
+            **sr_id_updates,
             "response_message": (
                 "The intent is unclear. Ask the user to clarify whether they want to "
                 "create, update, approve, or check the status of a service request. "
@@ -326,6 +368,7 @@ async def supervisor_node(state: ServiceRequestState) -> dict[str, Any]:  # noqa
         log.info("supervisor.preview_intent")
         return {
             "intent": decision.intent,
+            **sr_id_updates,
             "status": "IN_PROGRESS",
         }
 
@@ -346,6 +389,7 @@ async def supervisor_node(state: ServiceRequestState) -> dict[str, Any]:  # noqa
             intent_display = decision.intent.replace("_", " ").lower()
             return {
                 "intent": decision.intent,
+                **sr_id_updates,
                 "status": "WAITING_FOR_USER",
                 "response_message": (
                     f"Your role ({role_display}) does not permit this action "
@@ -378,5 +422,6 @@ async def supervisor_node(state: ServiceRequestState) -> dict[str, Any]:  # noqa
         "service_category": decision.service_category,
         "sub_category": decision.sub_category,
         "active_agent": decision.target_agent,
+        **sr_id_updates,
         "status": "IN_PROGRESS",
     }

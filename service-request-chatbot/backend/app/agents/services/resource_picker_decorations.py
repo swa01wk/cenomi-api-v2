@@ -30,7 +30,7 @@ def build_resource_picker(
     spec: dict[str, Any] = {
         "kind": "resource_picker",
         "resource": resource,
-        "filters": dict(filters or {"limit": 5, "offset": 0}),
+        "filters": dict[str, int](filters or {"limit": 5, "offset": 0}),
     }
     if selection:
         spec["selection"] = selection

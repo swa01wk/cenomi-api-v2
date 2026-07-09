@@ -29,6 +29,7 @@ Security contract
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from dataclasses import dataclass, field
@@ -46,6 +47,16 @@ log = structlog.get_logger(__name__)
 logger = logging.getLogger(__name__)
 
 _MAX_RESPONSE_BYTES = 32_768  # cap raw body stored in trace payload
+
+# Top-level SR DTO fields needed for PUT /files and collected_data hydration.
+# Platform keeps these outside nested ``payload`` (see ServiceRequestDTO).
+_SR_TOP_LEVEL_REF_KEYS = (
+    "lease_id",
+    "lease_code",
+    "tenant_profile_id",
+    "property_id",
+    "brand_id",
+)
 
 # Token time-to-live: refresh after this many seconds regardless of JWT exp.
 # Intentionally conservative so a slow graph turn never races token expiry.
@@ -296,8 +307,9 @@ class ServiceRequestPlatformClient:
 
     async def get_service_request(self, sr_id: str) -> ServiceRequestGetResult:
         """GET /service-requests/{sr_id} — refresh status and operations."""
-        await self.ensure_authenticated()
         endpoint = f"{self._base_url}{self._SERVICE_REQUESTS_PATH}/{sr_id}"
+        if not self._uses_agentic_bearer("GET", endpoint):
+            await self.ensure_authenticated()
         wall_start = time.monotonic()
 
         try:
@@ -328,8 +340,12 @@ class ServiceRequestPlatformClient:
                 success=True,
                 sr_id=str(data.get("service_request_id") or sr_id),
                 status=data.get("status") or data.get("sr_status"),
-                service_request_operations=data.get("service_request_operations") or [],
-                payload=data.get("payload"),
+                service_request_operations=(
+                    data.get("service_request_operations")
+                    or data.get("operations")
+                    or []
+                ),
+                payload=self._merge_sr_payload_with_top_level_refs(data),
                 endpoint=endpoint,
                 status_code=response.status_code,
                 latency_ms=latency_ms,
@@ -353,8 +369,9 @@ class ServiceRequestPlatformClient:
         self, sr_id: str, payload: dict[str, Any]
     ) -> PlatformCallResult:
         """PATCH /service-requests/{sr_id} — update SR (FM save/approve)."""
-        await self.ensure_authenticated()
         endpoint = f"{self._base_url}{self._SERVICE_REQUESTS_PATH}/{sr_id}"
+        if not self._uses_agentic_bearer("PATCH", endpoint):
+            await self.ensure_authenticated()
         result = await self._patch(endpoint, payload)
         if result.success and result.sr_id is None:
             result.sr_id = self._extract_sr_id(result.response_payload) or sr_id
@@ -382,8 +399,9 @@ class ServiceRequestPlatformClient:
         The platform expects raw binary bytes in the body with no Content-Type
         header override (the Postman collection uses 'binary' body mode).
         """
-        await self.ensure_authenticated()
         endpoint = f"{self._base_url}{self._FILES_PATH}"
+        if not self._uses_agentic_bearer("PUT", endpoint):
+            await self.ensure_authenticated()
         params: dict[str, str] = {
             "query": "SERVICE_REQUEST",
             "file_extension": metadata.file_extension,
@@ -480,6 +498,14 @@ class ServiceRequestPlatformClient:
             path = path[4:]
         return path
 
+    @staticmethod
+    def _is_service_request_by_id_path(path: str) -> bool:
+        """True for ``/service-requests/{sr_id}`` (not list or workflows)."""
+        parts = [p for p in path.strip("/").split("/") if p]
+        if len(parts) < 2:
+            return False
+        return parts[-2] == "service-requests" and parts[-1] != "workflows"
+
     @classmethod
     def _is_agentic_route(cls, method: str, url: str) -> bool:
         path = cls._normalize_path(url)
@@ -487,6 +513,12 @@ class ServiceRequestPlatformClient:
         if m == "GET" and path.endswith("/leases"):
             return True
         if m == "POST" and path.endswith("/service-requests"):
+            return True
+        if m == "PUT" and path.endswith("/files"):
+            return True
+        if m == "GET" and cls._is_service_request_by_id_path(path):
+            return True
+        if m == "PATCH" and cls._is_service_request_by_id_path(path):
             return True
         return False
 
@@ -605,8 +637,10 @@ class ServiceRequestPlatformClient:
             async with httpx.AsyncClient(timeout=self._timeout) as client:
                 response = await client.patch(endpoint, json=payload, headers=headers)
 
-            # ── 401 reactive re-auth ──────────────────────────────────────────
-            if response.status_code == 401:
+            # ── 401 reactive re-auth (S2S only) ───────────────────────────────
+            if response.status_code == 401 and not self._uses_agentic_bearer(
+                "PATCH", endpoint
+            ):
                 log.info("platform_client.patch.401_retry_after_reauth", endpoint=endpoint)
                 self._token_acquired_at = 0.0
                 if await self.ensure_authenticated():
@@ -655,6 +689,47 @@ class ServiceRequestPlatformClient:
         except Exception:
             raw = response.text[:_MAX_RESPONSE_BYTES]
             return {"_raw": raw} if raw else None
+
+    @staticmethod
+    def _merge_sr_payload_with_top_level_refs(
+        data: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Combine nested ``payload`` with top-level lease/property refs.
+
+        Platform GET ``/service-requests/{id}`` returns ``lease_id``,
+        ``lease_code``, ``tenant_profile_id``, and ``property_id`` on the SR
+        object itself. Nested ``payload`` holds form fields (and often
+        ``brand_id``) but not those top-level refs. Upload and sync need both.
+        """
+        raw_payload = data.get("payload")
+        merged: dict[str, Any] = {}
+        if isinstance(raw_payload, dict):
+            merged.update(raw_payload)
+        elif isinstance(raw_payload, str) and raw_payload.strip():
+            try:
+                parsed = json.loads(raw_payload)
+            except json.JSONDecodeError:
+                parsed = None
+            if isinstance(parsed, dict):
+                merged.update(parsed)
+
+        for key in _SR_TOP_LEVEL_REF_KEYS:
+            value = data.get(key)
+            if value in (None, "", 0):
+                continue
+            # Prefer nested payload value when already set; fill gaps from top-level.
+            if merged.get(key) in (None, "", 0):
+                merged[key] = value
+
+        # Detail GET often omits top-level lease_id/lease_code; nested payload
+        # uses ``lease`` for the PMS lease code.
+        if merged.get("lease_code") in (None, "") and merged.get("lease") not in (
+            None,
+            "",
+        ):
+            merged["lease_code"] = merged["lease"]
+
+        return merged or None
 
     @staticmethod
     def _extract_correlation(

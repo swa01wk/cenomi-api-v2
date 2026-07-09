@@ -32,6 +32,9 @@ from app.agents.schemas.handover_schema import (
 )
 from app.agents.services.document_upload_service import DocumentUploadService
 from app.agents.services.permission_service import PermissionDeniedError, PermissionService
+from app.agents.services.review_decorations_service import payload_to_collected_data
+from app.agents.services.service_request_api_service import get_service_request_api_service
+from app.core.request_context import reset_current_auth_context, set_current_auth_context
 from app.core.security import get_auth_context
 from app.db.repositories.service_request_draft_repo import ServiceRequestDraftRepository
 from app.db.session import DbSession
@@ -67,6 +70,113 @@ def _pick_upload_permission(document_type: str | None) -> str:
     if document_type in _FM_DOC_TYPES:
         return "UPLOAD_FM_HANDOVER_DOCUMENT"
     return "CREATE_HANDOVER_SR"
+
+
+async def _resolve_lease_id_from_code(
+    lease_code: str,
+    auth: AuthContext,
+) -> dict[str, Any]:
+    """Resolve numeric lease_id (and related refs) via GET /leases."""
+    from app.agents.services.lease_lookup_service import (
+        LeaseLookupQuery,
+        get_lease_lookup_service,
+    )
+
+    ctx_token = set_current_auth_context(auth)
+    try:
+        result = await get_lease_lookup_service().lookup(
+            LeaseLookupQuery(lease_code=str(lease_code).strip())
+        )
+    finally:
+        reset_current_auth_context(ctx_token)
+
+    if result.error or not result.matches:
+        logger.warning(
+            "upload_document: lease lookup failed for lease_code=%s — %s",
+            lease_code,
+            result.error or "no matches",
+        )
+        return {}
+
+    match = result.matches[0]
+    return {
+        "lease_id": match.lease_id,
+        "brand_id": match.brand_id,
+        "property_id": match.property_id,
+        "lease_code": match.lease_code,
+        "tenant_profile_id": match.tenant_profile_id,
+    }
+
+
+async def _hydrate_backend_refs_from_platform(
+    sr_id: str,
+    backend: dict[str, Any],
+    auth: AuthContext,
+) -> dict[str, Any]:
+    """Fill lease/brand refs from GET /service-requests/{sr_id} when draft lacks them.
+
+    Platform detail responses often omit top-level ``lease_id`` (it is not on
+    ``ServiceRequestDetailResponse``). Nested handover payload stores the PMS
+    code as ``lease``. When ``lease_id`` is still missing after GET, resolve it
+    via lease lookup using that code.
+    """
+    if backend.get("lease_id"):
+        return backend
+
+    ctx_token = set_current_auth_context(auth)
+    try:
+        result = await get_service_request_api_service().get_service_request(sr_id)
+    finally:
+        reset_current_auth_context(ctx_token)
+
+    if not result.success:
+        logger.warning(
+            "upload_document: platform GET sr_id=%s failed — %s",
+            sr_id,
+            result.error,
+        )
+        return backend
+
+    hydrated = payload_to_collected_data(result.payload or {})
+    merged = dict(backend)
+    for key in (
+        "lease_id",
+        "brand_id",
+        "property_id",
+        "lease_code",
+        "tenant_profile_id",
+        "contract_id",
+    ):
+        if not merged.get(key) and hydrated.get(key) not in (None, "", 0):
+            merged[key] = hydrated[key]
+
+    # Prefer contract_id from the SR payload over GET /leases. Lease lookup only
+    # returns leases eligible for *new* handover creation, so an existing SR's
+    # lease is filtered out (reason=handover_exists) even though the code is valid.
+    if not merged.get("lease_id") and merged.get("contract_id") not in (None, "", 0):
+        merged["lease_id"] = merged["contract_id"]
+        logger.info(
+            "upload_document: using contract_id=%s as lease_id for sr_id=%s",
+            merged["contract_id"],
+            sr_id,
+        )
+
+    if not merged.get("lease_id") and merged.get("lease_code"):
+        resolved = await _resolve_lease_id_from_code(str(merged["lease_code"]), auth)
+        for key, value in resolved.items():
+            if not merged.get(key) and value not in (None, "", 0):
+                merged[key] = value
+
+    if not merged.get("lease_id"):
+        logger.warning(
+            "upload_document: GET sr_id=%s ok but lease_id still missing "
+            "(lease_code=%s, contract_id=%s, payload_keys=%s)",
+            sr_id,
+            merged.get("lease_code"),
+            merged.get("contract_id"),
+            sorted((result.payload or {}).keys()),
+        )
+    return merged
 
 
 # ---------------------------------------------------------------------------
@@ -169,6 +279,12 @@ async def upload_document(
     # mock document ID in mock mode, so relaxing the lease_id guard is safe.
     from app.core.config import settings as _settings
     _in_mock_mode = not bool(_settings.service_request_api_base_url)
+
+    if draft_sr_id and not draft_backend.get("lease_id") and not _in_mock_mode:
+        draft_backend = await _hydrate_backend_refs_from_platform(
+            draft_sr_id, draft_backend, auth
+        )
+
     if draft_sr_id and (draft_backend.get("lease_id") or _in_mock_mode):
         file_bytes = await file.read()
         filename = file.filename or "unknown"
@@ -176,19 +292,25 @@ async def upload_document(
         # RDD report documents must carry document_type_status=APPROVED
         doc_type_status = "APPROVED" if document_type in _RDD_DOC_TYPES else ""
 
-        upload_result = await _upload_service.upload_document(
-            file_bytes=file_bytes,
-            filename=filename,
-            content_type=content_type,
-            document_type_id=document_type or "UNKNOWN",
-            sr_id=draft_sr_id,
-            lease_id=str(draft_backend.get("lease_id", "")),
-            brand_id=str(draft_backend.get("brand_id", "")),
-            property_id=str(draft_backend.get("property_id", "")),
-            lease_code=str(draft_backend.get("lease_code", "")),
-            tenant_profile_id=str(draft_backend.get("tenant_profile_id", "")),
-            document_type_status=doc_type_status,
-        )
+        # Forward the caller's AI session Bearer to PUT /files (agentic route).
+        # Without this, the platform client falls back to S2S login.
+        ctx_token = set_current_auth_context(auth)
+        try:
+            upload_result = await _upload_service.upload_document(
+                file_bytes=file_bytes,
+                filename=filename,
+                content_type=content_type,
+                document_type_id=document_type or "UNKNOWN",
+                sr_id=draft_sr_id,
+                lease_id=str(draft_backend.get("lease_id", "")),
+                brand_id=str(draft_backend.get("brand_id", "")),
+                property_id=str(draft_backend.get("property_id", "")),
+                lease_code=str(draft_backend.get("lease_code", "")),
+                tenant_profile_id=str(draft_backend.get("tenant_profile_id", "")),
+                document_type_status=doc_type_status,
+            )
+        finally:
+            reset_current_auth_context(ctx_token)
 
         if upload_result.error:
             raise HTTPException(
@@ -254,17 +376,25 @@ async def upload_document(
             "status": "uploaded",
         }
 
-    # 7. No sr_id or backend refs — document upload requires an existing SR.
+    # 7. No sr_id or lease refs — cannot call platform PUT /files.
     logger.warning(
         "upload_document: blocked — no sr_id/lease_id available "
-        "(session_id=%s, document_type=%s)",
+        "(session_id=%s, sr_id=%s, document_type=%s)",
         session_id,
+        draft_sr_id,
         document_type,
     )
-    raise HTTPException(
-        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-        detail=(
+    if draft_sr_id and not draft_backend.get("lease_id"):
+        detail = (
+            f"Could not resolve lease details for service request {draft_sr_id}. "
+            "Reopen the SR from the inbox list, then try attaching again."
+        )
+    else:
+        detail = (
             "Document upload requires an active Service Request. "
             "Please create the service request first, then upload documents."
-        ),
+        )
+    raise HTTPException(
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        detail=detail,
     )

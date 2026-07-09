@@ -36,6 +36,7 @@ from app.agents.graph.help_agent_graph import (
     _route_after_sync,
     _route_after_validation,
     _route_after_supervisor,
+    _should_open_existing_sr,
     _SR_ACTION_INTENTS,
 )
 
@@ -102,6 +103,77 @@ class TestRouteAfterSync:
         state = _state(workflow_stage="", active_agent="")
         result = _route_after_sync(state)
         assert result == "supervisor"
+
+    def test_synced_sr_without_stage_routes_to_preview(self) -> None:
+        state = _state(
+            workflow_stage="",
+            active_agent="",
+            backend_refs={
+                "sr_id": "11711",
+                "platform_sr_status": "IN_PROCESS",
+                "sr_operations": [],
+                "sync_attempted": True,
+            },
+        )
+        result = _route_after_sync(state)
+        assert result == "preview"
+
+    def test_sync_error_routes_to_response_generation(self) -> None:
+        state = _state(
+            workflow_stage="",
+            active_agent="",
+            backend_refs={
+                "sr_id": "11711",
+                "sync_attempted": True,
+                "sync_error": "HTTP 403",
+            },
+        )
+        result = _route_after_sync(state)
+        assert result == "response_generation"
+
+
+# ---------------------------------------------------------------------------
+# _should_open_existing_sr
+# ---------------------------------------------------------------------------
+
+
+class TestShouldOpenExistingSr:
+    def test_true_when_sr_id_and_update_intent(self) -> None:
+        state = _state(
+            intent="UPDATE_RDD_SERVICE_REQUEST",
+            backend_refs={"sr_id": "11711"},
+        )
+        assert _should_open_existing_sr(state) is True
+
+    def test_true_for_unknown_with_sr_id(self) -> None:
+        state = _state(intent="UNKNOWN", backend_refs={"sr_id": "11711"})
+        assert _should_open_existing_sr(state) is True
+
+    def test_false_for_create_intent(self) -> None:
+        state = _state(
+            intent="CREATE_RDD_SERVICE_REQUEST",
+            backend_refs={"sr_id": "11711"},
+        )
+        assert _should_open_existing_sr(state) is False
+
+    def test_false_when_cancel_phrase(self) -> None:
+        state = _state(
+            intent="CHECK_SERVICE_REQUEST_STATUS",
+            user_message="cancel and start over",
+            backend_refs={"sr_id": "11711"},
+        )
+        assert _should_open_existing_sr(state) is False
+
+    def test_false_without_sr_id(self) -> None:
+        state = _state(intent="CHECK_SERVICE_REQUEST_STATUS", backend_refs={})
+        assert _should_open_existing_sr(state) is False
+
+    def test_false_after_sync_attempted(self) -> None:
+        state = _state(
+            intent="UNKNOWN",
+            backend_refs={"sr_id": "11711", "sync_attempted": True},
+        )
+        assert _should_open_existing_sr(state) is False
 
 
 # ---------------------------------------------------------------------------
@@ -228,6 +300,33 @@ class TestRouteAfterSupervisor:
 
     def test_waiting_for_user_routes_to_response_generation(self) -> None:
         state = _state(intent="CREATE_RDD_SERVICE_REQUEST", status="WAITING_FOR_USER")
+        result = _route_after_supervisor(state)
+        assert result == "response_generation"
+
+    def test_open_existing_sr_routes_to_sync(self) -> None:
+        state = _state(
+            intent="UPDATE_RDD_SERVICE_REQUEST",
+            status="IN_PROGRESS",
+            backend_refs={"sr_id": "11711"},
+        )
+        result = _route_after_supervisor(state)
+        assert result == "sr_status_sync"
+
+    def test_rbac_denied_with_sr_id_still_routes_to_sync(self) -> None:
+        state = _state(
+            intent="UPDATE_RDD_SERVICE_REQUEST",
+            status="WAITING_FOR_USER",
+            backend_refs={"sr_id": "11711"},
+        )
+        result = _route_after_supervisor(state)
+        assert result == "sr_status_sync"
+
+    def test_rbac_denied_after_sync_attempted_routes_to_response(self) -> None:
+        state = _state(
+            intent="UPDATE_RDD_SERVICE_REQUEST",
+            status="WAITING_FOR_USER",
+            backend_refs={"sr_id": "11711", "sync_attempted": True},
+        )
         result = _route_after_supervisor(state)
         assert result == "response_generation"
 

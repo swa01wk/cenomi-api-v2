@@ -107,8 +107,28 @@ async def sr_status_sync_node(state: ServiceRequestState) -> dict[str, Any]:
         logger.debug("sr_status_sync_node: skipped — no sr_id in backend_refs")
         return {}
 
+    backend_refs["sync_attempted"] = True
     current_stage: str | None = state.get("workflow_stage")
     svc = get_service_request_api_service()
+
+    def _sync_failed(error: str, status_code: int | None = None) -> dict[str, Any]:
+        backend_refs["sync_error"] = error
+        log.warning(
+            "sr_status_sync_node: GET sr_id=%s error=%s status_code=%s — continuing",
+            sr_id,
+            error,
+            status_code,
+        )
+        msg = (
+            f"I could not load service request **{sr_id}** from the platform "
+            f"({error}). Please check that you have access to this SR, or pick it "
+            "from the inbox list below."
+        )
+        return {
+            "backend_refs": backend_refs,
+            "response_message": msg,
+            "status": "WAITING_FOR_USER",
+        }
 
     try:
         result = await svc.get_service_request(sr_id)
@@ -118,16 +138,12 @@ async def sr_status_sync_node(state: ServiceRequestState) -> dict[str, Any]:
             exc,
             exc_info=True,
         )
-        return {}
+        return _sync_failed(str(exc))
 
     if result.error:
-        logger.warning(
-            "sr_status_sync_node: GET sr_id=%s error=%s status_code=%s — continuing",
-            sr_id,
-            result.error,
-            result.status_code,
-        )
-        return {}
+        return _sync_failed(result.error, result.status_code)
+
+    backend_refs.pop("sync_error", None)
 
     # Support both ServiceRequestGetResult (has .status / .service_request_operations)
     # and the legacy ServiceRequestCreationResult (stores data in .response_payload).
