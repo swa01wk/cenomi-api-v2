@@ -282,6 +282,7 @@ class TestFMApiSubmissionNode:
 
     @pytest.mark.asyncio
     async def test_success_approve(self) -> None:
+        from app.agents.services.platform_api_client import ServiceRequestGetResult
         from app.agents.services.service_request_api_service import ServiceRequestCreationResult
         backend_refs = _fm_backend_refs(
             fm_payload={"status": "APPROVED"},
@@ -297,14 +298,64 @@ class TestFMApiSubmissionNode:
             latency_ms=10,
             status_code=200,
         )
+        mock_get = ServiceRequestGetResult(
+            success=True,
+            sr_id="sr-123",
+            status="PENDING",
+            service_request_operations=[
+                {"assigned_role": "FM_MANAGER", "status": "FINISHED"},
+                {"assigned_role": "DD_ENGINEER", "status": "IN_PROGRESS"},
+            ],
+        )
         with patch(
             "app.agents.graph.nodes.handover.fm_api_submission_node.get_service_request_api_service"
         ) as mock_svc_factory:
             mock_svc = AsyncMock()
             mock_svc.patch_service_request = AsyncMock(return_value=mock_result)
+            mock_svc.get_service_request = AsyncMock(return_value=mock_get)
             mock_svc_factory.return_value = mock_svc
             result = await fm_api_submission_node(state)
 
         assert result["status"] == "SUBMITTED"
         assert result["backend_refs"]["fm_status"] == "APPROVED"
         assert "approved" in result["response_message"].lower()
+        mock_svc.get_service_request.assert_awaited_once_with("sr-123")
+
+    @pytest.mark.asyncio
+    async def test_approve_fails_when_fm_op_still_in_progress(self) -> None:
+        from app.agents.services.platform_api_client import ServiceRequestGetResult
+        from app.agents.services.service_request_api_service import ServiceRequestCreationResult
+        backend_refs = _fm_backend_refs(
+            fm_payload={"status": "APPROVED"},
+            fm_action="approve",
+        )
+        state = _state(backend_refs=backend_refs)
+
+        mock_result = ServiceRequestCreationResult(
+            sr_id="sr-123",
+            endpoint="http://x/service-requests/sr-123",
+            request_payload={},
+            response_payload={"success": True},
+            latency_ms=10,
+            status_code=200,
+        )
+        mock_get = ServiceRequestGetResult(
+            success=True,
+            sr_id="sr-123",
+            status="PENDING",
+            service_request_operations=[
+                {"assigned_role": "FM_MANAGER", "status": "IN_PROGRESS"},
+                {"assigned_role": "DD_ENGINEER", "status": "YET_TO_START"},
+            ],
+        )
+        with patch(
+            "app.agents.graph.nodes.handover.fm_api_submission_node.get_service_request_api_service"
+        ) as mock_svc_factory:
+            mock_svc = AsyncMock()
+            mock_svc.patch_service_request = AsyncMock(return_value=mock_result)
+            mock_svc.get_service_request = AsyncMock(return_value=mock_get)
+            mock_svc_factory.return_value = mock_svc
+            result = await fm_api_submission_node(state)
+
+        assert result["status"] == "FAILED"
+        assert "still in progress" in result["response_message"].lower()

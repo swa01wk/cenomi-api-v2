@@ -197,6 +197,19 @@ async def sr_status_sync_node(state: ServiceRequestState) -> dict[str, Any]:
 
     payload: dict[str, Any] = getattr(result, "payload", None) or {}
     if payload:
+        # Snapshot for FM/RDD builders (open-existing path never ran create payload builder).
+        inner = dict(payload)
+        backend_refs["create_payload"] = {
+            "payload": inner,
+            "title": inner.get("title") or "",
+            "tenant_profile_id": inner.get("tenant_profile_id"),
+            "property_id": inner.get("property_id"),
+            "service_category": "FIT_OUT_AND_HANDOVER",
+            "sub_category": "HANDOVER",
+            "lease_code": inner.get("lease_code") or inner.get("lease") or "",
+            "lease_id": inner.get("lease_id") or inner.get("contract_id"),
+            "service_request_id": sr_id,
+        }
         existing_collected: dict[str, Any] = dict(state.get("collected_data") or {})
         hydrated = payload_to_collected_data(payload)
         if hydrated:

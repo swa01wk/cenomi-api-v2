@@ -80,6 +80,14 @@ _VALIDATION_ERROR_QUESTIONS: dict[str, tuple[str, str]] = {
     ),
 }
 
+# Blocking errors that are not "correct this field value" prompts — skip Priority 0
+# so we keep asking for the next missing user field (or let UI show doc attach).
+_NON_FIELD_VALIDATION_TYPES: frozenset[str] = frozenset({
+    "document_count",
+    "document_type",
+    "permission",
+})
+
 
 # ---------------------------------------------------------------------------
 # Node
@@ -145,7 +153,10 @@ async def missing_field_node(state: ServiceRequestState) -> dict[str, Any]:
     # inspection_done_by).
     non_required_blocking = [
         e for e in validation_errors
-        if e.get("blocking", True) and e.get("validation_type") != "required"
+        if e.get("blocking", True)
+        and e.get("validation_type") != "required"
+        and e.get("validation_type") not in _NON_FIELD_VALIDATION_TYPES
+        and e.get("field") not in (None, "", "_documents")
     ]
     if non_required_blocking:
         # Pick the first non-required blocking error and ask the user to correct it.

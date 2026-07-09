@@ -213,6 +213,43 @@ def _rdd_document_status_entry(
     }
 
 
+def _seed_fm_inner_from_collected(data: dict[str, Any]) -> dict[str, Any]:
+    """Fallback inner payload when create_payload is missing (open-existing SR)."""
+    lease_code = data.get("lease_code") or data.get("lease") or ""
+    seeded: dict[str, Any] = {}
+    for key in (
+        "mall",
+        "brand",
+        "title",
+        "description",
+        "startDate",
+        "endDate",
+        "notes",
+        "comments",
+        "unit_codes",
+        "contracted_area",
+        "city",
+        "brand_id",
+        "tenant_profile_id",
+        "contract_id",
+        "property_id",
+        "lease_id",
+        "inspection_done_by",
+        "inspectionDoneBy",
+        "lease_brand_mall",
+        "company_name",
+        "guideLineLink",
+        "unit_readiness_date",
+        "expected_handover_date",
+    ):
+        if data.get(key) not in (None, ""):
+            seeded[key] = data[key]
+    if lease_code:
+        seeded["lease"] = lease_code
+        seeded.setdefault("lease_code", lease_code)
+    return seeded
+
+
 def build_fm_review_payload(
     data: dict[str, Any],
     backend_refs: dict[str, Any],
@@ -236,7 +273,9 @@ def build_fm_review_payload(
     """
     sr_id: str = backend_refs.get("sr_id", "")
     create_payload: dict[str, Any] = backend_refs.get("create_payload") or {}
-    inner: dict[str, Any] = create_payload.get("payload") or {}
+    inner: dict[str, Any] = dict(create_payload.get("payload") or {})
+    if not inner:
+        inner = _seed_fm_inner_from_collected(data)
 
     uploaded_docs: list[str] = backend_refs.get("uploaded_documents") or []
     sr_operations: list[dict[str, Any]] = backend_refs.get("sr_operations") or []
@@ -266,8 +305,8 @@ def build_fm_review_payload(
         "property_id": inner.get("property_id", data.get("property_id")),
         "service_category": "FIT_OUT_AND_HANDOVER",
         "sub_category": "HANDOVER",
-        "lease_code": inner.get("lease", data.get("lease_code", "")),
-        "lease_id": create_payload.get("lease_id", data.get("lease_id")),
+        "lease_code": inner.get("lease") or inner.get("lease_code") or data.get("lease_code", ""),
+        "lease_id": create_payload.get("lease_id") or inner.get("lease_id") or data.get("lease_id"),
         "service_request_id": sr_id,
         "status": "IN_PROCESS",
     }
@@ -287,18 +326,21 @@ def build_fm_approve_payload(
 ) -> dict[str, Any]:
     """Build the PATCH payload for FM_REVIEW approval (status=APPROVED).
 
-    Same shape as save-progress but with ``status="APPROVED"`` and an
-    optional ``comment`` field.  Top-level ``lease_code``/``lease_id`` are
-    omitted per the Postman collection shape for approval.
+    Same shape as save-progress but with top-level ``status="APPROVED"`` and an
+    optional ``comment``. Inner ``current_sr_status`` stays ``IN_PROCESS``
+    (pre-action state). Top-level ``lease_code``/``lease_id`` are omitted per
+    the Postman collection shape for approval.
     """
     base = build_fm_review_payload(data, backend_refs)
 
     sr_id: str = backend_refs.get("sr_id", "")
-    uploaded_docs: list[str] = backend_refs.get("uploaded_documents") or []
     inner = dict(base.get("payload") or {})
-    inner["current_sr_status"] = "APPROVED"
+    # Keep pre-action status; top-level status carries APPROVED.
+    inner["current_sr_status"] = "IN_PROCESS"
     if comment:
         inner["comment"] = comment
+    elif not inner.get("comment"):
+        inner["comment"] = data.get("comments", "")
 
     return {
         "payload": inner,
@@ -309,6 +351,8 @@ def build_fm_approve_payload(
         "sub_category": "HANDOVER",
         "service_request_id": sr_id,
         "status": "APPROVED",
+        "comment": comment or data.get("comments", "") or "",
+        "user_action": None,
     }
 
 

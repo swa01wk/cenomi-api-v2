@@ -25,6 +25,7 @@ from app.agents.graph.nodes.handover.fm_api_submission_node import fm_api_submis
 from app.agents.graph.nodes.handover.fm_payload_builder_node import fm_payload_builder_node
 from app.agents.graph.nodes.handover.fm_review_entry_node import fm_review_entry_node
 from app.agents.graph.nodes.handover.merge_state_node import merge_state_node
+from app.agents.services.platform_api_client import ServiceRequestGetResult
 from app.agents.services.service_request_api_service import ServiceRequestCreationResult
 from app.types.chat import AuthContext
 
@@ -83,7 +84,7 @@ def _base_fm_state(**kwargs: Any) -> dict[str, Any]:
         ],
         "workflow_stage": "FM_REVIEW",
         "action_override": None,
-        "auth": _fm_auth(),
+        "auth_context": _fm_auth(),
     }
     state.update(kwargs)
     return state
@@ -97,6 +98,25 @@ def _mock_patch_success(sr_id: str = "sr-fm-001") -> ServiceRequestCreationResul
         response_payload={"success": True, "id": sr_id},
         latency_ms=10,
         status_code=200,
+    )
+
+
+def _mock_get_after_fm_approve(sr_id: str = "sr-fm-001") -> ServiceRequestGetResult:
+    return ServiceRequestGetResult(
+        success=True,
+        sr_id=sr_id,
+        status="PENDING",
+        service_request_operations=[
+            {"assigned_role": "FM_MANAGER", "status": "FINISHED"},
+            {"assigned_role": "DD_ENGINEER", "status": "IN_PROGRESS"},
+        ],
+    )
+
+
+def _fm_approve_api_mock(sr_id: str = "sr-fm-001") -> AsyncMock:
+    return AsyncMock(
+        patch_service_request=AsyncMock(return_value=_mock_patch_success(sr_id)),
+        get_service_request=AsyncMock(return_value=_mock_get_after_fm_approve(sr_id)),
     )
 
 
@@ -235,9 +255,7 @@ class TestFMApiSubmissionWithDocuments:
 
         with patch(
             "app.agents.graph.nodes.handover.fm_api_submission_node.get_service_request_api_service",
-            return_value=AsyncMock(
-                patch_service_request=AsyncMock(return_value=_mock_patch_success())
-            ),
+            return_value=_fm_approve_api_mock(),
         ):
             result = await fm_api_submission_node(state)
 
@@ -246,7 +264,7 @@ class TestFMApiSubmissionWithDocuments:
 
     @pytest.mark.asyncio
     async def test_wrong_role_permission_denied(self) -> None:
-        state = _base_fm_state(auth=_mall_manager_auth())
+        state = _base_fm_state(auth_context=_mall_manager_auth())
         state["backend_refs"]["fm_payload"] = {"status": "APPROVED"}
         state["backend_refs"]["fm_action"] = "approve"
 
@@ -298,9 +316,7 @@ class TestFMFullChainedPipeline:
         # 4. Submit to platform
         with patch(
             "app.agents.graph.nodes.handover.fm_api_submission_node.get_service_request_api_service",
-            return_value=AsyncMock(
-                patch_service_request=AsyncMock(return_value=_mock_patch_success())
-            ),
+            return_value=_fm_approve_api_mock(),
         ):
             sub_result = await fm_api_submission_node(state)
 

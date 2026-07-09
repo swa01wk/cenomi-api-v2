@@ -314,15 +314,21 @@ class TestValidateRDDDateOrder:
 
     # ── Missing date handling ──────────────────────────────────────────────
 
-    def test_missing_date_produces_failed_result(self) -> None:
+    def test_missing_later_date_skips_pair_no_false_failure(self) -> None:
+        """Incomplete pairs must not fail the filled earlier date (re-ask loop)."""
         data = self._valid_data()
         del data["fitout_start_date"]
         results = validate_rdd_date_order(data)
-        assert any(r["status"] == "FAILED" for r in results)
+        failed = _failed(results)
+        assert not any(r["field"] == "actual_handover_date" for r in failed)
 
-    def test_all_dates_missing_all_pairs_fail(self) -> None:
+    def test_all_dates_missing_produces_no_order_errors(self) -> None:
         results = validate_rdd_date_order({})
-        assert all(r["status"] == "FAILED" for r in results)
+        assert results == []
+
+    def test_only_actual_handover_present_no_order_errors(self) -> None:
+        results = validate_rdd_date_order({"actual_handover_date": "2026-08-20"})
+        assert results == []
 
     # ── Shape ─────────────────────────────────────────────────────────────
 

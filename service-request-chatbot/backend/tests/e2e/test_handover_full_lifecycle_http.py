@@ -99,15 +99,24 @@ def _make_full_lifecycle_sr_mock() -> MagicMock:
     ]
     rdd_get_result.response_payload = {}
 
+    patch_count = {"n": 0}
+
+    async def _patch_sr(sr_id: str, payload: dict) -> ServiceRequestCreationResult:
+        patch_count["n"] += 1
+        return ok_result
+
+    async def _get_sr(sr_id: str):
+        # After FM approve PATCH (2nd patch in this lifecycle: save then approve),
+        # return FINISHED FM + IN_PROGRESS DD for verify + later syncs.
+        if patch_count["n"] >= 2:
+            return rdd_get_result
+        return fm_get_result
+
     svc = AsyncMock()
     svc.create_service_request = AsyncMock(return_value=ok_result)
-    svc.patch_service_request = AsyncMock(return_value=ok_result)
+    svc.patch_service_request = AsyncMock(side_effect=_patch_sr)
     svc.submit_report = AsyncMock(return_value=ok_result)
-    # get_service_request is called once per turn that has sr_id in state.
-    # FM turns (2, 3, 4, 5, 6) return fm_get_result; RDD turns (7, 8, 9) return rdd_get_result.
-    svc.get_service_request = AsyncMock(
-        side_effect=[fm_get_result] * 5 + [rdd_get_result] * 5
-    )
+    svc.get_service_request = AsyncMock(side_effect=_get_sr)
     return MagicMock(return_value=svc)
 
 

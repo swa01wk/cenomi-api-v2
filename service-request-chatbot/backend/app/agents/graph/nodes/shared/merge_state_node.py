@@ -75,6 +75,48 @@ def _add_days(date_str: str, days: int) -> str:
 
     return date_str
 
+
+# LLM-extractable date fields whose year must be coerced to the current year
+# when the user did not type an explicit 4-digit year.  gpt-4o-mini frequently
+# stamps a stale year (e.g. 2023) on bare dates like "30 August" even though the
+# extraction prompt says to assume the current year.  This deterministic guard
+# repairs that so downstream RDD date-order validation does not loop.
+_USER_DATE_FIELDS: frozenset[str] = frozenset({
+    "startDate",
+    "endDate",
+    "unit_readiness_date",
+    "expected_handover_date",
+    "actual_handover_date",
+    "fitout_start_date",
+    "fitout_end_date",
+})
+
+_EXPLICIT_YEAR_RE = re.compile(r"\b(?:19|20)\d{2}\b")
+
+
+def _coerce_year_if_absent(value: str, message_has_year: bool) -> str:
+    """Force *value*'s year to the current year when the user gave no explicit year.
+
+    Only applies to ISO ``YYYY-MM-DD`` values.  When ``message_has_year`` is
+    True (the user typed a 4-digit year) the value is returned unchanged so an
+    intentional past/future year is respected.
+    """
+    if message_has_year or not value:
+        return value
+    try:
+        parsed = datetime.date.fromisoformat(value)
+    except (ValueError, TypeError):
+        return value
+    current_year = datetime.date.today().year
+    if parsed.year == current_year:
+        return value
+    try:
+        return parsed.replace(year=current_year).strftime("%Y-%m-%d")
+    except ValueError:
+        # Feb 29 → non-leap current year; fall back to original.
+        return value
+
+
 # Fields that become immutable once the lease has been confirmed via the API
 # (i.e. lease_id is present in collected_data).  Before lease resolution the
 # user must be free to provide / correct these identifiers; after resolution
@@ -97,6 +139,13 @@ async def merge_state_node(state: ServiceRequestState) -> dict[str, Any]:
     """Merge ``extracted_fields`` and ``corrected_fields`` into ``collected_data``."""
     collected: dict[str, Any] = dict(state.get("collected_data") or {})
     extracted: dict[str, Any] = state.get("extracted_fields") or {}
+
+    # Whether the user's raw message contained an explicit 4-digit year. Used to
+    # decide if extracted date years may be coerced to the current year. Only
+    # attempt coercion when a message is actually present to inspect.
+    user_message: str = state.get("user_message") or ""
+    can_coerce_year: bool = bool(user_message.strip())
+    message_has_year: bool = bool(_EXPLICIT_YEAR_RE.search(user_message))
 
     # ── Apply inline edits from the confirmation card first ────────────────
     # corrected_fields come directly from the user's UI interaction, so they
@@ -146,6 +195,14 @@ async def merge_state_node(state: ServiceRequestState) -> dict[str, Any]:
         # Skip explicitly null proposals.
         if new_value is None:
             continue
+
+        # Repair hallucinated years on bare dates (no year typed by the user).
+        if (
+            can_coerce_year
+            and field_name in _USER_DATE_FIELDS
+            and isinstance(new_value, str)
+        ):
+            new_value = _coerce_year_if_absent(new_value, message_has_year)
 
         current_value = collected.get(field_name)
 
@@ -212,16 +269,19 @@ async def merge_state_node(state: ServiceRequestState) -> dict[str, Any]:
 
     # ── Auto-compute trading_date from fitout_end_date ────────────────────────
     # RDD_REVIEW: trading_date = fitout_end_date + 8 days (per product spec).
-    # The user is never asked for this value; it is derived automatically once
-    # fitout_end_date is present, and shown read-only on the confirmation card.
-    if (
-        workflow_stage == "RDD_REVIEW"
-        and collected.get("fitout_end_date")
-        and not collected.get("trading_date")
-    ):
-        collected["trading_date"] = _add_days(
+    # The user is never asked for this value; it is derived automatically from
+    # fitout_end_date and shown read-only on the confirmation card.
+    #
+    # Recompute every turn (not just when unset): trading_date is fully derived,
+    # so a stale value from an earlier fitout_end_date must be refreshed when the
+    # user corrects the fitout end date. Leaving a stale trading_date caused RDD
+    # date-order validation to fail in a loop.
+    if workflow_stage == "RDD_REVIEW" and collected.get("fitout_end_date"):
+        recomputed = _add_days(
             str(collected["fitout_end_date"]), _AUTO_COMPUTE_TRADING_DAYS
         )
+        if recomputed != collected.get("trading_date"):
+            collected["trading_date"] = recomputed
 
     return {"collected_data": collected}
 
