@@ -57,6 +57,8 @@ class ServiceRequestGraphState(TypedDict, total=False):
     # ── Response construction ─────────────────────────────────────────────────
     response_message: str
     response_ui: dict[str, Any]
+    # Generic UI chrome set by graph nodes; orchestration blind-merges into response_ui.
+    response_decorations: dict[str, Any]
 
     # ── FAQ RAG citations ─────────────────────────────────────────────────────
     # Set by faq_node when RAG search succeeds; always a list (never None).

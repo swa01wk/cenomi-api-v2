@@ -197,6 +197,12 @@ class TestBackendProtectedFieldHandling:
         assert result["response_ui"]["field"] != "lease_id"
 
     @pytest.mark.asyncio
+    async def test_does_not_emit_lease_resource_picker(self) -> None:
+        state = _state(workflow_stage="CREATE_SR", collected_data={})
+        result = await missing_field_node(state)
+        assert "response_decorations" not in result
+
+    @pytest.mark.asyncio
     async def test_missing_fields_list_includes_backend_fields(self) -> None:
         """missing_fields list should accurately reflect ALL missing fields including backend ones."""
         state = _state(workflow_stage="CREATE_SR", collected_data={})

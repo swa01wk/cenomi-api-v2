@@ -13,6 +13,8 @@ Responsibilities
     - ``platform_sr_status``     — raw status string from the API
     - ``sr_operations``          — the operations list
 - Update ``workflow_stage`` in state when a new stage is detected.
+- Hydrate ``collected_data`` from the GET payload when available.
+- Set ``response_decorations`` for review UI (via review_decorations_service).
 
 Non-responsibilities
 --------------------
@@ -29,6 +31,12 @@ from typing import Any
 import structlog
 
 from app.agents.graph.state import ServiceRequestState
+from app.agents.services.review_decorations_service import (
+    build_review_decorations,
+    derive_user_role,
+    merge_decorations,
+    payload_to_collected_data,
+)
 from app.agents.services.service_request_api_service import get_service_request_api_service
 from app.observability.decorators import trace_node
 
@@ -89,6 +97,8 @@ async def sr_status_sync_node(state: ServiceRequestState) -> dict[str, Any]:
     ``backend_refs``   — enriched with ``platform_sr_status`` and ``sr_operations``.
     ``workflow_stage`` — updated to FM_REVIEW, RDD_REVIEW, or SR_COMPLETED when
                          the platform operations warrant it.
+    ``collected_data`` — hydrated from platform payload when present.
+    ``response_decorations`` — review UI chrome for FM/RDD stages.
     """
     backend_refs: dict[str, Any] = dict(state.get("backend_refs") or {})
     sr_id: str | None = backend_refs.get("sr_id")
@@ -145,6 +155,11 @@ async def sr_status_sync_node(state: ServiceRequestState) -> dict[str, Any]:
     backend_refs["platform_sr_status"] = platform_status
     backend_refs["sr_operations"] = operations
 
+    auth = state.get("auth_context")
+    user_role = derive_user_role(auth)
+    if user_role:
+        backend_refs["user_role"] = user_role
+
     log.info(
         "sr_status_sync_node.done",
         sr_id=sr_id,
@@ -155,13 +170,40 @@ async def sr_status_sync_node(state: ServiceRequestState) -> dict[str, Any]:
     )
 
     updates: dict[str, Any] = {"backend_refs": backend_refs}
+    effective_stage = new_stage or current_stage
     if new_stage and new_stage != current_stage:
         updates["workflow_stage"] = new_stage
 
-    # When syncing an RDD-stage SR, propagate the platform status as rdd_status
-    # so downstream nodes can read it without re-fetching.
+    # When syncing an RDD-stage SR, propagate the platform status as rdd_status.
     _RDD_STATUSES: frozenset[str] = frozenset({"REPORT_SUBMITTED", "APPROVED", "APPROVED_WITH_CHANGES"})
-    if current_stage == "RDD_REVIEW" and platform_status and platform_status in _RDD_STATUSES:
+    if effective_stage == "RDD_REVIEW" and platform_status and platform_status in _RDD_STATUSES:
         backend_refs["rdd_status"] = platform_status
+
+    payload: dict[str, Any] = getattr(result, "payload", None) or {}
+    if payload:
+        existing_collected: dict[str, Any] = dict(state.get("collected_data") or {})
+        hydrated = payload_to_collected_data(payload)
+        if hydrated:
+            updates["collected_data"] = {**existing_collected, **hydrated}
+
+    # Ensure active_agent for handover review routing when opening existing SR.
+    if effective_stage in ("FM_REVIEW", "RDD_REVIEW") and not state.get("active_agent"):
+        updates["active_agent"] = "rdd_agent"
+        updates["service_category"] = "FIT_OUT_AND_HANDOVER"
+        updates["sub_category"] = "HANDOVER"
+
+    merged_state = {**dict(state), **updates}
+    review_deco = build_review_decorations(merged_state)
+    if review_deco:
+        updates["response_decorations"] = merge_decorations(
+            state.get("response_decorations"),
+            review_deco,
+        )
+
+    if not state.get("response_message") and sr_id and effective_stage in ("FM_REVIEW", "RDD_REVIEW"):
+        updates["response_message"] = (
+            f"Opening Handover SR **{sr_id}** ({effective_stage.replace('_', ' ').title()}). "
+            "Review the details below, upload any required documents, then choose an action."
+        )
 
     return updates

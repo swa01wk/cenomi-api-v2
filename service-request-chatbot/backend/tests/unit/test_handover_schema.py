@@ -375,7 +375,7 @@ class TestServiceRequestGraphState:
         # Submission
         "backend_refs", "validation_errors",
         # Output
-        "response_message", "response_ui",
+        "response_message", "response_ui", "response_decorations",
         # FAQ RAG citations
         "faq_sources",
         # UI-layer overrides (not persisted)

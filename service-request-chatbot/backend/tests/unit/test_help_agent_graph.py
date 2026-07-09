@@ -249,3 +249,32 @@ class TestSRActionIntentsDerived:
 
     def test_unknown_is_not_action_intent(self) -> None:
         assert "UNKNOWN" not in _SR_ACTION_INTENTS
+
+
+# ---------------------------------------------------------------------------
+# handover_entry_node — CREATE_SR stage pinning
+# ---------------------------------------------------------------------------
+
+
+class TestHandoverEntryStage:
+    @pytest.mark.asyncio
+    async def test_pins_create_sr_on_first_rdd_agent_turn(self) -> None:
+        from app.agents.graph.nodes.handover.handover_entry_node import handover_entry_node
+
+        result = await handover_entry_node(
+            {"active_agent": "rdd_agent", "user_message": "create handover"}
+        )
+        assert result["workflow_stage"] == "CREATE_SR"
+
+    @pytest.mark.asyncio
+    async def test_does_not_overwrite_existing_stage(self) -> None:
+        from app.agents.graph.nodes.handover.handover_entry_node import handover_entry_node
+
+        result = await handover_entry_node(
+            {
+                "active_agent": "rdd_agent",
+                "workflow_stage": "FM_REVIEW",
+                "user_message": "update",
+            }
+        )
+        assert result == {}

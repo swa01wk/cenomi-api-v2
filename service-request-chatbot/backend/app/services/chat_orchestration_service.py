@@ -49,14 +49,20 @@ def _build_auth_context(role: str | None) -> AuthContext:
     from app.agents.services.permission_service import ROLE_PERMISSION_MAP
     roles: frozenset[str] = ROLE_PERMISSION_MAP.get(role or "", frozenset()) if role else frozenset()
     return AuthContext(subject_id="chat_user", tenant_id=None, roles=roles)
+
+
+from app.agents.services.review_decorations_service import (
+    build_inbox_decorations,
+    derive_user_role,
+)
 from app.agents.services.conversation_state_service import ConversationStateService
+from app.services.response_ui_finalize import finalize_response_ui
 from app.core.injection_guard import scan_message
 from app.db.models import ChatSession
 from app.db.repositories.audit_log_repo import AuditLogRepository
 from app.db.repositories.chat_message_repo import ChatMessageRepository
 from app.db.repositories.chat_session_repo import ChatSessionRepository
 from app.observability.trace_manager import TraceManager
-from app.types.chat import AuthContext
 
 log = structlog.get_logger(__name__)
 
@@ -74,6 +80,7 @@ class ChatTurnState:
     ready_to_submit: bool
     rdd_status: str | None = None
     fm_status: str | None = None
+    sr_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -259,9 +266,18 @@ class ChatOrchestrationService:
         if selected_lease_id:
             initial_state["selected_lease"] = {"id": selected_lease_id}
         # sr_id passed by frontend when FM/DD opens an existing SR
+        backend_refs = dict(initial_state.get("backend_refs") or {})
+        if auth_context is not None:
+            user_role = derive_user_role(auth_context)
+            if user_role:
+                backend_refs["user_role"] = user_role
+            if not sr_id:
+                inbox_deco = build_inbox_decorations(auth_context)
+                if inbox_deco:
+                    initial_state["response_decorations"] = inbox_deco
         if sr_id:
-            backend_refs = dict(initial_state.get("backend_refs") or {})
             backend_refs["sr_id"] = sr_id
+        if backend_refs:
             initial_state["backend_refs"] = backend_refs
         # MSP Platform fields — injected by the MSP adapter layer only;
         # absent (None) on all existing /api/chat/service-request turns.
@@ -390,6 +406,14 @@ class ChatOrchestrationService:
                 "fields": _fields_from_collected(collected),
             }
 
+        decorations: dict[str, Any] = dict(result_state.get("response_decorations") or {})
+        response_ui = finalize_response_ui(
+            response_ui,
+            decorations,
+            draft_preview=draft_preview,
+            response_message=response_message,
+        )
+
         return ChatTurnResult(
             session_id=session_uuid,
             active_agent=active_agent,
@@ -402,6 +426,7 @@ class ChatOrchestrationService:
                 ready_to_submit=ready_to_submit,
                 rdd_status=rdd_status,
                 fm_status=fm_status,
+                sr_id=sr_id,
             ),
             trace_id=trace_id,
             draft_preview=draft_preview,

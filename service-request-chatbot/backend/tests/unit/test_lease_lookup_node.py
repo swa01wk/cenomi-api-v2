@@ -135,48 +135,65 @@ def _make_trace_manager() -> MagicMock:
 
 class TestNoIdentifiers:
     @pytest.mark.asyncio
-    async def test_no_identifiers_returns_waiting(self) -> None:
-        state = _state(collected_data={})
+    async def test_create_sr_browse_returns_in_progress(self) -> None:
+        state = _state(collected_data={}, workflow_stage="CREATE_SR")
+        svc = _MockService(_make_result([]))
+        result = await lease_lookup_node(state, service=svc)
+        assert result["status"] == "IN_PROGRESS"
+
+    @pytest.mark.asyncio
+    async def test_create_sr_browse_emits_leases_picker(self) -> None:
+        state = _state(collected_data={}, workflow_stage="CREATE_SR")
+        svc = _MockService(_make_result([]))
+        result = await lease_lookup_node(state, service=svc)
+        spec = result["response_decorations"]["suggestions"]
+        assert spec["kind"] == "resource_picker"
+        assert spec["resource"] == "leases"
+
+    @pytest.mark.asyncio
+    async def test_create_sr_browse_defers_text_question(self) -> None:
+        state = _state(collected_data={}, workflow_stage="CREATE_SR")
+        svc = _MockService(_make_result([]))
+        result = await lease_lookup_node(state, service=svc)
+        assert "response_ui" not in result
+
+    @pytest.mark.asyncio
+    async def test_work_permit_no_identifiers_returns_waiting(self) -> None:
+        state = _state(collected_data={}, workflow_stage="CREATE_WORK_PERMIT")
         svc = _MockService(_make_result([]))
         result = await lease_lookup_node(state, service=svc)
         assert result["status"] == "WAITING_FOR_USER"
 
     @pytest.mark.asyncio
-    async def test_no_identifiers_asks_for_lease_code(self) -> None:
-        state = _state(collected_data={})
+    async def test_work_permit_no_identifiers_asks_for_lease_code(self) -> None:
+        state = _state(collected_data={}, workflow_stage="CREATE_WORK_PERMIT")
         svc = _MockService(_make_result([]))
         result = await lease_lookup_node(state, service=svc)
         assert result["response_ui"]["field"] == "lease_code"
 
     @pytest.mark.asyncio
-    async def test_no_identifiers_response_ui_type_is_text_question(self) -> None:
-        state = _state(collected_data={})
+    async def test_work_permit_no_identifiers_response_ui_type_is_text_question(self) -> None:
+        state = _state(collected_data={}, workflow_stage="CREATE_WORK_PERMIT")
         svc = _MockService(_make_result([]))
         result = await lease_lookup_node(state, service=svc)
         assert result["response_ui"]["type"] == "text_question"
 
     @pytest.mark.asyncio
-    async def test_no_identifiers_response_message_non_empty(self) -> None:
-        state = _state(collected_data={})
-        svc = _MockService(_make_result([]))
-        result = await lease_lookup_node(state, service=svc)
-        assert result.get("response_message")
-
-    @pytest.mark.asyncio
     async def test_no_identifiers_service_not_called(self) -> None:
         """Service.lookup should NOT be called when there are no identifiers."""
-        state = _state(collected_data={})
+        state = _state(collected_data={}, workflow_stage="CREATE_SR")
         svc = MagicMock(spec=AbstractLeaseLookupService)
         svc.lookup = AsyncMock()
         await lease_lookup_node(state, service=svc)
         svc.lookup.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_no_collected_data_key_treats_as_no_identifiers(self) -> None:
-        state = _state()  # no collected_data key at all
+    async def test_no_collected_data_key_browse_on_default_create_sr(self) -> None:
+        state = _state()
         svc = _MockService(_make_result([]))
         result = await lease_lookup_node(state, service=svc)
-        assert result["status"] == "WAITING_FOR_USER"
+        assert result["status"] == "IN_PROGRESS"
+        assert result["response_decorations"]["suggestions"]["resource"] == "leases"
 
 
 # ---------------------------------------------------------------------------
