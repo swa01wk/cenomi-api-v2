@@ -1,0 +1,36 @@
+FM Handover Checklist — Sample Test Document
+=============================================
+Document Type: SR_HANDOVER_CHECKLIST
+Use during: Phase 2 — FM_REVIEW (upload as "Handover Checklist")
+
+Property:     Riyadh Park
+Unit:         RP-E2E-01
+Tenant:       Zara
+Lease Code:   LC-E2E-001
+
+Checklist Items
+---------------
+[x] Unit keys handed over to FM team
+[x] Electricity supply verified and functional
+[x] Water supply and plumbing checked
+[x] HVAC system operational
+[x] Fire safety equipment installed and tested
+[x] Emergency exits clearly marked
+[x] Unit measurements verified: 420 sqm (matches lease agreement)
+[x] Defects documented and photographed: None identified
+[x] Tenant representative present and acknowledged: Yes
+[x] Previous tenant's belongings fully removed
+[x] Flooring and walls in acceptable condition
+[x] Signage area prepared for tenant branding
+
+Unit Readiness Date: 2026-07-15
+
+Inspector Notes:
+Unit is in excellent condition and ready for fitout works.
+All utilities have been tested and are functioning correctly.
+No outstanding maintenance issues.
+
+Inspector:    FM Manager
+Department:   Facilities Management
+Date:         2026-07-15
+Signature:    [FM Manager Signature]

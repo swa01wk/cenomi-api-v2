@@ -12,14 +12,22 @@ type FieldConfig = {
 const FM_REVIEW_FIELDS: FieldConfig[] = [
   { key: "mall", label: "Mall" },
   { key: "brand", label: "Brand" },
-  { key: "unit_code", label: "Unit Code" },
+  { key: "unit_codes", label: "Unit Codes" },       // fixed: was "unit_code"
   { key: "lease_code", label: "Lease Code" },
   { key: "description", label: "Description" },
+  { key: "unit_readiness_date", label: "Unit Readiness Date" },
+  { key: "expected_handover_date", label: "Expected Handover Date" },
+  { key: "comments", label: "Comments" },
 ];
 
 const RDD_REVIEW_ADDITIONAL_FIELDS: FieldConfig[] = [
-  { key: "unit_readiness_date", label: "Unit Readiness Date" },
-  { key: "expected_handover_date", label: "Expected Handover Date" },
+  { key: "guideLineLink", label: "Guidelines Link" },
+  { key: "document_status", label: "Document Status" },
+  { key: "actual_handover_date", label: "Actual Handover Date" },
+  { key: "fitout_start_date", label: "Fitout Start Date" },
+  { key: "fitout_end_date", label: "Fitout End Date" },
+  { key: "trading_date", label: "Trading Start Date (Auto)" },
+  { key: "comments", label: "Comments" },
 ];
 
 function getFieldsForStage(stage: string): FieldConfig[] {

@@ -6,7 +6,16 @@
     "dev": "next dev --turbopack",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "next lint",
+    "test:e2e": "playwright test",
+    "test:e2e:ui": "playwright test --ui",
+    "test:e2e:headed": "playwright test --headed",
+    "test:live": "playwright test --config playwright.live.config.ts",
+    "test:live:lifecycle": "playwright test --config playwright.live.config.ts tests/e2e/live/lifecycle-live.spec.ts",
+    "test:live:eval": "playwright test --config playwright.live.config.ts tests/e2e/live/agent-eval.spec.ts",
+    "test:live:ui": "playwright test --config playwright.live.config.ts --ui",
+    "export:sessions": "cd ../backend && python scripts/export_session_observability.py --session-file ../frontend/playwright-report-live/session-ids.json --out ../frontend/playwright-report-live/observability --eval",
+    "export:sessions:recent": "cd ../backend && python scripts/export_session_observability.py --recent 5 --out ../frontend/playwright-report-live/observability --eval"
   },
   "dependencies": {
     "next": "^15.3.0",
@@ -15,6 +24,7 @@
   },
   "devDependencies": {
     "@eslint/eslintrc": "^3.2.0",
+    "@playwright/test": "^1.61.1",
     "@types/node": "^22.0.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",

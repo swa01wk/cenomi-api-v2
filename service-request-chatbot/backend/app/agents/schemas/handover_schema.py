@@ -84,7 +84,13 @@ CREATE_SR_STAGE = StageDefinition(
         "startDate",
         "endDate",
         "inspection_done_by",
-        "comments",
+        "notes",          # optional — already in OPTIONAL_FIELDS, never blocks
+        # "comments" intentionally removed from required_fields.
+        # It is still extractable (in EXTRACTABLE_FIELDS) and stored when provided,
+        # but the bot no longer proactively asks for it — "notes" covers the same UX
+        # intent and is the single catch-all optional field for free-form input.
+        # This prevents the agent from asking two nearly-identical optional questions
+        # ("notes" then "comments") before showing the confirmation card.
     ),
 )
 
@@ -95,6 +101,10 @@ FM_REVIEW_STAGE = StageDefinition(
         "unit_readiness_date",
         # expected_handover_date is auto-computed as unit_readiness_date + 7 days
         # by merge_state_node. It is NOT asked of the user.
+        # "comments" intentionally removed: same rationale as CREATE_SR — the bot
+        # was asking for comments as a mandatory turn even though it's optional.
+        # FM Manager can provide comments inline; fm_action gates approval, not
+        # the presence of a comments value.
     ),
     # At least one of these must be uploaded before FM save/approve.
     required_documents=(
@@ -110,10 +120,14 @@ RDD_REVIEW_STAGE = StageDefinition(
     role="DD_ENGINEER",
     required_fields=(
         "guideLineLink",
+        "document_status",    # "APPROVED" | "APPROVED_WITH_CHANGES" — chosen by RDD PM
         "actual_handover_date",
         "fitout_start_date",
         "fitout_end_date",
-        "trading_date",
+        # trading_date intentionally removed — auto-computed as fitout_end_date + 8 days
+        # by merge_state_node. It is NOT asked of the user.
+        # "comments" intentionally removed — same pattern as CREATE_SR and FM_REVIEW.
+        # RDD PM can provide comments inline; rdd_action gates submission, not comments.
     ),
     # DR_SR_HANDOVER_REPORT is mandatory; SR_REJECTED_HANDOVER_REPORT and
     # SR_HANDOVER_OTHER are optional additional uploads allowed at this stage.
@@ -200,6 +214,10 @@ from app.agents.graph.nodes.shared.merge_state_node import BACKEND_COMPUTED_FIEL
 PERMISSION_MAP: dict[str, tuple[str, ...]] = {
     stage_def.role: (stage_def.stage,) for stage_def in STAGE_REGISTRY.values()
 }
+# OPERATIONS shares FM_REVIEW permissions with FM_MANAGER but is not a
+# stage_def.role (there is only one role per StageDefinition), so it is
+# added explicitly here.
+PERMISSION_MAP["OPERATIONS"] = ("FM_REVIEW",)
 
 # ── Helper utilities ──────────────────────────────────────────────────────────
 
@@ -301,10 +319,12 @@ EXTRACTABLE_FIELDS: frozenset[str] = frozenset(
         "unit_readiness_date",
         "expected_handover_date",
         "guideLineLink",
+        "document_status",    # "APPROVED" or "APPROVED_WITH_CHANGES" — RDD stage
         "actual_handover_date",
         "fitout_start_date",
         "fitout_end_date",
-        "trading_date",
+        # trading_date intentionally excluded — auto-computed from fitout_end_date + 8 days.
+        # The LLM must never extract or propose this field.
     }
 )
 

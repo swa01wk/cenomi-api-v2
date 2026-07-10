@@ -109,7 +109,40 @@ async def test_successful_handover_sr_creation(app_client: AsyncClient) -> None:
         session_id = body1.get("session_id")
         assert session_id is not None
 
-    # Turn 2 & 3: supply data and confirm
+    # Turn 2: supply all collected data — extraction mock returns all fields at once,
+    # lease mock resolves to a single match, validation passes → confirmation card shown.
+    all_data = _all_collected_data()
+    with (
+        patch(
+            "app.agents.graph.nodes.shared.field_extraction_node.FieldExtractionService",
+            make_field_extraction_mock(
+                {k: {"value": str(v) if not isinstance(v, list) else ",".join(v), "confidence": 1.0}
+                 for k, v in all_data.items()}
+            ),
+        ),
+        patch(
+            "app.agents.graph.nodes.shared.field_extraction_node.get_default_gateway",
+            return_value=MagicMock(model="gpt-4o-mini"),
+        ),
+        patch(
+            "app.agents.graph.nodes.shared.lease_lookup_node.get_lease_lookup_service",
+            make_lease_mock([_zara_lease()]),
+        ),
+        patch(
+            "app.agents.graph.nodes.shared.validation_node._validation_service.validate_draft",
+            MagicMock(return_value=[]),
+        ),
+    ):
+        body2 = await post_turn(
+            app_client,
+            "Lease LC-E2E-001, all details provided",
+            session_id=session_id,
+            user_id=_USER_ID,
+        )
+        # Confirmation card should now be shown
+        session_id = body2.get("session_id") or session_id
+
+    # Turn 3: confirm submission
     with (
         patch(
             "app.agents.graph.nodes.shared.field_extraction_node.FieldExtractionService",
@@ -125,17 +158,16 @@ async def test_successful_handover_sr_creation(app_client: AsyncClient) -> None:
         ),
         patch(
             "app.agents.graph.nodes.handover.payload_builder_node.build_create_handover_payload",
-            MagicMock(return_value=_all_collected_data()),
+            MagicMock(return_value=all_data),
         ),
         patch(
             "app.agents.graph.nodes.handover.api_submission_node.get_service_request_api_service",
             make_sr_api_mock("SR-E2E-001"),
         ),
     ):
-        # Turn 3: confirm submission
         body3 = await post_turn(
             app_client,
-            "yes, please submit",
+            "yes",
             session_id=session_id,
             user_id=_USER_ID,
         )
@@ -300,6 +332,14 @@ async def test_multiple_lease_selection_flow(app_client: AsyncClient) -> None:
     )
 
     with (
+        patch(
+            "app.agents.graph.nodes.supervisor_node._call_supervisor_llm",
+            make_supervisor_mock(),
+        ),
+        patch(
+            "app.agents.graph.nodes.supervisor_node.get_default_gateway",
+            return_value=MagicMock(model="gpt-4o-mini"),
+        ),
         patch(
             "app.agents.graph.nodes.shared.field_extraction_node.FieldExtractionService",
             make_field_extraction_mock(

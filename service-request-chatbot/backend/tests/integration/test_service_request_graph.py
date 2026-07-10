@@ -71,6 +71,7 @@ def _all_fields() -> dict:
         "startDate": "2024-02-01",
         "endDate": "2024-03-01",
         "inspection_done_by": "FM Team",
+        "notes": "",
         "comments": "Ready for handover",
     }
 

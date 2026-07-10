@@ -60,20 +60,66 @@ _CHAT_ENDPOINT = "/api/chat/service-request"
 
 
 def _make_mock_db() -> AsyncMock:
-    """Build a no-op AsyncSession mock with all hooks wired."""
+    """Build a no-op AsyncSession mock with all hooks wired.
+
+    - ``session.add`` auto-assigns UUIDs and stores objects by table name.
+    - ``session.execute`` returns the most recently stored object for the queried
+      table (detected via ``stmt.froms``/``stmt.get_final_froms()``), enabling
+      multi-turn tests where ``ChatSessionRepository.update`` and
+      ``ConversationStateService.load`` succeed without a real database.
+    """
+    from uuid import uuid4 as _uuid4
+    from app.db.models import ChatSession as _ChatSession, ServiceRequestDraft as _Draft
+
+    # Map table_name → list of stored model instances (newest last).
+    _store: dict[str, list[Any]] = {}
+
     session = AsyncMock(spec=AsyncSession)
-    session.add = MagicMock()
+
+    def _auto_id_add(obj: Any) -> None:
+        if hasattr(obj, "id") and obj.id is None:
+            obj.id = _uuid4()
+        tbl = getattr(getattr(type(obj), "__tablename__", None), "__func__", None)
+        tbl_name = getattr(type(obj), "__tablename__", None)
+        if tbl_name:
+            _store.setdefault(tbl_name, []).append(obj)
+
+    session.add = MagicMock(side_effect=_auto_id_add)
     session.flush = AsyncMock()
     session.commit = AsyncMock()
     session.rollback = AsyncMock()
 
-    result_mock = MagicMock()
-    result_mock.scalar_one_or_none.return_value = None
-    result_mock.scalar_one.return_value = 0
-    scalars_mock = MagicMock()
-    scalars_mock.__iter__ = MagicMock(return_value=iter([]))
-    result_mock.scalars.return_value = scalars_mock
-    session.execute = AsyncMock(return_value=result_mock)
+    def _get_table_name(stmt: Any) -> str | None:
+        """Extract the primary table name from a Select statement."""
+        try:
+            froms = stmt.get_final_froms()
+            if len(froms) == 1:
+                return froms[0].name
+        except Exception:
+            pass
+        try:
+            froms = list(stmt.froms)
+            if len(froms) == 1:
+                return froms[0].name
+        except Exception:
+            pass
+        return None
+
+    def _make_result(stmt: Any = None) -> MagicMock:
+        result_mock = MagicMock()
+        stored_obj = None
+        if stmt is not None:
+            tbl = _get_table_name(stmt)
+            if tbl and tbl in _store and _store[tbl]:
+                stored_obj = _store[tbl][-1]
+        result_mock.scalar_one_or_none.return_value = stored_obj
+        result_mock.scalar_one.return_value = 0
+        scalars_mock = MagicMock()
+        scalars_mock.__iter__ = MagicMock(return_value=iter([]))
+        result_mock.scalars.return_value = scalars_mock
+        return result_mock
+
+    session.execute = AsyncMock(side_effect=lambda stmt=None, *a, **kw: _make_result(stmt))
     return session
 
 

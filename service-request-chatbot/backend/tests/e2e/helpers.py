@@ -151,5 +151,6 @@ def all_collected_data() -> dict[str, Any]:
         "startDate": "2025-05-01",
         "endDate": "2025-06-01",
         "inspection_done_by": "FM_MANAGER",
+        "notes": "",
         "comments": "Ready for handover",
     }

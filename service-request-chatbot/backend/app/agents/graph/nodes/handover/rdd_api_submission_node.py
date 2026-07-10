@@ -139,11 +139,21 @@ async def rdd_api_submission_node(state: ServiceRequestState) -> dict[str, Any]:
 
     # ── 5. API call ────────────────────────────────────────────────────────────
     svc = get_service_request_api_service()
-    # final_approve uses PATCH (not POST); submit uses POST submit_report
-    if rdd_action == "final_approve":
+    # Explicit guard: only call submit_report when rdd_action is exactly "submit".
+    # A missing or empty rdd_action must fail-closed; silently defaulting to
+    # submit_report caused accidental POST calls with no action context.
+    if rdd_action == "submit":
+        result = await svc.submit_report(payload)
+    elif rdd_action == "final_approve":
         result = await svc.patch_service_request(sr_id, payload)
     else:
-        result = await svc.submit_report(payload)
+        return {
+            "status": "FAILED",
+            "response_message": (
+                f"RDD submission blocked: unrecognised rdd_action '{rdd_action}'. "
+                "Expected 'submit' or 'final_approve'."
+            ),
+        }
 
     logger.info(
         "rdd_api_submission_node: sr_id=%s status_code=%s error=%s latency_ms=%s",

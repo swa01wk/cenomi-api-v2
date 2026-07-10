@@ -187,15 +187,24 @@ def _fm_document_status_entry(doc_id: str) -> dict[str, Any]:
 
 def _rdd_document_status_entry(
     doc_id: str,
+    document_status: str = "APPROVED",
     actual_handover_date: str = "",
     fitout_start_date: str = "",
     fitout_end_date: str = "",
     trading_date: str = "",
 ) -> dict[str, Any]:
-    """Build a document_status_map entry for the RDD handover report."""
+    """Build a document_status_map entry for the RDD handover report.
+
+    Parameters
+    ----------
+    document_status:
+        The RDD Project Manager's document review decision.
+        Accepted values: ``"APPROVED"`` or ``"APPROVED_WITH_CHANGES"``.
+        Defaults to ``"APPROVED"`` when not yet collected.
+    """
     return {
         "id": doc_id,
-        "document_status": "APPROVED",
+        "document_status": document_status,
         "handover_date": "",
         "actual_handover_date": _to_ddmmyyyy(actual_handover_date) if actual_handover_date else "",
         "fitout_start_date": _to_ddmmyyyy(fitout_start_date) if fitout_start_date else "",
@@ -241,6 +250,7 @@ def build_fm_review_payload(
         "expected_handover_date": data.get("expected_handover_date", ""),
         "documents_ids": uploaded_docs,
         "document_status_map": document_status_map,
+        "comment": data.get("comments", ""),
         "ref_no": ref_no,
         "sr_id": sr_id,
         "current_sr_status": "IN_PROCESS",
@@ -339,6 +349,7 @@ def build_rdd_report_payload(
     rdd_status_entry = (
         _rdd_document_status_entry(
             doc_id=rdd_doc_id,
+            document_status=data.get("document_status", "APPROVED"),
             actual_handover_date=data.get("actual_handover_date", ""),
             fitout_start_date=data.get("fitout_start_date", ""),
             fitout_end_date=data.get("fitout_end_date", ""),
@@ -358,6 +369,7 @@ def build_rdd_report_payload(
         "expected_handover_date": data.get(
             "expected_handover_date", inner.get("expected_handover_date", "")
         ),
+        "comment": data.get("comments", ""),
         "sr_id": sr_id,
         "user_action": None,
     }

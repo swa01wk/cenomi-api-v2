@@ -105,12 +105,18 @@ class ConversationStateService:
             draft = await self._draft_repo.get_by_session(session_id)
 
             if draft is None:
+                # FM_REVIEW / RDD_REVIEW sessions may not have a service_category
+                # set (registry_node is skipped for stage-sync entry paths).
+                # Use a default so the draft is created and documents/state persist.
                 if not service_category:
-                    log.debug(
-                        "conversation_state_service.save_checkpoint.skipped_no_category",
-                        session_id=str(session_id),
-                    )
-                    return
+                    if workflow_stage in ("FM_REVIEW", "RDD_REVIEW"):
+                        service_category = "FIT_OUT_AND_HANDOVER"
+                    else:
+                        log.debug(
+                            "conversation_state_service.save_checkpoint.skipped_no_category",
+                            session_id=str(session_id),
+                        )
+                        return
                 await self._draft_repo.create(
                     session_id=session_id,
                     service_category=service_category,

@@ -17,8 +17,12 @@ htmlcov/
 .env.local
 !.env.example
 
-# Test result output files
+# Test result output files and eval session exports
 results/
+sessions/
+eval_report_*.json
+_dump_scenarios.py
+_dump_lifecycle.py
 
 # Distribution
 *.egg-info/

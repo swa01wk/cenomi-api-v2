@@ -51,10 +51,11 @@ handover, work permits, operations confirmations, fit-out, tenant profile update
 - Can upload FM documents and save progress.
 - Cannot approve or reject independently.
 
-**DD Engineer (Development Division Engineer)**
+**RDD Project Manager**
 - Handles the final RDD review stage.
 - Uploads the handover report document.
-- Submits the RDD report to complete the service request.
+- Sets document status (Approve or Approve with Changes).
+- Submits the RDD report and approves the service request to completion.
 
 **Admin**
 - Has access to all stages and all service requests.
@@ -85,8 +86,9 @@ handover, work permits, operations confirmations, fit-out, tenant profile update
 1. **CREATE_SR** — Mall Manager submits the initial request. The SR is created on the platform.
 2. **FM_REVIEW** — FM Manager reviews the SR. They upload 3 documents and set handover dates.
    They can save progress and come back, or approve in one session.
-3. **RDD_REVIEW** — DD Engineer submits the final RDD handover report.
-   They provide 4 key dates and upload the handover report document.
+3. **RDD_REVIEW** — RDD Project Manager submits the final RDD handover report.
+   They provide 4 key dates, set the document status, and upload the handover report.
+   Trading start date is automatically calculated as fitout end date + 8 days.
 4. **SR_COMPLETED** — The workflow is closed. All stages are approved.
 
 ---
@@ -229,9 +231,9 @@ Access reports from the Reports section in the main navigation.
 A: Typically 2–3 business days after the Mall Manager submits the SR.
 
 **Q: How long does RDD review take? What is the RDD SLA?**
-A: There is no fixed SLA for RDD review. The timeline depends on the DD Engineer's
+A: There is no fixed SLA for RDD review. The timeline depends on the RDD Project Manager's
    availability and schedule. Once FM review is approved, the platform notifies the
-   DD Engineer automatically, but the time to complete the RDD handover report
+   RDD Project Manager automatically, but the time to complete the RDD handover report
    varies case by case.
 
 **Q: Can I edit a field after submitting the SR?**
@@ -239,7 +241,7 @@ A: Fields can be corrected during FM review. Use the inline edit feature on the 
    when the FM Manager is reviewing the SR.
 
 **Q: Who is notified when FM review is approved?**
-A: The DD Engineer is notified by the platform automatically when FM review is approved.
+A: The RDD Project Manager is notified by the platform automatically when FM review is approved.
 
 **Q: What happens if I reject an FM review?**
 A: The SR is sent back for corrections. The Mall Manager can update the SR and resubmit.
@@ -252,7 +254,7 @@ A: ISO 8601 format: YYYY-MM-DD (e.g. 2026-07-15). The assistant accepts natural 
 A: For RDD review, dates must be in this order:
    actual_handover_date ≤ fitout_start_date ≤ fitout_end_date ≤ trading_date.
 
-**Q: Can the DD Engineer start RDD review without FM approval?**
+**Q: Can the RDD Project Manager start RDD review without FM approval?**
 A: No. RDD review only becomes available after FM Manager approves the FM review stage.
 
 **Q: I can't see my lease — what should I do?**

@@ -117,8 +117,11 @@ class TestHandoverSchemaFix:
         assert "expected_handover_date" in BACKEND_COMPUTED_FIELDS
 
     def test_get_missing_fields_fm_with_readiness_set(self) -> None:
-        """When unit_readiness_date is provided, FM_REVIEW has no missing fields."""
-        collected = {"unit_readiness_date": "2026-06-18"}
+        """When required fields are provided, FM_REVIEW has no missing fields.
+
+        comments is optional — an empty string (user explicitly declined) is acceptable.
+        """
+        collected = {"unit_readiness_date": "2026-06-18", "comments": ""}
         missing = get_missing_fields("FM_REVIEW", collected)
         assert missing == []
 

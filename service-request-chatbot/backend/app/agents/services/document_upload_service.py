@@ -56,12 +56,21 @@ class DocumentUploadResult:
 class DocumentUploadService:
     """Upload documents to the Cenomi platform via PUT /files.
 
-    This replaces the previous stub that only returned
-    ``"placeholder-document-id"``.
+    In mock mode (``SERVICE_REQUEST_API_BASE_URL`` not configured) the platform
+    client has no base URL and real HTTP calls would fail.  In that case
+    ``upload_document`` short-circuits and returns a mock document ID so that
+    the rest of the FM/RDD workflow (document count validation, state updates)
+    works correctly without a live platform connection.
     """
 
     def __init__(self) -> None:
         self._client = get_platform_client()
+
+    @property
+    def _mock_mode(self) -> bool:
+        """True when no platform URL is configured — same sentinel as MockServiceRequestAPIService."""
+        from app.core.config import settings
+        return not bool(settings.service_request_api_base_url)
 
     async def upload_document(
         self,
@@ -97,6 +106,23 @@ class DocumentUploadService:
             On success ``document_id`` is populated.
             On failure ``error`` is populated and ``document_id`` is ``None``.
         """
+        # ── Mock mode: no platform URL configured ────────────────────────────
+        if self._mock_mode:
+            import uuid as _uuid
+            mock_id = f"mock-doc-{_uuid.uuid4()}"
+            log.info(
+                "document_upload_service.upload.mock",
+                document_type_id=document_type_id,
+                sr_id=sr_id,
+                mock_document_id=mock_id,
+            )
+            return DocumentUploadResult(
+                document_id=mock_id,
+                file_path=f"/mock/documents/{mock_id}.pdf",
+                signed_url=None,
+                document_type_id=document_type_id,
+            )
+
         file_extension = _derive_extension(filename, content_type)
 
         metadata = FileUploadMetadata(

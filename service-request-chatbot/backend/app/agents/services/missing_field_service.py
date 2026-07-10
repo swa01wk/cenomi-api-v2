@@ -15,6 +15,7 @@ from app.types.service_request import ValidationIssueDTO
 # ---------------------------------------------------------------------------
 
 HANDOVER_FIELD_QUESTIONS: dict[str, str] = {
+    # ── CREATE_SR — Mall Manager ──────────────────────────────────────────────
     "lease_code": "Ask the user for the lease code for this handover request.",
     "lease_brand_mall": "Ask the user for the lease, brand name, or mall name.",
     "title": (
@@ -25,15 +26,32 @@ HANDOVER_FIELD_QUESTIONS: dict[str, str] = {
     "description": "Ask the user for a short description of this handover request.",
     "startDate": "Ask the user when the inspection should start (date).",
     "endDate": "Ask the user when the inspection should end (date).",
-    "inspection_done_by": "Ask the user who will perform the inspection. They must choose one of exactly two options: FM Manager or Operations. Make the two choices explicit.",
-    "comments": "Ask the user if they have any additional comments for this request.",
-    "unit_readiness_date": "Ask the user for the unit readiness date.",
-    "expected_handover_date": "Ask the user for the expected handover date.",
-    "guideLineLink": "Ask the user to provide the guideline link for the handover report.",
-    "actual_handover_date": "Ask the user for the actual handover date.",
-    "fitout_start_date": "Ask the user for the fitout start date.",
-    "fitout_end_date": "Ask the user for the fitout end date.",
-    "trading_date": "Ask the user for the trading date.",
+    "inspection_done_by": (
+        "Ask the user who will perform the inspection. "
+        "They must choose one of exactly two options: FM Manager or Operations. "
+        "Make the two choices explicit."
+    ),
+    "notes": "Ask the user if they have any additional notes or comments for this handover request. Accept 'no comments', 'none', 'skip', or any similar declination as a valid answer.",
+    # ── FM_REVIEW — FM Manager / Operations ───────────────────────────────────
+    "unit_readiness_date": "Ask the FM Manager for the unit readiness date.",
+    "expected_handover_date": "Ask the FM Manager for the expected handover date.",
+    # ── RDD_REVIEW — RDD Project Manager ──────────────────────────────────────
+    "guideLineLink": "Ask the RDD Project Manager to provide the guideline link for the handover report.",
+    "document_status": (
+        "Ask the RDD Project Manager for the document status. "
+        "They must choose one of exactly two options: "
+        "'Approve' (APPROVED) if the handover report is accepted as-is, or "
+        "'Approve with changes' (APPROVED_WITH_CHANGES) if it is accepted with required amendments. "
+        "Make both choices explicit."
+    ),
+    "actual_handover_date": "Ask the RDD Project Manager for the actual handover date.",
+    "fitout_start_date": "Ask the RDD Project Manager for the fitout start date.",
+    "fitout_end_date": (
+        "Ask the RDD Project Manager for the fitout end date. "
+        "The trading start date will be automatically calculated as fitout end date + 8 days."
+    ),
+    # trading_date intentionally omitted — auto-computed as fitout_end_date + 8 days.
+    # missing_field_node will never ask for it (also excluded via auto_generated_fields in WorkflowConfig).
 }
 
 # ---------------------------------------------------------------------------

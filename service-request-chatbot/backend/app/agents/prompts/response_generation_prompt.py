@@ -38,7 +38,7 @@ FIELD_LABELS: dict[str, str] = {
 STAGE_DESCRIPTIONS: dict[str, str] = {
     "CREATE_SR": "creating a new Handover Service Request",
     "FM_REVIEW": "FM Manager review of the handover",
-    "RDD_REVIEW": "RDD Engineer review and final sign-off",
+    "RDD_REVIEW": "RDD Project Manager review and final sign-off",
 }
 
 # ---------------------------------------------------------------------------

@@ -63,6 +63,9 @@ from app.agents.graph.nodes.work_permit.work_permit_confirmation_node import wor
 from app.agents.graph.nodes.work_permit.work_permit_payload_builder_node import work_permit_payload_builder_node
 from app.agents.graph.nodes.work_permit.work_permit_api_submission_node import work_permit_api_submission_node
 
+# ── Document upload node (partitions state["documents"] into FM/RDD buckets) ──
+from app.agents.graph.nodes.document_upload_node import document_upload_node
+
 # ── RDD agent nodes (CREATE_SR / FM_REVIEW / RDD_REVIEW workflow phases) ──────
 from app.agents.graph.nodes.handover.handover_entry_node import handover_entry_node
 from app.agents.graph.nodes.handover.fm_review_entry_node import fm_review_entry_node
@@ -209,6 +212,11 @@ def _route_after_registry(state: dict[str, Any]) -> str:
 def _route_after_merge(state: dict[str, Any]) -> str:
     if state.get("selected_lease"):
         return "lease_lookup"
+    # FM_REVIEW and RDD_REVIEW: lease was resolved during CREATE_SR.
+    # Skip re-lookup; an sr_id in backend_refs confirms the SR exists.
+    workflow_stage = state.get("workflow_stage") or ""
+    if workflow_stage in ("FM_REVIEW", "RDD_REVIEW"):
+        return "validation"
     collected = state.get("collected_data") or {}
     if not collected.get("lease_id"):
         return "lease_lookup"
@@ -347,6 +355,7 @@ def build_help_agent_graph():
 
     # ── Node registration ────────────────────────────────────────────────────
     graph.add_node("load_session", load_session_node)
+    graph.add_node("document_upload", document_upload_node)
     graph.add_node("sr_status_sync", sr_status_sync_node)
     graph.add_node("supervisor", supervisor_node)
     graph.add_node("faq_node", faq_node)
@@ -381,8 +390,12 @@ def build_help_agent_graph():
     graph.add_edge(START, "load_session")
 
     # ── Session / status-sync routing ────────────────────────────────────────
+    # document_upload_node runs immediately after load_session on every turn so
+    # that backend_refs.uploaded_documents and backend_refs.rdd_document_id are
+    # populated from state["documents"] before any payload builder is reached.
+    graph.add_edge("load_session", "document_upload")
     graph.add_conditional_edges(
-        "load_session",
+        "document_upload",
         _route_after_load,
         {
             "sr_status_sync": "sr_status_sync",

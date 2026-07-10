@@ -119,7 +119,7 @@ class TestRouteAfterValidation:
             "unit_codes": ["U-01"], "city": "Riyadh", "contracted_area": 150,
             "title": "handover-LC-001-test", "description": "Test",
             "startDate": "2026-07-01", "endDate": "2026-07-03",
-            "inspection_done_by": "FM_MANAGER", "comments": "",
+            "inspection_done_by": "FM_MANAGER", "notes": "", "comments": "",
         }
 
     def test_blocking_error_routes_to_missing_field(self) -> None:
@@ -142,7 +142,7 @@ class TestRouteAfterValidation:
     def test_fm_review_all_valid_routes_to_fm_confirmation(self) -> None:
         state = _state(
             workflow_stage="FM_REVIEW",
-            collected_data={"unit_readiness_date": "2026-07-10"},
+            collected_data={"unit_readiness_date": "2026-07-10", "comments": ""},
             validation_errors=[],
         )
         result = _route_after_validation(state)
@@ -152,9 +152,12 @@ class TestRouteAfterValidation:
         state = _state(
             workflow_stage="RDD_REVIEW",
             collected_data={
-                "guideLineLink": "http://link", "actual_handover_date": "2026-07-15",
-                "fitout_start_date": "2026-07-16", "fitout_end_date": "2026-07-20",
-                "trading_date": "2026-07-25",
+                "guideLineLink": "http://link",
+                "document_status": "APPROVED",
+                "actual_handover_date": "2026-07-15",
+                "fitout_start_date": "2026-07-16",
+                "fitout_end_date": "2026-07-20",
+                "comments": "",
             },
             validation_errors=[],
         )

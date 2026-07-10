@@ -115,6 +115,8 @@ class ChatStatePayload(BaseModel):
     workflow_stage: str | None = None
     missing_fields: list[str] = Field(default_factory=list)
     ready_to_submit: bool = False
+    rdd_status: str | None = None
+    fm_status: str | None = None
 
 
 class ServiceRequestChatResponse(BaseModel):
@@ -180,8 +182,9 @@ async def post_service_request_chat(
     auth: AuthContext = Depends(get_auth_context),
 ) -> ServiceRequestChatResponse:
     """Process one chat turn for the service-request workflow."""
-    # Validate: empty message is only allowed when sr_id is present (FM/DD opening existing SR)
-    if not body.message and not body.sr_id:
+    # Validate: empty message is only allowed when sr_id is present (FM/DD opening an existing SR)
+    # or when an explicit action is provided (FM/DD clicking a button without typing a message).
+    if not body.message and not body.sr_id and not body.action:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="Either 'message' or 'sr_id' must be provided.",
@@ -237,6 +240,8 @@ async def post_service_request_chat(
             workflow_stage=result.state.workflow_stage,
             missing_fields=result.state.missing_fields,
             ready_to_submit=result.state.ready_to_submit,
+            rdd_status=result.state.rdd_status,
+            fm_status=result.state.fm_status,
         ),
         trace_id=str(result.trace_id) if result.trace_id else None,
     )

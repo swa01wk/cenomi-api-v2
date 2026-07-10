@@ -144,7 +144,8 @@ def _build_rdd_config() -> WorkflowConfig:
             }
         ),
         # "expected_handover_date" is auto-computed from unit_readiness_date + 7 days
-        auto_generated_fields=frozenset({"title", "expected_handover_date"}),
+        # "trading_date" is auto-computed from fitout_end_date + 8 days
+        auto_generated_fields=frozenset({"title", "expected_handover_date", "trading_date"}),
         lease_trigger_fields=("lease_code", "lease_brand_mall"),
         action_intents=frozenset(
             {

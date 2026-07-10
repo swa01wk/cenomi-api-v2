@@ -61,7 +61,7 @@ async def fm_payload_builder_node(state: ServiceRequestState) -> dict[str, Any]:
 
     try:
         if fm_action == "approve":
-            comment: str = collected_data.get("fm_comment", "")
+            comment: str = collected_data.get("comments", "")
             payload = build_fm_approve_payload(collected_data, backend_refs, comment)
         else:
             payload = build_fm_review_payload(collected_data, backend_refs)

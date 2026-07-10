@@ -1,0 +1,57 @@
+RDD Handover Meeting Report — Sample Test Document
+===================================================
+Document Type: DR_SR_HANDOVER_REPORT
+Use during: Phase 3 — RDD_REVIEW (upload as "Handover Meeting Report")
+
+Service Request ID: [to be filled at time of testing]
+Property:           Riyadh Park
+Unit:               RP-E2E-01
+Tenant:             Zara
+Lease Code:         LC-E2E-001
+
+Meeting Details
+---------------
+Date of Handover Meeting: 2026-07-15
+Location:                 Riyadh Park — Management Office, Level 1
+Duration:                 60 minutes
+
+Attendees:
+  - RDD Project Manager (Chair)
+  - FM Manager
+  - Tenant Representative (Zara Operations Manager)
+  - Property Leasing Officer
+
+Handover Dates
+--------------
+Actual Handover Date:    2026-07-15
+Fitout Start Date:       2026-07-16
+Fitout End Date:         2026-07-22
+Trading Start Date:      2026-07-30  (auto-calculated: fitout end + 8 days)
+
+Document Status: APPROVED
+
+Guidelines Reference: https://cenomi.com/guidelines/handover-2026
+
+Summary of Meeting
+------------------
+The formal handover of unit RP-E2E-01 at Riyadh Park was conducted on 2026-07-15.
+The FM Manager presented the completed FM checklist and site survey.
+The tenant representative acknowledged receipt of the unit.
+
+Key Points:
+1. Unit was handed over in move-in ready condition.
+2. All FM checklist items verified and signed off.
+3. Fitout works approved to commence on 2026-07-16.
+4. Trading commencement scheduled for 2026-07-30 pending fitout completion.
+5. Tenant to submit fitout drawings for approval before works begin.
+
+Outstanding Items: None
+
+Resolution:
+The handover meeting concluded successfully. All parties are in agreement on
+the handover dates and conditions. The service request is approved for completion.
+
+Signed:
+  RDD Project Manager: [Signature] — 2026-07-15
+  FM Manager:          [Signature] — 2026-07-15
+  Tenant Rep:          [Signature] — 2026-07-15

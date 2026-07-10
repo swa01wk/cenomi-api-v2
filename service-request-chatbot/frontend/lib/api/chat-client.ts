@@ -66,5 +66,7 @@ export async function postServiceRequestChat(
     missingFields: (state.missing_fields as string[]) ?? [],
     readyToSubmit: (state.ready_to_submit as boolean) ?? false,
     faqSources: (data.faq_sources as Array<{ source_type: string; title: string }>) ?? [],
+    rddStatus: (state.rdd_status as string | null) ?? null,
+    fmStatus: (state.fm_status as string | null) ?? null,
   };
 }

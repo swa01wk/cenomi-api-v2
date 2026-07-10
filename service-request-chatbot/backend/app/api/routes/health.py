@@ -6,6 +6,7 @@ import structlog
 from fastapi import APIRouter
 from sqlalchemy import text
 
+from app.core.config import settings
 from app.core.redis import get_redis
 from app.db.session import get_db_session
 
@@ -63,3 +64,23 @@ async def ready() -> dict[str, object]:
 
     payload = {"status": "ready" if all_ok else "degraded", "checks": checks}
     return JSONResponse(content=payload, status_code=200 if all_ok else 503)
+
+
+@router.post(
+    "/dev/mock/reset",
+    summary="Reset mock SR state (dev only)",
+    description=(
+        "Clears the in-memory mock SR state store so the next lifecycle test "
+        "starts fresh.  Only works when SERVICE_REQUEST_API_BASE_URL is unset "
+        "(mock mode).  Returns 404 in production."
+    ),
+)
+async def reset_mock_state() -> dict[str, str]:
+    if settings.service_request_api_base_url:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="Not available in production mode")
+
+    from app.agents.services.service_request_api_service import reset_mock_sr_state
+    reset_mock_sr_state()
+    log.info("dev.mock.reset", action="mock SR state cleared")
+    return {"status": "ok", "message": "Mock SR state cleared"}

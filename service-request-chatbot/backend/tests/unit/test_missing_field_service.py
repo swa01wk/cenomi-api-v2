@@ -119,14 +119,16 @@ class TestHandoverFieldQuestions:
         "startDate",
         "endDate",
         "inspection_done_by",
-        "comments",
+        # "comments" intentionally removed: the bot now asks for "notes" instead
+        # (notes and comments are synonymous; removed to avoid two identical optional turns).
+        "notes",
         "unit_readiness_date",
         # expected_handover_date is auto-computed; removed from questions
         "guideLineLink",
         "actual_handover_date",
         "fitout_start_date",
         "fitout_end_date",
-        "trading_date",
+        # trading_date intentionally omitted — auto-computed as fitout_end_date + 8 days
     }
 
     def test_all_expected_fields_present(self) -> None:

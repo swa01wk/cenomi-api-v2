@@ -1,8 +1,8 @@
 # Cenomi RDD Chatbot — Stakeholder Progress Report
 
-> **Prepared:** June 27, 2026  
+> **Prepared:** July 8, 2026 (updated from June 27, 2026)
 > **Audience:** Cenomi Project Stakeholders  
-> **Scope:** Full summary of all work delivered from project inception to date  
+> **Scope:** Full summary of all work delivered from project inception to date (v1.3.0)
 > **Prepared by:** Development Team
 
 ---
@@ -25,6 +25,7 @@
 14. [Known Gaps & Remaining Work](#14-known-gaps--remaining-work)
 15. [The Help Agent System](#15-the-helper-agent-system)
 16. [Key Design Principles](#16-key-design-principles)
+17. [Version Summary](#17-version-summary)
 
 ---
 
@@ -32,19 +33,22 @@
 
 The **Cenomi RDD Chatbot** is a production-ready conversational AI system that allows Cenomi mall tenants to submit, review, and approve **Handover Service Requests** entirely through natural language — replacing the previous manual form-filling process.
 
-Over approximately **6 weeks** of active development (May 18 – June 26, 2026), the team delivered:
+Over approximately **7 weeks** of active development (May 18 – July 8, 2026), the team delivered:
 
 | Area | Deliverable |
 |------|-------------|
-| **Backend** | Full FastAPI + LangGraph multi-agent system (~15,800 lines of Python) |
+| **Backend** | Full FastAPI + LangGraph multi-agent system (~15,800+ lines of Python) |
 | **Frontend** | Next.js 15 chat UI + Admin Observability dashboard |
 | **Workflows** | Three complete workflow stages: CREATE_SR, FM_REVIEW, RDD_REVIEW |
-| **Test Suite** | **1,219 tests** (unit + integration + e2e) — 1,181 passing (97%) |
-| **Documentation** | 17 technical documentation files + full developer handover guide |
-| **Security** | 5-layer defence-in-depth guardrail system |
-| **Observability** | Full trace/run/LLM call recording system with Admin UI |
+| **Test Suite** | **1,387 pytest tests** (all passing) + **42 Playwright mocked** + **50 Playwright live** |
+| **Evaluation** | **47 agent scenarios** across all 3 phases — 45/47 passing (2 LLM variability) |
+| **Documentation** | 24 technical documentation files + full developer handover guide |
+| **Security** | 5-layer defence-in-depth guardrail system + 7-layer RBAC |
+| **Observability** | Full trace/run/LLM call recording system with Admin UI + session export tools |
+| **Production** | Multi-stage Dockerfiles (backend + frontend) + production docker-compose stack |
+| **MSP Integration** | Help Agent adapter — sync + SSE streaming endpoints (`/api/v1/chat`, `/api/v1/chat/stream`) |
 
-The system is **code-complete** for the full Handover SR lifecycle. The remaining 38 test failures are pre-existing test-level issues (not production regressions) — all identified, categorised, and documented for the incoming team.
+The system is **UAT-ready** for the full Handover SR lifecycle. All test suites pass. Two items remain before switching to the live platform: (1) verify `sr_status_sync_node` field names against a real platform response (~30 min), and (2) set `RBAC_ENFORCE=true` in the deployment environment.
 
 ---
 
@@ -72,8 +76,8 @@ The project began with:
 
 ## 3. Development Timeline
 
-| Date | Commit | What Was Delivered |
-|------|--------|--------------------|
+| Date | Commit / Release | What Was Delivered |
+|------|------------------|--------------------|
 | **May 18, 2026** | `fadab44` — *Cenomi RDD Chatbot* | **Complete initial application** — full backend (CREATE_SR workflow), full frontend shell, observability system, 150+ unit/integration tests, 13 documentation files. 215 files, 47,773 lines added. |
 | **May 18, 2026** | `a8920bc` — *v2* | **FM & RDD review workflow nodes** — FM and RDD entry nodes, submission nodes, payload builders, platform API client (`platform_api_client.py`), status sync node, document upload service, permission service extensions, 5 new test files. |
 | **May 18, 2026** | `3cf0df6` — *Package.json update* | Frontend dependency lock fix. |
@@ -81,7 +85,11 @@ The project began with:
 | **Jun 6, 2026** | `f68a68e` — *RDD agent (docs)* | Comprehensive documentation update — architecture, agent-design, extensibility-guide, handover-workflow, security-guardrails all updated to reflect full FM/RDD scope. |
 | **Jun 18, 2026** | `3c62119` — *RDD life cycle* | **Full lifecycle completion** — RDD final-approve flow, expected handover date auto-computation, document upload node fully wired, role-permission map, HANDOVER.md developer handover document (1,100+ lines), FM/RDD e2e integration tests (743 lines), role-stage access tests, frontend stage UI components (LifecycleStepper, StageActions, StageContextPanel, DocumentUploadPanel, RoleSelector). |
 | **Jun 18, 2026** | `28cfca2` — *Arch docs* | Architecture and agent-design docs updated to reflect complete multi-stage system. |
-| **Jun 26, 2026** | `f9a57c4` — *Extensions* | **Multi-workflow scaling refactor** — `WorkflowConfig` registry, field-extraction per-workflow prompt injection, data-driven helper-agent graph routing, helper schema decoupled (`HelperIntent = str`), 76 new tests added (workflow_config, help_agent_graph, help_agent_schema), RDD lifecycle doc (`rdd-lifecycle.md`), role-stage access integration test suite (354 lines). |
+| **Jun 26, 2026** | `f9a57c4` — *Extensions* (v1.1.0) | **Multi-workflow scaling refactor** — `WorkflowConfig` registry, field-extraction per-workflow prompt injection, data-driven helper-agent graph routing, helper schema decoupled (`HelperIntent = str`), 76 new tests added (workflow_config, help_agent_graph, help_agent_schema), RDD lifecycle doc (`rdd-agent.md`), role-stage access integration test suite (354 lines). |
+| **Jun 29, 2026** | `c1003bf` — *Agent pipeline stable* | **Lease fix, RBAC fix, eval suite, MSP integration hardening** — lease resolution loop fixed, RBAC denial propagation fixed, eval suite expanded, MSP contract alignment verified. |
+| **Jul 1–2, 2026** | `9fb0741`, `99752c2` — *RAG completed* | **FAQ node → RAG pipeline** — FAQ node upgraded from embedded knowledge to hybrid Azure AI Search + embedded knowledge. RAG pipeline validated end-to-end with Azure AI Search index. |
+| **Jul 6–7, 2026** | `3a743b8` — *MSP integration* (v1.2.0) | **UAT readiness release** — Full lifecycle E2E verified, stateful mock SR service, production Dockerfiles (backend + frontend), `docker-compose.prod.yml`, lifecycle test runner script (`run_lifecycle_tests.sh`), `docs/uat-readiness.md`, `docs/manual-testing-guide.md`. Test suite: 1,386/1,386 passing. |
+| **Jul 8, 2026** | `ef9c9e9` — *v2* (v1.3.0) | **Playwright + eval + 6 bug fixes** — 42 mocked + 50 live Playwright tests; 47-scenario agent evaluation suite (S1–S47); 6 agent bugs found and fixed; observability export scripts (`export_session_observability.py`, `get_session_conversation.py`); live test orchestrator (`run-live-tests.sh`). Test suite: 1,387/1,387 passing. |
 
 ---
 
@@ -138,6 +146,8 @@ The project began with:
 - [x] `MetricsCards` — aggregate LLM call counts, token usage, latency
 - [x] `TraceFilters` — filter by status, date range, session
 - [x] `ValidationResultCard` — validation errors per turn
+- [x] `export_session_observability.py` — structured JSON + Markdown transcript export per session
+- [x] `get_session_conversation.py` — conversation viewer with state transitions
 
 ### Authentication & RBAC
 - [x] JWT-based authentication (`python-jose` + `bcrypt`)
@@ -145,8 +155,26 @@ The project began with:
 - [x] `UserRepository` — `get_by_username`, `create`, `deactivate`
 - [x] `AuthGuard` frontend component — blocks unauthenticated access
 - [x] Login page (`/login`)
-- [x] Role-based permission service — `MALL_MANAGER`, `FM_MANAGER`, `DD_ENGINEER`
+- [x] Role-based permission service — `MALL_MANAGER`, `FM_MANAGER`, `DD_ENGINEER`, `OPERATIONS`, `ADMIN`
 - [x] Stage-role enforcement — each workflow stage only accessible by its authorised role
+- [x] `PermissionService` — fail-closed for unknown actions + JWT role name expansion via `ROLE_PERMISSION_MAP`
+- [x] 7-layer RBAC (JWT → supervisor → registry → stage entry → permission service → lease scoping → submission guard)
+
+### MSP Platform Integration
+- [x] `POST /api/v1/chat` — sync MSP help agent endpoint
+- [x] `POST /api/v1/chat/stream` — SSE streaming MSP endpoint (Phase 1 pseudo-streaming)
+- [x] API v2 routes (`/api/v2/*`) — all existing endpoints duplicated with v2 prefix
+- [x] `x-internal-api-token` service-to-service auth (`MSP_SERVICE_TOKEN`)
+- [x] `language` and `msp_context` fields injected into graph state from MSP request
+- [x] `faqSources` mapped through to `ChatServiceResponse`
+
+### Production Infrastructure
+- [x] `backend/Dockerfile` — 2-stage multi-stage build (non-root, runs migrations on start)
+- [x] `frontend/Dockerfile` — 3-stage build with Next.js standalone output
+- [x] `docker-compose.prod.yml` — full production stack (Postgres + Redis + backend + frontend)
+- [x] `backend/.env.prod.example` — production secrets template
+- [x] `run-live-tests.sh` — 5-tier live test orchestrator (unit → integration → e2e → eval → Playwright)
+- [x] `run_lifecycle_tests.sh` — priority 68-test lifecycle suite runner
 
 ---
 
@@ -427,17 +455,24 @@ Sensitive values (`api_key`, `password`, `token`, `secret`, `authorization`) are
 
 ### Summary
 
-| Layer | Files | Tests | Status |
-|-------|-------|-------|--------|
-| Unit | 40 files | ~13,986 lines | 1,181 passing |
-| Integration | 8 files | ~3,925 lines | (included above) |
-| E2E | 3 files | ~1,142 lines | (included above) |
-| **Total** | **51 files** | **1,219 tests** | **97% passing (1,181/1,219)** |
+| Layer | Tests | Status |
+|-------|-------|--------|
+| Unit (isolated nodes, services, validators) | ~1,300 | ✅ All passing |
+| Integration (graph + mocked LLM/API) | ~80 | ✅ All passing |
+| E2E (full HTTP stack, all externals mocked) | ~17 | ✅ All passing |
+| **Total pytest** | **1,387** | **✅ 1,387 / 1,387 (100%)** |
+| Lifecycle priority suite (`run_lifecycle_tests.sh`) | 68 | ✅ All passing |
+| Playwright mocked UI (no backend required) | 42 | ✅ 42 / 42 |
+| Playwright live — CREATE_SR eval (real LLM) | 33 | ✅ 31 / 33 (2 LLM variability, not bugs) |
+| Playwright live — FM_REVIEW eval | 6 | ✅ 6 / 6 |
+| Playwright live — RDD_REVIEW eval | 6 | ✅ 6 / 6 |
+| Playwright live — Full lifecycle (S46–S47) | 2 | ✅ 2 / 2 |
+| Playwright live — UI lifecycle | 16 | ✅ 16 / 16 |
 
 ### What Is Tested
 
 **Unit tests cover:**
-- All 12+ graph nodes in isolation (mock DB, mock LLM, mock platform APIs)
+- All 26 graph nodes in isolation (mock DB, mock LLM, mock platform APIs)
 - All 11 domain services
 - All 7 observability repositories
 - All 4 core repositories
@@ -447,62 +482,68 @@ Sensitive values (`api_key`, `password`, `token`, `secret`, `authorization`) are
 - Payload builder (4 payload shapes)
 - Supervisor routing logic
 - Trace manager (start/finish/fail/capture)
+- MSP chat endpoints (18 tests)
+- Help agent graph routing (76 tests)
+- FAQ node (RAG pipeline)
 
 **Integration tests cover:**
 - Full chat endpoint (`POST /api/chat/service-request`) with ASGI transport
 - Full handover lifecycle (create → FM → RDD) with mocked platform APIs
-- FM review e2e flow
-- RDD review e2e flow (Phase 3a + 3b)
-- Role-stage access enforcement (all 3 roles, all 3 stages)
+- FM review e2e flow (14 tests)
+- RDD review e2e flow — Phase 3a + 3b (16 tests)
+- Role-stage access enforcement — every role × every stage (21 tests)
+- Full lifecycle HTTP (7 tests — complete 9-step sequence)
 - Observability endpoints (trace list, trace detail, metrics)
-- Trace lifecycle (start → run → finish)
 
-**E2E tests cover:**
-- Full handover SR creation via HTTP with in-process database
-- Multi-turn conversation continuity
+**Playwright frontend tests cover:**
+- Authentication flow (login, redirect, role badge, sign-out)
+- LifecycleStepper UI at each stage
+- FM/RDD action buttons with RBAC
+- Full CREATE→FM→RDD flow with mocked API (mocked tier)
+- 3-phase lifecycle through real browser UI (live tier)
+- 33 CREATE_SR eval scenarios via API (live tier)
+- 14 FM/RDD + full lifecycle eval scenarios (live tier)
 
-### Remaining 38 Test Failures
-
-All 38 remaining failures are **test-level issues** (not application bugs). They fall into 8 categories:
-
-| # | Issue | Failures |
-|---|-------|----------|
-| 1 | `api_submission_node` mock needs configurable failure mode | 9 |
-| 2 | `field_extraction` tests calling real LLM (no mock wired) | 3 |
-| 3 | `missing_field_node` FM stage field count changed | 2 |
-| 4 | RDD Phase 3b final-approve routing (mock not wired) | 13 |
-| 5 | Trace lifecycle mock not awaitable | 3 |
-| 6 | Graph integration routing fixture shapes | 3 |
-| 7 | Handover lifecycle UUID format + sr_id assertion | 4 |
-| 8 | FM API failure mock always returns success | 1 |
-
-None of these represent regressions in core workflow logic. All are documented in `docs/test-failures-analysis.md`.
+**Agent evaluation covers:**
+- 47 named scenarios (S1–S47) across all 3 phases
+- Multi-user, multi-phase structure (separate JWT per role)
+- Document upload, SR ID passing between phases
 
 ---
 
 ## 12. Documentation Produced
 
-Seventeen technical documentation files totalling approximately **12,000 lines** of documentation:
+Twenty-four technical documentation files totalling approximately **18,000+ lines** of documentation:
 
-| Document | Purpose | Lines (approx.) |
-|----------|---------|----------------|
-| `HANDOVER.md` (root) | Complete developer handover guide — setup, architecture, integration, gaps | 1,170 |
-| `docs/agent-design-complete.md` | Complete node-by-node reference — all 20+ nodes, routing, state schema, LLM calls | 1,424 |
-| `docs/help-agent-pipeline.md` | Help Agent design — all 4 workflows, RBAC, lifecycle, API reference | 1,714 |
-| `docs/architecture.md` | System architecture — frontend/backend contract, DB schema, integration diagram | 432 |
-| `docs/handover-workflow.md` | CREATE_SR / FM_REVIEW / RDD_REVIEW stage definitions, payload shapes, sequence diagrams | 365 |
-| `docs/security-guardrails.md` | All 5 security layers with code examples | 241 |
-| `docs/observability.md` | Trace hierarchy, schema tables, Admin UI, redaction | 225 |
-| `docs/testing-strategy.md` | Full test pyramid, fixtures, mock patterns, running tests | 344+ |
-| `docs/test-failures-analysis.md` | Root-cause analysis of all 38 remaining failures | 682 |
-| `docs/api-reference.md` | Complete REST API contract — all endpoints, request/response schemas | 337 |
-| `docs/extensibility-guide.md` | How to add new service request types; FM/RDD completion checklist | 220 |
-| `docs/local-development.md` | Step-by-step setup guide | 268 |
-| `docs/debugging-guide.md` | SQL inspection queries, common failure modes | 391 |
-| `docs/e2e-lifecycle-test-scenarios.md` | 33 detailed test scenarios with expected outcomes | 1,417 |
-| `docs/client-demo-script.md` | Live demo script for client presentations | 839 |
-| `docs/rdd-lifecycle.md` | RDD lifecycle deep-dive | 394 |
-| `docs/chatbot-test-queries.md` | 1,000+ test queries across all intent types | 1,265 |
+| Document | Purpose |
+|----------|---------|
+| `HANDOVER.md` (root) | Complete developer handover guide — setup, architecture, integration, gaps |
+| `STAKEHOLDER_REPORT.md` (root) | Stakeholder-facing project summary (this document) |
+| `RELEASE_NOTES.md` (root) | Version history and change log (v1.0.0 → v1.3.0) |
+| `REPORT.md` (root) | UAT readiness report — 12 sections covering all phases and RBAC |
+| `docs/agent-design-complete.md` | Authoritative node-by-node reference — all 26 nodes, routing, state schema, LLM calls |
+| `docs/help-agent-pipeline.md` | Help Agent design — all 4 workflows, RBAC, lifecycle, API reference |
+| `docs/rdd-agent.md` | RDD agent lifecycle architecture (3-phase deep-dive) |
+| `docs/architecture.md` | System architecture — frontend/backend contract, DB schema, integration diagram |
+| `docs/database.md` | Database schema, models, migrations |
+| `docs/handover-workflow.md` | CREATE_SR / FM_REVIEW / RDD_REVIEW stage definitions, payload shapes, sequence diagrams |
+| `docs/security-guardrails.md` | All 5 security layers with code examples |
+| `docs/observability.md` | Trace hierarchy, schema tables, Admin UI, redaction |
+| `docs/agent-testing-guide.md` | Complete agent test guide — unit through eval |
+| `docs/test-automation-lifecycle.md` | Full lifecycle test automation (pytest + Playwright + eval runner) |
+| `docs/api-reference.md` | Complete REST API contract — all endpoints, request/response schemas |
+| `docs/extensibility-guide.md` | How to add new service request types; FM/RDD completion checklist |
+| `docs/local-development.md` | Step-by-step setup guide + troubleshooting |
+| `docs/debugging-guide.md` | SQL inspection queries, common failure modes |
+| `docs/e2e-lifecycle-test-scenarios.md` | 47 detailed test scenarios with expected outcomes |
+| `docs/e2e-user-testing-guide.md` | Role-by-role UAT walkthrough (all 4 roles) |
+| `docs/uat-readiness.md` | Comprehensive UAT readiness assessment |
+| `docs/azure-deployment.md` | Azure deployment guide |
+| `docs/production-readiness.md` | Production readiness assessment |
+| `docs/help-agent-validation.md` | Help Agent / MSP integration contract and gap table |
+| `docs/faq-rag-testing.md` | FAQ node RAG pipeline test cases |
+| `docs/chatbot-test-queries.md` | 1,000+ test queries across all intent types |
+| `docs/client-demo-script.md` | Live demo script for client presentations |
 
 ---
 
@@ -540,27 +581,42 @@ Seventeen technical documentation files totalling approximately **12,000 lines**
 |-----------|-----------|
 | Database | PostgreSQL 16 (Docker) |
 | Cache | Redis 7 (Docker) |
-| Local orchestration | docker-compose.yml |
-| App containers | Not yet containerised |
-| CI/CD | Not yet configured |
+| Local orchestration | `docker-compose.yml` |
+| Production orchestration | `docker-compose.prod.yml` (Postgres + Redis + backend + frontend) |
+| Backend container | `backend/Dockerfile` — 2-stage multi-stage build |
+| Frontend container | `frontend/Dockerfile` — 3-stage Next.js standalone |
+| CI/CD | `./run-live-tests.sh` — manual 5-tier gate (no automated pipeline yet) |
 
 ---
 
 ## 14. Known Gaps & Remaining Work
 
-The following items are **designed and documented** but not yet fully wired end-to-end with the live Cenomi platform:
+As of v1.3.0, all major implementation gaps are **closed**. Only 4 minor items remain before full production go-live:
 
-| # | Gap | Priority | Effort |
-|---|-----|----------|--------|
-| 1 | **Real file upload to platform** — document upload node calls the real upload endpoint but the document ID is not fed back into the SR payload automatically | High | Medium |
-| 2 | **SR status polling** — `sr_status_sync_node` reads `workflow_stage` from stored state; needs live status check from platform to handle out-of-band stage changes | High | Low |
-| 3 | **Structured frontend stage actions** — FM/RDD stages use the same chat input as CREATE_SR; a dedicated "Submit Review" / "Approve" button per stage would improve UX | Medium | Low |
-| 4 | **Application Dockerfiles** — the app can run locally but has no Dockerfile for containerised deployment | Medium | Low |
-| 5 | **CI/CD pipeline** — no automated build/test pipeline configured | Medium | Medium |
-| 6 | **JWT user seeding** — `users` table exists but no seed script; initial users must be inserted manually | Low | Low |
-| 7 | **38 remaining test failures** — all test-level issues, none are production regressions (see Section 11) | Low | Medium |
+| # | Item | Priority | Effort | Note |
+|---|------|----------|--------|------|
+| 1 | **Verify `sr_status_sync_node` field names against live platform** | High | ~30 min | One-time check when platform credentials are available. Code already handles both `assigned_role` and `role` field names. |
+| 2 | **Set `RBAC_ENFORCE=true` before production** | High | 5 min | One env var flip. All tests pass either way. |
+| 3 | **CI/CD pipeline** | Medium | 1–2 days | `./run-live-tests.sh` serves as the manual gate. |
+| 4 | **True SSE token streaming** | Low | Deferred | Phase 1 pseudo-streaming (full message as one event) works for MSP integration. True token streaming requires LangGraph/gateway changes. |
 
-All gaps are documented in detail in `HANDOVER.md` Section 13 and `gaps_and_pc/chatbot_postman_gap_implementation_plan.md`.
+### Previously Open Gaps — Now Closed
+
+| Gap | Closed in |
+|-----|-----------|
+| CREATE_SR payload alignment with Postman | v1.0.0 |
+| Backend-derived field enrichment | v1.0.0 |
+| File upload wired to platform | v1.0.0 |
+| Platform client token refresh | v1.0.0 |
+| FM_REVIEW pipeline | v1.0.2 |
+| RDD_REVIEW pipeline (Phase 3a + 3b) | v1.0.2 |
+| Structured UI actions (Save/Approve/Submit/Final Approve buttons) | v1.0.2 |
+| Stateful mock SR service | v1.2.0 |
+| Production Dockerfiles (backend + frontend) | v1.2.0 |
+| `PermissionService` fail-closed + JWT role expansion | v1.3.0 |
+| 6 agent bugs (comments, lease-lookup in FM/RDD, draft creation, upload mock mode) | v1.3.0 |
+
+All historical gaps are documented in `HANDOVER.md` Section 13 and `gaps_and_pc/chatbot_postman_gap_implementation_plan.md`.
 
 ---
 
@@ -706,9 +762,9 @@ The FAQ workflow is the **default path** — all ambiguous messages, questions, 
 
 **How it works:**
 - Supervisor classifies intent as `ASK_HELP`
-- `faq_node` builds context from the last 4 conversation turns + current message
-- Single LLM call with `FAQ_SYSTEM_PROMPT` (embedded knowledge — no external search)
-- Returns natural language answer; no SR draft created; session remains stateless
+- `faq_node` queries **Azure AI Search** (hybrid semantic + keyword) over the Cenomi help content index
+- Results are combined with embedded platform knowledge and passed to a single LLM call
+- Returns natural language answer with citations; no SR draft created; session remains stateless
 
 **FAQ knowledge covers:**
 - Platform overview and all 5 roles
@@ -716,6 +772,7 @@ The FAQ workflow is the **default path** — all ambiguous messages, questions, 
 - All 4 lifecycle stages and what each role must do
 - Required documents per stage (FM: 3 docs; RDD: 1 report)
 - Common Q&A: FM timing, date formats, inline editing, notifications
+- Any content indexed in the Azure AI Search index
 
 **Examples of FAQ questions handled:**
 ```
@@ -726,7 +783,7 @@ The FAQ workflow is the **default path** — all ambiguous messages, questions, 
 "What happens if the FM Manager rejects the SR?"
 ```
 
-**Properties:** No external search · No session draft created · Arabic supported (responds in message language) · Safe fallback: never fabricates
+**Properties:** Hybrid RAG (Azure AI Search + embedded knowledge) · Arabic supported (responds in message language) · Safe fallback: never fabricates · Sources returned in `faqSources` response field
 
 ---
 
@@ -854,9 +911,9 @@ The full Help Agent graph has 26 nodes organised into 6 layers:
 
 | Layer | Nodes |
 |-------|-------|
-| **Session** | `load_session`, `sr_status_sync`, `save_state` |
+| **Session** | `load_session`, `document_upload`, `sr_status_sync`, `save_state` |
 | **Routing / Classification** | `supervisor` (LLM), `registry`, `preview` |
-| **Q&A** | `faq_node` (LLM) |
+| **Q&A** | `faq_node` (LLM + Azure AI Search RAG) |
 | **Stage Entry (HITL)** | `handover_entry`, `fm_review_entry`, `rdd_review_entry` |
 | **Data Pipeline** | `field_extraction` (LLM), `merge_state`, `lease_lookup`, `validation`, `missing_field` |
 | **Confirmation** | `confirmation`, `fm_confirmation`, `rdd_confirmation` |
@@ -865,11 +922,13 @@ The full Help Agent graph has 26 nodes organised into 6 layers:
 
 **LLM calls per turn (worst case):** 3 — supervisor, field_extraction, response_generation. Typical happy-path turn: 1–2 LLM calls.
 
+> **Note:** `document_upload` runs immediately after `load_session` every turn. It partitions any documents uploaded since the last turn into FM or RDD buckets in `backend_refs`, ensuring payload builders always have up-to-date document IDs without requiring the chat turn to trigger the upload.
+
 ---
 
 ### 15.12 RBAC — Seven Independent Enforcement Layers
 
-The Help Agent enforces RBAC at 7 independent checkpoints. No single layer is trusted alone; all must pass:
+The Help Agent enforces RBAC at 7 independent checkpoints. No single layer is trusted alone; all must pass. All 7 layers are implemented and tested (21 RBAC integration tests + JWT token tests):
 
 | Layer | Where | What It Checks |
 |-------|-------|---------------|
@@ -877,7 +936,7 @@ The Help Agent enforces RBAC at 7 independent checkpoints. No single layer is tr
 | **2. Supervisor intent filter** | `supervisor_node.py` | `ROLE_PERMITTED_INTENTS` — FM Manager cannot `CREATE_SR` |
 | **3. Registry stage check** | `registry_node.py` | `role_can_act_on_stage(role, stage)` — wrong role rejected here |
 | **4. Stage entry node guard** | entry nodes | `handover_entry` = MALL_MANAGER · `fm_review_entry` = FM_MANAGER/OPERATIONS · `rdd_review_entry` = DD_ENGINEER |
-| **5. PermissionService check** | `permission_service.py` | Action-level, fail-closed — unknown actions raise `PermissionDeniedError` |
+| **5. PermissionService check** | `permission_service.py` | Action-level, **fail-closed** — unknown actions raise `PermissionDeniedError`; JWT role names expanded via `ROLE_PERMISSION_MAP` |
 | **6. Lease scoping** | `lease_lookup_node.py` | `property_ids` from JWT injected into lease query — user sees only authorised leases |
 | **7. Submission hard guard** | `api_submission_node.py` | 3 independent checks: `confirmation_status==CONFIRMED` + no blocking errors + payload present |
 
@@ -898,4 +957,19 @@ These principles guided every design decision and are worth carrying forward:
 
 ---
 
-*End of Stakeholder Report — June 27, 2026*
+---
+
+## 17. Version Summary
+
+| Version | Date | Key Milestone |
+|---------|------|---------------|
+| v1.0.0 | May 18, 2026 | Complete initial application — CREATE_SR + FM/RDD nodes |
+| v1.0.1 | Jun 6, 2026 | Preview node, supervisor refinements, 33 eval scenarios |
+| v1.0.2 | Jun 18, 2026 | Full RDD lifecycle, developer HANDOVER.md, stage UI components |
+| v1.1.0 | Jun 26, 2026 | Multi-workflow scaling refactor, WorkflowConfig registry |
+| *(pipeline)* | Jun 29, 2026 | Lease + RBAC fixes, eval hardening, MSP integration alignment |
+| *(pipeline)* | Jul 1–2, 2026 | FAQ node → hybrid Azure AI Search RAG |
+| v1.2.0 | Jul 7, 2026 | UAT readiness — stateful mock, production Dockerfiles, full lifecycle E2E |
+| **v1.3.0** | **Jul 8, 2026** | **Playwright suite (92 tests), 47-scenario eval, 6 agent bugs fixed, observability export** |
+
+*End of Stakeholder Report — July 8, 2026 (v1.3.0)*

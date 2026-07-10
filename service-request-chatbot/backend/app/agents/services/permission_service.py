@@ -135,6 +135,15 @@ class PermissionService:
         Raises :class:`PermissionDeniedError` when the required permission is
         absent from ``auth.roles``.
 
+        ``auth.roles`` may contain either:
+        - Permission strings (e.g. ``"CAN_FM_REVIEW_HANDOVER_SR"``) — used in
+          tests and graph nodes that build AuthContext directly.
+        - Role names (e.g. ``"FM_MANAGER"``) — used when the JWT from the login
+          endpoint populates ``auth.roles`` from the ``roles`` JWT claim.
+
+        Both forms are handled: role names are expanded to their permission sets
+        via ``ROLE_PERMISSION_MAP`` before the check.
+
         Unknown actions (not present in ``ACTION_PERMISSION_MAP``) are
         **fail-closed**: an unrecognised action raises ``PermissionDeniedError``
         with ``required_role="UNKNOWN_ACTION"``.  This prevents unclassified
@@ -143,8 +152,17 @@ class PermissionService:
         required = ACTION_PERMISSION_MAP.get(action)
         if required is None:
             raise PermissionDeniedError(action=action, required_role="UNKNOWN_ACTION")
-        if required not in auth.roles:
-            raise PermissionDeniedError(action=action, required_role=required)
+
+        # Fast path: permission string is directly present
+        if required in auth.roles:
+            return
+
+        # Expand role names to permission strings (JWT populates roles by name)
+        for role_name in auth.roles:
+            if required in ROLE_PERMISSION_MAP.get(role_name, frozenset()):
+                return
+
+        raise PermissionDeniedError(action=action, required_role=required)
 
     # ------------------------------------------------------------------
     # Convenience wrappers
