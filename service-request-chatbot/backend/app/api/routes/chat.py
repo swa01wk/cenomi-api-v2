@@ -117,6 +117,7 @@ class ChatStatePayload(BaseModel):
     ready_to_submit: bool = False
     rdd_status: str | None = None
     fm_status: str | None = None
+    sr_id: str | None = None
 
 
 class ServiceRequestChatResponse(BaseModel):
@@ -242,6 +243,7 @@ async def post_service_request_chat(
             ready_to_submit=result.state.ready_to_submit,
             rdd_status=result.state.rdd_status,
             fm_status=result.state.fm_status,
+            sr_id=result.state.sr_id,
         ),
         trace_id=str(result.trace_id) if result.trace_id else None,
     )

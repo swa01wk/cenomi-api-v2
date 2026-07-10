@@ -206,8 +206,8 @@ async def test_first_user_message() -> None:
     Graph path
     ----------
     START → load_session → supervisor → registry → handover_entry →
-    field_extraction → merge_state → lease_lookup (no identifiers) →
-    response_generation → save_state → END
+    field_extraction → merge_state → lease_lookup (browse) → validation →
+    missing_field → response_generation → save_state → END
     """
     with (
         patch(
@@ -226,16 +226,25 @@ async def test_first_user_message() -> None:
             "app.agents.graph.nodes.shared.field_extraction_node.get_default_gateway",
             return_value=MagicMock(),
         ),
+        patch(
+            "app.agents.graph.nodes.shared.response_generation_node.get_default_gateway",
+            return_value=MagicMock(),
+        ),
     ):
         result = await _GRAPH.ainvoke(
             _base_state(user_message="I want to create a handover service request")
         )
 
-    # Supervisor + registry set the active agent
     assert result["active_agent"] == "rdd_agent"
     assert result["intent"] == "CREATE_RDD_SERVICE_REQUEST"
-    # Lease lookup returns WAITING_FOR_USER because no identifiers were provided
+    assert result["workflow_stage"] == "CREATE_SR"
+    assert result.get("missing_fields"), "Expected missing_fields to be populated"
+    deco = result.get("response_decorations") or {}
+    spec = deco.get("suggestions") or {}
+    assert spec.get("kind") == "resource_picker"
+    assert spec.get("resource") == "leases"
     assert result["status"] == "WAITING_FOR_USER"
+    assert result.get("response_ui", {}).get("type") == "text_question"
     assert result.get("response_message"), "Expected a non-empty response_message"
 
 

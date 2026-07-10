@@ -36,6 +36,8 @@ from app.agents.services.lease_lookup_service import (
     _MOCK_RECORDS,
     get_lease_lookup_service,
 )
+from app.core.request_context import reset_current_auth_context, set_current_auth_context
+from app.types.chat import AuthContext
 
 
 # ---------------------------------------------------------------------------
@@ -451,6 +453,56 @@ class TestHttpLeaseLookupServiceSuccess:
         with patch("httpx.AsyncClient", return_value=self._make_client_ctx(resp)):
             result = await svc.lookup(LeaseLookupQuery(lease_code="t0105712"))
         assert len(result.matches) == 1
+
+    @pytest.mark.asyncio
+    async def test_200_nested_data_leases_envelope_parsed(self) -> None:
+        # cenomi-api Success envelope: {"success": true, "data": {"leases": [...]}}
+        body = {"success": True, "data": {"leases": [_UA_RECORD], "reason": "", "count": 1}}
+        resp = _make_http_response(200, body)
+        svc = HttpLeaseLookupService(base_url="http://api.example.com")
+        with patch("httpx.AsyncClient", return_value=self._make_client_ctx(resp)):
+            result = await svc.lookup(LeaseLookupQuery(lease_code="t0105712"))
+        assert len(result.matches) == 1
+        assert result.matches[0].lease_code == "t0105712"
+
+    @pytest.mark.asyncio
+    async def test_bearer_token_sent_as_authorization_header(self) -> None:
+        body = {"success": True, "data": {"leases": [_UA_RECORD]}}
+        resp = _make_http_response(200, body)
+        client = AsyncMock()
+        client.get = AsyncMock(return_value=resp)
+        ctx = MagicMock()
+        ctx.__aenter__ = AsyncMock(return_value=client)
+        ctx.__aexit__ = AsyncMock(return_value=False)
+        svc = HttpLeaseLookupService(base_url="http://api.example.com")
+        auth_token = set_current_auth_context(
+            AuthContext(subject_id="u1", bearer_token="ai.jwt.token")
+        )
+        try:
+            with patch("httpx.AsyncClient", return_value=ctx):
+                result = await svc.lookup(LeaseLookupQuery(lease_code="t0105712"))
+        finally:
+            reset_current_auth_context(auth_token)
+        assert len(result.matches) == 1
+        _, kwargs = client.get.call_args
+        assert kwargs["headers"]["Authorization"] == "Bearer ai.jwt.token"
+        assert result.request_payload["has_authorization"] is True
+
+    @pytest.mark.asyncio
+    async def test_missing_bearer_token_sends_no_authorization_header(self) -> None:
+        body = {"leases": [_UA_RECORD]}
+        resp = _make_http_response(200, body)
+        client = AsyncMock()
+        client.get = AsyncMock(return_value=resp)
+        ctx = MagicMock()
+        ctx.__aenter__ = AsyncMock(return_value=client)
+        ctx.__aexit__ = AsyncMock(return_value=False)
+        svc = HttpLeaseLookupService(base_url="http://api.example.com")
+        with patch("httpx.AsyncClient", return_value=ctx):
+            result = await svc.lookup(LeaseLookupQuery(lease_code="t0105712"))
+        _, kwargs = client.get.call_args
+        assert "Authorization" not in kwargs["headers"]
+        assert result.request_payload["has_authorization"] is False
 
     @pytest.mark.asyncio
     async def test_200_empty_list_returns_no_matches(self) -> None:

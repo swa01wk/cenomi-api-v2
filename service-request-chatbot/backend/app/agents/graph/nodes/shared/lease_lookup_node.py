@@ -34,6 +34,11 @@ from app.agents.services.lease_lookup_service import (
     LeaseLookupQuery,
     get_lease_lookup_service,
 )
+from app.agents.services.resource_picker_decorations import (
+    build_create_lease_picker,
+    should_browse_leases,
+)
+from app.agents.services.review_decorations_service import merge_decorations
 from app.observability.decorators import trace_node
 
 log = structlog.get_logger(__name__)
@@ -193,6 +198,14 @@ async def lease_lookup_node(
 
     if not query.has_identifiers():
         log.info("lease_lookup.no_identifiers")
+        if should_browse_leases(state):
+            return {
+                "status": "IN_PROGRESS",
+                "response_decorations": merge_decorations(
+                    state.get("response_decorations"),
+                    build_create_lease_picker(),
+                ),
+            }
         return {
             "status": "WAITING_FOR_USER",
             "response_message": _NO_LEASE_FIELDS_MESSAGE,

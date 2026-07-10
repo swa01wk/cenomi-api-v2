@@ -197,6 +197,12 @@ class TestBackendProtectedFieldHandling:
         assert result["response_ui"]["field"] != "lease_id"
 
     @pytest.mark.asyncio
+    async def test_does_not_emit_lease_resource_picker(self) -> None:
+        state = _state(workflow_stage="CREATE_SR", collected_data={})
+        result = await missing_field_node(state)
+        assert "response_decorations" not in result
+
+    @pytest.mark.asyncio
     async def test_missing_fields_list_includes_backend_fields(self) -> None:
         """missing_fields list should accurately reflect ALL missing fields including backend ones."""
         state = _state(workflow_stage="CREATE_SR", collected_data={})
@@ -403,6 +409,35 @@ class TestMissingFieldNodeWorkflowConfig:
         # Should not raise even with no active_agent
         result = await missing_field_node(state)
         assert "status" in result
+
+    @pytest.mark.asyncio
+    async def test_rdd_does_not_reask_actual_handover_when_only_docs_blocking(self) -> None:
+        """Document-count errors must not steal the next question from missing fields."""
+        state = _state(
+            workflow_stage="RDD_REVIEW",
+            collected_data={
+                "actual_handover_date": "2026-08-20",
+                # other RDD required fields still missing
+            },
+            validation_errors=[
+                {
+                    "field": "_documents",
+                    "validation_type": "document_count",
+                    "status": "FAILED",
+                    "blocking": True,
+                    "message": "A Handover Report must be uploaded before submitting.",
+                }
+            ],
+        )
+        result = await missing_field_node(state)
+        asked = (result.get("response_ui") or {}).get("field")
+        assert asked != "actual_handover_date"
+        assert asked in {
+            "guideLineLink",
+            "document_status",
+            "fitout_start_date",
+            "fitout_end_date",
+        }
 
     @pytest.mark.asyncio
     async def test_backend_fields_from_config_exclude_correct_fields(self) -> None:

@@ -21,6 +21,8 @@ from app.agents.services.payload_builder_service import (
     PayloadBuilderService,
     _REQUIRED_DATA_KEYS,
     build_create_handover_payload,
+    build_fm_approve_payload,
+    build_fm_review_payload,
 )
 
 
@@ -398,6 +400,80 @@ class TestBuildCreateHandoverPayloadConstants:
     def test_guideline_link_always_empty_string(self) -> None:
         result = build_create_handover_payload(_full_data())
         assert result["payload"]["guideLineLink"] == ""
+
+
+# ===========================================================================
+# TestBuildFmApprovePayload
+# ===========================================================================
+
+
+class TestBuildFmApprovePayload:
+    def _backend_refs(self, **kwargs: Any) -> dict[str, Any]:
+        base = {
+            "sr_id": "11714",
+            "create_payload": {
+                "payload": {
+                    "mall": "Riyadh Park",
+                    "brand": "Nike",
+                    "lease": "LC-001",
+                    "title": "Handover SR",
+                    "tenant_profile_id": "TP-001",
+                    "property_id": "PROP-001",
+                },
+                "lease_id": "LEASE-001",
+            },
+            "uploaded_documents": ["doc-1"],
+            "sr_operations": [{"assigned_role": "FM_MANAGER", "status": "IN_PROGRESS"}],
+        }
+        base.update(kwargs)
+        return base
+
+    def test_inner_current_sr_status_stays_in_process(self) -> None:
+        data = {
+            "unit_readiness_date": "01/07/2026",
+            "expected_handover_date": "02/07/2026",
+        }
+        payload = build_fm_approve_payload(data, self._backend_refs(), comment="ok")
+        assert payload["status"] == "APPROVED"
+        assert payload["payload"]["current_sr_status"] == "IN_PROCESS"
+        assert payload["payload"]["mall"] == "Riyadh Park"
+        assert payload["payload"]["lease"] == "LC-001"
+        assert "lease_code" not in payload
+        assert "lease_id" not in payload
+        assert payload["user_action"] is None
+        assert payload["comment"] == "ok"
+
+    def test_fallback_from_collected_when_create_payload_empty(self) -> None:
+        data = {
+            "mall": "Mall X",
+            "brand": "Brand Y",
+            "lease_code": "T999",
+            "title": "Open existing",
+            "unit_readiness_date": "01/07/2026",
+            "expected_handover_date": "02/07/2026",
+            "tenant_profile_id": 10,
+            "property_id": 20,
+        }
+        refs = {
+            "sr_id": "11714",
+            "create_payload": {},
+            "uploaded_documents": [],
+            "sr_operations": [],
+        }
+        payload = build_fm_approve_payload(data, refs)
+        assert payload["payload"]["mall"] == "Mall X"
+        assert payload["payload"]["lease"] == "T999"
+        assert payload["payload"]["current_sr_status"] == "IN_PROCESS"
+        assert payload["status"] == "APPROVED"
+
+    def test_save_progress_still_includes_lease_top_level(self) -> None:
+        data = {
+            "unit_readiness_date": "01/07/2026",
+            "expected_handover_date": "02/07/2026",
+        }
+        payload = build_fm_review_payload(data, self._backend_refs())
+        assert payload["status"] == "IN_PROCESS"
+        assert payload["lease_code"] == "LC-001"
 
 
 # ===========================================================================

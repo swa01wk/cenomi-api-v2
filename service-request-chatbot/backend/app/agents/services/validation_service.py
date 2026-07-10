@@ -219,23 +219,33 @@ def validate_rdd_date_order(data: dict[str, Any]) -> list[ValidationResult]:
 
         actual_handover_date ≤ fitout_start_date ≤ fitout_end_date ≤ trading_date
 
-    Returns one ValidationResult for each adjacent pair in the chain.
+    Only pairs where **both** dates are present are checked. Incomplete pairs
+    are skipped — missing dates are already covered by required-field
+    validation. Emitting a blocking ``rdd_date_order`` error on a filled
+    earlier date when the later date is still missing caused the bot to
+    re-ask for ``actual_handover_date`` in a loop.
     """
     results: list[ValidationResult] = []
 
     for earlier_field, later_field in _RDD_DATE_CHAIN:
-        earlier_val = _parse_date(data.get(earlier_field), earlier_field)
-        later_val = _parse_date(data.get(later_field), later_field)
+        earlier_raw = data.get(earlier_field)
+        later_raw = data.get(later_field)
+        # Skip until both sides exist; required-field checks handle absences.
+        if earlier_raw in (None, "") or later_raw in (None, ""):
+            continue
+
+        earlier_val = _parse_date(earlier_raw, earlier_field)
+        later_val = _parse_date(later_raw, later_field)
 
         if earlier_val is None or later_val is None:
-            missing = earlier_field if earlier_val is None else later_field
+            bad_field = earlier_field if earlier_val is None else later_field
             results.append(
                 _result(
-                    field=earlier_field,
+                    field=bad_field,
                     validation_type="rdd_date_order",
                     passed=False,
                     message=(
-                        f"Cannot validate RDD date ordering: '{missing}' is missing or unparseable."
+                        f"Cannot validate RDD date ordering: '{bad_field}' is unparseable."
                     ),
                     blocking=True,
                 )

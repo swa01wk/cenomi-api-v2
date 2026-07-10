@@ -149,7 +149,34 @@ async def preview_node(state: ServiceRequestState) -> dict[str, Any]:
     collected_data: dict[str, Any] = state.get("collected_data") or {}
 
     if sr_id:
-        # ── Submitted SR — fetch live data from the platform ──────────────
+        # ── Submitted SR — use synced state when available, else platform GET ──
+        platform_status = backend_refs.get("platform_sr_status")
+        if platform_status is not None:
+            log.info("preview_node.using_synced_state", sr_id=sr_id)
+            fields = _fields_from_collected(collected_data)
+            ops_row = _ops_field(backend_refs.get("sr_operations") or [])
+            if ops_row:
+                fields.append(ops_row)
+            response_ui = {
+                "type": "sr_preview_card",
+                "message": f"Here is your submitted service request (ID: {sr_id}).",
+                "requestType": "Handover Service Request",
+                "srId": sr_id,
+                "status": platform_status or "SUBMITTED",
+                "isSubmitted": True,
+                "fields": fields,
+            }
+            response_message = (
+                f"Show the user the service request (ID: {sr_id}) "
+                f"with status '{platform_status}'. "
+                "The structured card is being shown; give a very short 1-sentence intro."
+            )
+            return {
+                "response_ui": response_ui,
+                "response_message": response_message,
+                "status": "WAITING_FOR_USER",
+            }
+
         log.info("preview_node.fetching_sr", sr_id=sr_id)
         try:
             api_service = get_service_request_api_service()

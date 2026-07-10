@@ -104,6 +104,81 @@ class TestBasicMerge:
 
 
 # ---------------------------------------------------------------------------
+# TestDateYearCoercion
+# ---------------------------------------------------------------------------
+
+
+class TestDateYearCoercion:
+    @pytest.mark.asyncio
+    async def test_bare_date_year_coerced_to_current(self) -> None:
+        """LLM stamping a stale year on a bare date is repaired to current year."""
+        import datetime
+
+        current = datetime.date.today().year
+        state = _state(
+            user_message="10th september",
+            extracted_fields={"fitout_end_date": _ext("2023-09-10")},
+            collected_data={},
+            workflow_stage="RDD_REVIEW",
+        )
+        result = await merge_state_node(state)
+        assert result["collected_data"]["fitout_end_date"] == f"{current}-09-10"
+
+    @pytest.mark.asyncio
+    async def test_explicit_year_respected(self) -> None:
+        """When the user typed a 4-digit year it must not be overridden."""
+        state = _state(
+            user_message="10 September 2023",
+            extracted_fields={"fitout_end_date": _ext("2023-09-10")},
+            collected_data={},
+            workflow_stage="RDD_REVIEW",
+        )
+        result = await merge_state_node(state)
+        assert result["collected_data"]["fitout_end_date"] == "2023-09-10"
+
+    @pytest.mark.asyncio
+    async def test_no_message_no_coercion(self) -> None:
+        """Absent user_message → no coercion (deterministic pipeline tests)."""
+        state = _state(
+            extracted_fields={"startDate": _ext("2025-06-01")},
+            collected_data={},
+        )
+        result = await merge_state_node(state)
+        assert result["collected_data"]["startDate"] == "2025-06-01"
+
+
+# ---------------------------------------------------------------------------
+# TestTradingDateRecompute
+# ---------------------------------------------------------------------------
+
+
+class TestTradingDateRecompute:
+    @pytest.mark.asyncio
+    async def test_trading_date_recomputed_when_fitout_end_changes(self) -> None:
+        """A stale trading_date must refresh when fitout_end_date is corrected."""
+        state = _state(
+            user_message="fitout ends 2026-09-10",
+            extracted_fields={"fitout_end_date": _ext("2026-09-10")},
+            collected_data={"trading_date": "2023-11-01"},
+            workflow_stage="RDD_REVIEW",
+        )
+        result = await merge_state_node(state)
+        # 2026-09-10 + 8 days
+        assert result["collected_data"]["trading_date"] == "2026-09-18"
+
+    @pytest.mark.asyncio
+    async def test_trading_date_set_when_absent(self) -> None:
+        state = _state(
+            user_message="fitout ends 2026-09-10",
+            extracted_fields={"fitout_end_date": _ext("2026-09-10")},
+            collected_data={},
+            workflow_stage="RDD_REVIEW",
+        )
+        result = await merge_state_node(state)
+        assert result["collected_data"]["trading_date"] == "2026-09-18"
+
+
+# ---------------------------------------------------------------------------
 # TestBackendProtectedFields
 # ---------------------------------------------------------------------------
 

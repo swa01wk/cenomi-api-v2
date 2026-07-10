@@ -276,6 +276,8 @@ class TestFMReviewLifecycle:
 
     @pytest.mark.asyncio
     async def test_fm_approve_full_path(self) -> None:
+        from app.agents.services.platform_api_client import ServiceRequestGetResult
+
         state = self._fm_state("approve")
 
         pb_result = await fm_payload_builder_node(state)
@@ -283,11 +285,21 @@ class TestFMReviewLifecycle:
         assert state["backend_refs"]["fm_payload"]["status"] == "APPROVED"
 
         mock_result = _mock_patch_result()
+        mock_get = ServiceRequestGetResult(
+            success=True,
+            sr_id="sr-lifecycle-001",
+            status="PENDING",
+            service_request_operations=[
+                {"assigned_role": "FM_MANAGER", "status": "FINISHED"},
+                {"assigned_role": "DD_ENGINEER", "status": "IN_PROGRESS"},
+            ],
+        )
         with patch(
             "app.agents.graph.nodes.handover.fm_api_submission_node.get_service_request_api_service"
         ) as mock_factory:
             mock_svc = AsyncMock()
             mock_svc.patch_service_request = AsyncMock(return_value=mock_result)
+            mock_svc.get_service_request = AsyncMock(return_value=mock_get)
             mock_factory.return_value = mock_svc
             result = await fm_api_submission_node(state)
 

@@ -19,6 +19,7 @@ Non-responsibilities
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any
 from uuid import UUID
@@ -38,9 +39,24 @@ _TOOL_NAME_SAVE = "service_request_api.fm.patch_save_progress"
 _TOOL_NAME_APPROVE = "service_request_api.fm.patch_approve"
 _TOOL_TYPE = "API"
 
+_FM_ROLES: frozenset[str] = frozenset({"FM_MANAGER", "OPERATIONS"})
+_FM_FINISHED: frozenset[str] = frozenset({"FINISHED", "APPROVED"})
+
 
 def _has_blocking_errors(validation_errors: list[dict[str, Any]]) -> bool:
     return any(e.get("blocking", True) for e in validation_errors)
+
+
+def _fm_operation_finished(operations: list[dict[str, Any]]) -> bool:
+    """True when an FM/OPERATIONS op exists and is FINISHED/APPROVED."""
+    fm_ops = [
+        op
+        for op in operations
+        if (op.get("assigned_role") or op.get("role") or "").upper() in _FM_ROLES
+    ]
+    if not fm_ops:
+        return False
+    return all((op.get("status") or "").upper() in _FM_FINISHED for op in fm_ops)
 
 
 def _to_uuid(value: str | UUID | None) -> UUID | None:
@@ -104,7 +120,7 @@ async def fm_api_submission_node(state: ServiceRequestState) -> dict[str, Any]:
 
     # ── 3. Permission guard ────────────────────────────────────────────────────
     from app.types.chat import AuthContext
-    auth: AuthContext | None = state.get("auth")  # type: ignore[assignment]
+    auth: AuthContext | None = state.get("auth_context")  # type: ignore[assignment]
     if auth is not None:
         try:
             action_name = (
@@ -145,6 +161,12 @@ async def fm_api_submission_node(state: ServiceRequestState) -> dict[str, Any]:
         )
 
     # ── 5. API call ────────────────────────────────────────────────────────────
+    logger.info(
+        "fm_api_submission_node: PATCH payload sr_id=%s fm_action=%s body=%s",
+        sr_id,
+        fm_action,
+        json.dumps(payload, default=str, ensure_ascii=False),
+    )
     svc = get_service_request_api_service()
     result = await svc.patch_service_request(sr_id, payload)
 
@@ -197,7 +219,64 @@ async def fm_api_submission_node(state: ServiceRequestState) -> dict[str, Any]:
             ),
         }
 
-    # ── 8. Success ─────────────────────────────────────────────────────────────
+    # ── 8. Approve: verify FM operation advanced on platform ───────────────────
+    if fm_action == "approve":
+        try:
+            get_result = await svc.get_service_request(sr_id)
+        except Exception as exc:
+            logger.warning(
+                "fm_api_submission_node: post-approve GET failed sr_id=%s error=%s",
+                sr_id,
+                exc,
+                exc_info=True,
+            )
+            return {
+                "backend_refs": backend_refs,
+                "status": "FAILED",
+                "response_message": (
+                    f"FM approve was sent for **{sr_id}**, but I could not verify "
+                    "that the Facility Manager step finished. Please refresh the "
+                    "service request and try again if it is still in FM review."
+                ),
+            }
+
+        operations: list[dict[str, Any]] = list(
+            getattr(get_result, "service_request_operations", None) or []
+        )
+        platform_status = getattr(get_result, "status", None)
+        if getattr(get_result, "error", None) or not getattr(get_result, "success", True):
+            return {
+                "backend_refs": backend_refs,
+                "status": "FAILED",
+                "response_message": (
+                    f"FM approve was sent for **{sr_id}**, but verification failed "
+                    f"({getattr(get_result, 'error', None) or 'GET error'}). "
+                    "Please refresh the service request and confirm the FM step."
+                ),
+            }
+
+        backend_refs["sr_operations"] = operations
+        if platform_status:
+            backend_refs["platform_sr_status"] = platform_status
+
+        if not _fm_operation_finished(operations):
+            logger.error(
+                "fm_api_submission_node: approve PATCH succeeded but FM op not finished "
+                "sr_id=%s operations=%s",
+                sr_id,
+                operations,
+            )
+            return {
+                "backend_refs": backend_refs,
+                "status": "FAILED",
+                "response_message": (
+                    f"The platform accepted the FM approve for **{sr_id}**, but the "
+                    "Facility Manager operation is still in progress. The workflow "
+                    "did not advance — please retry or approve from the portal form."
+                ),
+            }
+
+    # ── 9. Success ─────────────────────────────────────────────────────────────
     backend_refs["fm_status"] = "APPROVED" if fm_action == "approve" else "IN_PROCESS"
 
     # Audit log

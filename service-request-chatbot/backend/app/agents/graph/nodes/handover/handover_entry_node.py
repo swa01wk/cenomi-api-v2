@@ -235,4 +235,7 @@ async def handover_entry_node(state: ServiceRequestState) -> dict[str, Any]:
             ),
         }
 
+    if state.get("active_agent") == "rdd_agent" and not state.get("workflow_stage"):
+        return {"workflow_stage": "CREATE_SR"}
+
     return {}

@@ -103,7 +103,7 @@ async def rdd_api_submission_node(state: ServiceRequestState) -> dict[str, Any]:
 
     # ── 3. Permission guard ────────────────────────────────────────────────────
     from app.types.chat import AuthContext
-    auth: AuthContext | None = state.get("auth")  # type: ignore[assignment]
+    auth: AuthContext | None = state.get("auth_context")  # type: ignore[assignment]
     if auth is not None:
         try:
             _permission_service.check("SUBMIT_RDD_HANDOVER_REPORT", auth)

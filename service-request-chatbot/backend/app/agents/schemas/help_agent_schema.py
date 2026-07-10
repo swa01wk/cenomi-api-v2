@@ -65,10 +65,11 @@ ROLE_PERMITTED_INTENTS: dict[str, frozenset[str]] = {
             "CREATE_WORK_PERMIT_SR",
         }
     ),
-    # Phase 2 actor — can approve / save FM review
+    # Phase 2 actor — FM review: update stage fields, upload docs, approve/save
     "FM_MANAGER": _SR_READ_INTENTS
     | frozenset(
         {
+            "UPDATE_RDD_SERVICE_REQUEST",
             "APPROVE_RDD_SERVICE_REQUEST",
         }
     ),
@@ -76,6 +77,7 @@ ROLE_PERMITTED_INTENTS: dict[str, frozenset[str]] = {
     "OPERATIONS": _SR_READ_INTENTS
     | frozenset(
         {
+            "UPDATE_RDD_SERVICE_REQUEST",
             "APPROVE_RDD_SERVICE_REQUEST",
         }
     ),

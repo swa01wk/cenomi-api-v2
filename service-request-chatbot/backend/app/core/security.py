@@ -41,8 +41,9 @@ def get_auth_context(
             )
         return AuthContext(subject_id="anonymous")
 
+    raw_token = credentials.credentials
     try:
-        payload = decode_access_token(credentials.credentials)
+        payload = decode_access_token(raw_token)
     except JWTError as exc:
         if settings.rbac_enforce:
             raise HTTPException(
@@ -50,7 +51,9 @@ def get_auth_context(
                 detail="Invalid or expired token. Please log in again.",
             ) from exc
         logger.warning("security.invalid_jwt: %s", exc)
-        return AuthContext(subject_id="unauthenticated")
+        # Preserve the raw Bearer so platform lease lookup can still authenticate
+        # when chatbot JWT_SECRET_KEY and platform AI_SESSION_TOKEN_SECRET diverge.
+        return AuthContext(subject_id="unauthenticated", bearer_token=raw_token)
 
     return AuthContext(
         subject_id=str(payload.get("user_id", payload.get("sub", "unknown"))),
@@ -59,6 +62,7 @@ def get_auth_context(
         unique_property_ids=tuple(int(x) for x in payload.get("unique_property_ids", [])),
         mall_names=tuple(payload.get("mall_names", [])),
         is_global_admin=bool(payload.get("is_global_admin", False)),
+        bearer_token=raw_token,
     )
 
 

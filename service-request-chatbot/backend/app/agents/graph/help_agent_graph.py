@@ -48,7 +48,11 @@ from langgraph.graph import END, START, StateGraph
 from app.agents.graph.nodes.shared.load_session_node import load_session_node
 from app.agents.graph.nodes.shared.save_state_node import save_state_node
 # supervisor_node lives at nodes/ root for test-patching compatibility
-from app.agents.graph.nodes.supervisor_node import _user_wants_preview, supervisor_node
+from app.agents.graph.nodes.supervisor_node import (
+    _user_wants_preview,
+    _user_wants_to_switch,
+    supervisor_node,
+)
 from app.agents.graph.nodes.shared.registry_node import registry_node
 from app.agents.graph.nodes.shared.sr_status_sync_node import sr_status_sync_node
 from app.agents.graph.nodes.shared.response_generation_node import response_generation_node
@@ -104,6 +108,38 @@ _SR_ACTION_INTENTS: frozenset[str] = frozenset(
     for intent in cfg.action_intents
 )
 
+# Intents that start a brand-new SR — must not trigger open-existing-SR sync.
+_CREATE_NEW_SR_INTENTS: frozenset[str] = frozenset(
+    {
+        "CREATE_RDD_SERVICE_REQUEST",
+        "CREATE_WORK_PERMIT_SR",
+    }
+)
+
+
+def _should_open_existing_sr(state: dict[str, Any]) -> bool:
+    """Return True when the turn should sync/open an existing platform SR.
+
+    Predicate (not an intent inclusion list):
+      - ``backend_refs.sr_id`` is set
+      - sync was not already attempted this turn (prevents supervisor ↔ sync loop)
+      - user did not send cancel/switch phrase
+      - intent is not a create-new-SR intent
+    """
+    backend_refs = state.get("backend_refs") or {}
+    if not backend_refs.get("sr_id"):
+        return False
+    if backend_refs.get("sync_attempted"):
+        return False
+    user_message = state.get("user_message") or ""
+    if _user_wants_to_switch(user_message):
+        return False
+    intent = state.get("intent") or ""
+    if intent in _CREATE_NEW_SR_INTENTS:
+        return False
+    return True
+
+
 # ---------------------------------------------------------------------------
 # Routing functions
 # ---------------------------------------------------------------------------
@@ -152,7 +188,12 @@ def _route_after_sync(state: dict[str, Any]) -> str:
     if workflow_stage in all_terminal:
         return "supervisor"
 
-    # 4. Fallback: active_agent entry node or supervisor
+    # 4. Fallback: status preview, agent entry, or supervisor (never re-sync)
+    backend_refs = state.get("backend_refs") or {}
+    if backend_refs.get("sync_attempted") and backend_refs.get("sync_error"):
+        return "response_generation"
+    if backend_refs.get("sr_id"):
+        return "preview"
     if agent:
         return _AGENT_ENTRY_NODES.get(agent, "handover_entry")
     return "supervisor"
@@ -162,12 +203,13 @@ def _route_after_supervisor(state: dict[str, Any]) -> str:
     """Route after intent classification.
 
     Priority:
-    1. PREVIEW_SERVICE_REQUEST → preview node.
-    2. WAITING_FOR_USER (LLM/parse failure or RBAC denial set in supervisor_node)
+    1. Open existing SR (sr_id extracted / present) → sr_status_sync (same turn).
+    2. PREVIEW_SERVICE_REQUEST → preview node.
+    3. WAITING_FOR_USER (LLM/parse failure or RBAC denial set in supervisor_node)
        → response_generation.
-    3. CHECK_SERVICE_REQUEST_STATUS → preview node.
-    4. ASK_HELP / UNKNOWN → faq_node.
-    5. SR action intents → registry.
+    4. CHECK_SERVICE_REQUEST_STATUS → preview node (after sync when sr_id set).
+    5. ASK_HELP / UNKNOWN → faq_node.
+    6. SR action intents → registry.
 
     RBAC enforcement is performed inside supervisor_node (not here) so that the
     denial message is correctly propagated through graph state.  This function
@@ -175,6 +217,9 @@ def _route_after_supervisor(state: dict[str, Any]) -> str:
     """
     intent: str = state.get("intent") or "UNKNOWN"
     status: str = state.get("status") or ""
+
+    if _should_open_existing_sr(state):
+        return "sr_status_sync"
 
     # Preview always routes to the dedicated preview node
     if intent == "PREVIEW_SERVICE_REQUEST":
@@ -184,8 +229,8 @@ def _route_after_supervisor(state: dict[str, Any]) -> str:
     if status == "WAITING_FOR_USER":
         return "response_generation"
 
-    # CHECK_SERVICE_REQUEST_STATUS with sr_id → sr_status_sync already ran;
-    # just show the SR via preview path
+    # CHECK_SERVICE_REQUEST_STATUS — preview after sync when sr_id is present;
+    # otherwise preview_node may GET or show draft.
     if intent == "CHECK_SERVICE_REQUEST_STATUS":
         return "preview"
 
@@ -291,6 +336,10 @@ def _route_after_handover_entry(state: dict[str, Any]) -> str:
 def _route_after_fm_entry(state: dict[str, Any]) -> str:
     if state.get("status") == "WAITING_FOR_USER":
         return "response_generation"
+    # Single-turn confirm already set CONFIRMED — skip extraction and go
+    # straight through merge → validation → fm_confirmation → payload builder.
+    if state.get("confirmation_status") == "CONFIRMED":
+        return "merge_state"
     backend_refs = state.get("backend_refs") or {}
     if backend_refs.get("fm_action"):
         return "merge_state"
@@ -411,6 +460,7 @@ def build_help_agent_graph():
             "handover_entry": "handover_entry",
             "fm_review_entry": "fm_review_entry",
             "rdd_review_entry": "rdd_review_entry",
+            "preview": "preview",
             "supervisor": "supervisor",
         },
     )
@@ -420,6 +470,7 @@ def build_help_agent_graph():
         "supervisor",
         _route_after_supervisor,
         {
+            "sr_status_sync": "sr_status_sync",
             "faq_node": "faq_node",
             "preview": "preview",
             "registry": "registry",

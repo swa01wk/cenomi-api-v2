@@ -23,7 +23,10 @@ from app.observability.redaction import redact_payload, strip_cot
 if TYPE_CHECKING:
     pass
 
-_REMOVE_KEYS: frozenset[str] = frozenset({"trace_manager"})
+# ``auth_context`` carries the raw inbound Bearer JWT on a non-serialisable
+# AuthContext dataclass. Drop it entirely so the token never lands in trace
+# storage (repr would otherwise leak it) and serialisation never fails.
+_REMOVE_KEYS: frozenset[str] = frozenset({"trace_manager", "auth_context"})
 
 
 def _is_db_session(value: Any) -> bool:
