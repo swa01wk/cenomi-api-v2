@@ -26,6 +26,7 @@ from uuid import UUID
 
 from app.agents.graph.state import ServiceRequestState
 from app.agents.services.permission_service import PermissionDeniedError, PermissionService
+from app.agents.services.payload_builder_service import snapshot_create_payload_from_platform
 from app.agents.services.service_request_api_service import get_service_request_api_service
 from app.db.repositories.audit_log_repo import AuditLogRepository
 from app.observability.decorators import trace_node
@@ -213,8 +214,10 @@ async def fm_api_submission_node(state: ServiceRequestState) -> dict[str, Any]:
             workflow_version = _workflow_version_from_get(pre_get)
             if pre_get.service_request_operations:
                 backend_refs["sr_operations"] = list(pre_get.service_request_operations)
-            if pre_get.payload and not backend_refs.get("create_payload"):
-                backend_refs["create_payload"] = {"payload": pre_get.payload}
+            if isinstance(pre_get.payload, dict) and pre_get.payload:
+                snapshot_create_payload_from_platform(
+                    backend_refs, pre_get.payload, sr_id=sr_id
+                )
     except Exception:
         logger.warning(
             "fm_api_submission_node: pre-PATCH GET failed sr_id=%s (continuing)",
@@ -356,6 +359,10 @@ async def fm_api_submission_node(state: ServiceRequestState) -> dict[str, Any]:
         backend_refs["sr_operations"] = operations
         if platform_status:
             backend_refs["platform_sr_status"] = platform_status
+        if isinstance(getattr(get_result, "payload", None), dict) and get_result.payload:
+            snapshot_create_payload_from_platform(
+                backend_refs, get_result.payload, sr_id=sr_id
+            )
 
         if not _fm_operation_finished(operations):
             logger.error(
@@ -376,6 +383,11 @@ async def fm_api_submission_node(state: ServiceRequestState) -> dict[str, Any]:
 
     # ── 9. Success ─────────────────────────────────────────────────────────────
     backend_refs["fm_status"] = "APPROVED" if fm_action == "approve" else "IN_PROCESS"
+
+    # Persist the body we just wrote so later stages merge from a fresh snapshot.
+    written_inner = payload.get("payload") if isinstance(payload, dict) else None
+    if isinstance(written_inner, dict) and written_inner:
+        snapshot_create_payload_from_platform(backend_refs, written_inner, sr_id=sr_id)
 
     next_stage: str | None = None
     if fm_action == "approve":
