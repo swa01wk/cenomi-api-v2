@@ -6,6 +6,7 @@ Responsibilities
 - Guard: no blocking validation errors.
 - Guard: FM payload must be present in ``backend_refs["fm_payload"]``.
 - Guard: permission check via PermissionService.
+- Legacy V1 Handover contract only: save → ``IN_PROCESS``, approve → ``APPROVED``.
 - Call ``ServiceRequestAPIService.patch_service_request`` with the payload.
 - Capture observability (redacted payload snapshot, tool-call record).
 - Write audit log event (``sr.fm.progress_saved`` or ``sr.fm.approved``).
@@ -15,6 +16,7 @@ Non-responsibilities
 --------------------
 - MUST NOT call the LLM.
 - MUST NOT build the payload (that is ``fm_payload_builder_node``).
+- MUST NOT send RE_EXAMINE (V2 UPDATE_APPROVE); Handover is legacy-only.
 """
 
 from __future__ import annotations
@@ -68,19 +70,6 @@ def _fm_operation_finished(operations: list[dict[str, Any]]) -> bool:
     has_in_progress = any(_status(op) == "IN_PROGRESS" for op in fm_ops)
     has_terminal = any(_status(op) in _FM_FINISHED for op in fm_ops)
     return has_terminal and not has_in_progress
-
-
-def _workflow_version_from_get(get_result: Any) -> int:
-    """Extract workflow_version from a GET SR result (default 1 = legacy)."""
-    payload = getattr(get_result, "payload", None) or {}
-    raw = payload.get("workflow_version")
-    if raw is None and isinstance(getattr(get_result, "response_payload", None), dict):
-        data = (get_result.response_payload or {}).get("data") or {}
-        raw = data.get("workflow_version")
-    try:
-        return int(raw) if raw is not None else 1
-    except (TypeError, ValueError):
-        return 1
 
 
 def _map_stage_after_fm_approve(operations: list[dict[str, Any]]) -> str | None:
@@ -200,18 +189,13 @@ async def fm_api_submission_node(state: ServiceRequestState) -> dict[str, Any]:
             state=redact(payload),
         )
 
-    # ── 5. API call ────────────────────────────────────────────────────────────
-    # V2 workflows require an UPDATE (RE_EXAMINE) before APPROVE. Without it the
-    # platform may accept the call but leave FM IN_PROGRESS (or record history
-    # while the active op stays pending). Detect version via GET and:
-    #   - save_progress → RE_EXAMINE on v2, IN_PROCESS on v1
-    #   - approve on v2 → RE_EXAMINE first (if needed), then APPROVED
+    # ── 5. API call (legacy V1 Handover contract) ───────────────────────────────
+    # Handover always uses V1: save → IN_PROCESS, approve → APPROVED.
+    # Do not send RE_EXAMINE (that is V2 UPDATE_APPROVE semantics).
     svc = get_service_request_api_service()
-    workflow_version = 1
     try:
         pre_get = await svc.get_service_request(sr_id)
         if pre_get.success:
-            workflow_version = _workflow_version_from_get(pre_get)
             if pre_get.service_request_operations:
                 backend_refs["sr_operations"] = list(pre_get.service_request_operations)
             if isinstance(pre_get.payload, dict) and pre_get.payload:
@@ -224,44 +208,6 @@ async def fm_api_submission_node(state: ServiceRequestState) -> dict[str, Any]:
             sr_id,
             exc_info=True,
         )
-
-    if fm_action == "save_progress" and workflow_version >= 2:
-        payload = dict(payload)
-        payload["status"] = "RE_EXAMINE"
-        inner = dict(payload.get("payload") or {})
-        inner["current_sr_status"] = "IN_PROCESS"
-        payload["payload"] = inner
-        logger.info(
-            "fm_api_submission_node: v2 save → status=RE_EXAMINE sr_id=%s",
-            sr_id,
-        )
-
-    if fm_action == "approve" and workflow_version >= 2:
-        # require_update_before_action: send UPDATE before APPROVE
-        update_payload = dict(payload)
-        update_payload["status"] = "RE_EXAMINE"
-        update_inner = dict(update_payload.get("payload") or {})
-        update_inner["current_sr_status"] = "IN_PROCESS"
-        update_payload["payload"] = update_inner
-        logger.info(
-            "fm_api_submission_node: v2 approve pre-step RE_EXAMINE sr_id=%s",
-            sr_id,
-        )
-        update_result = await svc.patch_service_request(sr_id, update_payload)
-        if update_result.error is not None:
-            logger.warning(
-                "fm_api_submission_node: v2 RE_EXAMINE failed sr_id=%s error=%s",
-                sr_id,
-                update_result.error,
-            )
-            return {
-                "backend_refs": backend_refs,
-                "status": "FAILED",
-                "response_message": (
-                    "I could not save FM progress before approving "
-                    f"(required for this service request). Detail: {update_result.error}"
-                ),
-            }
 
     logger.info(
         "fm_api_submission_node: PATCH payload sr_id=%s fm_action=%s body=%s",

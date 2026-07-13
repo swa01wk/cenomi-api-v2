@@ -423,7 +423,8 @@ class TestRDDApiSubmissionFinalApprove:
         assert "permission" in result["response_message"].lower()
 
     @pytest.mark.asyncio
-    async def test_v2_final_approve_sends_re_examine_then_approved(self) -> None:
+    async def test_final_approve_patches_approved_once_no_re_examine(self) -> None:
+        """Legacy Handover: final approve is a single PATCH APPROVED (no RE_EXAMINE pre-step)."""
         backend_refs = _rdd_backend_refs(
             rdd_action="final_approve",
             rdd_payload={
@@ -432,7 +433,7 @@ class TestRDDApiSubmissionFinalApprove:
             },
         )
         state = _state(backend_refs=backend_refs, auth_context=_dd_engineer_auth())
-        mock_svc = _final_approve_svc(workflow_version=2)
+        mock_svc = _final_approve_svc(workflow_version=1)
 
         with patch(
             "app.agents.graph.nodes.handover.rdd_api_submission_node.get_service_request_api_service",
@@ -441,11 +442,10 @@ class TestRDDApiSubmissionFinalApprove:
             result = await rdd_api_submission_node(state)
 
         assert result["status"] == "COMPLETED"
-        assert mock_svc.patch_service_request.await_count == 2
-        first_body = mock_svc.patch_service_request.await_args_list[0].args[1]
-        second_body = mock_svc.patch_service_request.await_args_list[1].args[1]
-        assert first_body["status"] == "RE_EXAMINE"
-        assert second_body["status"] == "APPROVED"
+        assert mock_svc.patch_service_request.await_count == 1
+        body = mock_svc.patch_service_request.await_args.args[1]
+        assert body["status"] == "APPROVED"
+        mock_svc.submit_report.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_approve_fails_when_rdd_op_still_in_progress(self) -> None:
@@ -471,6 +471,15 @@ class TestRDDApiSubmissionFinalApprove:
 
 
 class TestRDDApiSubmissionPhase3a:
+    def _submit_svc(self) -> AsyncMock:
+        svc = AsyncMock()
+        svc.submit_report = AsyncMock(return_value=_mock_submit_success())
+        svc.patch_service_request = AsyncMock()
+        svc.get_service_request = AsyncMock(
+            return_value=_mock_get_after_rdd_approve(rdd_finished=False)
+        )
+        return svc
+
     @pytest.mark.asyncio
     async def test_submit_success_sets_rdd_status_report_submitted(self) -> None:
         backend_refs = _rdd_backend_refs(
@@ -478,10 +487,11 @@ class TestRDDApiSubmissionPhase3a:
             rdd_payload={"status": "REPORT_SUBMITTED"},
         )
         state = _state(backend_refs=backend_refs)
+        mock_svc = self._submit_svc()
 
         with patch(
             "app.agents.graph.nodes.handover.rdd_api_submission_node.get_service_request_api_service",
-            return_value=AsyncMock(submit_report=AsyncMock(return_value=_mock_submit_success())),
+            return_value=mock_svc,
         ):
             result = await rdd_api_submission_node(state)
 
@@ -499,11 +509,40 @@ class TestRDDApiSubmissionPhase3a:
 
         with patch(
             "app.agents.graph.nodes.handover.rdd_api_submission_node.get_service_request_api_service",
-            return_value=AsyncMock(submit_report=AsyncMock(return_value=_mock_submit_success())),
+            return_value=self._submit_svc(),
         ):
             result = await rdd_api_submission_node(state)
 
         assert result.get("workflow_stage") != "SR_COMPLETED"
+
+    @pytest.mark.asyncio
+    async def test_submit_always_posts_report_never_patches(self) -> None:
+        """Legacy Handover: submit always POST REPORT_SUBMITTED via submit_report."""
+        backend_refs = _rdd_backend_refs(
+            rdd_action="submit",
+            rdd_payload={
+                "status": "REPORT_SUBMITTED",
+                "payload": {"title": "T", "current_sr_status": "IN_PROCESS"},
+            },
+        )
+        backend_refs["user_role"] = "DD_ENGINEER"
+        state = _state(backend_refs=backend_refs, workflow_stage="RDD_REVIEW")
+        mock_svc = self._submit_svc()
+
+        with patch(
+            "app.agents.graph.nodes.handover.rdd_api_submission_node.get_service_request_api_service",
+            return_value=mock_svc,
+        ):
+            result = await rdd_api_submission_node(state)
+
+        assert result["status"] == "SUBMITTED"
+        assert result["backend_refs"]["rdd_status"] == "REPORT_SUBMITTED"
+        mock_svc.submit_report.assert_called_once()
+        mock_svc.patch_service_request.assert_not_called()
+        suggestions = (result.get("response_decorations") or {}).get("suggestions") or {}
+        actions = [o.get("action") for o in suggestions.get("options") or []]
+        assert "approve_rdd_final" in actions
+        assert "Final Approve" in result["response_message"]
 
 
 # ---------------------------------------------------------------------------
@@ -595,6 +634,40 @@ class TestSRStatusSyncRddStatus:
             },
             latency_ms=5,
             status_code=200,
+        )
+        with patch(
+            "app.agents.graph.nodes.shared.sr_status_sync_node.get_service_request_api_service",
+            return_value=AsyncMock(get_service_request=AsyncMock(return_value=mock_result)),
+        ):
+            result = await sr_status_sync_node(state)
+
+        assert "rdd_status" not in result.get("backend_refs", {})
+
+    @pytest.mark.asyncio
+    async def test_in_process_with_report_fields_does_not_infer_rdd_status(self) -> None:
+        """Legacy: only explicit platform REPORT_SUBMITTED/APPROVED sets rdd_status."""
+        from app.agents.services.service_request_api_service import ServiceRequestGetResult
+
+        state = {
+            "session_id": "sess-sync-004",
+            "user_id": "user-001",
+            "trace_manager": None,
+            "trace_id": None,
+            "workflow_stage": "RDD_REVIEW",
+            "backend_refs": {"sr_id": "sr-sync-004"},
+        }
+        mock_result = ServiceRequestGetResult(
+            success=True,
+            sr_id="sr-sync-004",
+            status="IN_PROCESS",
+            service_request_operations=[
+                {"assigned_role": "DD_ENGINEER", "status": "IN_PROGRESS"},
+            ],
+            payload={
+                "guideLineLink": "https://example.com",
+                "actual_handover_date": "25/07/2026",
+                "fitout_start_date": "05/08/2026",
+            },
         )
         with patch(
             "app.agents.graph.nodes.shared.sr_status_sync_node.get_service_request_api_service",

@@ -76,6 +76,7 @@ async def response_generation_node(state: ServiceRequestState) -> dict[str, Any]
         confirmation_status=state.get("confirmation_status"),
         response_ui_type=current_ui.get("type") if current_ui else None,
         conversation_history=conversation_history,
+        asking_field=current_ui.get("field") if current_ui else None,
     )
 
     # ── Call the LLM ────────────────────────────────────────────────────────

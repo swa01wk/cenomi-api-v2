@@ -368,7 +368,7 @@ class TestServiceRequestGraphState:
         # Conversation context
         "conversation_history",
         # Data collection
-        "collected_data", "extracted_fields", "missing_fields",
+        "collected_data", "extracted_fields", "missing_fields", "active_field",
         # Lease
         "lease_matches", "selected_lease",
         # Documents

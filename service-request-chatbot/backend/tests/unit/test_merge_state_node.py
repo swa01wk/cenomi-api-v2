@@ -449,3 +449,64 @@ class TestEdgeCases:
         state = _state(collected_data={"title": "Existing"})
         result = await merge_state_node(state)
         assert result["collected_data"]["title"] == "Existing"
+
+
+# ---------------------------------------------------------------------------
+# TestActiveFieldRemap — bare dates bind to the field the bot asked for
+# ---------------------------------------------------------------------------
+
+
+class TestActiveFieldRemap:
+    @pytest.mark.asyncio
+    async def test_wrong_date_key_remapped_to_active_field(self) -> None:
+        """LLM mapped a bare date to fitout_start; active was actual_handover."""
+        state = _state(
+            active_field="actual_handover_date",
+            user_message="10th august",
+            extracted_fields={"fitout_start_date": _ext("2026-08-10")},
+            collected_data={},
+        )
+        result = await merge_state_node(state)
+        cd = result["collected_data"]
+        assert cd["actual_handover_date"] == "2026-08-10"
+        assert "fitout_start_date" not in cd
+
+    @pytest.mark.asyncio
+    async def test_correct_date_key_not_remapped(self) -> None:
+        state = _state(
+            active_field="fitout_end_date",
+            user_message="20th august",
+            extracted_fields={"fitout_end_date": _ext("2026-08-20")},
+            collected_data={"actual_handover_date": "2026-08-10", "fitout_start_date": "2026-08-15"},
+            workflow_stage="RDD_REVIEW",
+        )
+        result = await merge_state_node(state)
+        assert result["collected_data"]["fitout_end_date"] == "2026-08-20"
+
+    @pytest.mark.asyncio
+    async def test_no_remap_when_multiple_dates_extracted(self) -> None:
+        state = _state(
+            active_field="actual_handover_date",
+            user_message="handover 10 aug fitout start 15 aug",
+            extracted_fields={
+                "fitout_start_date": _ext("2026-08-15"),
+                "fitout_end_date": _ext("2026-08-20"),
+            },
+            collected_data={},
+        )
+        result = await merge_state_node(state)
+        cd = result["collected_data"]
+        assert "actual_handover_date" not in cd
+        assert cd["fitout_start_date"] == "2026-08-15"
+        assert cd["fitout_end_date"] == "2026-08-20"
+
+    @pytest.mark.asyncio
+    async def test_no_remap_without_active_field(self) -> None:
+        state = _state(
+            user_message="10th august",
+            extracted_fields={"fitout_start_date": _ext("2026-08-10")},
+            collected_data={},
+        )
+        result = await merge_state_node(state)
+        assert result["collected_data"]["fitout_start_date"] == "2026-08-10"
+        assert "actual_handover_date" not in result["collected_data"]

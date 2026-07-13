@@ -7,6 +7,7 @@ Responsibilities
     - ``submit_rdd_report`` → set ``backend_refs["rdd_action"] = "submit"``
     - ``cancel_update``     → reset to response_generation
     - ``upload_document``   → short-circuit (handled by upload route)
+- Handle confirm / PENDING text confirmation (same gap FM already fixed).
 - Fall through to shared field_extraction pipeline when no action_override.
 
 Non-responsibilities
@@ -18,6 +19,7 @@ Non-responsibilities
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 import structlog
@@ -29,6 +31,52 @@ log = structlog.get_logger(__name__)
 logger = logging.getLogger(__name__)
 
 _RDD_ALLOWED_ROLES: frozenset[str] = frozenset({"DD_ENGINEER"})
+
+# Text confirm phrases when confirmation_status is PENDING (card shown without
+# a stage-specific confirmAction, or user typed instead of clicking).
+_CONFIRM_PHRASES: frozenset[str] = frozenset(
+    {
+        "yes",
+        "yep",
+        "yeah",
+        "yup",
+        "confirm",
+        "confirmed",
+        "submit",
+        "proceed",
+        "ok",
+        "okay",
+        "go ahead",
+        "looks good",
+        "please submit",
+        "yes please",
+        "yes, please submit",
+    }
+)
+_REJECT_PHRASES: frozenset[str] = frozenset(
+    {
+        "no",
+        "nope",
+        "cancel",
+        "change",
+        "edit",
+        "modify",
+        "wait",
+        "not yet",
+        "don't submit",
+        "do not submit",
+    }
+)
+
+
+def _contains_phrase(message: str, phrases: frozenset[str]) -> bool:
+    text = (message or "").strip().lower()
+    if not text:
+        return False
+    for phrase in phrases:
+        if phrase in text:
+            return True
+    return bool(re.fullmatch(r"(yes|y|ok|okay)[.!]?", text))
 
 
 @trace_node("rdd_review_entry", "AGENT")
@@ -49,6 +97,8 @@ async def rdd_review_entry_node(state: ServiceRequestState) -> dict[str, Any]:
     action_override: str | None = state.get("action_override")
     backend_refs: dict[str, Any] = dict(state.get("backend_refs") or {})
     user_role: str | None = backend_refs.get("user_role")
+    confirmation_status: str | None = state.get("confirmation_status")
+    user_message: str = state.get("user_message") or ""
 
     # ── 0. Role guard ──────────────────────────────────────────────────────
     if user_role and user_role.upper() not in _RDD_ALLOWED_ROLES:
@@ -86,6 +136,13 @@ async def rdd_review_entry_node(state: ServiceRequestState) -> dict[str, Any]:
         backend_refs["rdd_action"] = "final_approve"
         return {"backend_refs": backend_refs, "confirmation_status": "CONFIRMED"}
 
+    # ConfirmationCard falls back to action=confirm when confirmAction missing.
+    # Treat that as RDD report submit so Confirm & Submit works.
+    if action_override == "confirm":
+        log.info("rdd_review_entry.action_confirm_generic")
+        backend_refs["rdd_action"] = backend_refs.get("rdd_action") or "submit"
+        return {"backend_refs": backend_refs, "confirmation_status": "CONFIRMED"}
+
     if action_override in ("cancel", "cancel_rdd"):
         log.info("rdd_review_entry.action_cancel")
         return {
@@ -108,5 +165,25 @@ async def rdd_review_entry_node(state: ServiceRequestState) -> dict[str, Any]:
             "response_message": "Please use the upload interface to attach the RDD handover report.",
         }
 
-    # ── 2. No action override — fall through to field_extraction ──────────
+    # ── 2. Text confirmation while card is PENDING ─────────────────────────
+    if confirmation_status == "PENDING":
+        if _contains_phrase(user_message, _CONFIRM_PHRASES):
+            log.info("rdd_review_entry.confirmation_accepted_text")
+            backend_refs["rdd_action"] = backend_refs.get("rdd_action") or "submit"
+            return {
+                "backend_refs": backend_refs,
+                "confirmation_status": "CONFIRMED",
+            }
+        if _contains_phrase(user_message, _REJECT_PHRASES):
+            log.info("rdd_review_entry.confirmation_rejected_text")
+            return {
+                "confirmation_status": "REJECTED",
+                "status": "WAITING_FOR_USER",
+                "response_message": (
+                    "No problem — what would you like to change? "
+                    "Please tell me which field to update."
+                ),
+            }
+
+    # ── 3. No action override — fall through to field_extraction ──────────
     return {}

@@ -36,6 +36,9 @@ def finalize_response_ui(
     if deco.get("promote_preview") and draft_preview and result.get("type") == "message":
         promoted = dict(draft_preview)
         promoted.setdefault("message", response_message)
+        # Keep stage action chips (e.g. Final Approve) — promote must not drop them.
+        if result.get("suggestions") and not promoted.get("suggestions"):
+            promoted["suggestions"] = result["suggestions"]
         result = promoted
 
     if result.get("type") == "message" and not result.get("message"):

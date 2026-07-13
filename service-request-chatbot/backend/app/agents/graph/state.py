@@ -36,6 +36,10 @@ class ServiceRequestGraphState(TypedDict, total=False):
     collected_data: dict[str, Any]
     extracted_fields: dict[str, Any]
     missing_fields: list[str]
+    # Field the bot asked for on the previous turn. Persisted across turns so
+    # bare answers ("10th August") bind to the correct key even when
+    # ``missing_fields`` is cleared at load time.
+    active_field: Optional[str]
 
     # ── Lease resolution ──────────────────────────────────────────────────────
     lease_matches: list[dict]

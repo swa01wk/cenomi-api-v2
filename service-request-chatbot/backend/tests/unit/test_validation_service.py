@@ -239,6 +239,23 @@ class TestValidateStartEndDate:
         r = validate_start_end_date("2025-01-01", "bad-date")
         assert r["status"] == "FAILED"
 
+    def test_accepts_utc_datetime_iso_from_formik(self) -> None:
+        """Portal Formik syncs UTC ISO; date range must still compare calendar dates."""
+        r = validate_start_end_date(
+            "2026-07-20T06:00:00.000Z",
+            "2026-08-10T06:00:00.000Z",
+        )
+        assert r["status"] == "PASSED"
+
+    def test_mixed_date_only_and_datetime_iso(self) -> None:
+        r = validate_start_end_date("2026-07-20", "2026-08-10T06:00:00.000Z")
+        assert r["status"] == "PASSED"
+
+    def test_accepts_platform_dd_mm_yyyy(self) -> None:
+        """GET SR payload dates are DD/MM/YYYY — must validate without re-asking."""
+        r = validate_start_end_date("01/08/2026", "10/08/2026")
+        assert r["status"] == "PASSED"
+
     # ── Shape ─────────────────────────────────────────────────────────────
 
     def test_validation_type_is_date_range(self) -> None:
@@ -346,6 +363,19 @@ class TestValidateRDDDateOrder:
         data["actual_handover_date"] = "2025-12-31"
         results = validate_rdd_date_order(data)
         assert all(r["blocking"] is True for r in _failed(results))
+
+    def test_accepts_platform_dd_mm_yyyy_chain(self) -> None:
+        """Hydrated platform dates must not fail as unparseable."""
+        results = validate_rdd_date_order(
+            {
+                "actual_handover_date": "30/08/2026",
+                "fitout_start_date": "10/09/2026",
+                "fitout_end_date": "20/09/2026",
+                "trading_date": "28/09/2026",
+            }
+        )
+        assert _failed(results) == []
+        assert len(_passed(results)) == 3
 
 
 # ===========================================================================

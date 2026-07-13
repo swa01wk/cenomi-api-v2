@@ -134,6 +134,7 @@ class ServiceRequestGetResult:
     status: str | None
     service_request_operations: list[dict[str, Any]] = field(default_factory=list)
     payload: dict[str, Any] | None = None
+    service_request_attachments: list[dict[str, Any]] = field(default_factory=list)
     endpoint: str = ""
     status_code: int | None = None
     latency_ms: int = 0
@@ -346,6 +347,9 @@ class ServiceRequestPlatformClient:
                     or []
                 ),
                 payload=self._merge_sr_payload_with_top_level_refs(data),
+                service_request_attachments=list(
+                    data.get("service_request_attachments") or []
+                ),
                 endpoint=endpoint,
                 status_code=response.status_code,
                 latency_ms=latency_ms,

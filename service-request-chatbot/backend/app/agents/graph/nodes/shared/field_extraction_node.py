@@ -57,6 +57,18 @@ async def field_extraction_node(state: ServiceRequestState) -> dict[str, Any]:
     workflow_stage: str | None = state.get("workflow_stage")
     conversation_history: list[dict] = state.get("conversation_history") or []  # type: ignore[assignment]
     missing_fields: list[str] = state.get("missing_fields") or []  # type: ignore[assignment]
+    active_field: str | None = state.get("active_field")
+
+    # Prefer the field asked on the previous turn. ``missing_fields`` is cleared
+    # at load time, so without ``active_field`` bare dates map to the wrong key.
+    extraction_hint: list[str] | None = None
+    if active_field:
+        extraction_hint = [active_field]
+        for field in missing_fields:
+            if field != active_field:
+                extraction_hint.append(field)
+    elif missing_fields:
+        extraction_hint = list(missing_fields)
 
     # Look up the agent's extraction prompt — falls back to handover default when absent.
     active_agent: str | None = state.get("active_agent")
@@ -92,7 +104,7 @@ async def field_extraction_node(state: ServiceRequestState) -> dict[str, Any]:
         user_message,
         workflow_stage,
         recent_history=conversation_history[-4:] if conversation_history else None,
-        missing_fields=missing_fields if missing_fields else None,
+        missing_fields=extraction_hint,
         system_prompt=extraction_prompt,
     )
 

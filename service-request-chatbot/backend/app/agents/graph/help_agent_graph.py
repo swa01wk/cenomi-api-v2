@@ -349,9 +349,17 @@ def _route_after_fm_entry(state: dict[str, Any]) -> str:
 def _route_after_rdd_entry(state: dict[str, Any]) -> str:
     if state.get("status") == "WAITING_FOR_USER":
         return "response_generation"
+    # Single-turn confirm already set CONFIRMED — skip extraction and go
+    # straight through merge → validation → rdd_confirmation → payload builder.
+    if state.get("confirmation_status") == "CONFIRMED":
+        return "merge_state"
     backend_refs = state.get("backend_refs") or {}
     if backend_refs.get("rdd_action"):
         return "merge_state"
+    # Report already on platform — idle open should show Final Approve chips,
+    # not re-enter field collection / submit confirmation.
+    if backend_refs.get("rdd_status") == "REPORT_SUBMITTED":
+        return "response_generation"
     return "field_extraction"
 
 

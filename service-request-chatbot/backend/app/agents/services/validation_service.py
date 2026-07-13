@@ -20,7 +20,7 @@ returns only FAILED results to populate ``state.validation_errors``.
 from __future__ import annotations
 
 import logging
-from datetime import date
+from datetime import date, datetime
 from typing import Any
 
 from app.agents.schemas.handover_schema import (
@@ -84,18 +84,40 @@ def _result(
 
 
 def _parse_date(value: Any, field_name: str) -> date | None:
-    """Parse *value* as an ISO-8601 date (``YYYY-MM-DD``).
+    """Parse *value* as a calendar date.
 
-    Returns ``None`` if *value* is absent, non-string, or unparseable so that
-    callers can emit a targeted error rather than raising an unhandled exception.
+    Accepts ``YYYY-MM-DD``, full ISO-8601 datetimes (with ``Z`` or offset),
+    and platform form formats ``DD/MM/YYYY`` / ``DD-MM-YYYY``.
+    Datetimes are truncated to their calendar date so Formik/UTC values that
+    round-trip via ``corrected_fields`` still validate.
     """
-    if not value or not isinstance(value, str):
+    if value is None:
         return None
+    text = str(value).strip()
+    if not text:
+        return None
+
+    # Fast path: date-only or datetime whose prefix is YYYY-MM-DD.
+    if len(text) >= 10 and text[4] == "-" and text[7] == "-":
+        try:
+            return date.fromisoformat(text[:10])
+        except ValueError:
+            pass
+
+    # Platform Handover payloads use DD/MM/YYYY (and sometimes DD-MM-YYYY).
+    if len(text) >= 10 and text[2] in "/-" and text[5] in "/-":
+        for fmt in ("%d/%m/%Y", "%d-%m-%Y"):
+            try:
+                return datetime.strptime(text[:10], fmt).date()
+            except ValueError:
+                continue
+
+    normalized = text.replace("Z", "+00:00")
     try:
-        return date.fromisoformat(value)
+        return datetime.fromisoformat(normalized).date()
     except ValueError:
         logger.debug(
-            "Could not parse '%s' as ISO date for field '%s'", value, field_name
+            "Could not parse '%s' as date for field '%s'", value, field_name
         )
         return None
 

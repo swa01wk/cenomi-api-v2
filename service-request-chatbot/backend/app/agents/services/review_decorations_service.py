@@ -227,16 +227,19 @@ def build_review_decorations(state: dict[str, Any]) -> dict[str, Any]:
     if suggestions:
         decorations["suggestions"] = suggestions
 
-    doc_req = _document_requirement_block(
-        stage=stage,
-        documents=documents,
-        session_id=session_id,
-        sr_id=sr_id,
-    )
-    if doc_req:
-        decorations["document_requirement"] = doc_req
+    # After report submit, the mandatory RDD doc is already on the platform —
+    # don't re-prompt uploads while offering Final Approve.
+    if not (stage == "RDD_REVIEW" and rdd_status == "REPORT_SUBMITTED"):
+        doc_req = _document_requirement_block(
+            stage=stage,
+            documents=documents,
+            session_id=session_id,
+            sr_id=sr_id,
+        )
+        if doc_req:
+            decorations["document_requirement"] = doc_req
 
-    if len(decorations) <= 1 and not suggestions and not doc_req:
+    if len(decorations) <= 1 and not suggestions and not decorations.get("document_requirement"):
         decorations["promote_preview"] = True
 
     return decorations

@@ -215,11 +215,12 @@ def _build_confirmation_card(
     # string to send back instead of the generic "confirm".
     # FM_REVIEW defaults to approve when fm_action was never set (e.g. user
     # reached the card via field collection rather than an Approve chip).
+    # RDD_REVIEW defaults to submit for the same reason (PM report path).
     stage_action: str = ""
     if workflow_stage == "FM_REVIEW":
         stage_action = (backend_refs or {}).get("fm_action") or "approve"
     elif workflow_stage == "RDD_REVIEW":
-        stage_action = (backend_refs or {}).get("rdd_action") or ""
+        stage_action = (backend_refs or {}).get("rdd_action") or "submit"
     confirm_action = _CONFIRM_ACTION_MAP.get((workflow_stage, stage_action))
     if confirm_action:
         card["confirmAction"] = confirm_action
