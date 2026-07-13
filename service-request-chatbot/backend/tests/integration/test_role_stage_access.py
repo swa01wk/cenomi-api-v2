@@ -58,7 +58,7 @@ def _fm_state(role: str, action: str = "save_fm_progress") -> dict[str, Any]:
         "backend_refs": {"user_role": role},
         "action_override": action,
         "workflow_stage": "FM_REVIEW",
-        "auth": _auth_for(role),
+        "auth_context": _auth_for(role),
     }
 
 
@@ -73,7 +73,7 @@ def _rdd_entry_state(role: str, action: str = "submit_rdd_report") -> dict[str, 
         "backend_refs": {"user_role": role},
         "action_override": action,
         "workflow_stage": "RDD_REVIEW",
-        "auth": _auth_for(role),
+        "auth_context": _auth_for(role),
     }
 
 
@@ -93,7 +93,7 @@ def _rdd_submit_api_state(role: str) -> dict[str, Any]:
             "rdd_document_id": "doc-rdd-001",
         },
         "workflow_stage": "RDD_REVIEW",
-        "auth": _auth_for(role),
+        "auth_context": _auth_for(role),
     }
 
 
@@ -115,7 +115,7 @@ def _rdd_final_approve_api_state(role: str) -> dict[str, Any]:
             },
         },
         "workflow_stage": "RDD_REVIEW",
-        "auth": _auth_for(role),
+        "auth_context": _auth_for(role),
     }
 
 
@@ -128,6 +128,29 @@ def _mock_patch_success() -> ServiceRequestCreationResult:
         latency_ms=5,
         status_code=200,
     )
+
+
+def _mock_get_after_rdd_approve() -> Any:
+    from app.agents.services.platform_api_client import ServiceRequestGetResult
+
+    return ServiceRequestGetResult(
+        success=True,
+        sr_id="sr-role-test-001",
+        status="COMPLETED",
+        service_request_operations=[
+            {"assigned_role": "FM_MANAGER", "status": "FINISHED"},
+            {"assigned_role": "DD_ENGINEER", "status": "FINISHED"},
+        ],
+        payload={"workflow_version": 1},
+    )
+
+
+def _final_approve_svc() -> AsyncMock:
+    svc = AsyncMock()
+    svc.patch_service_request = AsyncMock(return_value=_mock_patch_success())
+    svc.submit_report = AsyncMock()
+    svc.get_service_request = AsyncMock(return_value=_mock_get_after_rdd_approve())
+    return svc
 
 
 # ---------------------------------------------------------------------------
@@ -314,7 +337,7 @@ class TestRDDApiFinalApproveRoleAccess:
         state = _rdd_final_approve_api_state("DD_ENGINEER")
         with patch(
             "app.agents.graph.nodes.handover.rdd_api_submission_node.get_service_request_api_service",
-            return_value=AsyncMock(patch_service_request=AsyncMock(return_value=_mock_patch_success())),
+            return_value=_final_approve_svc(),
         ):
             result = await rdd_api_submission_node(state)
         assert result["workflow_stage"] == "SR_COMPLETED"

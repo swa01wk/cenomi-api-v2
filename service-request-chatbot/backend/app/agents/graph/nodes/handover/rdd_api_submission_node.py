@@ -2,14 +2,16 @@
 
 Responsibilities
 ----------------
-- Guard: ``backend_refs["rdd_action"] == "submit"`` must be present.
+- Guard: ``backend_refs["rdd_action"]`` must be ``submit`` or ``final_approve``.
 - Guard: no blocking validation errors.
 - Guard: RDD payload must be present in ``backend_refs["rdd_payload"]``.
 - Guard: permission check via PermissionService.
 - Call ``ServiceRequestAPIService.submit_report`` (POST /service-requests with
-  status=REPORT_SUBMITTED).
+  status=REPORT_SUBMITTED) or ``patch_service_request`` for final approve.
+- On v2 final approve: UPDATE (``RE_EXAMINE``) then ``APPROVED``, then verify
+  the DD/RDD operation finished on the platform.
 - Capture observability (redacted snapshot + tool-call record).
-- Write audit log event ``sr.rdd.report_submitted``.
+- Write audit log events ``sr.rdd.report_submitted`` / ``sr.rdd.final_approved``.
 - Update state with platform result.
 
 Non-responsibilities
@@ -20,6 +22,7 @@ Non-responsibilities
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any
 from uuid import UUID
@@ -37,9 +40,46 @@ _permission_service = PermissionService()
 _TOOL_NAME = "service_request_api.rdd.submit_report"
 _TOOL_TYPE = "API"
 
+_RDD_ROLES: frozenset[str] = frozenset({"DD_ENGINEER"})
+_RDD_FINISHED: frozenset[str] = frozenset({"FINISHED", "APPROVED"})
+
 
 def _has_blocking_errors(validation_errors: list[dict[str, Any]]) -> bool:
     return any(e.get("blocking", True) for e in validation_errors)
+
+
+def _workflow_version_from_get(get_result: Any) -> int:
+    """Extract workflow_version from a GET SR result (default 1 = legacy)."""
+    payload = getattr(get_result, "payload", None)
+    raw = None
+    if isinstance(payload, dict):
+        raw = payload.get("workflow_version")
+    if raw is None and isinstance(getattr(get_result, "response_payload", None), dict):
+        data = (get_result.response_payload or {}).get("data") or {}
+        if isinstance(data, dict):
+            raw = data.get("workflow_version")
+    try:
+        return int(raw) if raw is not None else 1
+    except (TypeError, ValueError):
+        return 1
+
+
+def _rdd_operation_finished(operations: list[dict[str, Any]]) -> bool:
+    """True when a DD/RDD op is terminal and none remain IN_PROGRESS."""
+    rdd_ops = [
+        op
+        for op in operations
+        if (op.get("assigned_role") or op.get("role") or "").upper() in _RDD_ROLES
+    ]
+    if not rdd_ops:
+        return False
+
+    def _status(op: dict[str, Any]) -> str:
+        return (op.get("status") or "").upper()
+
+    has_in_progress = any(_status(op) == "IN_PROGRESS" for op in rdd_ops)
+    has_terminal = any(_status(op) in _RDD_FINISHED for op in rdd_ops)
+    return has_terminal and not has_in_progress
 
 
 def _to_uuid(value: str | UUID | None) -> UUID | None:
@@ -145,6 +185,57 @@ async def rdd_api_submission_node(state: ServiceRequestState) -> dict[str, Any]:
     if rdd_action == "submit":
         result = await svc.submit_report(payload)
     elif rdd_action == "final_approve":
+        # V2 workflows require UPDATE (RE_EXAMINE) before APPROVE at RDD level
+        # (UPDATE_APPROVE + require_update_before_action), same as FM.
+        workflow_version = 1
+        try:
+            pre_get = await svc.get_service_request(sr_id)
+            if getattr(pre_get, "success", False) is True:
+                workflow_version = _workflow_version_from_get(pre_get)
+                if pre_get.service_request_operations:
+                    backend_refs["sr_operations"] = list(pre_get.service_request_operations)
+                if pre_get.payload and not backend_refs.get("create_payload"):
+                    backend_refs["create_payload"] = {"payload": pre_get.payload}
+        except Exception:
+            logger.warning(
+                "rdd_api_submission_node: pre-PATCH GET failed sr_id=%s (continuing)",
+                sr_id,
+                exc_info=True,
+            )
+
+        if workflow_version >= 2:
+            update_payload = dict(payload)
+            update_payload["status"] = "RE_EXAMINE"
+            update_inner = dict(update_payload.get("payload") or {})
+            # Keep pre-action status for UPDATE; top-level carries RE_EXAMINE.
+            if not update_inner.get("current_sr_status"):
+                update_inner["current_sr_status"] = "REPORT_SUBMITTED"
+            update_payload["payload"] = update_inner
+            logger.info(
+                "rdd_api_submission_node: v2 final_approve pre-step RE_EXAMINE sr_id=%s",
+                sr_id,
+            )
+            update_result = await svc.patch_service_request(sr_id, update_payload)
+            if update_result.error is not None:
+                logger.warning(
+                    "rdd_api_submission_node: v2 RE_EXAMINE failed sr_id=%s error=%s",
+                    sr_id,
+                    update_result.error,
+                )
+                return {
+                    "backend_refs": backend_refs,
+                    "status": "FAILED",
+                    "response_message": (
+                        "I could not save RDD progress before approving "
+                        f"(required for this service request). Detail: {update_result.error}"
+                    ),
+                }
+
+        logger.info(
+            "rdd_api_submission_node: PATCH payload sr_id=%s rdd_action=final_approve body=%s",
+            sr_id,
+            json.dumps(payload, default=str, ensure_ascii=False),
+        )
         result = await svc.patch_service_request(sr_id, payload)
     else:
         return {
@@ -243,7 +334,62 @@ async def rdd_api_submission_node(state: ServiceRequestState) -> dict[str, Any]:
             ),
         }
 
-    # Phase 3b (final_approve) — PATCH APPROVED; SR is now fully complete
+    # Phase 3b (final_approve) — verify RDD operation advanced on platform
+    try:
+        get_result = await svc.get_service_request(sr_id)
+    except Exception as exc:
+        logger.warning(
+            "rdd_api_submission_node: post-approve GET failed sr_id=%s error=%s",
+            sr_id,
+            exc,
+            exc_info=True,
+        )
+        return {
+            "backend_refs": backend_refs,
+            "status": "FAILED",
+            "response_message": (
+                f"RDD approve was sent for **{sr_id}**, but I could not verify "
+                "that the RDD step finished. Please refresh the service request "
+                "and try again if it is still in RDD review."
+            ),
+        }
+
+    operations: list[dict[str, Any]] = list(
+        getattr(get_result, "service_request_operations", None) or []
+    )
+    if getattr(get_result, "error", None) or not getattr(get_result, "success", True):
+        return {
+            "backend_refs": backend_refs,
+            "status": "FAILED",
+            "response_message": (
+                f"RDD approve was sent for **{sr_id}**, but verification failed "
+                f"({getattr(get_result, 'error', None) or 'GET error'}). "
+                "Please refresh the service request and confirm the RDD step."
+            ),
+        }
+
+    backend_refs["sr_operations"] = operations
+    platform_status = getattr(get_result, "status", None)
+    if platform_status:
+        backend_refs["platform_sr_status"] = platform_status
+
+    if not _rdd_operation_finished(operations):
+        logger.error(
+            "rdd_api_submission_node: approve PATCH succeeded but RDD op not finished "
+            "sr_id=%s operations=%s",
+            sr_id,
+            operations,
+        )
+        return {
+            "backend_refs": backend_refs,
+            "status": "FAILED",
+            "response_message": (
+                f"The platform accepted the RDD approve for **{sr_id}**, but the "
+                "RDD operation is still in progress. The workflow did not complete "
+                "— please retry or approve from the portal form."
+            ),
+        }
+
     backend_refs["rdd_status"] = "APPROVED"
     if trace_manager is not None and session_id is not None:
         try:
@@ -257,7 +403,7 @@ async def rdd_api_submission_node(state: ServiceRequestState) -> dict[str, Any]:
                     "status_code": result.status_code,
                     "latency_ms": result.latency_ms,
                 },
-                metadata={"endpoint": result.endpoint, "workflow_stage": "RDD_REVIEW"},
+                metadata={"endpoint": result.endpoint, "workflow_stage": "SR_COMPLETED"},
             )
         except Exception:
             logger.warning(
