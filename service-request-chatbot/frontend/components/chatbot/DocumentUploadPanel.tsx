@@ -14,7 +14,7 @@ type DocTypeConfig = {
 const FM_DOC_TYPES: DocTypeConfig[] = [
   { id: "SR_HANDOVER_CHECKLIST", label: "Handover Checklist" },
   { id: "SR_HANDOVER_SITE_SURVEY", label: "Site Survey" },
-  { id: "SR_COP_CHECKLIST_OTHER", label: "COP Checklist" },
+  { id: "SR_HANDOVER_OTHER", label: "Other" },
 ];
 
 const RDD_DOC_TYPES: DocTypeConfig[] = [
@@ -59,6 +59,7 @@ export function DocumentUploadPanel({
   const [selectedDocType, setSelectedDocType] = useState<string>("");
   const [isUploading, setIsUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
+  const [uploadSuccess, setUploadSuccess] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const docTypes = getDocTypes(userRole);
@@ -75,16 +76,19 @@ export function DocumentUploadPanel({
 
     setIsUploading(true);
     setUploadError(null);
+    setUploadSuccess(null);
 
     try {
       const result = await uploadDocument(file, selectedDocType, sessionId, srId);
+      const label = getDocLabel(selectedDocType);
       onUploadComplete({
         documentId: result.document_id,
         documentType: selectedDocType,
-        documentTypeLabel: getDocLabel(selectedDocType),
+        documentTypeLabel: label,
         filename: file.name,
         signedUrl: result.signed_url,
       });
+      setUploadSuccess(`${file.name} uploaded as ${label}.`);
       setSelectedDocType("");
       if (fileInputRef.current) fileInputRef.current.value = "";
     } catch (err) {
@@ -138,24 +142,33 @@ export function DocumentUploadPanel({
         <p className="mt-2 text-xs text-red-600 dark:text-red-400">{uploadError}</p>
       )}
 
+      {uploadSuccess && (
+        <p className="mt-2 text-xs text-green-600 dark:text-green-400">{uploadSuccess}</p>
+      )}
+
       {/* Uploaded documents list */}
       {uploadedDocuments.length > 0 && (
-        <ul className="mt-4 space-y-1.5">
-          {uploadedDocuments.map((doc, idx) => (
-            <li
-              key={doc.documentId ?? idx}
-              className="flex items-center gap-2 rounded-md bg-zinc-50 px-3 py-2 text-xs dark:bg-zinc-800"
-            >
-              <span className="text-green-600 dark:text-green-400">✓</span>
-              <span className="flex-1 truncate font-medium text-zinc-700 dark:text-zinc-200">
-                {doc.filename}
-              </span>
-              <span className="shrink-0 text-zinc-500 dark:text-zinc-400">
-                {doc.documentTypeLabel}
-              </span>
-            </li>
-          ))}
-        </ul>
+        <div className="mt-4">
+          <p className="mb-1.5 text-xs font-medium text-zinc-500 dark:text-zinc-400">
+            Attached ({uploadedDocuments.length})
+          </p>
+          <ul className="space-y-1.5">
+            {uploadedDocuments.map((doc, idx) => (
+              <li
+                key={doc.documentId ?? `${doc.documentType}-${idx}`}
+                className="flex items-center gap-2 rounded-md border border-green-200 bg-green-50 px-3 py-2 text-xs dark:border-green-900 dark:bg-green-950/40"
+              >
+                <span className="text-green-600 dark:text-green-400">✓</span>
+                <span className="flex-1 truncate font-medium text-zinc-700 dark:text-zinc-200">
+                  {doc.filename}
+                </span>
+                <span className="shrink-0 rounded bg-green-100 px-1.5 py-0.5 text-green-800 dark:bg-green-900 dark:text-green-200">
+                  {doc.documentTypeLabel}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
       )}
     </div>
   );

@@ -21,7 +21,6 @@ _GRAPH_ROLES: tuple[str, ...] = ("FM_MANAGER", "OPERATIONS", "DD_ENGINEER", "MAL
 _DOC_LABELS: dict[str, str] = {
     "SR_HANDOVER_CHECKLIST": "Handover Checklist",
     "SR_HANDOVER_SITE_SURVEY": "Site Survey",
-    "SR_COP_CHECKLIST_OTHER": "COP Checklist",
     "SR_HANDOVER_OTHER": "Other",
     "DR_SR_HANDOVER_REPORT": "Handover Meeting Report",
     "SR_REJECTED_HANDOVER_REPORT": "Rejected Fitout and Handover Report",
@@ -30,7 +29,6 @@ _DOC_LABELS: dict[str, str] = {
 _FM_DOC_TYPES: frozenset[str] = frozenset({
     "SR_HANDOVER_CHECKLIST",
     "SR_HANDOVER_SITE_SURVEY",
-    "SR_COP_CHECKLIST_OTHER",
     "SR_HANDOVER_OTHER",
 })
 
@@ -135,24 +133,27 @@ def _document_requirement_block(
     if not relevant:
         relevant = list(stage_def.required_documents)
 
-    # FM: at least one upload required — show all options until any is uploaded.
-    if stage == "FM_REVIEW" and uploaded & _FM_DOC_TYPES:
-        return None
-
-    # RDD: mandatory report — hide panel once report uploaded.
-    if stage == "RDD_REVIEW" and "DR_SR_HANDOVER_REPORT" in uploaded:
-        return None
-
     doc_rows = [
         {
             "key": doc_type,
             "label": _DOC_LABELS.get(doc_type, doc_type),
-            "required": doc_type in ("SR_HANDOVER_CHECKLIST", "DR_SR_HANDOVER_REPORT"),
+            "required": (
+                doc_type == "DR_SR_HANDOVER_REPORT"
+                if stage == "RDD_REVIEW"
+                else False  # FM needs any one of the three — none individually mandatory
+            ),
             "status": "uploaded" if doc_type in uploaded else "missing",
         }
         for doc_type in relevant
     ]
-    if all(r["status"] == "uploaded" for r in doc_rows):
+
+    # Keep the card visible while any required type is still missing so the
+    # user can see which documents are attached. Hide only when every listed
+    # type is uploaded (or, for FM, when at least one is uploaded *and* the
+    # caller is past the upload step — we still show statuses after the first
+    # attach so the UI clearly reflects success).
+    if stage == "RDD_REVIEW" and "DR_SR_HANDOVER_REPORT" in uploaded:
+        # Report is the only mandatory RDD doc; hide once it is present.
         return None
 
     return {

@@ -80,7 +80,7 @@ def _base_fm_state(**kwargs: Any) -> dict[str, Any]:
         "documents": [
             {"document_id": "fm-doc-checklist", "document_type_id": "SR_HANDOVER_CHECKLIST"},
             {"document_id": "fm-doc-survey", "document_type_id": "SR_HANDOVER_SITE_SURVEY"},
-            {"document_id": "fm-doc-cop", "document_type_id": "SR_COP_CHECKLIST_OTHER"},
+            {"document_id": "fm-doc-other", "document_type_id": "SR_HANDOVER_OTHER"},
         ],
         "workflow_stage": "FM_REVIEW",
         "action_override": None,
@@ -110,6 +110,7 @@ def _mock_get_after_fm_approve(sr_id: str = "sr-fm-001") -> ServiceRequestGetRes
             {"assigned_role": "FM_MANAGER", "status": "FINISHED"},
             {"assigned_role": "DD_ENGINEER", "status": "IN_PROGRESS"},
         ],
+        payload={"workflow_version": 1},
     )
 
 
@@ -134,7 +135,7 @@ class TestFMDocumentBridge:
         uploaded = result["backend_refs"]["uploaded_documents"]
         assert "fm-doc-checklist" in uploaded
         assert "fm-doc-survey" in uploaded
-        assert "fm-doc-cop" in uploaded
+        assert "fm-doc-other" in uploaded
         assert len(uploaded) == 3
 
     @pytest.mark.asyncio
@@ -183,7 +184,7 @@ class TestFMPayloadWithDocuments:
     async def test_payload_includes_all_three_doc_ids(self) -> None:
         state = _base_fm_state()
         state["backend_refs"]["uploaded_documents"] = [
-            "fm-doc-checklist", "fm-doc-survey", "fm-doc-cop"
+            "fm-doc-checklist", "fm-doc-survey", "fm-doc-other"
         ]
         state["backend_refs"]["fm_action"] = "approve"
         state["collected_data"]["expected_handover_date"] = "2026-06-25"
@@ -191,7 +192,7 @@ class TestFMPayloadWithDocuments:
         result = await fm_payload_builder_node(state)
         payload_inner = result["backend_refs"]["fm_payload"]["payload"]
 
-        for doc_id in ("fm-doc-checklist", "fm-doc-survey", "fm-doc-cop"):
+        for doc_id in ("fm-doc-checklist", "fm-doc-survey", "fm-doc-other"):
             assert doc_id in payload_inner["documents_ids"]
 
     @pytest.mark.asyncio
@@ -248,7 +249,7 @@ class TestFMApiSubmissionWithDocuments:
         state = _base_fm_state()
         state["backend_refs"]["fm_action"] = "approve"
         state["backend_refs"]["uploaded_documents"] = [
-            "fm-doc-checklist", "fm-doc-survey", "fm-doc-cop"
+            "fm-doc-checklist", "fm-doc-survey", "fm-doc-other"
         ]
         state["backend_refs"]["fm_payload"] = {"status": "APPROVED"}
         state["collected_data"]["expected_handover_date"] = "2026-06-25"

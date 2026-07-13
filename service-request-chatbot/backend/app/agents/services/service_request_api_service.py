@@ -375,10 +375,12 @@ class MockServiceRequestAPIService(AbstractServiceRequestAPIService):
             "status": "SUBMITTED",
             "service_request_operations": [
                 {"assigned_role": "MALL_MANAGER", "workflow_level": 1, "status": "FINISHED"},
+                # Only the selected inspector role is active (matches platform).
                 {"assigned_role": "FM_MANAGER", "workflow_level": 2, "status": "IN_PROGRESS"},
-                {"assigned_role": "OPERATIONS", "workflow_level": 2, "status": "IN_PROGRESS"},
                 {"assigned_role": "DD_ENGINEER", "workflow_level": 3, "status": "YET_TO_START"},
             ],
+            "workflow_version": 1,
+            "payload": {},
         }
         return ServiceRequestCreationResult(
             sr_id=sr_id,
@@ -404,12 +406,15 @@ class MockServiceRequestAPIService(AbstractServiceRequestAPIService):
                 latency_ms=self._latency_ms,
                 error="SR not found in mock",
             )
+        payload = dict(state.get("payload") or {})
+        if state.get("workflow_version") is not None:
+            payload["workflow_version"] = state["workflow_version"]
         return _GR(
             success=True,
             sr_id=sr_id,
             status=state.get("status"),
             service_request_operations=state.get("service_request_operations", []),
-            payload=state.get("payload"),
+            payload=payload or None,
             endpoint=f"{self._MOCK_ENDPOINT_BASE}/{sr_id}",
             status_code=200,
             latency_ms=self._latency_ms,
@@ -436,12 +441,18 @@ class MockServiceRequestAPIService(AbstractServiceRequestAPIService):
         status = payload.get("status", "IN_PROCESS")
         # Advance mock state
         if sr_id in self._sr_states:
-            self._sr_states[sr_id]["status"] = status
+            # V2 UPDATE (RE_EXAMINE) keeps FM IN_PROGRESS — same as platform TransitionTypeStay.
+            if status == "RE_EXAMINE":
+                self._sr_states[sr_id]["status"] = "IN_PROCESS"
+            else:
+                self._sr_states[sr_id]["status"] = status
             if status == "APPROVED":
                 ops = self._sr_states[sr_id].get("service_request_operations", [])
                 for op in ops:
                     if op["assigned_role"] in ("FM_MANAGER", "OPERATIONS"):
-                        op["status"] = "FINISHED"
+                        # Only finish ops that were active; leave YET_TO_START alone.
+                        if (op.get("status") or "").upper() in ("IN_PROGRESS", "FINISHED", "APPROVED"):
+                            op["status"] = "FINISHED"
                     if op["assigned_role"] == "DD_ENGINEER":
                         op["status"] = "IN_PROGRESS"
         return ServiceRequestCreationResult(

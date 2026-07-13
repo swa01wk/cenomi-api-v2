@@ -35,6 +35,7 @@ use, the expected format, and a short description.
 | lease_code             | string                           | Tenant lease identifier (e.g. "LC-1234")        |
 | mall                   | string                           | Mall or property name (e.g. "Riyadh Park")      |
 | brand                  | string                           | Tenant brand name (e.g. "Nike", "H&M")          |
+| company                | string                           | Tenant company / legal entity name (e.g. "Nike Saudi Arabia LLC") |
 | description            | string                           | Detailed description of the request             |
 | startDate              | ISO 8601 date (YYYY-MM-DD)       | Requested start date                            |
 | endDate                | ISO 8601 date (YYYY-MM-DD)       | Requested end date                              |

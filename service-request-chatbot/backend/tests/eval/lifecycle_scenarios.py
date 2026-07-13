@@ -336,7 +336,7 @@ _S39 = LifecycleScenario(
             stage="FM_REVIEW",
             open_existing_sr=True,
             upload_mock_document=True,
-            document_type="SR_COP_CHECKLIST_OTHER",
+            document_type="SR_HANDOVER_OTHER",
             turns=[
                 Turn(
                     message="Unit readiness date is 2026-08-12.",

@@ -63,7 +63,7 @@ _AUTO_GENERATED_FIELDS: frozenset[str] = frozenset({"title"})
 # Ordered preference for the "trigger" question when backend fields are unresolved.
 # Asking for lease_code first enables the most precise lookup; lease_brand_mall
 # covers free-text brand/mall input when a formal code is unavailable.
-_LEASE_TRIGGER_FIELDS: tuple[str, ...] = ("lease_code", "lease_brand_mall")
+_LEASE_TRIGGER_FIELDS: tuple[str, ...] = ("lease_code", "company", "lease_brand_mall")
 
 # Validation-error questions: maps validation_type → (field_to_ask, question_hint).
 # When a blocking validation error has no entry here, fall back to the generic

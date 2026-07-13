@@ -253,6 +253,8 @@ class TestFMReviewLifecycle:
 
     @pytest.mark.asyncio
     async def test_fm_save_progress_full_path(self) -> None:
+        from app.agents.services.platform_api_client import ServiceRequestGetResult
+
         state = self._fm_state("save_progress")
 
         # Build payload
@@ -268,6 +270,17 @@ class TestFMReviewLifecycle:
         ) as mock_factory:
             mock_svc = AsyncMock()
             mock_svc.patch_service_request = AsyncMock(return_value=mock_result)
+            mock_svc.get_service_request = AsyncMock(
+                return_value=ServiceRequestGetResult(
+                    success=True,
+                    sr_id="sr-lifecycle-001",
+                    status="IN_PROCESS",
+                    service_request_operations=[
+                        {"assigned_role": "FM_MANAGER", "status": "IN_PROGRESS"},
+                    ],
+                    payload={"workflow_version": 1},
+                )
+            )
             mock_factory.return_value = mock_svc
             result = await fm_api_submission_node(state)
 

@@ -17,7 +17,13 @@ from app.types.service_request import ValidationIssueDTO
 HANDOVER_FIELD_QUESTIONS: dict[str, str] = {
     # ── CREATE_SR — Mall Manager ──────────────────────────────────────────────
     "lease_code": "Ask the user for the lease code for this handover request.",
-    "lease_brand_mall": "Ask the user for the lease, brand name, or mall name.",
+    "lease_brand_mall": (
+        "Ask the user for the lease code, brand name, company/tenant name, or mall name "
+        "so you can look up the lease."
+    ),
+    "company": (
+        "Ask the user for the tenant company name to search for matching leases."
+    ),
     "title": (
         "Ask the user if they have a specific title for this handover request. "
         "Let them know the system will auto-generate one from the lease code and description "

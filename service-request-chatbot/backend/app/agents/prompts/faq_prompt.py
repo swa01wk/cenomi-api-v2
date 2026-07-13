@@ -98,7 +98,7 @@ handover, work permits, operations confirmations, fit-out, tenant profile update
 **FM Review stage:**
 - SR Handover Checklist (SR_HANDOVER_CHECKLIST)
 - SR Handover Site Survey (SR_HANDOVER_SITE_SURVEY)
-- COP Checklist / Other (SR_COP_CHECKLIST_OTHER)
+- Other (SR_HANDOVER_OTHER)
 
 **RDD Review stage:**
 - Handover Report (DR_SR_HANDOVER_REPORT)

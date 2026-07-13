@@ -40,6 +40,34 @@ def test_build_review_decorations_fm_stage() -> None:
     assert deco["suggestions"]["kind"] == "labeled_options"
     assert len(deco["suggestions"]["options"]) == 2
     assert deco.get("document_requirement") is not None
+    docs = deco["document_requirement"]["documents"]
+    assert {d["key"] for d in docs} == {
+        "SR_HANDOVER_CHECKLIST",
+        "SR_HANDOVER_SITE_SURVEY",
+        "SR_HANDOVER_OTHER",
+    }
+    assert "SR_COP_CHECKLIST_OTHER" not in {d["key"] for d in docs}
+
+
+def test_build_review_decorations_keeps_card_after_fm_upload() -> None:
+    """After an FM attach, the card stays so the user sees Uploaded status."""
+    state = {
+        "backend_refs": {"sr_id": "12847", "user_role": "FM_MANAGER"},
+        "workflow_stage": "FM_REVIEW",
+        "session_id": "sess-1",
+        "documents": [
+            {
+                "document_id": "d1",
+                "document_type_id": "SR_HANDOVER_CHECKLIST",
+            }
+        ],
+    }
+    deco = build_review_decorations(state)
+    req = deco.get("document_requirement")
+    assert req is not None
+    by_key = {d["key"]: d["status"] for d in req["documents"]}
+    assert by_key["SR_HANDOVER_CHECKLIST"] == "uploaded"
+    assert by_key["SR_HANDOVER_SITE_SURVEY"] == "missing"
 
 
 def test_build_review_decorations_skips_when_confirmation_pending() -> None:

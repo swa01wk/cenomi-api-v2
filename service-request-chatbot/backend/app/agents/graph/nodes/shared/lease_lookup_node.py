@@ -65,11 +65,11 @@ _LEASE_ENRICHMENT_FIELDS: frozenset[str] = frozenset(
 
 _NO_LEASE_FIELDS_MESSAGE = (
     "No lease identifiers were found. Ask the user for the lease code, "
-    "or alternatively the brand name and/or mall name."
+    "or alternatively the brand name, company/tenant name, and/or mall name."
 )
 _NO_MATCH_MESSAGE = (
     "The lease lookup returned zero matches. Apologise and ask the user to "
-    "double-check the lease code, brand name, or mall name they provided."
+    "double-check the lease code, brand name, company name, or mall name they provided."
 )
 _MULTI_MATCH_MESSAGE = (
     "Multiple leases matched the search. Ask the user to select the correct one "
@@ -193,6 +193,7 @@ async def lease_lookup_node(
         lease_code=normalised_lease_code,
         brand=collected.get("brand"),
         mall=collected.get("mall"),
+        company=collected.get("company") or collected.get("company_name"),
         property_ids=property_ids,
     )
 

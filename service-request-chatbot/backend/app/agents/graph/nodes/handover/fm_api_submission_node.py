@@ -48,7 +48,11 @@ def _has_blocking_errors(validation_errors: list[dict[str, Any]]) -> bool:
 
 
 def _fm_operation_finished(operations: list[dict[str, Any]]) -> bool:
-    """True when an FM/OPERATIONS op exists and is FINISHED/APPROVED."""
+    """True when no FM/OPERATIONS op is still IN_PROGRESS and at least one is terminal.
+
+    Ignores ``YET_TO_START`` rows (unused inspector role at the same level) so a
+    finished FM_MANAGER op is not blocked by a dormant OPERATIONS row.
+    """
     fm_ops = [
         op
         for op in operations
@@ -56,7 +60,42 @@ def _fm_operation_finished(operations: list[dict[str, Any]]) -> bool:
     ]
     if not fm_ops:
         return False
-    return all((op.get("status") or "").upper() in _FM_FINISHED for op in fm_ops)
+
+    def _status(op: dict[str, Any]) -> str:
+        return (op.get("status") or "").upper()
+
+    has_in_progress = any(_status(op) == "IN_PROGRESS" for op in fm_ops)
+    has_terminal = any(_status(op) in _FM_FINISHED for op in fm_ops)
+    return has_terminal and not has_in_progress
+
+
+def _workflow_version_from_get(get_result: Any) -> int:
+    """Extract workflow_version from a GET SR result (default 1 = legacy)."""
+    payload = getattr(get_result, "payload", None) or {}
+    raw = payload.get("workflow_version")
+    if raw is None and isinstance(getattr(get_result, "response_payload", None), dict):
+        data = (get_result.response_payload or {}).get("data") or {}
+        raw = data.get("workflow_version")
+    try:
+        return int(raw) if raw is not None else 1
+    except (TypeError, ValueError):
+        return 1
+
+
+def _map_stage_after_fm_approve(operations: list[dict[str, Any]]) -> str | None:
+    """Return next workflow_stage after a successful FM approve."""
+    _RDD_ROLES = frozenset({"DD_ENGINEER"})
+    in_progress: set[str] = set()
+    for op in operations:
+        role = (op.get("assigned_role") or op.get("role") or "").upper()
+        status = (op.get("status") or "").upper()
+        if status == "IN_PROGRESS":
+            in_progress.add(role)
+    if in_progress & _RDD_ROLES:
+        return "RDD_REVIEW"
+    if in_progress & _FM_ROLES:
+        return "FM_REVIEW"
+    return None
 
 
 def _to_uuid(value: str | UUID | None) -> UUID | None:
@@ -161,13 +200,72 @@ async def fm_api_submission_node(state: ServiceRequestState) -> dict[str, Any]:
         )
 
     # ── 5. API call ────────────────────────────────────────────────────────────
+    # V2 workflows require an UPDATE (RE_EXAMINE) before APPROVE. Without it the
+    # platform may accept the call but leave FM IN_PROGRESS (or record history
+    # while the active op stays pending). Detect version via GET and:
+    #   - save_progress → RE_EXAMINE on v2, IN_PROCESS on v1
+    #   - approve on v2 → RE_EXAMINE first (if needed), then APPROVED
+    svc = get_service_request_api_service()
+    workflow_version = 1
+    try:
+        pre_get = await svc.get_service_request(sr_id)
+        if pre_get.success:
+            workflow_version = _workflow_version_from_get(pre_get)
+            if pre_get.service_request_operations:
+                backend_refs["sr_operations"] = list(pre_get.service_request_operations)
+            if pre_get.payload and not backend_refs.get("create_payload"):
+                backend_refs["create_payload"] = {"payload": pre_get.payload}
+    except Exception:
+        logger.warning(
+            "fm_api_submission_node: pre-PATCH GET failed sr_id=%s (continuing)",
+            sr_id,
+            exc_info=True,
+        )
+
+    if fm_action == "save_progress" and workflow_version >= 2:
+        payload = dict(payload)
+        payload["status"] = "RE_EXAMINE"
+        inner = dict(payload.get("payload") or {})
+        inner["current_sr_status"] = "IN_PROCESS"
+        payload["payload"] = inner
+        logger.info(
+            "fm_api_submission_node: v2 save → status=RE_EXAMINE sr_id=%s",
+            sr_id,
+        )
+
+    if fm_action == "approve" and workflow_version >= 2:
+        # require_update_before_action: send UPDATE before APPROVE
+        update_payload = dict(payload)
+        update_payload["status"] = "RE_EXAMINE"
+        update_inner = dict(update_payload.get("payload") or {})
+        update_inner["current_sr_status"] = "IN_PROCESS"
+        update_payload["payload"] = update_inner
+        logger.info(
+            "fm_api_submission_node: v2 approve pre-step RE_EXAMINE sr_id=%s",
+            sr_id,
+        )
+        update_result = await svc.patch_service_request(sr_id, update_payload)
+        if update_result.error is not None:
+            logger.warning(
+                "fm_api_submission_node: v2 RE_EXAMINE failed sr_id=%s error=%s",
+                sr_id,
+                update_result.error,
+            )
+            return {
+                "backend_refs": backend_refs,
+                "status": "FAILED",
+                "response_message": (
+                    "I could not save FM progress before approving "
+                    f"(required for this service request). Detail: {update_result.error}"
+                ),
+            }
+
     logger.info(
         "fm_api_submission_node: PATCH payload sr_id=%s fm_action=%s body=%s",
         sr_id,
         fm_action,
         json.dumps(payload, default=str, ensure_ascii=False),
     )
-    svc = get_service_request_api_service()
     result = await svc.patch_service_request(sr_id, payload)
 
     logger.info(
@@ -279,6 +377,12 @@ async def fm_api_submission_node(state: ServiceRequestState) -> dict[str, Any]:
     # ── 9. Success ─────────────────────────────────────────────────────────────
     backend_refs["fm_status"] = "APPROVED" if fm_action == "approve" else "IN_PROCESS"
 
+    next_stage: str | None = None
+    if fm_action == "approve":
+        next_stage = _map_stage_after_fm_approve(
+            list(backend_refs.get("sr_operations") or [])
+        )
+
     # Audit log
     session_id: UUID | None = _to_uuid(state.get("session_id"))
     user_id: UUID | None = _to_uuid(state.get("user_id"))
@@ -296,8 +400,9 @@ async def fm_api_submission_node(state: ServiceRequestState) -> dict[str, Any]:
                     "fm_action": fm_action,
                     "status_code": result.status_code,
                     "latency_ms": result.latency_ms,
+                    "workflow_stage": next_stage or "FM_REVIEW",
                 },
-                metadata={"endpoint": result.endpoint, "workflow_stage": "FM_REVIEW"},
+                metadata={"endpoint": result.endpoint, "workflow_stage": next_stage or "FM_REVIEW"},
             )
         except Exception:
             logger.warning("fm_api_submission_node: audit log write failed (non-fatal)", exc_info=True)
@@ -305,13 +410,25 @@ async def fm_api_submission_node(state: ServiceRequestState) -> dict[str, Any]:
     fm_message = (
         f"Your Handover Service Request has been approved at the FM review stage. "
         f"Reference: **{sr_id}**."
+        + (
+            " It has moved to RDD review."
+            if next_stage == "RDD_REVIEW"
+            else ""
+        )
         if fm_action == "approve"
         else f"FM review progress has been saved for Service Request **{sr_id}**. "
         "The request remains in progress."
     )
 
-    return {
+    out: dict[str, Any] = {
         "backend_refs": backend_refs,
         "status": "SUBMITTED",
         "response_message": fm_message,
+        # Clear confirmation so the next turn does not re-show a stale FM card.
+        "confirmation_status": None,
+        "confirmation_required": False,
     }
+    if next_stage:
+        out["workflow_stage"] = next_stage
+        out["active_agent"] = "rdd_agent"
+    return out
