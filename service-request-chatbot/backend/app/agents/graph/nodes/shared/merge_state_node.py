@@ -104,7 +104,7 @@ def _coerce_year_if_absent(value: str, message_has_year: bool) -> str:
     if message_has_year or not value:
         return value
     try:
-        parsed = datetime.date.fromisoformat(value)
+        parsed = datetime.date.fromisoformat(value[:10] if len(value) >= 10 and value[4] == "-" else value)
     except (ValueError, TypeError):
         return value
     current_year = datetime.date.today().year
@@ -115,6 +115,20 @@ def _coerce_year_if_absent(value: str, message_has_year: bool) -> str:
     except ValueError:
         # Feb 29 → non-leap current year; fall back to original.
         return value
+
+
+def _to_date_only(value: Any) -> Any:
+    """Normalise ISO datetimes to ``YYYY-MM-DD`` for chatbot date fields."""
+    if not isinstance(value, str):
+        return value
+    text = value.strip()
+    if len(text) >= 10 and text[4] == "-" and text[7] == "-":
+        try:
+            datetime.date.fromisoformat(text[:10])
+            return text[:10]
+        except ValueError:
+            return value
+    return value
 
 
 # Fields that become immutable once the lease has been confirmed via the API
@@ -129,6 +143,34 @@ _LEASE_CONFIRMED_FIELDS: frozenset[str] = frozenset({"lease_code", "mall", "bran
 _CONFIDENCE_THRESHOLD: float = 0.6
 
 
+def _remap_extracted_to_active_field(
+    extracted: dict[str, Any],
+    active_field: str | None,
+) -> dict[str, Any]:
+    """Bind a single bare date extraction to the field the bot just asked for.
+
+    ``load_session`` clears ``missing_fields``, so extraction often guesses the
+    wrong RDD date key (e.g. maps "10th August" → ``fitout_start_date`` when the
+    question was ``actual_handover_date``).  When exactly one date field was
+    extracted and ``active_field`` is a different date field, remap the value.
+    """
+    if not active_field or active_field in BACKEND_PROTECTED_FIELDS:
+        return extracted
+    if active_field in extracted:
+        return extracted
+    if active_field not in _USER_DATE_FIELDS:
+        return extracted
+
+    date_keys = [k for k in extracted if k in _USER_DATE_FIELDS]
+    if len(date_keys) != 1:
+        return extracted
+
+    wrong_key = date_keys[0]
+    remapped = dict(extracted)
+    remapped[active_field] = remapped.pop(wrong_key)
+    return remapped
+
+
 # ---------------------------------------------------------------------------
 # Node
 # ---------------------------------------------------------------------------
@@ -138,7 +180,10 @@ _CONFIDENCE_THRESHOLD: float = 0.6
 async def merge_state_node(state: ServiceRequestState) -> dict[str, Any]:
     """Merge ``extracted_fields`` and ``corrected_fields`` into ``collected_data``."""
     collected: dict[str, Any] = dict(state.get("collected_data") or {})
-    extracted: dict[str, Any] = state.get("extracted_fields") or {}
+    extracted: dict[str, Any] = _remap_extracted_to_active_field(
+        dict(state.get("extracted_fields") or {}),
+        state.get("active_field"),
+    )
 
     # Whether the user's raw message contained an explicit 4-digit year. Used to
     # decide if extracted date years may be coerced to the current year. Only
@@ -156,6 +201,8 @@ async def merge_state_node(state: ServiceRequestState) -> dict[str, Any]:
         if field_name in BACKEND_PROTECTED_FIELDS:
             continue
         if value is not None:
+            if field_name in _USER_DATE_FIELDS:
+                value = _to_date_only(value)
             collected[field_name] = value
 
     corrections: list[dict[str, Any]] = list(collected.get("_corrections") or [])
@@ -202,7 +249,10 @@ async def merge_state_node(state: ServiceRequestState) -> dict[str, Any]:
             and field_name in _USER_DATE_FIELDS
             and isinstance(new_value, str)
         ):
+            new_value = _to_date_only(new_value)
             new_value = _coerce_year_if_absent(new_value, message_has_year)
+        elif field_name in _USER_DATE_FIELDS:
+            new_value = _to_date_only(new_value)
 
         current_value = collected.get(field_name)
 

@@ -13,19 +13,38 @@ Design notes
 * Required keys are validated before the payload dict is returned; any
   missing key raises ``ValueError`` with a descriptive message so callers
   can surface the error before attempting a network call.
-* ``startDateLT`` and ``endDateLT`` are timezone-localised date variants
-  optionally enriched by the lease-lookup flow; they default to ``""`` when absent.
+* CREATE inspection datetimes: chatbot extracts date-only ISO; the builder
+  normalises to UTC ISO ``startDate``/``endDate`` plus portal LT display
+  strings ``startDateLT``/``endDateLT`` (``DD/MM/YYYY h:mm AM/PM``) so the
+  classic DateTimePicker can hydrate after create.
 * RDD date values from collected_data are in ISO format (YYYY-MM-DD); they
   are normalised to DD/MM/YYYY per the Postman collection shape.
+* FM dates are also written as DD/MM/YYYY for portal form hydration.
+* Both ``comment`` and ``comments`` are written so the form textarea binds.
+* Builders merge from the latest ``create_payload`` snapshot (refreshed via
+  platform GET before build) so PATCH/POST replace does not wipe fields.
+* RDD report dates are mirrored at payload root **and** in ``document_status_map``.
+* RDD final approve prefers the last ``rdd_payload`` so APPROVE preserves
+  guideLineLink, docs, and dates.
 """
 
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+import re
+from datetime import datetime, time, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
 
 logger = logging.getLogger(__name__)
+
+# Portal DateTimePicker + manual CREATE use Asia/Riyadh wall time for LT.
+_PORTAL_TZ = ZoneInfo("Asia/Riyadh")
+_DEFAULT_INSPECTION_HOUR = 9
+_LT_DISPLAY_RE = re.compile(
+    r"^\d{1,2}/\d{1,2}/\d{4}\s+\d{1,2}:\d{2}\s+(?:AM|PM)$",
+    re.IGNORECASE,
+)
 
 # ── Required data keys ────────────────────────────────────────────────────────
 
@@ -77,6 +96,96 @@ def _validate_required_keys(data: dict[str, Any]) -> None:
         )
 
 
+def _format_lt_display(dt_local: datetime) -> str:
+    """Format local wall time as portal DateTimePicker LT (``DD/MM/YYYY h:mm AM/PM``)."""
+    hour12 = dt_local.hour % 12 or 12
+    ampm = "AM" if dt_local.hour < 12 else "PM"
+    return (
+        f"{dt_local.day:02d}/{dt_local.month:02d}/{dt_local.year} "
+        f"{hour12}:{dt_local.minute:02d} {ampm}"
+    )
+
+
+def _parse_lt_display(value: str) -> datetime | None:
+    """Parse portal LT display into Asia/Riyadh-aware datetime, or None."""
+    text = (value or "").strip()
+    if not _LT_DISPLAY_RE.match(text):
+        return None
+    try:
+        date_part, time_part, ampm = text.split()
+        day_s, month_s, year_s = date_part.split("/")
+        hour_s, minute_s = time_part.split(":")
+        hour = int(hour_s)
+        minute = int(minute_s)
+        ampm_u = ampm.upper()
+        if ampm_u == "PM" and hour < 12:
+            hour += 12
+        elif ampm_u == "AM" and hour == 12:
+            hour = 0
+        return datetime(
+            int(year_s),
+            int(month_s),
+            int(day_s),
+            hour,
+            minute,
+            0,
+            tzinfo=_PORTAL_TZ,
+        )
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_inspection_datetime(value: str) -> datetime | None:
+    """Parse date-only ISO or full ISO into Asia/Riyadh-aware datetime."""
+    text = (value or "").strip()
+    if not text:
+        return None
+
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", text):
+        try:
+            day = datetime.strptime(text, "%Y-%m-%d").date()
+        except ValueError:
+            return None
+        return datetime.combine(
+            day,
+            time(_DEFAULT_INSPECTION_HOUR, 0, 0),
+            tzinfo=_PORTAL_TZ,
+        )
+
+    normalized = text.replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=_PORTAL_TZ)
+    return parsed.astimezone(_PORTAL_TZ)
+
+
+def _normalize_inspection_datetime(
+    iso_or_date: Any,
+    existing_lt: Any = None,
+) -> tuple[str, str]:
+    """Return ``(utc_iso, lt_display)`` for CREATE payload inspection dates.
+
+    Chatbot extraction stores date-only ``YYYY-MM-DD``.  The portal CREATE
+    contract and DateTimePicker expect UTC ISO plus ``DD/MM/YYYY h:mm AM/PM``.
+    """
+    lt_raw = "" if existing_lt is None else str(existing_lt).strip()
+    iso_raw = "" if iso_or_date is None else str(iso_or_date).strip()
+
+    local_dt = _parse_lt_display(lt_raw) if lt_raw else None
+    if local_dt is None:
+        local_dt = _parse_inspection_datetime(iso_raw)
+    if local_dt is None:
+        return iso_raw, lt_raw
+
+    utc = local_dt.astimezone(timezone.utc)
+    utc_iso = utc.strftime("%Y-%m-%dT%H:%M:%S.") + f"{utc.microsecond // 1000:03d}Z"
+    lt_display = lt_raw if _parse_lt_display(lt_raw) else _format_lt_display(local_dt)
+    return utc_iso, lt_display
+
+
 # ── Public API ────────────────────────────────────────────────────────────────
 
 
@@ -103,6 +212,13 @@ def build_create_handover_payload(data: dict[str, Any]) -> dict[str, Any]:
     """
     _validate_required_keys(data)
 
+    start_iso, start_lt = _normalize_inspection_datetime(
+        data["startDate"], data.get("startDateLT")
+    )
+    end_iso, end_lt = _normalize_inspection_datetime(
+        data["endDate"], data.get("endDateLT")
+    )
+
     payload: dict[str, Any] = {
         "payload": {
             "mall": data["mall"],
@@ -110,9 +226,9 @@ def build_create_handover_payload(data: dict[str, Any]) -> dict[str, Any]:
             "lease": data["lease_code"],
             "notes": data.get("notes", ""),
             "title": data["title"],
-            "endDate": data["endDate"],
+            "endDate": end_iso,
             "comments": data.get("comments", ""),
-            "startDate": data["startDate"],
+            "startDate": start_iso,
             "attachments": "",
             "description": data["description"],
             "documents_ids": [],
@@ -133,9 +249,8 @@ def build_create_handover_payload(data: dict[str, Any]) -> dict[str, Any]:
             "tenant_profile_id": data["tenant_profile_id"],
             "contract_id": data["contract_id"],
             "property_id": data["property_id"],
-            # Timezone-localised date variants; optional — default to "" when absent.
-            "startDateLT": data.get("startDateLT", ""),
-            "endDateLT": data.get("endDateLT", ""),
+            "startDateLT": start_lt,
+            "endDateLT": end_lt,
         },
         "title": data["title"],
         "tenant_profile_id": data["tenant_profile_id"],
@@ -164,12 +279,100 @@ def _to_ddmmyyyy(iso_date_str: str) -> str:
 
     Returns the input unchanged when it cannot be parsed (best-effort).
     """
+    if not iso_date_str:
+        return ""
     for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y"):
         try:
-            return datetime.strptime(iso_date_str, fmt).strftime("%d/%m/%Y")
+            return datetime.strptime(str(iso_date_str).strip(), fmt).strftime("%d/%m/%Y")
         except ValueError:
             continue
-    return iso_date_str
+    return str(iso_date_str)
+
+
+def _platform_date(value: Any) -> str:
+    """Normalise a date for platform form fields (DD/MM/YYYY)."""
+    if value in (None, ""):
+        return ""
+    return _to_ddmmyyyy(str(value))
+
+
+def _apply_comments(target: dict[str, Any], comments: str) -> None:
+    """Write both ``comment`` and ``comments`` so portal form fields hydrate."""
+    text = comments or ""
+    target["comment"] = text
+    target["comments"] = text
+
+
+def _strip_meta_from_platform_payload(platform_payload: dict[str, Any]) -> dict[str, Any]:
+    """Copy platform GET payload without meta keys that are not form fields."""
+    skip = {"workflow_version"}
+    return {k: v for k, v in platform_payload.items() if k not in skip}
+
+
+def snapshot_create_payload_from_platform(
+    backend_refs: dict[str, Any],
+    platform_payload: dict[str, Any] | None,
+    *,
+    sr_id: str | None = None,
+) -> dict[str, Any]:
+    """Refresh ``backend_refs["create_payload"]`` from a platform GET payload.
+
+    Platform PATCH/POST **replaces** the stored payload, so chatbot builders must
+    always start from the latest platform snapshot — not a stale CREATE-time copy.
+    """
+    if not isinstance(platform_payload, dict) or not platform_payload:
+        return backend_refs
+
+    cleaned = _strip_meta_from_platform_payload(platform_payload)
+    existing = dict(backend_refs.get("create_payload") or {})
+    resolved_sr = (
+        sr_id
+        or backend_refs.get("sr_id")
+        or existing.get("service_request_id")
+        or ""
+    )
+    backend_refs["create_payload"] = {
+        "payload": cleaned,
+        "title": cleaned.get("title") or existing.get("title") or "",
+        "tenant_profile_id": (
+            cleaned.get("tenant_profile_id")
+            or existing.get("tenant_profile_id")
+        ),
+        "property_id": cleaned.get("property_id") or existing.get("property_id"),
+        "service_category": "FIT_OUT_AND_HANDOVER",
+        "sub_category": "HANDOVER",
+        "lease_code": (
+            cleaned.get("lease")
+            or cleaned.get("lease_code")
+            or existing.get("lease_code")
+            or ""
+        ),
+        "lease_id": cleaned.get("lease_id") or existing.get("lease_id"),
+        "service_request_id": resolved_sr,
+    }
+    return backend_refs
+
+
+def _inner_base_from_refs(
+    backend_refs: dict[str, Any],
+    data: dict[str, Any] | None = None,
+    *,
+    prefer_rdd_payload: bool = False,
+) -> dict[str, Any]:
+    """Resolve the richest available inner payload as a merge base."""
+    create_payload: dict[str, Any] = backend_refs.get("create_payload") or {}
+    inner: dict[str, Any] = dict(create_payload.get("payload") or {})
+
+    if prefer_rdd_payload:
+        rdd_envelope = backend_refs.get("rdd_payload") or {}
+        rdd_inner = rdd_envelope.get("payload")
+        if isinstance(rdd_inner, dict) and rdd_inner:
+            # REPORT_SUBMITTED body is newer than CREATE; overlay it.
+            inner = {**inner, **dict(rdd_inner)}
+
+    if not inner and data:
+        inner = _seed_fm_inner_from_collected(data)
+    return inner
 
 
 def _fm_document_status_entry(doc_id: str) -> dict[str, Any]:
@@ -206,10 +409,10 @@ def _rdd_document_status_entry(
         "id": doc_id,
         "document_status": document_status,
         "handover_date": "",
-        "actual_handover_date": _to_ddmmyyyy(actual_handover_date) if actual_handover_date else "",
-        "fitout_start_date": _to_ddmmyyyy(fitout_start_date) if fitout_start_date else "",
-        "fitout_end_date": _to_ddmmyyyy(fitout_end_date) if fitout_end_date else "",
-        "trading_date": _to_ddmmyyyy(trading_date) if trading_date else "",
+        "actual_handover_date": _platform_date(actual_handover_date),
+        "fitout_start_date": _platform_date(fitout_start_date),
+        "fitout_end_date": _platform_date(fitout_end_date),
+        "trading_date": _platform_date(trading_date),
     }
 
 
@@ -241,6 +444,10 @@ def _seed_fm_inner_from_collected(data: dict[str, Any]) -> dict[str, Any]:
         "guideLineLink",
         "unit_readiness_date",
         "expected_handover_date",
+        "actual_handover_date",
+        "fitout_start_date",
+        "fitout_end_date",
+        "trading_date",
     ):
         if data.get(key) not in (None, ""):
             seeded[key] = data[key]
@@ -273,30 +480,40 @@ def build_fm_review_payload(
     """
     sr_id: str = backend_refs.get("sr_id", "")
     create_payload: dict[str, Any] = backend_refs.get("create_payload") or {}
-    inner: dict[str, Any] = dict(create_payload.get("payload") or {})
-    if not inner:
-        inner = _seed_fm_inner_from_collected(data)
+    inner = _inner_base_from_refs(backend_refs, data)
 
-    uploaded_docs: list[str] = backend_refs.get("uploaded_documents") or []
+    uploaded_docs: list[str] = list(backend_refs.get("uploaded_documents") or [])
+    # Preserve any documents_ids already on the platform payload that the session
+    # may not have re-listed (open-existing / partial hydrate).
+    for existing_id in inner.get("documents_ids") or []:
+        if existing_id and existing_id not in uploaded_docs:
+            uploaded_docs.append(existing_id)
+
     sr_operations: list[dict[str, Any]] = backend_refs.get("sr_operations") or []
     ref_no: str = backend_refs.get("ref_no", "")
 
     document_status_map = [_fm_document_status_entry(doc_id) for doc_id in uploaded_docs]
 
+    unit_ready = data.get("unit_readiness_date") or inner.get("unit_readiness_date") or ""
+    expected_ho = (
+        data.get("expected_handover_date") or inner.get("expected_handover_date") or ""
+    )
+    comments = data.get("comments") or inner.get("comments") or inner.get("comment") or ""
+
     fm_inner: dict[str, Any] = {
         **inner,
-        "unit_readiness_date": data.get("unit_readiness_date", ""),
-        "expected_handover_date": data.get("expected_handover_date", ""),
+        "unit_readiness_date": _platform_date(unit_ready),
+        "expected_handover_date": _platform_date(expected_ho),
         "documents_ids": uploaded_docs,
         "document_status_map": document_status_map,
-        "comment": data.get("comments", ""),
-        "ref_no": ref_no,
+        "ref_no": ref_no or inner.get("ref_no", ""),
         "sr_id": sr_id,
         "current_sr_status": "IN_PROCESS",
         "document_saved": True,
-        "sr_operations": sr_operations,
+        "sr_operations": sr_operations or inner.get("sr_operations") or [],
         "user_action": None,
     }
+    _apply_comments(fm_inner, str(comments))
 
     payload: dict[str, Any] = {
         "payload": fm_inner,
@@ -337,10 +554,8 @@ def build_fm_approve_payload(
     inner = dict(base.get("payload") or {})
     # Keep pre-action status; top-level status carries APPROVED.
     inner["current_sr_status"] = "IN_PROCESS"
-    if comment:
-        inner["comment"] = comment
-    elif not inner.get("comment"):
-        inner["comment"] = data.get("comments", "")
+    comment_text = comment or data.get("comments", "") or inner.get("comments", "") or ""
+    _apply_comments(inner, str(comment_text))
 
     return {
         "payload": inner,
@@ -351,7 +566,7 @@ def build_fm_approve_payload(
         "sub_category": "HANDOVER",
         "service_request_id": sr_id,
         "status": "APPROVED",
-        "comment": comment or data.get("comments", "") or "",
+        "comment": comment_text,
         "user_action": None,
     }
 
@@ -380,43 +595,70 @@ def build_rdd_report_payload(
     """
     sr_id: str = backend_refs.get("sr_id", "")
     create_payload: dict[str, Any] = backend_refs.get("create_payload") or {}
-    inner: dict[str, Any] = create_payload.get("payload") or {}
+    inner = _inner_base_from_refs(backend_refs, data)
 
-    fm_doc_ids: list[str] = backend_refs.get("uploaded_documents") or []
+    fm_doc_ids: list[str] = list(backend_refs.get("uploaded_documents") or [])
+    for existing_id in inner.get("documents_ids") or []:
+        if existing_id and existing_id not in fm_doc_ids:
+            # Keep FM docs from platform; RDD report id added separately below.
+            fm_doc_ids.append(existing_id)
+
     rdd_doc_id: str | None = backend_refs.get("rdd_document_id")
 
     all_doc_ids = list(fm_doc_ids)
     if rdd_doc_id and rdd_doc_id not in all_doc_ids:
         all_doc_ids.append(rdd_doc_id)
 
-    fm_status_map = [_fm_document_status_entry(doc_id) for doc_id in fm_doc_ids]
+    actual = data.get("actual_handover_date") or inner.get("actual_handover_date") or ""
+    fit_start = data.get("fitout_start_date") or inner.get("fitout_start_date") or ""
+    fit_end = data.get("fitout_end_date") or inner.get("fitout_end_date") or ""
+    trading = data.get("trading_date") or inner.get("trading_date") or ""
+
+    # FM map entries: keep ids that are not the RDD report.
+    fm_only_ids = [d for d in all_doc_ids if d != rdd_doc_id]
+    fm_status_map = [_fm_document_status_entry(doc_id) for doc_id in fm_only_ids]
     rdd_status_entry = (
         _rdd_document_status_entry(
             doc_id=rdd_doc_id,
             document_status=data.get("document_status", "APPROVED"),
-            actual_handover_date=data.get("actual_handover_date", ""),
-            fitout_start_date=data.get("fitout_start_date", ""),
-            fitout_end_date=data.get("fitout_end_date", ""),
-            trading_date=data.get("trading_date", ""),
+            actual_handover_date=str(actual),
+            fitout_start_date=str(fit_start),
+            fitout_end_date=str(fit_end),
+            trading_date=str(trading),
         )
         if rdd_doc_id
         else None
     )
     document_status_map = fm_status_map + ([rdd_status_entry] if rdd_status_entry else [])
 
+    comments = data.get("comments") or inner.get("comments") or inner.get("comment") or ""
+    guide = data.get("guideLineLink") or inner.get("guideLineLink") or ""
+
     rdd_inner: dict[str, Any] = {
         **inner,
-        "guideLineLink": data.get("guideLineLink", ""),
+        "guideLineLink": guide,
         "documents_ids": all_doc_ids,
         "document_status_map": document_status_map,
-        "unit_readiness_date": data.get("unit_readiness_date", inner.get("unit_readiness_date", "")),
-        "expected_handover_date": data.get(
-            "expected_handover_date", inner.get("expected_handover_date", "")
+        # FM dates preserved (normalised) so a REPORT_SUBMITTED replace does not wipe them.
+        "unit_readiness_date": _platform_date(
+            data.get("unit_readiness_date") or inner.get("unit_readiness_date") or ""
         ),
-        "comment": data.get("comments", ""),
+        "expected_handover_date": _platform_date(
+            data.get("expected_handover_date") or inner.get("expected_handover_date") or ""
+        ),
+        # Mirror RDD dates at payload root so portal form date fields hydrate
+        # (in addition to document_status_map entries used by Postman/contract).
+        "actual_handover_date": _platform_date(actual),
+        "fitout_start_date": _platform_date(fit_start),
+        "fitout_end_date": _platform_date(fit_end),
+        "trading_date": _platform_date(trading),
+        "document_status": data.get("document_status")
+        or inner.get("document_status")
+        or "APPROVED",
         "sr_id": sr_id,
         "user_action": None,
     }
+    _apply_comments(rdd_inner, str(comments))
 
     payload: dict[str, Any] = {
         "payload": rdd_inner,
@@ -434,7 +676,7 @@ def build_rdd_report_payload(
     logger.debug(
         "build_rdd_report_payload: built for sr_id=%s fm_docs=%d rdd_doc=%s",
         sr_id,
-        len(fm_doc_ids),
+        len(fm_only_ids),
         rdd_doc_id,
     )
     return payload
@@ -446,48 +688,64 @@ def build_rdd_approve_payload(
 ) -> dict[str, Any]:
     """Build the PATCH payload for RDD final approval (status=APPROVED after REPORT_SUBMITTED).
 
-    Parameters
-    ----------
-    backend_refs:
-        ``backend_refs`` from graph state; must include ``sr_id`` and
-        ``create_payload`` (the original CREATE_SR payload shape).
-        Direct ID keys in ``backend_refs`` (e.g. ``tenant_profile_id``,
-        ``property_id``) take precedence over those in ``create_payload``.
-    comment:
-        Optional approver comment to include in the payload.
-
-    Returns
-    -------
-    dict
-        PATCH body ready for ``PlatformAPIClient.patch_service_request``.
+    Starts from the richest available snapshot (last ``rdd_payload`` / platform
+    ``create_payload``) so APPROVE does not wipe dates, docs, or guideLineLink.
     """
     sr_id: str = backend_refs.get("sr_id", "")
     create_payload: dict[str, Any] = backend_refs.get("create_payload") or {}
-    inner: dict[str, Any] = create_payload.get("payload") or {}
+    inner = _inner_base_from_refs(backend_refs, prefer_rdd_payload=True)
 
-    # Direct backend_refs IDs take precedence over create_payload values
-    tenant_profile_id = backend_refs.get("tenant_profile_id") or inner.get("tenant_profile_id") or create_payload.get("tenant_profile_id")
-    property_id = backend_refs.get("property_id") or inner.get("property_id") or create_payload.get("property_id")
+    tenant_profile_id = (
+        backend_refs.get("tenant_profile_id")
+        or inner.get("tenant_profile_id")
+        or create_payload.get("tenant_profile_id")
+    )
+    property_id = (
+        backend_refs.get("property_id")
+        or inner.get("property_id")
+        or create_payload.get("property_id")
+    )
+
+    comment_text = (
+        comment
+        or inner.get("comments")
+        or inner.get("comment")
+        or ""
+    )
 
     approved_inner: dict[str, Any] = {
         **inner,
-        "sr_id": sr_id,                     # sr_id in inner payload
-        "comment": comment,                  # comment in inner payload
+        "sr_id": sr_id,
         "current_sr_status": "REPORT_SUBMITTED",
         "user_action": None,
     }
+    # Keep dates in platform form format if present.
+    for date_key in (
+        "unit_readiness_date",
+        "expected_handover_date",
+        "actual_handover_date",
+        "fitout_start_date",
+        "fitout_end_date",
+        "trading_date",
+    ):
+        if approved_inner.get(date_key) not in (None, ""):
+            approved_inner[date_key] = _platform_date(approved_inner[date_key])
+    _apply_comments(approved_inner, str(comment_text))
 
     payload: dict[str, Any] = {
         "payload": approved_inner,
-        "title": inner.get("title", ""),
+        "title": inner.get("title", "") or create_payload.get("title", ""),
         "tenant_profile_id": tenant_profile_id,
         "property_id": property_id,
         "service_category": "FIT_OUT_AND_HANDOVER",
         "sub_category": "HANDOVER",
-        "lease_code": inner.get("lease", create_payload.get("lease_code", "")),
-        "lease_id": create_payload.get("lease_id"),
+        "lease_code": inner.get("lease")
+        or inner.get("lease_code")
+        or create_payload.get("lease_code", ""),
+        "lease_id": create_payload.get("lease_id") or inner.get("lease_id"),
         "service_request_id": sr_id,
         "status": "APPROVED",
+        "comment": comment_text,
     }
 
     logger.debug("build_rdd_approve_payload: built for sr_id=%s", sr_id)
@@ -529,3 +787,8 @@ class PayloadBuilderService:
         self, data: dict[str, Any], backend_refs: dict[str, Any]
     ) -> dict[str, Any]:
         return build_rdd_report_payload(data, backend_refs)
+
+    def build_rdd_approve_payload(
+        self, backend_refs: dict[str, Any], comment: str = ""
+    ) -> dict[str, Any]:
+        return build_rdd_approve_payload(backend_refs, comment)

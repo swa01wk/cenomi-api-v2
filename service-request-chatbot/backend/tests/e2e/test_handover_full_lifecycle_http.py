@@ -76,12 +76,14 @@ def _make_full_lifecycle_sr_mock() -> MagicMock:
     fm_get_result = MagicMock()
     fm_get_result.sr_id = _SR_ID
     fm_get_result.error = None
+    fm_get_result.success = True
     fm_get_result.status_code = 200
     fm_get_result.latency_ms = 30
     fm_get_result.status = "IN_PROCESS"
     fm_get_result.service_request_operations = [
         {"assigned_role": "FM_MANAGER", "status": "IN_PROGRESS"},
     ]
+    fm_get_result.payload = {"workflow_version": 1}
     fm_get_result.response_payload = {}
 
     # After FM approve, GET returns DD_ENGINEER IN_PROGRESS → RDD_REVIEW.
@@ -90,6 +92,7 @@ def _make_full_lifecycle_sr_mock() -> MagicMock:
     rdd_get_result = MagicMock()
     rdd_get_result.sr_id = _SR_ID
     rdd_get_result.error = None
+    rdd_get_result.success = True
     rdd_get_result.status_code = 200
     rdd_get_result.latency_ms = 30
     rdd_get_result.status = "IN_PROCESS"
@@ -97,7 +100,23 @@ def _make_full_lifecycle_sr_mock() -> MagicMock:
         {"assigned_role": "FM_MANAGER", "status": "FINISHED"},
         {"assigned_role": "DD_ENGINEER", "status": "IN_PROGRESS"},
     ]
+    rdd_get_result.payload = {"workflow_version": 1}
     rdd_get_result.response_payload = {}
+
+    # After RDD final approve PATCH, verify path expects DD FINISHED.
+    completed_get_result = MagicMock()
+    completed_get_result.sr_id = _SR_ID
+    completed_get_result.error = None
+    completed_get_result.success = True
+    completed_get_result.status_code = 200
+    completed_get_result.latency_ms = 30
+    completed_get_result.status = "COMPLETED"
+    completed_get_result.service_request_operations = [
+        {"assigned_role": "FM_MANAGER", "status": "FINISHED"},
+        {"assigned_role": "DD_ENGINEER", "status": "FINISHED"},
+    ]
+    completed_get_result.payload = {"workflow_version": 1}
+    completed_get_result.response_payload = {}
 
     patch_count = {"n": 0}
 
@@ -106,8 +125,9 @@ def _make_full_lifecycle_sr_mock() -> MagicMock:
         return ok_result
 
     async def _get_sr(sr_id: str):
-        # After FM approve PATCH (2nd patch in this lifecycle: save then approve),
-        # return FINISHED FM + IN_PROGRESS DD for verify + later syncs.
+        # patch 1 = FM save, patch 2 = FM approve, patch 3 = RDD final approve
+        if patch_count["n"] >= 3:
+            return completed_get_result
         if patch_count["n"] >= 2:
             return rdd_get_result
         return fm_get_result

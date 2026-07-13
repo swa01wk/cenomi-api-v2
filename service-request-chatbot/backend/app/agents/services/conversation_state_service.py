@@ -29,8 +29,8 @@ class ConversationStateService:
         """Return the latest draft fields for *session_id*, or ``{}`` if none exists.
 
         Workflow metadata embedded in ``collected_data`` by ``save_checkpoint``
-        (``_confirmation_status``, ``_selected_lease``) is extracted into
-        top-level state keys so graph nodes see a clean interface.
+        (``_confirmation_status``, ``_selected_lease``, ``_active_field``) is
+        extracted into top-level state keys so graph nodes see a clean interface.
         """
         try:
             draft = await self._draft_repo.get_by_session(session_id)
@@ -42,6 +42,7 @@ class ConversationStateService:
             # Extract embedded workflow metadata back into top-level state keys.
             confirmation_status = raw_collected.pop("_confirmation_status", None)
             selected_lease = raw_collected.pop("_selected_lease", None)
+            active_field = raw_collected.pop("_active_field", None)
 
             result: dict[str, Any] = {
                 "service_category": draft.service_category,
@@ -55,6 +56,8 @@ class ConversationStateService:
                 result["confirmation_status"] = confirmation_status
             if selected_lease is not None:
                 result["selected_lease"] = selected_lease
+            if active_field is not None:
+                result["active_field"] = active_field
 
             # Restore submitted SR identity into backend_refs so that
             # sr_status_sync routing and the preview node can access the
@@ -76,10 +79,10 @@ class ConversationStateService:
         Creates a new draft row when the graph has identified a service
         category; skips persistence when the intent is not yet resolved.
 
-        ``confirmation_status`` and ``selected_lease`` are not DB columns, so
-        they are piggy-backed into ``collected_data`` under reserved ``_``-prefixed
-        keys (``_confirmation_status``, ``_selected_lease``).  ``load`` strips them
-        back out into top-level state keys so nodes never see the raw storage.
+        ``confirmation_status``, ``selected_lease``, and ``active_field`` are not
+        DB columns, so they are piggy-backed into ``collected_data`` under reserved
+        ``_``-prefixed keys.  ``load`` strips them back out into top-level state
+        keys so nodes never see the raw storage.
         """
         try:
             service_category = state.get("service_category")
@@ -101,6 +104,12 @@ class ConversationStateService:
                 raw_collected["_selected_lease"] = selected_lease
             else:
                 raw_collected.pop("_selected_lease", None)
+
+            active_field = state.get("active_field")
+            if active_field is not None:
+                raw_collected["_active_field"] = active_field
+            else:
+                raw_collected.pop("_active_field", None)
 
             draft = await self._draft_repo.get_by_session(session_id)
 
@@ -131,6 +140,20 @@ class ConversationStateService:
                     sr_id=_extract_sr_id(state),
                 )
             else:
+                # Merge so a sync that only saw platform FM attachments cannot
+                # wipe an RDD report that was uploaded into the draft this session.
+                from app.agents.graph.nodes.shared.sr_status_sync_node import (
+                    _merge_documents,
+                )
+
+                state_docs = state.get("documents")
+                if state_docs is None:
+                    merged_docs = list(draft.documents or [])
+                else:
+                    merged_docs = _merge_documents(
+                        list(draft.documents or []),
+                        list(state_docs or []),
+                    )
                 updates: dict[str, Any] = {
                     "workflow_stage": workflow_stage,
                     # Use raw_collected unconditionally — an empty dict after a
@@ -140,7 +163,7 @@ class ConversationStateService:
                     # collected_data, causing context leakage into the next request.
                     "collected_data": raw_collected,
                     "missing_fields": state.get("missing_fields") or [],
-                    "documents": state.get("documents") or draft.documents,
+                    "documents": merged_docs,
                     "ready_to_submit": ready_to_submit,
                 }
                 if service_category:

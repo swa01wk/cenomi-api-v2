@@ -127,6 +127,29 @@ class TestRDDReviewEntryNode:
         result = await rdd_review_entry_node(state)
         assert result["status"] == "WAITING_FOR_USER"
 
+    @pytest.mark.asyncio
+    async def test_generic_confirm_sets_submit_and_confirmed(self) -> None:
+        """ConfirmationCard falls back to action=confirm when confirmAction missing."""
+        state = _state(
+            action_override="confirm",
+            backend_refs={"user_role": "DD_ENGINEER"},
+        )
+        result = await rdd_review_entry_node(state)
+        assert result["confirmation_status"] == "CONFIRMED"
+        assert result["backend_refs"]["rdd_action"] == "submit"
+
+    @pytest.mark.asyncio
+    async def test_pending_text_yes_confirms_submit(self) -> None:
+        state = _state(
+            action_override=None,
+            backend_refs={"user_role": "DD_ENGINEER"},
+            confirmation_status="PENDING",
+            user_message="Yes, please submit",
+        )
+        result = await rdd_review_entry_node(state)
+        assert result["confirmation_status"] == "CONFIRMED"
+        assert result["backend_refs"]["rdd_action"] == "submit"
+
 
 # ---------------------------------------------------------------------------
 # rdd_payload_builder_node

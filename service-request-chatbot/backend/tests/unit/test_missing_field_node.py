@@ -93,6 +93,20 @@ class TestMissingFieldNodeBasic:
         ui = result["response_ui"]
         assert ui["message"] == result["response_message"]
 
+    @pytest.mark.asyncio
+    async def test_active_field_set_when_asking(self) -> None:
+        state = _state(workflow_stage="RDD_REVIEW", collected_data={})
+        result = await missing_field_node(state)
+        assert result["active_field"] == result["response_ui"]["field"]
+        assert result["active_field"] is not None
+
+    @pytest.mark.asyncio
+    async def test_active_field_cleared_when_nothing_missing(self) -> None:
+        collected = {f: "value" for f in FM_REVIEW_STAGE.required_fields}
+        state = _state(workflow_stage="FM_REVIEW", collected_data=collected)
+        result = await missing_field_node(state)
+        assert result["active_field"] is None
+
 
 # ---------------------------------------------------------------------------
 # TestOneQuestionAtATime

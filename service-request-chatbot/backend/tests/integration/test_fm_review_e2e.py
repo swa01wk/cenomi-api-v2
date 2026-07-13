@@ -204,7 +204,7 @@ class TestFMPayloadWithDocuments:
 
         result = await fm_payload_builder_node(state)
         payload_inner = result["backend_refs"]["fm_payload"]["payload"]
-        assert payload_inner["unit_readiness_date"] == "2026-06-18"
+        assert payload_inner["unit_readiness_date"] == "18/06/2026"
 
     @pytest.mark.asyncio
     async def test_payload_includes_expected_handover_date(self) -> None:
@@ -215,7 +215,7 @@ class TestFMPayloadWithDocuments:
 
         result = await fm_payload_builder_node(state)
         payload_inner = result["backend_refs"]["fm_payload"]["payload"]
-        assert payload_inner["expected_handover_date"] == "2026-06-25"
+        assert payload_inner["expected_handover_date"] == "25/06/2026"
 
     @pytest.mark.asyncio
     async def test_approve_payload_has_approved_status(self) -> None:
@@ -311,7 +311,7 @@ class TestFMFullChainedPipeline:
         payload = state["backend_refs"]["fm_payload"]
         assert payload["status"] == "APPROVED"
         inner = payload["payload"]
-        assert inner["expected_handover_date"] == "2026-06-25"
+        assert inner["expected_handover_date"] == "25/06/2026"
         assert "fm-doc-checklist" in inner["documents_ids"]
 
         # 4. Submit to platform

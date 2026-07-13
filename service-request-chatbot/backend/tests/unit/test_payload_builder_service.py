@@ -174,12 +174,12 @@ class TestBuildCreateHandoverPayloadValues:
     def test_start_date_mapped(self) -> None:
         data = _full_data()
         result = build_create_handover_payload(data)
-        assert result["payload"]["startDate"] == data["startDate"]
+        assert result["payload"]["startDate"] == "2025-03-01T06:00:00.000Z"
 
     def test_end_date_mapped(self) -> None:
         data = _full_data()
         result = build_create_handover_payload(data)
-        assert result["payload"]["endDate"] == data["endDate"]
+        assert result["payload"]["endDate"] == "2025-09-01T06:00:00.000Z"
 
     def test_comments_mapped(self) -> None:
         data = _full_data()
@@ -268,13 +268,17 @@ class TestBuildCreateHandoverPayloadValues:
 
     def test_startDateLT_mapped_when_present(self) -> None:
         data = _full_data()
+        data["startDateLT"] = "01/03/2025 2:30 PM"
         result = build_create_handover_payload(data)
-        assert result["payload"]["startDateLT"] == data["startDateLT"]
+        assert result["payload"]["startDateLT"] == "01/03/2025 2:30 PM"
+        assert result["payload"]["startDate"] == "2025-03-01T11:30:00.000Z"
 
     def test_endDateLT_mapped_when_present(self) -> None:
         data = _full_data()
+        data["endDateLT"] = "01/09/2025 2:30 PM"
         result = build_create_handover_payload(data)
-        assert result["payload"]["endDateLT"] == data["endDateLT"]
+        assert result["payload"]["endDateLT"] == "01/09/2025 2:30 PM"
+        assert result["payload"]["endDate"] == "2025-09-01T11:30:00.000Z"
 
 
 # ===========================================================================
@@ -289,17 +293,26 @@ class TestBuildCreateHandoverPayloadDefaults:
         result = build_create_handover_payload(data)
         assert result["payload"]["notes"] == ""
 
-    def test_startDateLT_defaults_to_empty_string_when_absent(self) -> None:
+    def test_startDateLT_derived_from_date_when_absent(self) -> None:
         data = _full_data()
         del data["startDateLT"]
         result = build_create_handover_payload(data)
-        assert result["payload"]["startDateLT"] == ""
+        assert result["payload"]["startDateLT"] == "01/03/2025 9:00 AM"
+        assert result["payload"]["startDate"] == "2025-03-01T06:00:00.000Z"
 
-    def test_endDateLT_defaults_to_empty_string_when_absent(self) -> None:
+    def test_endDateLT_derived_from_date_when_absent(self) -> None:
         data = _full_data()
         del data["endDateLT"]
         result = build_create_handover_payload(data)
-        assert result["payload"]["endDateLT"] == ""
+        assert result["payload"]["endDateLT"] == "01/09/2025 9:00 AM"
+        assert result["payload"]["endDate"] == "2025-09-01T06:00:00.000Z"
+
+    def test_invalid_stored_lt_is_replaced_from_date(self) -> None:
+        """Legacy ISO-offset LT values are not portal display format — regenerate."""
+        data = _full_data()
+        result = build_create_handover_payload(data)
+        assert result["payload"]["startDateLT"] == "01/03/2025 9:00 AM"
+        assert result["payload"]["endDateLT"] == "01/09/2025 9:00 AM"
 
     def test_all_optional_fields_absent_still_builds(self) -> None:
         data = _full_data()
@@ -474,6 +487,140 @@ class TestBuildFmApprovePayload:
         payload = build_fm_review_payload(data, self._backend_refs())
         assert payload["status"] == "IN_PROCESS"
         assert payload["lease_code"] == "LC-001"
+
+    def test_fm_writes_comments_and_comment(self) -> None:
+        data = {
+            "unit_readiness_date": "2026-07-01",
+            "expected_handover_date": "2026-07-08",
+            "comments": "Site ready",
+        }
+        payload = build_fm_review_payload(data, self._backend_refs())
+        assert payload["payload"]["comments"] == "Site ready"
+        assert payload["payload"]["comment"] == "Site ready"
+
+    def test_fm_iso_dates_converted_to_ddmmyyyy(self) -> None:
+        data = {
+            "unit_readiness_date": "2026-07-01",
+            "expected_handover_date": "2026-07-08",
+        }
+        payload = build_fm_review_payload(data, self._backend_refs())
+        assert payload["payload"]["unit_readiness_date"] == "01/07/2026"
+        assert payload["payload"]["expected_handover_date"] == "08/07/2026"
+
+
+# ===========================================================================
+# TestBuildRddPayloadsPreserveAndMirror
+# ===========================================================================
+
+
+class TestBuildRddPayloadsPreserveAndMirror:
+    def test_rdd_report_mirrors_dates_at_payload_root(self) -> None:
+        from app.agents.services.payload_builder_service import build_rdd_report_payload
+
+        data = {
+            "guideLineLink": "https://example.com/g",
+            "actual_handover_date": "2026-08-20",
+            "fitout_start_date": "2026-08-30",
+            "fitout_end_date": "2026-09-10",
+            "trading_date": "2026-09-18",
+            "document_status": "APPROVED",
+            "comments": "RDD notes",
+            "unit_readiness_date": "2026-08-01",
+            "expected_handover_date": "2026-08-08",
+        }
+        refs = {
+            "sr_id": "sr-1",
+            "create_payload": {
+                "payload": {
+                    "mall": "Mall",
+                    "brand": "Brand",
+                    "lease": "L1",
+                    "title": "T",
+                    "tenant_profile_id": 1,
+                    "property_id": 2,
+                },
+                "lease_id": "LEASE-1",
+            },
+            "uploaded_documents": ["fm-1"],
+            "rdd_document_id": "rdd-1",
+        }
+        payload = build_rdd_report_payload(data, refs)
+        inner = payload["payload"]
+        assert inner["actual_handover_date"] == "20/08/2026"
+        assert inner["fitout_start_date"] == "30/08/2026"
+        assert inner["fitout_end_date"] == "10/09/2026"
+        assert inner["trading_date"] == "18/09/2026"
+        assert inner["unit_readiness_date"] == "01/08/2026"
+        assert inner["comments"] == "RDD notes"
+        assert inner["comment"] == "RDD notes"
+        assert inner["guideLineLink"] == "https://example.com/g"
+        rdd_entry = next(e for e in inner["document_status_map"] if e["id"] == "rdd-1")
+        assert rdd_entry["actual_handover_date"] == "20/08/2026"
+
+    def test_rdd_approve_preserves_report_fields_from_rdd_payload(self) -> None:
+        from app.agents.services.payload_builder_service import build_rdd_approve_payload
+
+        refs = {
+            "sr_id": "sr-1",
+            "create_payload": {
+                "payload": {
+                    "mall": "Mall",
+                    "title": "Create only",
+                    "tenant_profile_id": 1,
+                    "property_id": 2,
+                }
+            },
+            "rdd_payload": {
+                "payload": {
+                    "mall": "Mall",
+                    "title": "After report",
+                    "guideLineLink": "https://example.com/g",
+                    "actual_handover_date": "20/08/2026",
+                    "fitout_start_date": "30/08/2026",
+                    "trading_date": "18/09/2026",
+                    "document_status_map": [
+                        {
+                            "id": "rdd-1",
+                            "document_status": "APPROVED",
+                            "actual_handover_date": "20/08/2026",
+                        }
+                    ],
+                    "documents_ids": ["fm-1", "rdd-1"],
+                    "tenant_profile_id": 1,
+                    "property_id": 2,
+                }
+            },
+        }
+        payload = build_rdd_approve_payload(refs, comment="Final")
+        inner = payload["payload"]
+        assert inner["guideLineLink"] == "https://example.com/g"
+        assert inner["actual_handover_date"] == "20/08/2026"
+        assert inner["documents_ids"] == ["fm-1", "rdd-1"]
+        assert inner["document_status_map"][0]["id"] == "rdd-1"
+        assert inner["comments"] == "Final"
+        assert inner["current_sr_status"] == "REPORT_SUBMITTED"
+
+    def test_snapshot_create_payload_from_platform(self) -> None:
+        from app.agents.services.payload_builder_service import (
+            snapshot_create_payload_from_platform,
+        )
+
+        refs: dict[str, Any] = {"sr_id": "sr-9", "create_payload": {"lease_id": "OLD"}}
+        snapshot_create_payload_from_platform(
+            refs,
+            {
+                "mall": "M",
+                "title": "Fresh",
+                "lease": "L9",
+                "workflow_version": 2,
+                "unit_readiness_date": "01/07/2026",
+            },
+            sr_id="sr-9",
+        )
+        assert refs["create_payload"]["payload"]["title"] == "Fresh"
+        assert "workflow_version" not in refs["create_payload"]["payload"]
+        assert refs["create_payload"]["lease_code"] == "L9"
+        assert refs["create_payload"]["lease_id"] == "OLD"
 
 
 # ===========================================================================

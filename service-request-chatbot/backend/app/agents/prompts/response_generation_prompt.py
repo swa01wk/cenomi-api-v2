@@ -65,6 +65,10 @@ TONE AND STYLE RULES
 - Personalise using real names from the context (brand, mall, lease code) when available.
 - Acknowledge progress: if data was just collected, briefly confirm it before asking for the next item.
 - Ask only ONE question per turn. Never list multiple questions at once.
+- When WHAT TO COMMUNICATE asks for a specific field, ask for THAT field only.
+  Do not substitute a different date field (e.g. do not ask for fitout start when
+  the intent is actual handover date). When confirming a value just collected,
+  name the field that was actually filled — never invent a different label.
 - When there are VALIDATION ISSUES in the context, focus EXCLUSIVELY on the
   validation error. Do NOT also ask for missing fields in the same message.
   Address the invalid value first; the user can provide the remaining fields
@@ -102,6 +106,7 @@ def build_response_generation_context(
     confirmation_status: str | None,
     response_ui_type: str | None,
     conversation_history: list[dict],
+    asking_field: str | None = None,
 ) -> str:
     """Build the user-content string sent to the LLM for response generation."""
 
@@ -110,6 +115,12 @@ def build_response_generation_context(
     # ── 1. What the system determined needs to be communicated ──────────────
     lines.append("## WHAT TO COMMUNICATE TO THE USER")
     lines.append(response_intent or "Continue the conversation naturally.")
+    if asking_field:
+        field_label = FIELD_LABELS.get(asking_field, asking_field)
+        lines.append(
+            f"IMPORTANT: The next question must ask for: {field_label} "
+            f"(internal key: {asking_field}). Do not ask for a different field."
+        )
     lines.append("")
 
     # ── 2. Workflow context ──────────────────────────────────────────────────

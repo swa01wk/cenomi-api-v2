@@ -211,9 +211,13 @@ async def missing_field_node(state: ServiceRequestState) -> dict[str, Any]:
             "message": next_question,
         }
         updates["status"] = "WAITING_FOR_USER"
+        # Persist so the next turn's extraction can bind a bare answer to this
+        # field even though load_session clears missing_fields.
+        updates["active_field"] = next_field
     else:
         # Nothing left to ask — signal readiness for the next pipeline step.
         updates["response_message"] = ""
         updates["status"] = "IN_PROGRESS"
+        updates["active_field"] = None
 
     return updates

@@ -551,6 +551,7 @@ class TestStageSpecificConfirmationCards:
         card_keys = {f["key"] for f in result["response_ui"]["fields"]}
         assert "guideLineLink" in card_keys
         assert "actual_handover_date" in card_keys
+        assert result["response_ui"]["confirmAction"] == "confirm_rdd_submit"
 
     @pytest.mark.asyncio
     async def test_node_skips_rdd_when_required_field_missing(self) -> None:

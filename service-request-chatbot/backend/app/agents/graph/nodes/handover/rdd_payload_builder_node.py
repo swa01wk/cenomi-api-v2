@@ -20,10 +20,30 @@ from app.agents.graph.state import ServiceRequestState
 from app.agents.services.payload_builder_service import (
     build_rdd_report_payload,
     build_rdd_approve_payload,
+    snapshot_create_payload_from_platform,
 )
+from app.agents.services.service_request_api_service import get_service_request_api_service
 from app.observability.decorators import trace_node
 
 logger = logging.getLogger(__name__)
+
+
+async def _refresh_create_payload(backend_refs: dict[str, Any], sr_id: str) -> None:
+    """Best-effort GET → refresh create_payload so POST/PATCH does not wipe form fields."""
+    try:
+        result = await get_service_request_api_service().get_service_request(sr_id)
+        if getattr(result, "success", False) is True and isinstance(result.payload, dict):
+            snapshot_create_payload_from_platform(
+                backend_refs, result.payload, sr_id=sr_id
+            )
+            if result.service_request_operations:
+                backend_refs["sr_operations"] = list(result.service_request_operations)
+    except Exception:
+        logger.warning(
+            "rdd_payload_builder_node: platform GET refresh failed sr_id=%s (continuing)",
+            sr_id,
+            exc_info=True,
+        )
 
 
 @trace_node("rdd_payload_builder", "AGENT")
@@ -54,6 +74,8 @@ async def rdd_payload_builder_node(state: ServiceRequestState) -> dict[str, Any]
                 "Cannot build RDD report payload: service request ID is not available."
             ),
         }
+
+    await _refresh_create_payload(backend_refs, sr_id)
 
     rdd_action: str = backend_refs.get("rdd_action", "submit")
 

@@ -27,6 +27,7 @@ from app.agents.graph.nodes.document_upload_node import document_upload_node
 from app.agents.graph.nodes.handover.rdd_api_submission_node import rdd_api_submission_node
 from app.agents.graph.nodes.handover.rdd_payload_builder_node import rdd_payload_builder_node
 from app.agents.graph.nodes.handover.rdd_review_entry_node import rdd_review_entry_node
+from app.agents.services.platform_api_client import ServiceRequestGetResult
 from app.agents.services.service_request_api_service import ServiceRequestCreationResult
 from app.types.chat import AuthContext
 
@@ -95,7 +96,7 @@ def _base_rdd_state(rdd_action: str = "submit", **kwargs: Any) -> dict[str, Any]
         ],
         "workflow_stage": "RDD_REVIEW",
         "action_override": None,
-        "auth": _dd_auth(),
+        "auth_context": _dd_auth(),
     }
     state.update(kwargs)
     return state
@@ -121,6 +122,41 @@ def _mock_patch_success(sr_id: str = "sr-rdd-integ-001") -> ServiceRequestCreati
         latency_ms=10,
         status_code=200,
     )
+
+
+def _mock_get_after_rdd_approve(
+    *,
+    workflow_version: int = 1,
+    rdd_finished: bool = True,
+    sr_id: str = "sr-rdd-integ-001",
+) -> ServiceRequestGetResult:
+    return ServiceRequestGetResult(
+        success=True,
+        sr_id=sr_id,
+        status="COMPLETED" if rdd_finished else "REPORT_SUBMITTED",
+        service_request_operations=[
+            {"assigned_role": "FM_MANAGER", "status": "FINISHED"},
+            {
+                "assigned_role": "DD_ENGINEER",
+                "status": "FINISHED" if rdd_finished else "IN_PROGRESS",
+            },
+        ],
+        payload={"workflow_version": workflow_version},
+    )
+
+
+def _final_approve_svc(
+    *,
+    workflow_version: int = 1,
+    patch_result: ServiceRequestCreationResult | None = None,
+) -> AsyncMock:
+    svc = AsyncMock()
+    svc.patch_service_request = AsyncMock(return_value=patch_result or _mock_patch_success())
+    svc.submit_report = AsyncMock()
+    svc.get_service_request = AsyncMock(
+        return_value=_mock_get_after_rdd_approve(workflow_version=workflow_version)
+    )
+    return svc
 
 
 def _mock_patch_failure() -> ServiceRequestCreationResult:
@@ -277,9 +313,7 @@ class TestRDDPhase3bFinalApprove:
 
         with patch(
             "app.agents.graph.nodes.handover.rdd_api_submission_node.get_service_request_api_service",
-            return_value=AsyncMock(
-                patch_service_request=AsyncMock(return_value=_mock_patch_success())
-            ),
+            return_value=_final_approve_svc(),
         ):
             result = await rdd_api_submission_node(state)
 
@@ -296,9 +330,7 @@ class TestRDDPhase3bFinalApprove:
 
         with patch(
             "app.agents.graph.nodes.handover.rdd_api_submission_node.get_service_request_api_service",
-            return_value=AsyncMock(
-                patch_service_request=AsyncMock(return_value=_mock_patch_success())
-            ),
+            return_value=_final_approve_svc(),
         ):
             result = await rdd_api_submission_node(state)
 
@@ -312,9 +344,7 @@ class TestRDDPhase3bFinalApprove:
             "payload": {"current_sr_status": "REPORT_SUBMITTED"},
         }
 
-        mock_svc = AsyncMock()
-        mock_svc.patch_service_request = AsyncMock(return_value=_mock_patch_success())
-        mock_svc.submit_report = AsyncMock()
+        mock_svc = _final_approve_svc()
 
         with patch(
             "app.agents.graph.nodes.handover.rdd_api_submission_node.get_service_request_api_service",
@@ -335,9 +365,7 @@ class TestRDDPhase3bFinalApprove:
 
         with patch(
             "app.agents.graph.nodes.handover.rdd_api_submission_node.get_service_request_api_service",
-            return_value=AsyncMock(
-                patch_service_request=AsyncMock(return_value=_mock_patch_failure())
-            ),
+            return_value=_final_approve_svc(patch_result=_mock_patch_failure()),
         ):
             result = await rdd_api_submission_node(state)
 
@@ -347,7 +375,7 @@ class TestRDDPhase3bFinalApprove:
     @pytest.mark.asyncio
     async def test_wrong_role_cannot_final_approve(self) -> None:
         state = _base_rdd_state(rdd_action="final_approve")
-        state["auth"] = _fm_auth()
+        state["auth_context"] = _fm_auth()
         state["backend_refs"]["rdd_payload"] = {
             "status": "APPROVED",
             "payload": {"current_sr_status": "REPORT_SUBMITTED"},
@@ -412,9 +440,7 @@ class TestRDDChainedPhase3aTo3b:
         # Final approve
         with patch(
             "app.agents.graph.nodes.handover.rdd_api_submission_node.get_service_request_api_service",
-            return_value=AsyncMock(
-                patch_service_request=AsyncMock(return_value=_mock_patch_success())
-            ),
+            return_value=_final_approve_svc(),
         ):
             final_result = await rdd_api_submission_node(state_3b)
 

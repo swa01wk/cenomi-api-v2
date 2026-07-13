@@ -83,6 +83,90 @@ def _map_operations_to_stage(
     return current_stage
 
 
+def _attachments_to_documents(attachments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Map platform ``service_request_attachments`` into chat ``documents`` rows."""
+    docs: list[dict[str, Any]] = []
+    for att in attachments:
+        doc_id = att.get("document_id") or att.get("id")
+        doc_type = att.get("document_type_id") or att.get("document_type")
+        if not doc_id and not doc_type:
+            continue
+        docs.append(
+            {
+                "document_id": str(doc_id) if doc_id else "",
+                "document_type_id": str(doc_type) if doc_type else "",
+                "file_name": att.get("file_name") or att.get("filename") or "",
+            }
+        )
+    return docs
+
+
+def _merge_documents(
+    existing: list[dict[str, Any]],
+    incoming: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Union session draft docs with platform attachments (never drop uploads).
+
+    Chat uploads are written to the draft first; platform GET can lag or return
+    only older FM attachments. Replacing the list wiped RDD reports and caused
+    a Missing-document loop after a successful Attach.
+    """
+    merged: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    seen_types: set[str] = set()
+
+    def _add(doc: dict[str, Any]) -> None:
+        doc_id = str(doc.get("document_id") or "").strip()
+        doc_type = str(
+            doc.get("document_type_id") or doc.get("document_type") or doc.get("type") or ""
+        ).strip()
+        if doc_id and doc_id in seen_ids:
+            return
+        # Keep first occurrence per type when id is missing.
+        if not doc_id and doc_type and doc_type in seen_types:
+            return
+        if doc_id:
+            seen_ids.add(doc_id)
+        if doc_type:
+            seen_types.add(doc_type)
+        normalized = dict(doc)
+        if doc_type and not normalized.get("document_type_id"):
+            normalized["document_type_id"] = doc_type
+        if "file_name" not in normalized and normalized.get("filename"):
+            normalized["file_name"] = normalized["filename"]
+        merged.append(normalized)
+
+    for doc in existing:
+        if isinstance(doc, dict):
+            _add(doc)
+    for doc in incoming:
+        if isinstance(doc, dict):
+            _add(doc)
+    return merged
+
+
+def _apply_document_refs(
+    backend_refs: dict[str, Any],
+    documents: list[dict[str, Any]],
+) -> None:
+    """Refresh uploaded_documents / rdd_document_id from the merged doc list."""
+    ids = [str(d.get("document_id")) for d in documents if d.get("document_id")]
+    if ids:
+        backend_refs["uploaded_documents"] = ids
+    rdd_report = next(
+        (
+            d
+            for d in documents
+            if (d.get("document_type_id") or d.get("document_type") or "")
+            == "DR_SR_HANDOVER_REPORT"
+            and d.get("document_id")
+        ),
+        None,
+    )
+    if rdd_report:
+        backend_refs["rdd_document_id"] = str(rdd_report["document_id"])
+
+
 @trace_node("sr_status_sync", "TOOL")
 async def sr_status_sync_node(state: ServiceRequestState) -> dict[str, Any]:
     """Fetch platform SR status and update workflow_stage in state.
@@ -194,6 +278,16 @@ async def sr_status_sync_node(state: ServiceRequestState) -> dict[str, Any]:
     _RDD_STATUSES: frozenset[str] = frozenset({"REPORT_SUBMITTED", "APPROVED", "APPROVED_WITH_CHANGES"})
     if effective_stage == "RDD_REVIEW" and platform_status and platform_status in _RDD_STATUSES:
         backend_refs["rdd_status"] = platform_status
+
+    attachments: list[dict[str, Any]] = list(
+        getattr(result, "service_request_attachments", None) or []
+    )
+    existing_docs: list[dict[str, Any]] = list(state.get("documents") or [])
+    hydrated_docs = _attachments_to_documents(attachments) if attachments else []
+    if existing_docs or hydrated_docs:
+        merged_docs = _merge_documents(existing_docs, hydrated_docs)
+        updates["documents"] = merged_docs
+        _apply_document_refs(backend_refs, merged_docs)
 
     payload: dict[str, Any] = getattr(result, "payload", None) or {}
     if payload:

@@ -82,6 +82,22 @@ def test_build_review_decorations_skips_when_confirmation_pending() -> None:
     assert deco.get("promote_preview") is True
 
 
+def test_build_review_decorations_hides_docs_after_report_submitted() -> None:
+    state = {
+        "backend_refs": {
+            "sr_id": "11721",
+            "user_role": "DD_ENGINEER",
+            "rdd_status": "REPORT_SUBMITTED",
+        },
+        "workflow_stage": "RDD_REVIEW",
+        "session_id": "sess-1",
+        "documents": [],
+    }
+    deco = build_review_decorations(state)
+    assert "document_requirement" not in deco
+    assert deco["suggestions"]["options"][0]["action"] == "approve_rdd_final"
+
+
 def test_finalize_response_ui_merges_suggestions() -> None:
     ui = finalize_response_ui(
         {"type": "message"},
@@ -103,6 +119,22 @@ def test_finalize_response_ui_promotes_preview() -> None:
     )
     assert ui["type"] == "sr_preview_card"
     assert ui["srId"] == "99"
+
+
+def test_finalize_preserves_suggestions_when_promoting_preview() -> None:
+    draft = {"type": "sr_preview_card", "srId": "99", "fields": []}
+    suggestions = {
+        "kind": "labeled_options",
+        "options": [{"label": "Final Approve", "action": "approve_rdd_final"}],
+    }
+    ui = finalize_response_ui(
+        {"type": "message"},
+        {"promote_preview": True, "suggestions": suggestions},
+        draft_preview=draft,
+        response_message="Report submitted",
+    )
+    assert ui["type"] == "sr_preview_card"
+    assert ui["suggestions"] == suggestions
 
 
 def test_finalize_merges_lease_picker_on_text_question() -> None:
