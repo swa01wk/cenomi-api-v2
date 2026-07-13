@@ -721,6 +721,10 @@ class ServiceRequestPlatformClient:
             if merged.get(key) in (None, "", 0):
                 merged[key] = value
 
+        # Workflow version lives on the SR object (not nested payload).
+        if data.get("workflow_version") is not None:
+            merged["workflow_version"] = data["workflow_version"]
+
         # Detail GET often omits top-level lease_id/lease_code; nested payload
         # uses ``lease`` for the PMS lease code.
         if merged.get("lease_code") in (None, "") and merged.get("lease") not in (

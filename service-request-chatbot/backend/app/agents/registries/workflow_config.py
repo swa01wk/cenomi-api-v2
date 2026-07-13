@@ -146,7 +146,7 @@ def _build_rdd_config() -> WorkflowConfig:
         # "expected_handover_date" is auto-computed from unit_readiness_date + 7 days
         # "trading_date" is auto-computed from fitout_end_date + 8 days
         auto_generated_fields=frozenset({"title", "expected_handover_date", "trading_date"}),
-        lease_trigger_fields=("lease_code", "lease_brand_mall"),
+        lease_trigger_fields=("lease_code", "company", "lease_brand_mall"),
         action_intents=frozenset(
             {
                 "CREATE_RDD_SERVICE_REQUEST",
@@ -210,7 +210,7 @@ def _build_work_permit_config() -> WorkflowConfig:
             }
         ),
         auto_generated_fields=frozenset(),
-        lease_trigger_fields=("lease_code", "lease_brand_mall"),
+        lease_trigger_fields=("lease_code", "company", "lease_brand_mall"),
         action_intents=frozenset({"CREATE_WORK_PERMIT_SR"}),
     )
 

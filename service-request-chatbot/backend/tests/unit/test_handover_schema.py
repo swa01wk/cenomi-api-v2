@@ -126,8 +126,7 @@ class TestFMReviewStage:
     _EXPECTED_DOCS = (
         "SR_HANDOVER_CHECKLIST",
         "SR_HANDOVER_SITE_SURVEY",
-        "SR_COP_CHECKLIST_OTHER",
-        "SR_HANDOVER_OTHER",  # optional additional upload accepted at FM stage
+        "SR_HANDOVER_OTHER",
     )
 
     def test_role(self) -> None:
@@ -140,7 +139,11 @@ class TestFMReviewStage:
         assert set(FM_REVIEW_STAGE.required_documents) == set(self._EXPECTED_DOCS)
 
     def test_required_documents_count(self) -> None:
-        assert len(FM_REVIEW_STAGE.required_documents) == 4
+        assert len(FM_REVIEW_STAGE.required_documents) == 3
+
+    def test_cop_checklist_not_in_fm_docs(self) -> None:
+        assert "SR_COP_CHECKLIST_OTHER" not in FM_REVIEW_STAGE.required_documents
+        assert "SR_COP_CHECKLIST_OTHER" not in FM_ALLOWED_DOCUMENTS
 
 
 # ── RDD_REVIEW stage ──────────────────────────────────────────────────────────

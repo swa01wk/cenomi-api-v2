@@ -15,7 +15,8 @@ Search priority (``HttpLeaseLookupService`` and ``MockLeaseLookupService``)
 1. ``lease_code``  (exact)
 2. ``brand`` + ``mall``  (both present)
 3. ``brand`` only
-4. ``mall`` only
+4. ``company`` only (tenant company name — platform ``?company=``)
+5. ``mall`` only
 """
 
 from __future__ import annotations
@@ -54,6 +55,8 @@ class LeaseRecord(BaseModel):
     contracted_area: float
     city: str
     lease_brand_mall: str
+    # Optional — present when platform returns tenant company name
+    company_name: str = ""
 
 
 class LeaseLookupQuery(BaseModel):
@@ -62,6 +65,9 @@ class LeaseLookupQuery(BaseModel):
     lease_code: str | None = None
     brand: str | None = None
     mall: str | None = None
+    # Tenant company name — forwarded as platform ``company`` query param
+    # (ILIKE against tenant_profiles.company_name).
+    company: str | None = None
     # Optional: restrict results to the authenticated user's properties.
     # Passed as a repeated query param to the real Lease/Tenant API so that
     # a Mall Manager at Jawharat Jeddah cannot see leases from other malls.
@@ -70,7 +76,7 @@ class LeaseLookupQuery(BaseModel):
 
     def has_identifiers(self) -> bool:
         """Return True when at least one search field is non-empty."""
-        return bool(self.lease_code or self.brand or self.mall)
+        return bool(self.lease_code or self.brand or self.mall or self.company)
 
 
 @dataclass
@@ -217,6 +223,8 @@ class HttpLeaseLookupService(AbstractLeaseLookupService):
             params["brand"] = query.brand
         if query.mall:
             params["mall"] = query.mall
+        if query.company:
+            params["company"] = query.company
         # Forward the user's property scope to the platform so the response is
         # pre-filtered to leases the user is authorised to manage.
         if query.property_ids:
@@ -273,6 +281,7 @@ _MOCK_LEASES: list[dict[str, Any]] = [
         "unit_codes": ["FF050"],
         "contracted_area": 420,
         "city": "Jeddah",
+        "company_name": "Under Armour Trading Co",
         "lease_brand_mall": "t0105712 - Brand Under Armour - Jawharat Jeddah",
     },
     {
@@ -287,6 +296,7 @@ _MOCK_LEASES: list[dict[str, Any]] = [
         "unit_codes": ["GF101", "GF102"],
         "contracted_area": 680,
         "city": "Riyadh",
+        "company_name": "Nike Saudi Arabia LLC",
         "lease_brand_mall": "t0208831 - Nike - Riyadh Park",
     },
     {
@@ -301,6 +311,7 @@ _MOCK_LEASES: list[dict[str, Any]] = [
         "unit_codes": ["LG220"],
         "contracted_area": 510,
         "city": "Jeddah",
+        "company_name": "Nike Saudi Arabia LLC",
         "lease_brand_mall": "t0301144 - Nike - Mall of Arabia",
     },
     {
@@ -315,6 +326,7 @@ _MOCK_LEASES: list[dict[str, Any]] = [
         "unit_codes": ["UF301"],
         "contracted_area": 900,
         "city": "Dubai",
+        "company_name": "Inditex Fashion Group",
         "lease_brand_mall": "t0419977 - Zara - Dubai Festival City",
     },
 ]
@@ -397,7 +409,16 @@ class MockLeaseLookupService(AbstractLeaseLookupService):
                 if brand_l in r.brand.lower() or r.brand.lower() in brand_l
             ]
 
-        # Priority 4: mall only (case-insensitive substring, bidirectional).
+        # Priority 4: company / tenant name (platform ``?company=``).
+        if query.company:
+            company_l = query.company.lower()
+            return [
+                r for r in self._records
+                if company_l in (r.company_name or "").lower()
+                or (r.company_name or "").lower() in company_l
+            ]
+
+        # Priority 5: mall only (case-insensitive substring, bidirectional).
         # e.g. query "Jawharat Jeddah mall" must still match record "Jawharat Jeddah".
         if query.mall:
             mall_l = query.mall.lower()

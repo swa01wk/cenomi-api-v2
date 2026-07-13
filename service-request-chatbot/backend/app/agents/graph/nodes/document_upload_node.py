@@ -5,8 +5,8 @@ Responsibilities
 - Read state["documents"] — a list of document metadata dicts, each with
   at least ``document_id`` and ``document_type_id`` keys.
 - FM documents (SR_HANDOVER_CHECKLIST, SR_HANDOVER_SITE_SURVEY,
-  SR_COP_CHECKLIST_OTHER, SR_HANDOVER_OTHER) → merged into
-  ``backend_refs["uploaded_documents"]`` (deduplicated, preserving pre-existing IDs).
+  SR_HANDOVER_OTHER) → merged into ``backend_refs["uploaded_documents"]``
+  (deduplicated, preserving pre-existing IDs).
 - RDD report (DR_SR_HANDOVER_REPORT) → stored as
   ``backend_refs["rdd_document_id"]`` (last one wins).
 - Documents with None or missing ``document_id`` are silently skipped.
@@ -32,7 +32,6 @@ logger = logging.getLogger(__name__)
 _FM_DOCUMENT_TYPES: frozenset[str] = frozenset({
     "SR_HANDOVER_CHECKLIST",
     "SR_HANDOVER_SITE_SURVEY",
-    "SR_COP_CHECKLIST_OTHER",
     "SR_HANDOVER_OTHER",
 })
 

@@ -39,7 +39,6 @@ ConfirmationStatus = Literal["PENDING", "CONFIRMED", "REJECTED"]
 FMDocumentType = Literal[
     "SR_HANDOVER_CHECKLIST",
     "SR_HANDOVER_SITE_SURVEY",
-    "SR_COP_CHECKLIST_OTHER",
     "SR_HANDOVER_OTHER",
 ]
 
@@ -107,10 +106,10 @@ FM_REVIEW_STAGE = StageDefinition(
         # the presence of a comments value.
     ),
     # At least one of these must be uploaded before FM save/approve.
+    # Platform FM stage: Checklist, Site survey, Other (no COP checklist).
     required_documents=(
         "SR_HANDOVER_CHECKLIST",
         "SR_HANDOVER_SITE_SURVEY",
-        "SR_COP_CHECKLIST_OTHER",
         "SR_HANDOVER_OTHER",
     ),
 )
@@ -306,6 +305,8 @@ EXTRACTABLE_FIELDS: frozenset[str] = frozenset(
         "lease_code",
         "mall",
         "brand",
+        # Tenant / company name — maps to platform GET /leases?company=
+        "company",
         # "title" is extractable: the user may provide their own title.
         # If not provided, merge_state_node auto-generates it as
         # "handover-{lease_code}-{description_slug}".

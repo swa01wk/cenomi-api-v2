@@ -291,6 +291,42 @@ class TestMockLookupByBrandOnly:
 
 
 # ---------------------------------------------------------------------------
+# TestMockLookupByCompany
+# ---------------------------------------------------------------------------
+
+
+class TestMockLookupByCompany:
+    @pytest.mark.asyncio
+    async def test_company_returns_matching_leases(self) -> None:
+        svc = MockLeaseLookupService()
+        result = await svc.lookup(LeaseLookupQuery(company="Nike Saudi"))
+        assert len(result.matches) >= 1
+        assert all("nike" in (r.company_name or "").lower() for r in result.matches)
+
+    @pytest.mark.asyncio
+    async def test_company_case_insensitive(self) -> None:
+        svc = MockLeaseLookupService()
+        result = await svc.lookup(LeaseLookupQuery(company="under armour trading"))
+        assert len(result.matches) == 1
+        assert result.matches[0].lease_code == "t0105712"
+
+    @pytest.mark.asyncio
+    async def test_company_no_match(self) -> None:
+        svc = MockLeaseLookupService()
+        result = await svc.lookup(LeaseLookupQuery(company="Nonexistent Corp XYZ"))
+        assert len(result.matches) == 0
+
+    def test_has_identifiers_true_with_company(self) -> None:
+        q = LeaseLookupQuery(company="Acme Trading")
+        assert q.has_identifiers() is True
+
+    def test_http_company_param(self) -> None:
+        svc = HttpLeaseLookupService.__new__(HttpLeaseLookupService)
+        params = svc._build_params(LeaseLookupQuery(company="Nike Saudi Arabia LLC"))
+        assert params == {"company": "Nike Saudi Arabia LLC"}
+
+
+# ---------------------------------------------------------------------------
 # TestMockLookupByMallOnly
 # ---------------------------------------------------------------------------
 

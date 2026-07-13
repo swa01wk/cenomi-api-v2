@@ -141,6 +141,29 @@ export function ServiceRequestChat() {
         if (res.workflowStage !== undefined) setWorkflowStage(res.workflowStage);
         if (res.srId) setSrId(res.srId);
 
+        // Sync uploaded-doc checklist from document_requirement decorations
+        if (res.responseUI.type === "document_requirement") {
+          const uploadedFromUi = (res.responseUI.documents ?? [])
+            .filter((d) => d.status === "uploaded")
+            .map((d) => ({
+              documentId: d.key,
+              documentType: d.key,
+              documentTypeLabel: d.label,
+              filename: d.label,
+              signedUrl: null as string | null,
+            }));
+          if (uploadedFromUi.length > 0) {
+            setUploadedDocuments((prev) => {
+              const byType = new Set(prev.map((p) => p.documentType));
+              const merged = [...prev];
+              for (const doc of uploadedFromUi) {
+                if (!byType.has(doc.documentType)) merged.push(doc);
+              }
+              return merged;
+            });
+          }
+        }
+
         // Track rdd_status from the backend's ChatStatePayload (reliable source).
         // draftPreview.status is "SUBMITTED"/"DRAFT" — never "REPORT_SUBMITTED".
         if (res.rddStatus !== undefined) setRddStatus(res.rddStatus);
@@ -224,10 +247,22 @@ export function ServiceRequestChat() {
     [sendTurn],
   );
 
-  // Handles a successfully uploaded document — adds to local list and notifies backend
-  const handleUploadComplete = useCallback((doc: UploadedDoc) => {
-    setUploadedDocuments((prev) => [...prev, doc]);
-  }, []);
+  // Handles a successfully uploaded document — updates local list and refreshes
+  // graph decorations so DocumentRequirementCard / stage UI reflect the upload.
+  const handleUploadComplete = useCallback(
+    (doc: UploadedDoc) => {
+      setUploadedDocuments((prev) => {
+        if (prev.some((d) => d.documentId && d.documentId === doc.documentId)) {
+          return prev;
+        }
+        return [...prev, doc];
+      });
+      void sendTurn("", {
+        apiMessage: `I've uploaded the ${doc.documentTypeLabel || "document"}.`,
+      });
+    },
+    [sendTurn],
+  );
 
   // Opens an existing SR by SR ID (for FM Manager / DD Engineer)
   const handleOpenSR = useCallback(() => {

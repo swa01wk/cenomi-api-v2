@@ -79,12 +79,12 @@ class TestValidateDocumentCountFMReview:
         results = validate_document_count([_doc("SR_HANDOVER_SITE_SURVEY")], "FM_REVIEW")
         assert len(_failed(results)) == 0
 
-    def test_one_cop_checklist_passes(self) -> None:
-        results = validate_document_count([_doc("SR_COP_CHECKLIST_OTHER")], "FM_REVIEW")
+    def test_one_other_document_passes(self) -> None:
+        results = validate_document_count([_doc("SR_HANDOVER_OTHER")], "FM_REVIEW")
         assert len(_failed(results)) == 0
 
     def test_sr_handover_other_single_doc_passes(self) -> None:
-        """SR_HANDOVER_OTHER is now an allowed FM document type."""
+        """SR_HANDOVER_OTHER is an allowed FM document type."""
         results = validate_document_count([_doc("SR_HANDOVER_OTHER")], "FM_REVIEW")
         assert len(_failed(results)) == 0
 
@@ -92,7 +92,7 @@ class TestValidateDocumentCountFMReview:
         docs = [
             _doc("SR_HANDOVER_CHECKLIST"),
             _doc("SR_HANDOVER_SITE_SURVEY"),
-            _doc("SR_COP_CHECKLIST_OTHER"),
+            _doc("SR_HANDOVER_OTHER"),
         ]
         results = validate_document_count(docs, "FM_REVIEW")
         assert len(_failed(results)) == 0

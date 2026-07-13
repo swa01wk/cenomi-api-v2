@@ -59,7 +59,7 @@ class TestFMDocumentPartitioning:
         docs = [
             _fm_doc("fm-001", "SR_HANDOVER_CHECKLIST"),
             _fm_doc("fm-002", "SR_HANDOVER_SITE_SURVEY"),
-            _fm_doc("fm-003", "SR_COP_CHECKLIST_OTHER"),
+            _fm_doc("fm-003", "SR_HANDOVER_OTHER"),
         ]
         state = _state(documents=docs)
         result = await document_upload_node(state)
@@ -91,10 +91,16 @@ class TestFMDocumentPartitioning:
         assert "srv-001" in result["backend_refs"]["uploaded_documents"]
 
     @pytest.mark.asyncio
-    async def test_cop_checklist_doc_type_accepted(self) -> None:
+    async def test_other_doc_type_accepted(self) -> None:
+        state = _state(documents=[_fm_doc("other-001", "SR_HANDOVER_OTHER")])
+        result = await document_upload_node(state)
+        assert "other-001" in result["backend_refs"]["uploaded_documents"]
+
+    @pytest.mark.asyncio
+    async def test_cop_checklist_doc_type_ignored(self) -> None:
         state = _state(documents=[_fm_doc("cop-001", "SR_COP_CHECKLIST_OTHER")])
         result = await document_upload_node(state)
-        assert "cop-001" in result["backend_refs"]["uploaded_documents"]
+        assert "cop-001" not in result["backend_refs"].get("uploaded_documents", [])
 
 
 # ---------------------------------------------------------------------------
@@ -150,7 +156,7 @@ class TestMixedDocuments:
         docs = [
             _fm_doc("c-001", "SR_HANDOVER_CHECKLIST"),
             _fm_doc("s-001", "SR_HANDOVER_SITE_SURVEY"),
-            _fm_doc("p-001", "SR_COP_CHECKLIST_OTHER"),
+            _fm_doc("p-001", "SR_HANDOVER_OTHER"),
             _rdd_doc("r-001"),
         ]
         state = _state(documents=docs)
