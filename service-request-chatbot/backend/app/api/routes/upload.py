@@ -3,9 +3,9 @@
 Guards applied (in order)
 --------------------------
 1. **Role check** — caller must hold a valid upload permission based on
-   ``document_type`` (FM docs require ``CAN_FM_REVIEW_HANDOVER_SR``;
-   RDD report requires ``CAN_RDD_REVIEW_HANDOVER_SR``; default requires
-   ``CAN_RAISE_HANDOVER_SR``).
+   ``document_type``. Shared optional type ``SR_HANDOVER_OTHER`` allows
+   CREATE (MM), FM, or RDD upload actions. FM-only / RDD-only types stay
+   stage-scoped; unknown types fall back to ``CAN_RAISE_HANDOVER_SR``.
 2. **Content-type allowlist** — only PDF, JPEG, and PNG are accepted; returns
    415 for anything else.
 3. **Document-type validation** — ``document_type`` must be a member of
@@ -58,18 +58,52 @@ _ALLOWED_CONTENT_TYPES: frozenset[str] = frozenset(
 # RDD report document types require the APPROVED status flag on upload.
 _RDD_DOC_TYPES: frozenset[str] = frozenset(RDD_ALLOWED_DOCUMENTS)
 _FM_DOC_TYPES: frozenset[str] = frozenset(FM_ALLOWED_DOCUMENTS)
+# Optional "Other" is allowed for MM create, FM review, and RDD review.
+_SHARED_OPTIONAL_DOC_TYPES: frozenset[str] = frozenset({"SR_HANDOVER_OTHER"})
 
 _permission_service = PermissionService()
 _upload_service = DocumentUploadService()
 
 
-def _pick_upload_permission(document_type: str | None) -> str:
-    """Return the action name required to upload this document type."""
-    if document_type in _RDD_DOC_TYPES:
-        return "UPLOAD_RDD_HANDOVER_REPORT"
-    if document_type in _FM_DOC_TYPES:
-        return "UPLOAD_FM_HANDOVER_DOCUMENT"
-    return "CREATE_HANDOVER_SR"
+def _upload_actions_for(document_type: str | None) -> list[str]:
+    """Return upload actions that authorize this document type (OR semantics)."""
+    if not document_type or document_type in _SHARED_OPTIONAL_DOC_TYPES:
+        return [
+            "CREATE_HANDOVER_SR",
+            "UPLOAD_FM_HANDOVER_DOCUMENT",
+            "UPLOAD_RDD_HANDOVER_REPORT",
+        ]
+    if document_type in (_RDD_DOC_TYPES - _SHARED_OPTIONAL_DOC_TYPES):
+        return ["UPLOAD_RDD_HANDOVER_REPORT"]
+    if document_type in (_FM_DOC_TYPES - _SHARED_OPTIONAL_DOC_TYPES):
+        return ["UPLOAD_FM_HANDOVER_DOCUMENT"]
+    return ["CREATE_HANDOVER_SR"]
+
+
+def _ensure_upload_permitted(document_type: str | None, auth: AuthContext) -> None:
+    """Raise PermissionDeniedError if auth lacks every allowed action for the type."""
+    actions = _upload_actions_for(document_type)
+    last_exc: PermissionDeniedError | None = None
+    for action in actions:
+        try:
+            _permission_service.check(action, auth)
+            return
+        except PermissionDeniedError as exc:
+            last_exc = exc
+    if len(actions) > 1:
+        raise PermissionDeniedError(
+            action="UPLOAD_SHARED_HANDOVER_DOCUMENT",
+            required_role=(
+                "CAN_RAISE_HANDOVER_SR or CAN_FM_REVIEW_HANDOVER_SR "
+                "or CAN_RDD_REVIEW_HANDOVER_SR"
+            ),
+        )
+    if last_exc is not None:
+        raise last_exc
+    raise PermissionDeniedError(
+        action="UPLOAD_DOCUMENT",
+        required_role="CAN_RAISE_HANDOVER_SR",
+    )
 
 
 async def _resolve_lease_id_from_code(
@@ -191,6 +225,7 @@ async def upload_document(
     document_type: str | None = Form(default=None),
     session_id: str | None = Form(default=None),
     sr_id: str | None = Form(default=None),
+    comment: str | None = Form(default=None),
     auth: AuthContext = Depends(get_auth_context),
 ) -> dict[str, Any]:
     """Accept a document file, upload to the platform, and return document info.
@@ -208,13 +243,14 @@ async def upload_document(
         for the platform upload call.
     sr_id:
         Optional explicit service request ID (overrides draft-derived sr_id).
+    comment:
+        Optional per-file comment forwarded to the platform.
     auth:
         Resolved from the ``Authorization`` header by ``get_auth_context``.
     """
     # 1. Role check -----------------------------------------------------------
-    required_action = _pick_upload_permission(document_type)
     try:
-        _permission_service.check(required_action, auth)
+        _ensure_upload_permitted(document_type, auth)
     except PermissionDeniedError as exc:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -264,6 +300,7 @@ async def upload_document(
                     "lease_code": collected.get("lease_code", ""),
                     "tenant_profile_id": collected.get("tenant_profile_id", ""),
                     "existing_documents": list(draft.documents or []),
+                    "workflow_stage": draft.workflow_stage or "CREATE_SR",
                 }
         except (ValueError, Exception) as exc:
             logger.warning(
@@ -272,11 +309,8 @@ async def upload_document(
                 exc,
             )
 
-    # 5. Platform upload (when sr_id and backend refs are available) ----------
-    # In mock mode (no SERVICE_REQUEST_API_BASE_URL) backend refs may be absent
-    # for FM/RDD sessions that don't carry the CREATE_SR collected_data.
-    # The DocumentUploadService.upload_document already short-circuits to a
-    # mock document ID in mock mode, so relaxing the lease_id guard is safe.
+    # 5. Platform upload when lease refs are available (sr_id optional for
+    #    pre-create MM uploads — classic form behaviour).
     from app.core.config import settings as _settings
     _in_mock_mode = not bool(_settings.service_request_api_base_url)
 
@@ -285,15 +319,16 @@ async def upload_document(
             draft_sr_id, draft_backend, auth
         )
 
-    if draft_sr_id and (draft_backend.get("lease_id") or _in_mock_mode):
+    can_upload = bool(draft_backend.get("lease_id")) or _in_mock_mode
+    if can_upload and (draft_sr_id or draft_backend.get("lease_id") or _in_mock_mode):
         file_bytes = await file.read()
         filename = file.filename or "unknown"
+        optional_comment = (comment or "").strip()
 
         # RDD report documents must carry document_type_status=APPROVED
         doc_type_status = "APPROVED" if document_type in _RDD_DOC_TYPES else ""
 
         # Forward the caller's AI session Bearer to PUT /files (agentic route).
-        # Without this, the platform client falls back to S2S login.
         ctx_token = set_current_auth_context(auth)
         try:
             upload_result = await _upload_service.upload_document(
@@ -301,13 +336,14 @@ async def upload_document(
                 filename=filename,
                 content_type=content_type,
                 document_type_id=document_type or "UNKNOWN",
-                sr_id=draft_sr_id,
+                sr_id=draft_sr_id or "",
                 lease_id=str(draft_backend.get("lease_id", "")),
                 brand_id=str(draft_backend.get("brand_id", "")),
                 property_id=str(draft_backend.get("property_id", "")),
                 lease_code=str(draft_backend.get("lease_code", "")),
                 tenant_profile_id=str(draft_backend.get("tenant_profile_id", "")),
                 document_type_status=doc_type_status,
+                comment=optional_comment,
             )
         finally:
             reset_current_auth_context(ctx_token)
@@ -335,19 +371,19 @@ async def upload_document(
                     "signed_url": upload_result.signed_url,
                     "file_path": upload_result.file_path,
                 }
+                if optional_comment:
+                    doc_entry["comment"] = optional_comment
                 if draft:
                     existing_docs: list[dict[str, Any]] = list(draft.documents or [])
                     existing_docs.append(doc_entry)
                     await draft_repo.update(draft.id, {"documents": existing_docs})
                 else:
-                    # FM/RDD sessions may not have a draft yet (no service_category
-                    # set during sr_status_sync entry).  Create a minimal draft so
-                    # the document is persisted and visible to subsequent turns.
+                    stage = "FM_REVIEW" if draft_sr_id else "CREATE_SR"
                     await draft_repo.create(
                         session_id=resolved_session_id,
                         service_category="FIT_OUT_AND_HANDOVER",
                         sub_category="HANDOVER",
-                        workflow_stage="FM_REVIEW",
+                        workflow_stage=stage,
                         collected_data={},
                         missing_fields=[],
                         documents=[doc_entry],
@@ -373,12 +409,13 @@ async def upload_document(
             "document_id": document_id,
             "signed_url": upload_result.signed_url,
             "file_path": upload_result.file_path,
+            "comment": optional_comment or None,
             "status": "uploaded",
         }
 
-    # 7. No sr_id or lease refs — cannot call platform PUT /files.
+    # 7. No lease refs — cannot call platform PUT /files.
     logger.warning(
-        "upload_document: blocked — no sr_id/lease_id available "
+        "upload_document: blocked — no lease_id available "
         "(session_id=%s, sr_id=%s, document_type=%s)",
         session_id,
         draft_sr_id,
@@ -391,10 +428,103 @@ async def upload_document(
         )
     else:
         detail = (
-            "Document upload requires an active Service Request. "
-            "Please create the service request first, then upload documents."
+            "Document upload requires a resolved lease. "
+            "Provide the lease first, then upload optional attachments "
+            "before creating the service request."
         )
     raise HTTPException(
         status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
         detail=detail,
     )
+
+
+@router.delete("/upload")
+async def delete_uploaded_document(
+    db: DbSession,
+    document_id: str,
+    session_id: str | None = None,
+    sr_id: str | None = None,
+    lease_id: str | None = None,
+    auth: AuthContext = Depends(get_auth_context),
+) -> dict[str, Any]:
+    """Delete an uploaded document from the platform and session draft."""
+    permitted = False
+    for action in (
+        "CREATE_HANDOVER_SR",
+        "UPLOAD_FM_HANDOVER_DOCUMENT",
+        "UPLOAD_RDD_HANDOVER_REPORT",
+    ):
+        try:
+            _permission_service.check(action, auth)
+            permitted = True
+            break
+        except PermissionDeniedError:
+            continue
+    if not permitted:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Not permitted to delete handover documents.",
+        )
+
+    if not document_id:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="document_id is required",
+        )
+
+    resolved_lease = lease_id or ""
+    resolved_sr = sr_id or ""
+    resolved_session: UUID | None = None
+    if session_id:
+        try:
+            resolved_session = UUID(session_id)
+            draft_repo = ServiceRequestDraftRepository(db)
+            draft = await draft_repo.get_by_session(resolved_session)
+            if draft:
+                collected = dict(draft.collected_data or {})
+                if not resolved_lease:
+                    resolved_lease = str(collected.get("lease_id") or "")
+                if not resolved_sr and draft.sr_id:
+                    resolved_sr = str(draft.sr_id)
+        except (ValueError, Exception) as exc:
+            logger.warning("delete_upload: draft load failed — %s", exc)
+
+    from app.core.config import settings as _settings
+    from app.agents.services.platform_api_client import get_platform_client
+
+    _in_mock_mode = not bool(_settings.service_request_api_base_url)
+
+    if not _in_mock_mode:
+        ctx_token = set_current_auth_context(auth)
+        try:
+            platform = get_platform_client()
+            result = await platform.delete_document(
+                document_id=document_id,
+                type_="SERVICE_REQUEST",
+                type_id=resolved_sr or None,
+                lease_id=resolved_lease or None,
+            )
+            if not result.get("success") and result.get("error"):
+                raise HTTPException(
+                    status_code=status.HTTP_502_BAD_GATEWAY,
+                    detail=f"Platform delete failed: {result['error']}",
+                )
+        finally:
+            reset_current_auth_context(ctx_token)
+
+    if resolved_session:
+        try:
+            draft_repo = ServiceRequestDraftRepository(db)
+            draft = await draft_repo.get_by_session(resolved_session)
+            if draft:
+                remaining = [
+                    d
+                    for d in list(draft.documents or [])
+                    if str(d.get("document_id") or "") != str(document_id)
+                ]
+                await draft_repo.update(draft.id, {"documents": remaining})
+                await db.commit()
+        except Exception as exc:
+            logger.warning("delete_upload: draft update failed — %s", exc)
+
+    return {"document_id": document_id, "status": "deleted"}

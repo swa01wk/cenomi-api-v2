@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useRef } from "react";
-import { uploadDocument } from "@/lib/api/upload-client";
+import { deleteDocument, uploadDocument } from "@/lib/api/upload-client";
 import type { UploadedDoc } from "@/lib/types/chat";
 
 // ─── Document type configuration ─────────────────────────────────────────────
@@ -23,15 +23,25 @@ const RDD_DOC_TYPES: DocTypeConfig[] = [
   { id: "SR_HANDOVER_OTHER", label: "Other" },
 ];
 
-function getDocTypes(userRole: string | null | undefined): DocTypeConfig[] {
+const MM_DOC_TYPES: DocTypeConfig[] = [
+  { id: "SR_HANDOVER_OTHER", label: "Other (optional)" },
+];
+
+function getDocTypes(
+  userRole: string | null | undefined,
+  workflowStage: string | null | undefined,
+): DocTypeConfig[] {
+  if (workflowStage === "CREATE_SR") return MM_DOC_TYPES;
   if (userRole === "FM_MANAGER" || userRole === "OPERATIONS") return FM_DOC_TYPES;
   if (userRole === "DD_ENGINEER") return RDD_DOC_TYPES;
+  if (userRole === "MALL_MANAGER") return MM_DOC_TYPES;
   return [];
 }
 
 function getDocLabel(docTypeId: string): string {
   return (
-    [...FM_DOC_TYPES, ...RDD_DOC_TYPES].find((d) => d.id === docTypeId)?.label ?? docTypeId
+    [...FM_DOC_TYPES, ...RDD_DOC_TYPES, ...MM_DOC_TYPES].find((d) => d.id === docTypeId)
+      ?.label ?? docTypeId
   );
 }
 
@@ -44,6 +54,11 @@ interface DocumentUploadPanelProps {
   userRole: string | null | undefined;
   uploadedDocuments: UploadedDoc[];
   onUploadComplete: (doc: UploadedDoc) => void;
+  onDeleteComplete?: (documentId: string) => void;
+  /** When true, in-chat DocumentRequirementCard owns upload UX — hide this panel. */
+  preferChatDocumentCard?: boolean;
+  /** Collected SR fields — used to gate RDD upload until dates are set. */
+  collectedData?: Record<string, string | undefined> | null;
 }
 
 // ─── Component ────────────────────────────────────────────────────────────────
@@ -55,31 +70,53 @@ export function DocumentUploadPanel({
   userRole,
   uploadedDocuments,
   onUploadComplete,
+  onDeleteComplete,
+  preferChatDocumentCard = false,
+  collectedData = null,
 }: DocumentUploadPanelProps) {
   const [selectedDocType, setSelectedDocType] = useState<string>("");
+  const [comment, setComment] = useState("");
   const [isUploading, setIsUploading] = useState(false);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [uploadSuccess, setUploadSuccess] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const docTypes = getDocTypes(userRole);
+  const docTypes = getDocTypes(userRole, workflowStage);
+  const rddDatesReady =
+    Boolean(collectedData?.actual_handover_date) &&
+    Boolean(collectedData?.fitout_start_date) &&
+    Boolean(collectedData?.fitout_end_date);
+  const leaseReady = Boolean(collectedData?.lease_id || collectedData?.lease_code);
+  const mmOptionalUploadReady =
+    collectedData?.mm_optional_upload_status === "awaiting_upload";
   const shouldShow =
-    (workflowStage === "FM_REVIEW" || workflowStage === "RDD_REVIEW") &&
-    srId !== null &&
-    docTypes.length > 0;
+    !preferChatDocumentCard &&
+    docTypes.length > 0 &&
+    ((workflowStage === "FM_REVIEW" && srId !== null) ||
+      (workflowStage === "RDD_REVIEW" && rddDatesReady && srId !== null) ||
+      (workflowStage === "CREATE_SR" && leaseReady && mmOptionalUploadReady));
 
   if (!shouldShow) return null;
 
   async function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
-    if (!file || !selectedDocType || !srId) return;
+    if (!file || !selectedDocType) return;
+    // CREATE_SR may upload without srId once lease is resolved.
+    if (workflowStage !== "CREATE_SR" && !srId) return;
 
     setIsUploading(true);
     setUploadError(null);
     setUploadSuccess(null);
 
     try {
-      const result = await uploadDocument(file, selectedDocType, sessionId, srId);
+      const result = await uploadDocument(
+        file,
+        selectedDocType,
+        sessionId,
+        srId,
+        comment,
+      );
       const label = getDocLabel(selectedDocType);
       onUploadComplete({
         documentId: result.document_id,
@@ -90,6 +127,7 @@ export function DocumentUploadPanel({
       });
       setUploadSuccess(`${file.name} uploaded as ${label}.`);
       setSelectedDocType("");
+      setComment("");
       if (fileInputRef.current) fileInputRef.current.value = "";
     } catch (err) {
       setUploadError(err instanceof Error ? err.message : "Upload failed. Please try again.");
@@ -98,19 +136,33 @@ export function DocumentUploadPanel({
     }
   }
 
+  async function handleDelete(doc: UploadedDoc) {
+    if (!doc.documentId) return;
+    setDeletingId(doc.documentId);
+    setUploadError(null);
+    try {
+      await deleteDocument(doc.documentId, sessionId, srId);
+      onDeleteComplete?.(doc.documentId);
+      setUploadSuccess(`${doc.filename} removed.`);
+    } catch (err) {
+      setUploadError(err instanceof Error ? err.message : "Delete failed.");
+    } finally {
+      setDeletingId(null);
+    }
+  }
+
   return (
     <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-900">
       <h3 className="mb-3 text-sm font-semibold text-zinc-700 dark:text-zinc-300">
-        Upload Documents
+        {workflowStage === "CREATE_SR" ? "Optional Documents" : "Upload Documents"}
       </h3>
 
-      {/* Upload row */}
-      <div className="flex flex-col gap-2 sm:flex-row">
+      <div className="flex flex-col gap-2">
         <select
           value={selectedDocType}
           onChange={(e) => setSelectedDocType(e.target.value)}
           disabled={isUploading}
-          className="flex-1 rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-700 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500 disabled:opacity-50 dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-200"
+          className="w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-700 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500 disabled:opacity-50 dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-200"
         >
           <option value="">Select document type…</option>
           {docTypes.map((dt) => (
@@ -120,8 +172,17 @@ export function DocumentUploadPanel({
           ))}
         </select>
 
+        <input
+          type="text"
+          value={comment}
+          onChange={(e) => setComment(e.target.value)}
+          disabled={isUploading}
+          placeholder="Comment (optional)"
+          className="w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-700 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500 disabled:opacity-50 dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-200"
+        />
+
         <label
-          className={`cursor-pointer rounded-md border px-4 py-2 text-sm font-medium transition-colors ${
+          className={`inline-flex w-fit cursor-pointer rounded-md border px-4 py-2 text-sm font-medium transition-colors ${
             selectedDocType && !isUploading
               ? "border-blue-600 bg-blue-600 text-white hover:bg-blue-700"
               : "cursor-not-allowed border-zinc-300 bg-zinc-100 text-zinc-400 dark:border-zinc-600 dark:bg-zinc-700 dark:text-zinc-500"
@@ -146,7 +207,6 @@ export function DocumentUploadPanel({
         <p className="mt-2 text-xs text-green-600 dark:text-green-400">{uploadSuccess}</p>
       )}
 
-      {/* Uploaded documents list */}
       {uploadedDocuments.length > 0 && (
         <div className="mt-4">
           <p className="mb-1.5 text-xs font-medium text-zinc-500 dark:text-zinc-400">
@@ -165,6 +225,16 @@ export function DocumentUploadPanel({
                 <span className="shrink-0 rounded bg-green-100 px-1.5 py-0.5 text-green-800 dark:bg-green-900 dark:text-green-200">
                   {doc.documentTypeLabel}
                 </span>
+                {doc.documentId ? (
+                  <button
+                    type="button"
+                    disabled={deletingId === doc.documentId}
+                    onClick={() => void handleDelete(doc)}
+                    className="shrink-0 text-red-600 underline disabled:opacity-50"
+                  >
+                    {deletingId === doc.documentId ? "…" : "Delete"}
+                  </button>
+                ) : null}
               </li>
             ))}
           </ul>

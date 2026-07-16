@@ -37,7 +37,14 @@ HANDOVER_FIELD_QUESTIONS: dict[str, str] = {
         "They must choose one of exactly two options: FM Manager or Operations. "
         "Make the two choices explicit."
     ),
-    "notes": "Ask the user if they have any additional notes or comments for this handover request. Accept 'no comments', 'none', 'skip', or any similar declination as a valid answer.",
+    "notes": (
+        "Ask the user if they have any additional notes for this handover request. "
+        "Accept 'none', 'skip', or any similar declination as a valid answer."
+    ),
+    "comments": (
+        "Ask the user if they have any comments for this handover request. "
+        "Accept 'no comments', 'none', 'skip', or any similar declination as a valid answer."
+    ),
     # ── FM_REVIEW — FM Manager / Operations ───────────────────────────────────
     "unit_readiness_date": "Ask the FM Manager for the unit readiness date.",
     "expected_handover_date": "Ask the FM Manager for the expected handover date.",

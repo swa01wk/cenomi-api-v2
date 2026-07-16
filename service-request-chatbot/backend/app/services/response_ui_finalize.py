@@ -24,7 +24,9 @@ def finalize_response_ui(
             result["suggestions"] = deco["suggestions"]
 
     doc_req = deco.get("document_requirement")
-    if doc_req and result.get("type") in (None, "message", "text_question"):
+    # Promote upload card only over generic message UIs — never overwrite
+    # field questions (description, dates, etc.).
+    if doc_req and result.get("type") in (None, "message", "document_requirement"):
         result = {
             **result,
             "type": "document_requirement",

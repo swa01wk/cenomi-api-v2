@@ -118,13 +118,14 @@ RDD_REVIEW_STAGE = StageDefinition(
     stage="RDD_REVIEW",
     role="DD_ENGINEER",
     required_fields=(
-        "guideLineLink",
-        "document_status",    # "APPROVED" | "APPROVED_WITH_CHANGES" — chosen by RDD PM
+        # Dates first — document upload UI is gated until these are present.
         "actual_handover_date",
         "fitout_start_date",
         "fitout_end_date",
         # trading_date intentionally removed — auto-computed as fitout_end_date + 8 days
         # by merge_state_node. It is NOT asked of the user.
+        "guideLineLink",
+        "document_status",    # "APPROVED" | "APPROVED_WITH_CHANGES" — chosen by RDD PM
         # "comments" intentionally removed — same pattern as CREATE_SR and FM_REVIEW.
         # RDD PM can provide comments inline; rdd_action gates submission, not comments.
     ),

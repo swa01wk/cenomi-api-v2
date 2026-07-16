@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import { FileUploadButton } from "./FileUploadButton";
 import { AttachmentPreview } from "./AttachmentPreview";
 
@@ -12,6 +12,14 @@ type Props = {
 export function ChatInput({ onSend, disabled }: Props) {
   const [value, setValue] = useState("");
   const [attachments, setAttachments] = useState<File[]>([]);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  // Refocus the composer after each assistant turn (when disabled clears).
+  useEffect(() => {
+    if (!disabled) {
+      textareaRef.current?.focus();
+    }
+  }, [disabled]);
 
   const handleSend = useCallback(() => {
     const text = value.trim();
@@ -47,6 +55,7 @@ export function ChatInput({ onSend, disabled }: Props) {
       <div className="flex items-end gap-2 p-3">
         <FileUploadButton disabled={disabled} onFiles={handleFilesAdded} />
         <textarea
+          ref={textareaRef}
           className="max-h-[120px] min-h-[44px] flex-1 resize-none rounded-md border border-zinc-300 bg-transparent px-3 py-2.5 text-sm leading-snug outline-none transition focus:border-blue-400 focus:ring-2 focus:ring-blue-500/20 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:focus:border-blue-500"
           placeholder="Describe your service request…"
           value={value}
@@ -62,7 +71,7 @@ export function ChatInput({ onSend, disabled }: Props) {
         />
         <button
           type="button"
-          className="flex h-9 shrink-0 items-center gap-1.5 rounded-md bg-blue-600 px-3.5 text-sm font-medium text-white transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-40"
+          className="flex h-9 shrink-0 items-center gap-1.5 rounded-md bg-blue-600 px-3.5 text-sm font-medium text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-40"
           disabled={!canSend}
           onClick={handleSend}
         >

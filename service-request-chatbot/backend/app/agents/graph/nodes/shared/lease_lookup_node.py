@@ -38,7 +38,14 @@ from app.agents.services.resource_picker_decorations import (
     build_create_lease_picker,
     should_browse_leases,
 )
-from app.agents.services.review_decorations_service import merge_decorations
+from app.agents.services.review_decorations_service import (
+    MM_OPTIONAL_AWAITING_CHOICE,
+    MM_OPTIONAL_AWAITING_UPLOAD,
+    MM_OPTIONAL_DONE,
+    MM_OPTIONAL_UPLOAD_STATUS_KEY,
+    build_mm_optional_upload_waiting_response,
+    merge_decorations,
+)
 from app.observability.decorators import trace_node
 
 log = structlog.get_logger(__name__)
@@ -100,6 +107,33 @@ def _enrich_collected_data(
     # that key without any further user input.
     updated["lease"] = record.lease_code
     return updated
+
+
+def _with_mm_optional_offer_after_lease(
+    state: ServiceRequestState,
+    enriched: dict[str, Any],
+) -> dict[str, Any]:
+    """After lease resolve: offer optional MM upload (Yes/No) unless already done."""
+    status = enriched.get(MM_OPTIONAL_UPLOAD_STATUS_KEY)
+    if status not in (
+        MM_OPTIONAL_AWAITING_CHOICE,
+        MM_OPTIONAL_AWAITING_UPLOAD,
+        MM_OPTIONAL_DONE,
+    ):
+        enriched = {**enriched, MM_OPTIONAL_UPLOAD_STATUS_KEY: MM_OPTIONAL_AWAITING_CHOICE}
+
+    if enriched.get(MM_OPTIONAL_UPLOAD_STATUS_KEY) == MM_OPTIONAL_DONE:
+        return {
+            "collected_data": enriched,
+            "lease_matches": [],
+            "status": "IN_PROGRESS",
+        }
+
+    return {
+        **build_mm_optional_upload_waiting_response(state, collected=enriched),
+        "lease_matches": [],
+        "selected_lease": None,
+    }
 
 
 @trace_node("lease_lookup", "LANGGRAPH_NODE")
@@ -164,12 +198,7 @@ async def lease_lookup_node(
                 "lease_lookup.selected_lease.merged",
                 lease_code=record.lease_code,
             )
-            return {
-                "collected_data": enriched,
-                "lease_matches": [],
-                "selected_lease": None,
-                "status": "IN_PROGRESS",
-            }
+            return _with_mm_optional_offer_after_lease(state, enriched)
         # Fall through to Path B with collected["lease_code"] set from fallback_code
 
     # ── Path B: no lease yet selected — run lookup ────────────────────────────
@@ -299,7 +328,7 @@ async def lease_lookup_node(
             },
         }
 
-    # ── 1 match: auto-enrich collected_data ───────────────────────────────────
+    # ── 1 match: auto-enrich collected_data + offer optional MM upload ────────
     if match_count == 1:
         record = result.matches[0]
         enriched = _enrich_collected_data(collected, record)
@@ -309,11 +338,7 @@ async def lease_lookup_node(
             brand=record.brand,
             mall=record.mall,
         )
-        return {
-            "collected_data": enriched,
-            "lease_matches": [],
-            "status": "IN_PROGRESS",
-        }
+        return _with_mm_optional_offer_after_lease(state, enriched)
 
     # ── N matches: surface selection UI ───────────────────────────────────────
     match_dicts = [m.model_dump() for m in result.matches]

@@ -29,16 +29,19 @@ def test_build_inbox_decorations_skips_non_reviewer() -> None:
 
 
 def test_build_review_decorations_fm_stage() -> None:
+    """Incomplete FM review → only Save Progress (not Approve)."""
     state = {
         "backend_refs": {"sr_id": "12847", "user_role": "FM_MANAGER"},
         "workflow_stage": "FM_REVIEW",
         "session_id": "sess-1",
         "documents": [],
+        "collected_data": {},
     }
     deco = build_review_decorations(state)
     assert deco.get("promote_preview") is True
     assert deco["suggestions"]["kind"] == "labeled_options"
-    assert len(deco["suggestions"]["options"]) == 2
+    assert len(deco["suggestions"]["options"]) == 1
+    assert deco["suggestions"]["options"][0]["action"] == "save_fm_progress"
     assert deco.get("document_requirement") is not None
     docs = deco["document_requirement"]["documents"]
     assert {d["key"] for d in docs} == {
@@ -47,6 +50,22 @@ def test_build_review_decorations_fm_stage() -> None:
         "SR_HANDOVER_OTHER",
     }
     assert "SR_COP_CHECKLIST_OTHER" not in {d["key"] for d in docs}
+
+
+def test_build_review_decorations_fm_approve_when_ready() -> None:
+    """Ready FM review (date + doc) → only Approve Review."""
+    state = {
+        "backend_refs": {"sr_id": "12847", "user_role": "FM_MANAGER"},
+        "workflow_stage": "FM_REVIEW",
+        "session_id": "sess-1",
+        "documents": [
+            {"document_id": "d1", "document_type_id": "SR_HANDOVER_CHECKLIST"},
+        ],
+        "collected_data": {"unit_readiness_date": "2026-07-15"},
+    }
+    deco = build_review_decorations(state)
+    assert len(deco["suggestions"]["options"]) == 1
+    assert deco["suggestions"]["options"][0]["action"] == "approve_fm_review"
 
 
 def test_build_review_decorations_keeps_card_after_fm_upload() -> None:
@@ -98,6 +117,65 @@ def test_build_review_decorations_hides_docs_after_report_submitted() -> None:
     assert deco["suggestions"]["options"][0]["action"] == "approve_rdd_final"
 
 
+def test_build_review_decorations_hides_actions_after_rdd_approved() -> None:
+    """Post-approval: no action chips (View SR deferred)."""
+    state = {
+        "backend_refs": {
+            "sr_id": "11721",
+            "user_role": "DD_ENGINEER",
+            "rdd_status": "APPROVED",
+        },
+        "workflow_stage": "RDD_REVIEW",
+        "session_id": "sess-1",
+        "documents": [],
+        "collected_data": {
+            "actual_handover_date": "2026-07-01",
+            "fitout_start_date": "2026-07-02",
+            "fitout_end_date": "2026-07-10",
+        },
+    }
+    deco = build_review_decorations(state)
+    assert "suggestions" not in deco
+
+
+def test_build_review_decorations_rdd_hides_docs_until_dates() -> None:
+    """RDD document card must wait until required dates are collected."""
+    state = {
+        "backend_refs": {
+            "sr_id": "11721",
+            "user_role": "DD_ENGINEER",
+            "rdd_status": "IN_PROGRESS",
+        },
+        "workflow_stage": "RDD_REVIEW",
+        "session_id": "sess-1",
+        "documents": [],
+        "collected_data": {},
+    }
+    deco = build_review_decorations(state)
+    assert "document_requirement" not in deco
+
+
+def test_build_review_decorations_rdd_shows_docs_after_dates() -> None:
+    state = {
+        "backend_refs": {
+            "sr_id": "11721",
+            "user_role": "DD_ENGINEER",
+            "rdd_status": "IN_PROGRESS",
+        },
+        "workflow_stage": "RDD_REVIEW",
+        "session_id": "sess-1",
+        "documents": [],
+        "collected_data": {
+            "actual_handover_date": "2026-07-01",
+            "fitout_start_date": "2026-07-02",
+            "fitout_end_date": "2026-07-10",
+        },
+    }
+    deco = build_review_decorations(state)
+    assert deco.get("document_requirement") is not None
+    assert deco["suggestions"]["options"][0]["action"] == "submit_rdd_report"
+
+
 def test_finalize_response_ui_merges_suggestions() -> None:
     ui = finalize_response_ui(
         {"type": "message"},
@@ -146,6 +224,69 @@ def test_finalize_merges_lease_picker_on_text_question() -> None:
     )
     assert ui["suggestions"]["resource"] == "leases"
     assert ui["type"] == "text_question"
+
+
+def test_finalize_does_not_promote_docs_over_text_question() -> None:
+    ui = finalize_response_ui(
+        {
+            "type": "text_question",
+            "field": "description",
+            "message": "Please share a short description.",
+        },
+        {
+            "document_requirement": {
+                "documents": [{"key": "SR_HANDOVER_OTHER", "required": False}],
+                "uploadContext": {"session_id": "s1", "sr_id": ""},
+            }
+        },
+        draft_preview=None,
+        response_message="Please share a short description.",
+    )
+    assert ui["type"] == "text_question"
+    assert ui["field"] == "description"
+    assert "documents" not in ui
+
+
+def test_finalize_promotes_docs_over_message() -> None:
+    ui = finalize_response_ui(
+        {"type": "message", "message": "Upload optional docs."},
+        {
+            "document_requirement": {
+                "documents": [{"key": "SR_HANDOVER_OTHER", "required": False}],
+                "uploadContext": {"session_id": "s1", "sr_id": ""},
+            }
+        },
+        draft_preview=None,
+        response_message="Upload optional docs.",
+    )
+    assert ui["type"] == "document_requirement"
+    assert ui["documents"][0]["key"] == "SR_HANDOVER_OTHER"
+
+
+def test_build_create_sr_attachment_requires_awaiting_upload() -> None:
+    from app.agents.services.review_decorations_service import (
+        build_create_sr_attachment_decorations,
+    )
+
+    base = {
+        "workflow_stage": "CREATE_SR",
+        "session_id": "sess-1",
+        "documents": [],
+        "collected_data": {"lease_id": 95404},
+        "backend_refs": {},
+    }
+    assert build_create_sr_attachment_decorations(base) == {}
+
+    awaiting = {
+        **base,
+        "collected_data": {
+            "lease_id": 95404,
+            "mm_optional_upload_status": "awaiting_upload",
+        },
+    }
+    deco = build_create_sr_attachment_decorations(awaiting)
+    assert deco.get("document_requirement") is not None
+    assert deco["suggestions"]["options"][0]["action"] == "continue_optional_upload"
 
 
 def test_finalize_skips_suggestions_on_confirmation_card() -> None:

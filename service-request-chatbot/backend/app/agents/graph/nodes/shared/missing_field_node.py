@@ -27,6 +27,9 @@ from app.agents.services.missing_field_service import (
     HANDOVER_FIELD_QUESTIONS,
     get_missing_fields,
 )
+from app.agents.services.review_decorations_service import (
+    build_document_upload_ask_response,
+)
 from app.observability.decorators import trace_node
 
 # ---------------------------------------------------------------------------
@@ -215,6 +218,20 @@ async def missing_field_node(state: ServiceRequestState) -> dict[str, Any]:
         # field even though load_session clears missing_fields.
         updates["active_field"] = next_field
     else:
+        # Fields complete — if FM/RDD still need documents, ask for upload
+        # instead of silently advancing (document_count was skipped above).
+        doc_count_blocking = any(
+            e.get("blocking", True) and e.get("validation_type") == "document_count"
+            for e in validation_errors
+        )
+        if doc_count_blocking and workflow_stage in ("FM_REVIEW", "RDD_REVIEW"):
+            ask = build_document_upload_ask_response(
+                {**dict(state), "workflow_stage": workflow_stage}
+            )
+            if ask:
+                ask["missing_fields"] = effective_missing
+                return ask
+
         # Nothing left to ask — signal readiness for the next pipeline step.
         updates["response_message"] = ""
         updates["status"] = "IN_PROGRESS"

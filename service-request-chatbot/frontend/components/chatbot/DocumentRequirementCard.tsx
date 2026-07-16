@@ -6,7 +6,7 @@ type Props = {
 
 const STATUS_CONFIG: Record<DocumentItem["status"], { label: string; className: string }> = {
   missing: {
-    label: "Missing",
+    label: "Not uploaded",
     className: "bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-400",
   },
   uploaded: {

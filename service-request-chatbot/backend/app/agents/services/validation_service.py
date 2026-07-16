@@ -185,6 +185,23 @@ def validate_inspection_done_by(value: Any) -> ValidationResult:
     )
 
 
+def validate_guideline_link(value: Any) -> ValidationResult:
+    """Validate that ``guideLineLink`` is an absolute http(s) URL."""
+    text = str(value or "").strip()
+    passed = text.startswith("http://") or text.startswith("https://")
+    return _result(
+        field="guideLineLink",
+        validation_type="url",
+        passed=passed,
+        message=(
+            "Guideline link must be a valid URL starting with http:// or https://."
+            if not passed
+            else "Guideline link is a valid URL."
+        ),
+        blocking=True,
+    )
+
+
 def validate_start_end_date(start_date: Any, end_date: Any) -> ValidationResult:
     """Validate that ``startDate`` is strictly before ``endDate``.
 
@@ -475,6 +492,13 @@ class ValidationService:
         idb_value = data.get("inspection_done_by")
         if idb_value is not None:
             r = validate_inspection_done_by(idb_value)
+            if r["status"] == "FAILED":
+                errors.append(r)
+
+        # 2b. guideLineLink must be http(s) when present
+        guideline = data.get("guideLineLink")
+        if guideline not in (None, ""):
+            r = validate_guideline_link(guideline)
             if r["status"] == "FAILED":
                 errors.append(r)
 

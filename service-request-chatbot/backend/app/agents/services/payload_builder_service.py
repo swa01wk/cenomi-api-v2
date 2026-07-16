@@ -189,7 +189,10 @@ def _normalize_inspection_datetime(
 # ── Public API ────────────────────────────────────────────────────────────────
 
 
-def build_create_handover_payload(data: dict[str, Any]) -> dict[str, Any]:
+def build_create_handover_payload(
+    data: dict[str, Any],
+    documents: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     """Build the CREATE_SR submission payload from validated ``collected_data``.
 
     Parameters
@@ -197,6 +200,9 @@ def build_create_handover_payload(data: dict[str, Any]) -> dict[str, Any]:
     data:
         The validated ``collected_data`` dict from the graph state.  All keys
         listed in ``_REQUIRED_DATA_KEYS`` must be present and non-empty.
+    documents:
+        Optional uploaded documents (draft / graph state). Their ``document_id``
+        values are included in ``payload.documents_ids``.
 
     Returns
     -------
@@ -219,6 +225,12 @@ def build_create_handover_payload(data: dict[str, Any]) -> dict[str, Any]:
         data["endDate"], data.get("endDateLT")
     )
 
+    doc_ids: list[str] = []
+    for doc in documents or []:
+        doc_id = doc.get("document_id")
+        if doc_id and str(doc_id) not in doc_ids:
+            doc_ids.append(str(doc_id))
+
     payload: dict[str, Any] = {
         "payload": {
             "mall": data["mall"],
@@ -231,7 +243,7 @@ def build_create_handover_payload(data: dict[str, Any]) -> dict[str, Any]:
             "startDate": start_iso,
             "attachments": "",
             "description": data["description"],
-            "documents_ids": [],
+            "documents_ids": doc_ids,
             "guideLineLink": "",
             "inspectionDoneBy": data["inspection_done_by"],
             "lease_brand_mall": data["lease_brand_mall"],
@@ -263,9 +275,10 @@ def build_create_handover_payload(data: dict[str, Any]) -> dict[str, Any]:
     }
 
     logger.debug(
-        "build_create_handover_payload: payload built for lease_code=%s tenant_profile_id=%s",
+        "build_create_handover_payload: payload built for lease_code=%s tenant_profile_id=%s docs=%d",
         data["lease_code"],
         data["tenant_profile_id"],
+        len(doc_ids),
     )
 
     return payload

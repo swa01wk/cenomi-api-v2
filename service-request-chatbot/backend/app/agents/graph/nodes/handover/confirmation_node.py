@@ -23,6 +23,11 @@ from typing import Any
 
 from app.agents.graph.state import ServiceRequestState
 from app.agents.schemas.handover_schema import get_missing_fields
+from app.agents.services.display_formatters import format_field_display_value
+from app.agents.services.review_decorations_service import (
+    build_document_upload_ask_response,
+    is_fm_review_ready,
+)
 from app.observability.decorators import trace_node
 
 logger = logging.getLogger(__name__)
@@ -186,6 +191,17 @@ def _build_confirmation_card(
         (_CREATE_SR_DISPLAY_FIELDS, _CREATE_SR_EDITABLE, _STAGE_DISPLAY_CONFIG["CREATE_SR"][2]),
     )
 
+    # Lock guideline (and other RDD fields) after report submit / final approve.
+    editable = set(editable_fields)
+    rdd_status = ((backend_refs or {}).get("rdd_status") or "").upper()
+    if workflow_stage == "RDD_REVIEW" and rdd_status in {
+        "REPORT_SUBMITTED",
+        "APPROVED",
+        "APPROVED_WITH_CHANGES",
+        "COMPLETED",
+    }:
+        editable.discard("guideLineLink")
+
     # Enum fields that must render as a <select> dropdown on the frontend.
     _ENUM_OPTIONS: dict[str, list[str]] = {
         "document_status": ["APPROVED", "APPROVED_WITH_CHANGES"],
@@ -193,11 +209,20 @@ def _build_confirmation_card(
 
     fields: list[dict[str, Any]] = []
     for field_key in display_fields:
+        raw_value = collected_data.get(field_key)
+        is_editable = field_key in editable
+        # Keep raw ISO / enum codes for editable inputs (selects + round-trip).
+        # Format only for read-only display rows.
+        display_value = (
+            raw_value
+            if is_editable
+            else format_field_display_value(field_key, raw_value)
+        )
         row: dict[str, Any] = {
             "key": field_key,
             "label": _FIELD_LABELS.get(field_key, field_key),
-            "value": collected_data.get(field_key),
-            "editable": field_key in editable_fields,
+            "value": display_value,
+            "editable": is_editable,
         }
         if field_key in _ENUM_OPTIONS:
             row["options"] = _ENUM_OPTIONS[field_key]
@@ -280,6 +305,26 @@ async def confirmation_node(state: ServiceRequestState) -> dict[str, Any]:
             missing,
         )
         return {}
+
+    # FM: never auto-open the confirmation card after field collection.
+    # CREATE-stage docs (e.g. SR_HANDOVER_OTHER) can satisfy readiness, which
+    # previously skipped the upload UI. Show document_requirement + action chips
+    # until the user explicitly chooses Save Progress or Approve Review.
+    if workflow_stage == "FM_REVIEW":
+        documents = list(state.get("documents") or [])
+        fm_action_raw = backend_refs.get("fm_action")
+        if not fm_action_raw:
+            logger.info(
+                "confirmation_node: FM fields complete — showing upload/review turn "
+                "(no fm_action yet)"
+            )
+            return build_document_upload_ask_response(state)
+        fm_action = str(fm_action_raw).lower()
+        if fm_action == "approve" and not is_fm_review_ready(collected_data, documents):
+            logger.info(
+                "confirmation_node: FM approve blocked — missing documents; asking for upload"
+            )
+            return build_document_upload_ask_response(state)
 
     logger.info(
         "confirmation_node: all required fields present for stage=%s — generating confirmation card",

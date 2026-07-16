@@ -234,7 +234,7 @@ class TestSelectedLeaseMerge:
         assert cd["description"] == "Test"
 
     @pytest.mark.asyncio
-    async def test_selected_lease_sets_status_in_progress(self) -> None:
+    async def test_selected_lease_sets_status_waiting_for_offer(self) -> None:
         state = _state(
             collected_data={},
             selected_lease=_UA_RECORD.model_dump(),
@@ -242,7 +242,8 @@ class TestSelectedLeaseMerge:
         svc = MagicMock(spec=AbstractLeaseLookupService)
         svc.lookup = AsyncMock()
         result = await lease_lookup_node(state, service=svc)
-        assert result["status"] == "IN_PROGRESS"
+        assert result["status"] == "WAITING_FOR_USER"
+        assert result["collected_data"]["mm_optional_upload_status"] == "awaiting_choice"
 
     @pytest.mark.asyncio
     async def test_selected_lease_clears_lease_matches(self) -> None:
@@ -371,11 +372,12 @@ class TestZeroMatches:
 
 class TestSingleMatch:
     @pytest.mark.asyncio
-    async def test_single_match_status_in_progress(self) -> None:
+    async def test_single_match_status_waiting_for_optional_upload_offer(self) -> None:
         state = _state(collected_data={"lease_code": "t0105712"})
         svc = _MockService(_make_result([_UA_RECORD]))
         result = await lease_lookup_node(state, service=svc)
-        assert result["status"] == "IN_PROGRESS"
+        assert result["status"] == "WAITING_FOR_USER"
+        assert result["collected_data"]["mm_optional_upload_status"] == "awaiting_choice"
 
     @pytest.mark.asyncio
     async def test_single_match_enriches_collected_data(self) -> None:
@@ -413,11 +415,29 @@ class TestSingleMatch:
         assert result.get("lease_matches") == []
 
     @pytest.mark.asyncio
-    async def test_single_match_no_response_ui_or_waiting(self) -> None:
-        state = _state(collected_data={"lease_code": "t0105712"})
+    async def test_single_match_offers_yes_no_without_document_requirement(self) -> None:
+        state = _state(collected_data={"lease_code": "t0105712"}, session_id="sess-1")
         svc = _MockService(_make_result([_UA_RECORD]))
         result = await lease_lookup_node(state, service=svc)
-        assert "type" not in result.get("response_ui", {}) or result["status"] != "WAITING_FOR_USER"
+        deco = result.get("response_decorations") or {}
+        assert "document_requirement" not in deco
+        suggestions = deco["suggestions"]
+        assert suggestions["kind"] == "labeled_options"
+        actions = {o["action"] for o in suggestions["options"]}
+        assert actions == {"accept_optional_upload", "skip_optional_upload"}
+
+    @pytest.mark.asyncio
+    async def test_single_match_skips_offer_when_already_done(self) -> None:
+        state = _state(
+            collected_data={
+                "lease_code": "t0105712",
+                "mm_optional_upload_status": "done",
+            }
+        )
+        svc = _MockService(_make_result([_UA_RECORD]))
+        result = await lease_lookup_node(state, service=svc)
+        assert result["status"] == "IN_PROGRESS"
+        assert "document_requirement" not in (result.get("response_decorations") or {})
 
     @pytest.mark.asyncio
     async def test_single_match_unit_codes_is_list(self) -> None:
@@ -695,7 +715,7 @@ class TestTracing:
         state = _state(collected_data={"lease_code": "t0105712"})
         svc = _MockService(_make_result([_UA_RECORD]))
         result = await lease_lookup_node(state, service=svc)
-        assert result["status"] == "IN_PROGRESS"
+        assert result["status"] == "WAITING_FOR_USER"
 
     @pytest.mark.asyncio
     async def test_capture_tool_call_request_payload_has_endpoint(self) -> None:

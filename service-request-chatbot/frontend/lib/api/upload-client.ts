@@ -9,32 +9,29 @@ export type DocumentUploadResponse = {
   document_id: string | null;
   signed_url: string | null;
   file_path: string | null;
+  comment?: string | null;
   status: "uploaded" | string;
 };
 
 // ─── API base ─────────────────────────────────────────────────────────────────
 
 function apiBase(): string {
-  // Backend mounts upload at /api/upload — not /api/v1/upload.
+  // Backend mounts upload at /api/v1/upload and /api/v2/upload.
   const base = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
-  return `${base.replace(/\/$/, "")}/api`;
+  return `${base.replace(/\/$/, "")}/api/v1`;
 }
 
 // ─── Upload function ──────────────────────────────────────────────────────────
 
 /**
  * Upload a service request document to the platform via the backend.
- *
- * @param file           The file to upload (PDF, JPEG, or PNG).
- * @param documentType   Document type identifier (e.g. "SR_HANDOVER_CHECKLIST").
- * @param sessionId      Chat session UUID — used to resolve backend refs (sr_id, lease_id).
- * @param srId           Explicit SR ID override (optional; overrides draft-derived sr_id).
  */
 export async function uploadDocument(
   file: File,
   documentType: string,
   sessionId: string,
   srId?: string | null,
+  comment?: string | null,
 ): Promise<DocumentUploadResponse> {
   const token = getStoredToken();
 
@@ -43,6 +40,7 @@ export async function uploadDocument(
   form.append("document_type", documentType);
   form.append("session_id", sessionId);
   if (srId) form.append("sr_id", srId);
+  if (comment?.trim()) form.append("comment", comment.trim());
 
   const headers: Record<string, string> = {};
   if (token) headers["Authorization"] = `Bearer ${token}`;
@@ -59,4 +57,30 @@ export async function uploadDocument(
   }
 
   return (await res.json()) as DocumentUploadResponse;
+}
+
+/** Delete an uploaded document from the platform + session draft. */
+export async function deleteDocument(
+  documentId: string,
+  sessionId: string,
+  srId?: string | null,
+): Promise<{ document_id: string; status: string }> {
+  const token = getStoredToken();
+  const params = new URLSearchParams({ document_id: documentId, session_id: sessionId });
+  if (srId) params.set("sr_id", srId);
+
+  const headers: Record<string, string> = {};
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+
+  const res = await fetch(`${apiBase()}/upload?${params.toString()}`, {
+    method: "DELETE",
+    headers,
+  });
+
+  if (!res.ok) {
+    const errText = await res.text().catch(() => res.statusText);
+    throw new Error(`Delete failed (${res.status}): ${errText}`);
+  }
+
+  return (await res.json()) as { document_id: string; status: string };
 }

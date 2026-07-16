@@ -108,6 +108,7 @@ class FileUploadMetadata:
     file_name: str = ""
     document_type_status: str = ""
     file_extension: str = "pdf"
+    comment: str = ""
 
 
 @dataclass
@@ -414,13 +415,17 @@ class ServiceRequestPlatformClient:
             "brand_id": str(metadata.brand_id),
             "property_id": str(metadata.property_id),
             "lease_code": metadata.lease_code,
-            "sr_id": str(metadata.sr_id),
             "tenant_profile_id": str(metadata.tenant_profile_id),
             "document_type_status": metadata.document_type_status,
             "signed_url": "true",
         }
+        # sr_id may be empty for pre-create MM uploads (classic form behaviour).
+        if metadata.sr_id not in (None, "", "None"):
+            params["sr_id"] = str(metadata.sr_id)
         if metadata.file_name:
             params["file_name"] = metadata.file_name
+        if metadata.comment:
+            params["comment"] = metadata.comment
 
         wall_start = time.monotonic()
 
@@ -490,6 +495,67 @@ class ServiceRequestPlatformClient:
                 latency_ms=latency_ms,
                 error=err,
             )
+
+    async def delete_document(
+        self,
+        *,
+        document_id: str,
+        type_: str = "SERVICE_REQUEST",
+        type_id: str | None = None,
+        lease_id: str | None = None,
+    ) -> dict[str, Any]:
+        """DELETE /documents — remove an uploaded attachment from the platform."""
+        endpoint = f"{self._base_url}/documents"
+        if not self._uses_agentic_bearer("DELETE", endpoint):
+            await self.ensure_authenticated()
+
+        params: dict[str, str] = {
+            "document_id": str(document_id),
+            "type": type_,
+        }
+        if lease_id:
+            params["lease_id"] = str(lease_id)
+        elif type_id:
+            params["type_id"] = str(type_id)
+
+        wall_start = time.monotonic()
+        try:
+            async with httpx.AsyncClient(timeout=self._timeout) as client:
+                response = await client.delete(
+                    endpoint,
+                    params=params,
+                    headers=self._auth_headers("DELETE", endpoint),
+                )
+            latency_ms = int((time.monotonic() - wall_start) * 1000)
+            success = response.status_code in (200, 201, 204)
+            if not success:
+                log.warning(
+                    "platform_client.delete_document.non_2xx",
+                    status_code=response.status_code,
+                    document_id=document_id,
+                )
+                return {
+                    "success": False,
+                    "status_code": response.status_code,
+                    "latency_ms": latency_ms,
+                    "error": f"HTTP {response.status_code}",
+                }
+            return {
+                "success": True,
+                "status_code": response.status_code,
+                "latency_ms": latency_ms,
+                "error": None,
+            }
+        except httpx.RequestError as exc:
+            latency_ms = int((time.monotonic() - wall_start) * 1000)
+            err = f"{type(exc).__name__}: {exc}"
+            log.warning("platform_client.delete_document.connection_error", error=err)
+            return {
+                "success": False,
+                "status_code": None,
+                "latency_ms": latency_ms,
+                "error": err,
+            }
 
     # ------------------------------------------------------------------
     # Private HTTP helpers
