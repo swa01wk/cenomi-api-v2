@@ -510,3 +510,40 @@ class TestActiveFieldRemap:
         result = await merge_state_node(state)
         assert result["collected_data"]["fitout_start_date"] == "2026-08-10"
         assert "actual_handover_date" not in result["collected_data"]
+
+
+class TestNotesCommentsIndependence:
+    """Notes and comments are independent form fields — never mirrored."""
+
+    @pytest.mark.asyncio
+    async def test_notes_does_not_populate_comments(self) -> None:
+        state = _state(
+            extracted_fields={"notes": _ext("Site ready")},
+            collected_data={},
+        )
+        result = await merge_state_node(state)
+        assert result["collected_data"]["notes"] == "Site ready"
+        assert "comments" not in result["collected_data"]
+
+    @pytest.mark.asyncio
+    async def test_comments_does_not_populate_notes(self) -> None:
+        state = _state(
+            extracted_fields={"comments": _ext("Follow up with FM")},
+            collected_data={},
+        )
+        result = await merge_state_node(state)
+        assert result["collected_data"]["comments"] == "Follow up with FM"
+        assert "notes" not in result["collected_data"]
+
+    @pytest.mark.asyncio
+    async def test_notes_and_comments_can_differ(self) -> None:
+        state = _state(
+            extracted_fields={
+                "notes": _ext("Note A"),
+                "comments": _ext("Comment B"),
+            },
+            collected_data={},
+        )
+        result = await merge_state_node(state)
+        assert result["collected_data"]["notes"] == "Note A"
+        assert result["collected_data"]["comments"] == "Comment B"

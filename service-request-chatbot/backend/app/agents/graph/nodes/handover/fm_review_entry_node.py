@@ -28,6 +28,10 @@ from typing import Any
 import structlog
 
 from app.agents.graph.state import ServiceRequestState
+from app.agents.services.review_decorations_service import (
+    build_document_upload_ask_response,
+    is_fm_review_ready,
+)
 from app.observability.decorators import trace_node
 
 log = structlog.get_logger(__name__)
@@ -121,6 +125,11 @@ async def fm_review_entry_node(state: ServiceRequestState) -> dict[str, Any]:
         return {"backend_refs": backend_refs}
 
     if action_override == "approve_fm_review":
+        collected = dict(state.get("collected_data") or {})
+        documents = list(state.get("documents") or [])
+        if not is_fm_review_ready(collected, documents):
+            log.info("fm_review_entry.approve_blocked_missing_docs")
+            return build_document_upload_ask_response(state)
         log.info("fm_review_entry.action_approve")
         backend_refs["fm_action"] = "approve"
         return {"backend_refs": backend_refs}
@@ -134,15 +143,16 @@ async def fm_review_entry_node(state: ServiceRequestState) -> dict[str, Any]:
         backend_refs["fm_action"] = "save_progress"
         return {"backend_refs": backend_refs, "confirmation_status": "CONFIRMED"}
 
-    if action_override == "confirm_fm_approve":
-        log.info("fm_review_entry.action_confirm_fm_approve")
-        backend_refs["fm_action"] = "approve"
-        return {"backend_refs": backend_refs, "confirmation_status": "CONFIRMED"}
-
-    # Frontend ConfirmationCard falls back to action="confirm" when the card
-    # has no confirmAction. Treat that as FM approve so Confirm & Submit works.
-    if action_override == "confirm":
-        log.info("fm_review_entry.action_confirm_generic")
+    if action_override in ("confirm_fm_approve", "confirm"):
+        collected = dict(state.get("collected_data") or {})
+        documents = list(state.get("documents") or [])
+        if not is_fm_review_ready(collected, documents):
+            log.info("fm_review_entry.confirm_approve_blocked_missing_docs")
+            return build_document_upload_ask_response(state)
+        log.info(
+            "fm_review_entry.action_confirm_approve",
+            action=action_override,
+        )
         backend_refs["fm_action"] = "approve"
         return {"backend_refs": backend_refs, "confirmation_status": "CONFIRMED"}
 
@@ -183,6 +193,11 @@ async def fm_review_entry_node(state: ServiceRequestState) -> dict[str, Any]:
     # must be handled here or the card loops forever.
     if confirmation_status == "PENDING":
         if _contains_phrase(user_message, _CONFIRM_PHRASES):
+            collected = dict(state.get("collected_data") or {})
+            documents = list(state.get("documents") or [])
+            if not is_fm_review_ready(collected, documents):
+                log.info("fm_review_entry.pending_confirm_blocked_missing_docs")
+                return build_document_upload_ask_response(state)
             log.info("fm_review_entry.confirmation_accepted_text")
             backend_refs["fm_action"] = backend_refs.get("fm_action") or "approve"
             return {

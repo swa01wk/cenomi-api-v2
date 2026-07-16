@@ -193,6 +193,38 @@ class TestValidateInspectionDoneBy:
 
 
 # ===========================================================================
+# TestValidateGuidelineLink
+# ===========================================================================
+
+
+class TestValidateGuidelineLink:
+    def test_https_passes(self) -> None:
+        from app.agents.services.validation_service import validate_guideline_link
+
+        r = validate_guideline_link("https://example.com/guide")
+        assert r["status"] == "PASSED"
+
+    def test_http_passes(self) -> None:
+        from app.agents.services.validation_service import validate_guideline_link
+
+        r = validate_guideline_link("http://intranet.local/doc")
+        assert r["status"] == "PASSED"
+
+    def test_missing_scheme_fails(self) -> None:
+        from app.agents.services.validation_service import validate_guideline_link
+
+        r = validate_guideline_link("www.example.com")
+        assert r["status"] == "FAILED"
+        assert r["blocking"] is True
+
+    def test_empty_fails(self) -> None:
+        from app.agents.services.validation_service import validate_guideline_link
+
+        r = validate_guideline_link("")
+        assert r["status"] == "FAILED"
+
+
+# ===========================================================================
 # TestValidateStartEndDate
 # ===========================================================================
 

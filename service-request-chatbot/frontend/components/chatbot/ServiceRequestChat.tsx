@@ -264,6 +264,16 @@ export function ServiceRequestChat() {
     [sendTurn],
   );
 
+  const handleDeleteComplete = useCallback(
+    (documentId: string) => {
+      setUploadedDocuments((prev) => prev.filter((d) => d.documentId !== documentId));
+      void sendTurn("", {
+        apiMessage: "I've removed an uploaded document.",
+      });
+    },
+    [sendTurn],
+  );
+
   // Opens an existing SR by SR ID (for FM Manager / DD Engineer)
   const handleOpenSR = useCallback(() => {
     const trimmed = openSrInput.trim();
@@ -371,6 +381,11 @@ export function ServiceRequestChat() {
           workflowStage={workflowStage}
           userRole={userRole}
           rddStatus={rddStatus}
+          collectedData={latestSRPreview?.fields?.reduce(
+            (acc, f) => ({ ...acc, [f.key]: f.value ?? "" }),
+            {} as Record<string, string>,
+          )}
+          uploadedDocuments={uploadedDocuments}
           onAction={handleStageAction}
           disabled={isPending}
         />
@@ -421,8 +436,9 @@ export function ServiceRequestChat() {
           srId={srId}
         />
 
-        {/* Document upload panel — stage-gated, shown during FM/RDD review */}
-        {isLifecycleStage && srId && sessionId && (
+        {/* Document upload panel — FM/RDD or CREATE_SR (lease-gated optional) */}
+        {sessionId &&
+          (isLifecycleStage || workflowStage === "CREATE_SR") && (
           <DocumentUploadPanel
             sessionId={sessionId}
             srId={srId}
@@ -430,6 +446,14 @@ export function ServiceRequestChat() {
             userRole={userRole}
             uploadedDocuments={uploadedDocuments}
             onUploadComplete={handleUploadComplete}
+            onDeleteComplete={handleDeleteComplete}
+            preferChatDocumentCard={
+              sidebarUI?.type === "document_requirement" && isLifecycleStage
+            }
+            collectedData={latestSRPreview?.fields?.reduce(
+              (acc, f) => ({ ...acc, [f.key]: f.value ?? "" }),
+              {} as Record<string, string>,
+            )}
           />
         )}
 

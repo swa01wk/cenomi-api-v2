@@ -51,7 +51,10 @@ async def payload_builder_node(state: ServiceRequestState) -> dict[str, Any]:
         return {}
 
     try:
-        payload = build_create_handover_payload(collected_data)
+        payload = build_create_handover_payload(
+            collected_data,
+            documents=list(state.get("documents") or []),
+        )
     except ValueError as exc:
         logger.warning("payload_builder_node: payload build failed — %s", exc)
         return {"status": "FAILED"}

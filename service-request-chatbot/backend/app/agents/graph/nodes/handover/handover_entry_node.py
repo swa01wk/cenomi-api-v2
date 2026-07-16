@@ -28,6 +28,13 @@ from typing import Any
 import structlog
 
 from app.agents.graph.state import ServiceRequestState
+from app.agents.services.review_decorations_service import (
+    MM_OPTIONAL_AWAITING_CHOICE,
+    MM_OPTIONAL_AWAITING_UPLOAD,
+    MM_OPTIONAL_DONE,
+    MM_OPTIONAL_UPLOAD_STATUS_KEY,
+    build_mm_optional_upload_waiting_response,
+)
 from app.observability.decorators import trace_node
 
 log = structlog.get_logger(__name__)
@@ -94,6 +101,24 @@ _CANCEL_WORKFLOW_PHRASES: frozenset[str] = frozenset(
     }
 )
 
+_CONTINUE_OPTIONAL_UPLOAD_PHRASES: frozenset[str] = frozenset(
+    {
+        "continue",
+        "done",
+        "skip",
+        "next",
+        "no thanks",
+        "continue without uploading",
+        "skip upload",
+        "i'm done",
+        "im done",
+    }
+)
+
+_ACCEPT_OPTIONAL_UPLOAD_ACTIONS = frozenset({"accept_optional_upload"})
+_SKIP_OPTIONAL_UPLOAD_ACTIONS = frozenset({"skip_optional_upload"})
+_CONTINUE_OPTIONAL_UPLOAD_ACTIONS = frozenset({"continue_optional_upload"})
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -113,6 +138,78 @@ def _contains_phrase(message: str, phrases: frozenset[str]) -> bool:
         bool(re.search(r"\b" + re.escape(phrase) + r"\b", lowered))
         for phrase in phrases
     )
+
+
+def _handle_mm_optional_upload_gate(
+    state: ServiceRequestState,
+    *,
+    user_message: str,
+    action_override: str | None,
+) -> dict[str, Any] | None:
+    """CREATE_SR optional MM upload offer/upload wait. Returns patch or None."""
+    if (state.get("workflow_stage") or "CREATE_SR") != "CREATE_SR":
+        return None
+    if state.get("confirmation_status") == "PENDING":
+        return None
+
+    collected = dict(state.get("collected_data") or {})
+    mm_status = collected.get(MM_OPTIONAL_UPLOAD_STATUS_KEY)
+    if mm_status not in (MM_OPTIONAL_AWAITING_CHOICE, MM_OPTIONAL_AWAITING_UPLOAD):
+        return None
+
+    if (
+        action_override in _ACCEPT_OPTIONAL_UPLOAD_ACTIONS
+        or (
+            mm_status == MM_OPTIONAL_AWAITING_CHOICE
+            and user_message
+            and _contains_phrase(user_message, _CONFIRM_PHRASES)
+        )
+    ):
+        collected[MM_OPTIONAL_UPLOAD_STATUS_KEY] = MM_OPTIONAL_AWAITING_UPLOAD
+        log.info("handover_entry.mm_optional_upload_accepted")
+        return build_mm_optional_upload_waiting_response(state, collected=collected)
+
+    if (
+        action_override in _SKIP_OPTIONAL_UPLOAD_ACTIONS
+        or (
+            mm_status == MM_OPTIONAL_AWAITING_CHOICE
+            and user_message
+            and _contains_phrase(user_message, _REJECT_PHRASES)
+        )
+    ):
+        collected[MM_OPTIONAL_UPLOAD_STATUS_KEY] = MM_OPTIONAL_DONE
+        log.info("handover_entry.mm_optional_upload_skipped")
+        return {
+            "collected_data": collected,
+            "status": "IN_PROGRESS",
+            "response_decorations": {},
+            "response_ui": {},
+        }
+
+    if (
+        action_override in _CONTINUE_OPTIONAL_UPLOAD_ACTIONS
+        or (
+            mm_status == MM_OPTIONAL_AWAITING_UPLOAD
+            and user_message
+            and _contains_phrase(user_message, _CONTINUE_OPTIONAL_UPLOAD_PHRASES)
+        )
+    ):
+        collected[MM_OPTIONAL_UPLOAD_STATUS_KEY] = MM_OPTIONAL_DONE
+        log.info("handover_entry.mm_optional_upload_continued")
+        return {
+            "collected_data": collected,
+            "status": "IN_PROGRESS",
+            "response_decorations": {},
+            "response_ui": {},
+        }
+
+    # Still waiting — re-emit offer or upload UI; do not advance to missing fields.
+    log.info(
+        "handover_entry.mm_optional_upload_waiting",
+        mm_status=mm_status,
+        user_message=user_message[:120],
+    )
+    return build_mm_optional_upload_waiting_response(state, collected=collected)
 
 
 # ---------------------------------------------------------------------------
@@ -234,6 +331,17 @@ async def handover_entry_node(state: ServiceRequestState) -> dict[str, Any]:
                 "or tell me what you'd like to change."
             ),
         }
+
+    # ── 3. Optional MM upload offer / upload wait (CREATE_SR) ─────────────
+    # Handles accept/skip/continue actions and re-emits UI while waiting so
+    # missing-field questions do not run with a stray upload card.
+    mm_gate = _handle_mm_optional_upload_gate(
+        state,
+        user_message=user_message,
+        action_override=action_override,
+    )
+    if mm_gate is not None:
+        return mm_gate
 
     if state.get("active_agent") == "rdd_agent" and not state.get("workflow_stage"):
         return {"workflow_stage": "CREATE_SR"}

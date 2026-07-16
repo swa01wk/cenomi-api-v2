@@ -29,6 +29,9 @@ function FieldRow({
   const ENUM_LABELS: Record<string, string> = {
     APPROVED: "Approve",
     APPROVED_WITH_CHANGES: "Approve with Changes",
+    FM_MANAGER: "FM Manager",
+    OPERATIONS: "Operations",
+    DD_ENGINEER: "RDD Project Manager",
   };
 
   const displayLabel = ENUM_LABELS[displayValue] ?? displayValue;

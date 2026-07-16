@@ -85,6 +85,7 @@ class DocumentUploadService:
         lease_code: str,
         tenant_profile_id: str,
         document_type_status: str = "",
+        comment: str = "",
     ) -> DocumentUploadResult:
         """Upload *file_bytes* to the platform and return the assigned document ID.
 
@@ -95,10 +96,12 @@ class DocumentUploadService:
         content_type:           MIME type of the file.
         document_type_id:       Platform document-type identifier
                                 (e.g. ``"SR_HANDOVER_CHECKLIST"``).
-        sr_id:                  The service request this document belongs to.
+        sr_id:                  The service request this document belongs to
+                                (may be empty for pre-create MM uploads).
         lease_id, brand_id, ...: Backend refs required by the platform.
         document_type_status:   Set to ``"APPROVED"`` for RDD report;
                                 leave empty (``""``) for FM documents.
+        comment:                Optional per-file comment forwarded to the platform.
 
         Returns
         -------
@@ -125,9 +128,12 @@ class DocumentUploadService:
 
         file_extension = _derive_extension(filename, content_type)
 
+        # Portal convention: append ``___`` so display helpers can strip it.
+        platform_file_name = filename if filename.endswith("___") else f"{filename}___"
+
         metadata = FileUploadMetadata(
             document_type_id=document_type_id,
-            sr_id=sr_id,
+            sr_id=sr_id or "",
             lease_id=str(lease_id),
             brand_id=str(brand_id),
             property_id=str(property_id),
@@ -135,6 +141,8 @@ class DocumentUploadService:
             tenant_profile_id=str(tenant_profile_id),
             document_type_status=document_type_status,
             file_extension=file_extension,
+            file_name=platform_file_name,
+            comment=(comment or "").strip(),
         )
 
         log.info(
@@ -142,7 +150,9 @@ class DocumentUploadService:
             document_type_id=document_type_id,
             sr_id=sr_id,
             filename=filename,
+            platform_file_name=platform_file_name,
             content_type=content_type,
+            has_comment=bool(metadata.comment),
         )
 
         result = await self._client.upload_file(file_bytes, metadata)

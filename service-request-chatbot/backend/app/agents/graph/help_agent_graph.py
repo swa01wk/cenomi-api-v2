@@ -323,10 +323,8 @@ def _route_after_validation(state: dict[str, Any]) -> str:
 
 
 def _route_after_handover_entry(state: dict[str, Any]) -> str:
-    if (
-        state.get("active_agent") is None
-        and state.get("status") == "WAITING_FOR_USER"
-    ):
+    # Optional MM upload offer/wait and other WAITING short-circuits.
+    if state.get("status") == "WAITING_FOR_USER":
         return "response_generation"
     if state.get("action_override") == "cancel":
         return "merge_state"
@@ -470,6 +468,9 @@ def build_help_agent_graph():
             "rdd_review_entry": "rdd_review_entry",
             "preview": "preview",
             "supervisor": "supervisor",
+            # Sync GET failure sets sync_error and returns response_generation
+            # (_route_after_sync); must be registered or LangGraph raises KeyError.
+            "response_generation": "response_generation",
         },
     )
 

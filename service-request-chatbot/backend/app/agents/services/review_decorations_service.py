@@ -165,21 +165,128 @@ def _document_requirement_block(
     }
 
 
+# Terminal / post-approval RDD statuses — no action chips (View SR deferred).
+_RDD_TERMINAL_STATUSES: frozenset[str] = frozenset(
+    {
+        "APPROVED",
+        "APPROVED_WITH_CHANGES",
+        "COMPLETED",
+        "REJECTED",
+        "CANCELLED",
+    }
+)
+
+
+def _fm_review_ready(
+    collected: dict[str, Any],
+    documents: list[dict[str, Any]],
+) -> bool:
+    """True when FM can approve: readiness date set and at least one FM doc uploaded."""
+    date_ok = collected.get("unit_readiness_date") not in (None, "")
+    if not date_ok:
+        return False
+    uploaded = _uploaded_type_ids(documents)
+    return bool(uploaded & _FM_DOC_TYPES)
+
+
+def is_fm_review_ready(
+    collected: dict[str, Any],
+    documents: list[dict[str, Any]],
+) -> bool:
+    """Public alias for FM approve readiness (date + ≥1 FM document)."""
+    return _fm_review_ready(collected, documents)
+
+
+_FM_UPLOAD_ASK_MESSAGE = (
+    "Please upload at least one FM document (Handover Checklist, Site Survey, "
+    "or Other) to continue with the review."
+)
+_FM_UPLOAD_REVIEW_MESSAGE = (
+    "Review the details below. You can upload FM documents (Handover Checklist, "
+    "Site Survey, or Other), then choose an action."
+)
+_RDD_UPLOAD_ASK_MESSAGE = (
+    "Please upload the Handover Meeting Report to continue with the review."
+)
+
+
+def build_document_upload_ask_response(state: dict[str, Any]) -> dict[str, Any]:
+    """WAITING_FOR_USER payload that asks for required stage documents + upload card.
+
+    Clears ``confirmation_status`` so ``build_review_decorations`` includes
+    ``document_requirement`` (PENDING confirmation otherwise strips it).
+    """
+    stage: str = state.get("workflow_stage") or ""
+    collected = dict(state.get("collected_data") or {})
+    documents = list(state.get("documents") or [])
+    if stage == "FM_REVIEW":
+        message = (
+            _FM_UPLOAD_REVIEW_MESSAGE
+            if _fm_review_ready(collected, documents)
+            else _FM_UPLOAD_ASK_MESSAGE
+        )
+    elif stage == "RDD_REVIEW":
+        message = _RDD_UPLOAD_ASK_MESSAGE
+    else:
+        return {}
+
+    deco_state = {**dict(state), "confirmation_status": None}
+    decorations = build_review_decorations(deco_state)
+    return {
+        "status": "WAITING_FOR_USER",
+        "response_message": message,
+        "response_ui": {
+            "type": "message",
+            "message": message,
+        },
+        "response_decorations": decorations,
+        "active_field": None,
+        "confirmation_status": None,
+        "confirmation_required": False,
+    }
+
+
 def _action_suggestions(
     *,
     stage: str,
     user_role: str | None,
     rdd_status: str | None,
+    collected: dict[str, Any] | None = None,
+    documents: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any] | None:
+    """Return stage-specific action chips. Never mix FM and RDD actions.
+
+    FM shows exactly one chip:
+    - Save Progress while incomplete (persists data, does not approve)
+    - Approve Review when ready (advances toward RDD)
+    """
     options: list[dict[str, str]] = []
+    collected = collected or {}
+    documents = documents or []
 
     if stage == "FM_REVIEW" and user_role in ("FM_MANAGER", "OPERATIONS", "ADMIN"):
-        options = [
-            {"label": "Save Progress", "value": "save_fm_progress", "action": "save_fm_progress"},
-            {"label": "Approve Review", "value": "approve_fm_review", "action": "approve_fm_review"},
-        ]
+        if _fm_review_ready(collected, documents):
+            options = [
+                {
+                    "label": "Approve Review",
+                    "value": "approve_fm_review",
+                    "action": "approve_fm_review",
+                },
+            ]
+        else:
+            options = [
+                {
+                    "label": "Save Progress",
+                    "value": "save_fm_progress",
+                    "action": "save_fm_progress",
+                },
+            ]
     elif stage == "RDD_REVIEW" and user_role in ("DD_ENGINEER", "ADMIN"):
-        if rdd_status == "REPORT_SUBMITTED":
+        status = (rdd_status or "").upper()
+        if status in _RDD_TERMINAL_STATUSES:
+            # Post-approval: hide action suggestions (View SR deferred).
+            options = []
+        elif status == "REPORT_SUBMITTED":
             options = [
                 {
                     "label": "Final Approve",
@@ -195,10 +302,27 @@ def _action_suggestions(
                     "action": "submit_rdd_report",
                 },
             ]
+    # CREATE_SR / SR_COMPLETED / unknown stage → no review action chips
 
     if not options:
         return None
     return {"kind": "labeled_options", "options": options}
+
+
+_RDD_DATE_FIELDS_FOR_DOCS: tuple[str, ...] = (
+    "actual_handover_date",
+    "fitout_start_date",
+    "fitout_end_date",
+)
+
+
+def _rdd_required_dates_complete(collected: dict[str, Any]) -> bool:
+    """True when RDD date fields needed before document upload are present."""
+    for field in _RDD_DATE_FIELDS_FOR_DOCS:
+        value = collected.get(field)
+        if value is None or value == "":
+            return False
+    return True
 
 
 def build_review_decorations(state: dict[str, Any]) -> dict[str, Any]:
@@ -220,16 +344,28 @@ def build_review_decorations(state: dict[str, Any]) -> dict[str, Any]:
     documents: list[dict[str, Any]] = list(state.get("documents") or [])
     session_id: str | None = state.get("session_id")
     rdd_status: str | None = backend_refs.get("rdd_status")
+    collected: dict[str, Any] = dict(state.get("collected_data") or {})
 
     decorations: dict[str, Any] = {"promote_preview": True}
 
-    suggestions = _action_suggestions(stage=stage, user_role=user_role, rdd_status=rdd_status)
+    suggestions = _action_suggestions(
+        stage=stage,
+        user_role=user_role,
+        rdd_status=rdd_status,
+        collected=collected,
+        documents=documents,
+    )
     if suggestions:
         decorations["suggestions"] = suggestions
 
     # After report submit, the mandatory RDD doc is already on the platform —
     # don't re-prompt uploads while offering Final Approve.
-    if not (stage == "RDD_REVIEW" and rdd_status == "REPORT_SUBMITTED"):
+    # For RDD, also wait until required dates are collected before showing
+    # the document upload card.
+    show_docs = not (stage == "RDD_REVIEW" and (rdd_status or "").upper() == "REPORT_SUBMITTED")
+    if stage == "RDD_REVIEW" and not _rdd_required_dates_complete(collected):
+        show_docs = False
+    if show_docs:
         doc_req = _document_requirement_block(
             stage=stage,
             documents=documents,
@@ -243,6 +379,147 @@ def build_review_decorations(state: dict[str, Any]) -> dict[str, Any]:
         decorations["promote_preview"] = True
 
     return decorations
+
+
+# CREATE_SR optional MM upload offer (Yes → show card; No/Continue → hide).
+MM_OPTIONAL_UPLOAD_STATUS_KEY = "mm_optional_upload_status"
+MM_OPTIONAL_AWAITING_CHOICE = "awaiting_choice"
+MM_OPTIONAL_AWAITING_UPLOAD = "awaiting_upload"
+MM_OPTIONAL_DONE = "done"
+
+_MM_OPTIONAL_OFFER_MESSAGE = (
+    "Lease found. Would you like to upload an optional supporting document "
+    "for this handover request?"
+)
+_MM_OPTIONAL_UPLOAD_MESSAGE = (
+    "Upload an optional supporting document below, or tap Continue when you "
+    "are done (you can also continue without uploading)."
+)
+
+
+def build_mm_optional_upload_offer_suggestions() -> dict[str, Any]:
+    """Yes/No chips before showing the CREATE_SR optional upload card."""
+    return {
+        "kind": "labeled_options",
+        "options": [
+            {
+                "label": "Yes",
+                "value": "yes",
+                "action": "accept_optional_upload",
+            },
+            {
+                "label": "No",
+                "value": "no",
+                "action": "skip_optional_upload",
+            },
+        ],
+    }
+
+
+def build_mm_optional_upload_continue_suggestions() -> dict[str, Any]:
+    """Continue chip while the optional upload card is visible."""
+    return {
+        "kind": "labeled_options",
+        "options": [
+            {
+                "label": "Continue",
+                "value": "continue",
+                "action": "continue_optional_upload",
+            },
+        ],
+    }
+
+
+def build_mm_optional_upload_offer_decorations() -> dict[str, Any]:
+    """Suggestions-only decorations for the Yes/No optional-upload offer."""
+    return {"suggestions": build_mm_optional_upload_offer_suggestions()}
+
+
+def build_create_sr_attachment_decorations(state: dict[str, Any]) -> dict[str, Any]:
+    """Optional MM attachment card during CREATE_SR after user accepts the offer.
+
+    Shown only when ``mm_optional_upload_status == awaiting_upload``.
+    Does not block confirmation — attachments remain optional.
+    """
+    stage: str = state.get("workflow_stage") or "CREATE_SR"
+    if stage != "CREATE_SR":
+        return {}
+
+    collected: dict[str, Any] = dict(state.get("collected_data") or {})
+    if collected.get("lease_id") in (None, "", 0):
+        return {}
+    if collected.get(MM_OPTIONAL_UPLOAD_STATUS_KEY) != MM_OPTIONAL_AWAITING_UPLOAD:
+        return {}
+
+    backend_refs: dict[str, Any] = dict(state.get("backend_refs") or {})
+    session_id: str | None = state.get("session_id")
+    documents: list[dict[str, Any]] = list(state.get("documents") or [])
+    uploaded = _uploaded_type_ids(documents)
+
+    doc_rows = [
+        {
+            "key": "SR_HANDOVER_OTHER",
+            "label": _DOC_LABELS.get("SR_HANDOVER_OTHER", "Other"),
+            "required": False,
+            "status": "uploaded" if "SR_HANDOVER_OTHER" in uploaded else "missing",
+        }
+    ]
+
+    decorations: dict[str, Any] = {
+        "document_requirement": {
+            "documents": doc_rows,
+            "uploadContext": {
+                "session_id": session_id or "",
+                "sr_id": backend_refs.get("sr_id") or "",
+            },
+            "message": _MM_OPTIONAL_UPLOAD_MESSAGE,
+        },
+        "suggestions": build_mm_optional_upload_continue_suggestions(),
+    }
+    return decorations
+
+
+def build_mm_optional_upload_waiting_response(
+    state: dict[str, Any],
+    *,
+    collected: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """WAITING_FOR_USER payload for offer or upload-wait (CREATE_SR)."""
+    data = dict(collected if collected is not None else (state.get("collected_data") or {}))
+    status = data.get(MM_OPTIONAL_UPLOAD_STATUS_KEY)
+    base_state = {**dict(state), "collected_data": data}
+
+    if status == MM_OPTIONAL_AWAITING_CHOICE:
+        return {
+            "collected_data": data,
+            "status": "WAITING_FOR_USER",
+            "response_message": _MM_OPTIONAL_OFFER_MESSAGE,
+            "response_ui": {
+                "type": "message",
+                "message": _MM_OPTIONAL_OFFER_MESSAGE,
+            },
+            "response_decorations": merge_decorations(
+                state.get("response_decorations"),
+                build_mm_optional_upload_offer_decorations(),
+            ),
+        }
+
+    if status == MM_OPTIONAL_AWAITING_UPLOAD:
+        return {
+            "collected_data": data,
+            "status": "WAITING_FOR_USER",
+            "response_message": _MM_OPTIONAL_UPLOAD_MESSAGE,
+            "response_ui": {
+                "type": "message",
+                "message": _MM_OPTIONAL_UPLOAD_MESSAGE,
+            },
+            "response_decorations": merge_decorations(
+                state.get("response_decorations"),
+                build_create_sr_attachment_decorations(base_state),
+            ),
+        }
+
+    return {"collected_data": data}
 
 
 def merge_decorations(

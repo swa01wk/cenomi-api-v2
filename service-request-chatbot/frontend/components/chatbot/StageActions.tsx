@@ -4,6 +4,10 @@ interface StageActionsProps {
   workflowStage: string | null | undefined;
   userRole: string | null | undefined;
   rddStatus?: string | null;
+  /** Collected SR fields — used to gate FM Save vs Approve. */
+  collectedData?: Record<string, string | undefined> | null;
+  /** Uploaded docs — FM Approve requires at least one. */
+  uploadedDocuments?: { document_type_id?: string; document_type?: string }[];
   onAction: (action: string) => void;
   disabled?: boolean;
 }
@@ -14,25 +18,62 @@ type ActionButton = {
   variant: "primary" | "secondary" | "success";
 };
 
+const RDD_TERMINAL_STATUSES = new Set([
+  "APPROVED",
+  "APPROVED_WITH_CHANGES",
+  "COMPLETED",
+  "REJECTED",
+  "CANCELLED",
+]);
+
+const FM_DOC_TYPES = new Set([
+  "SR_HANDOVER_CHECKLIST",
+  "SR_HANDOVER_SITE_SURVEY",
+  "SR_HANDOVER_OTHER",
+]);
+
+function isFmReviewReady(
+  collectedData: Record<string, string | undefined> | null | undefined,
+  uploadedDocuments: { document_type_id?: string; document_type?: string }[] | undefined,
+): boolean {
+  const dateOk = Boolean(collectedData?.unit_readiness_date);
+  if (!dateOk) return false;
+  return (uploadedDocuments || []).some((d) => {
+    const t = d.document_type_id || d.document_type || "";
+    return FM_DOC_TYPES.has(t);
+  });
+}
+
 function getButtons(
   userRole: string | null | undefined,
   workflowStage: string | null | undefined,
   rddStatus: string | null | undefined,
+  collectedData?: Record<string, string | undefined> | null,
+  uploadedDocuments?: { document_type_id?: string; document_type?: string }[],
 ): ActionButton[] {
   if (!workflowStage || !userRole) return [];
 
+  // Stage-specific: never mix FM and RDD actions in one footer.
   if (
-    (userRole === "FM_MANAGER" || userRole === "OPERATIONS") &&
+    (userRole === "FM_MANAGER" || userRole === "OPERATIONS" || userRole === "ADMIN") &&
     workflowStage === "FM_REVIEW"
   ) {
-    return [
-      { label: "Save Progress", action: "save_fm_progress", variant: "secondary" },
-      { label: "Approve Review", action: "approve_fm_review", variant: "success" },
-    ];
+    if (isFmReviewReady(collectedData, uploadedDocuments)) {
+      return [{ label: "Approve Review", action: "approve_fm_review", variant: "success" }];
+    }
+    return [{ label: "Save Progress", action: "save_fm_progress", variant: "secondary" }];
   }
 
-  if (userRole === "DD_ENGINEER" && workflowStage === "RDD_REVIEW") {
-    if (rddStatus === "REPORT_SUBMITTED") {
+  if (
+    (userRole === "DD_ENGINEER" || userRole === "ADMIN") &&
+    workflowStage === "RDD_REVIEW"
+  ) {
+    const status = (rddStatus || "").toUpperCase();
+    if (RDD_TERMINAL_STATUSES.has(status)) {
+      // Post-approval: hide action buttons (View SR deferred).
+      return [];
+    }
+    if (status === "REPORT_SUBMITTED") {
       return [{ label: "Final Approve", action: "approve_rdd_final", variant: "success" }];
     }
     return [{ label: "Submit Report", action: "submit_rdd_report", variant: "primary" }];
@@ -54,10 +95,18 @@ export function StageActions({
   workflowStage,
   userRole,
   rddStatus,
+  collectedData,
+  uploadedDocuments,
   onAction,
   disabled = false,
 }: StageActionsProps) {
-  const buttons = getButtons(userRole, workflowStage, rddStatus);
+  const buttons = getButtons(
+    userRole,
+    workflowStage,
+    rddStatus,
+    collectedData,
+    uploadedDocuments,
+  );
 
   if (buttons.length === 0) return null;
 

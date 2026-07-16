@@ -272,20 +272,9 @@ async def merge_state_node(state: ServiceRequestState) -> dict[str, Any]:
     if corrections:
         collected["_corrections"] = corrections
 
-    # ── Synchronise notes ↔ comments ──────────────────────────────────────────
-    # Both fields represent the same UX concept ("any additional notes/comments?").
-    # The LLM maps answers to whichever field name appears in the user's message
-    # (e.g. "no additional comments" → comments; "no notes" → notes). Syncing
-    # them ensures that filling either field satisfies the proactive optional
-    # prompt for `notes`, preventing the bot from asking twice.
-    #
-    # Sync rules (only when one side is already set and the other is still None):
-    #   notes is None  + comments set → copy comments → notes
-    #   comments is None + notes set  → copy notes   → comments
-    if collected.get("notes") is None and collected.get("comments") is not None:
-        collected["notes"] = collected["comments"]
-    elif collected.get("comments") is None and collected.get("notes") is not None:
-        collected["comments"] = collected["notes"]
+    # Notes and comments are independent portal form fields (one may be
+    # mandatory on the form, the other optional). Do not mirror values between
+    # them — that caused duplicate display of the same text in confirmation.
 
     # ── Auto-generate title when lease_code + description are now available ──
     # Title is system-generated in the format:

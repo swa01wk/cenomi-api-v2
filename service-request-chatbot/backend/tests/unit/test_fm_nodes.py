@@ -92,9 +92,32 @@ class TestFMReviewEntryNode:
 
     @pytest.mark.asyncio
     async def test_approve_fm_review_sets_fm_action(self) -> None:
-        state = _state(action_override="approve_fm_review", backend_refs={})
+        state = _state(
+            action_override="approve_fm_review",
+            backend_refs={"user_role": "FM_MANAGER", "sr_id": "sr-123"},
+            collected_data={"unit_readiness_date": "2026-08-20"},
+            documents=[
+                {
+                    "document_id": "d1",
+                    "document_type_id": "SR_HANDOVER_CHECKLIST",
+                }
+            ],
+        )
         result = await fm_review_entry_node(state)
         assert result["backend_refs"]["fm_action"] == "approve"
+
+    @pytest.mark.asyncio
+    async def test_approve_fm_review_without_docs_asks_upload(self) -> None:
+        state = _state(
+            action_override="approve_fm_review",
+            backend_refs={"user_role": "FM_MANAGER", "sr_id": "sr-123"},
+            collected_data={"unit_readiness_date": "2026-08-20"},
+            documents=[],
+        )
+        result = await fm_review_entry_node(state)
+        assert result["status"] == "WAITING_FOR_USER"
+        assert "document_requirement" in (result.get("response_decorations") or {})
+        assert "fm_action" not in (result.get("backend_refs") or {})
 
     @pytest.mark.asyncio
     async def test_reject_sets_waiting_for_user(self) -> None:
@@ -125,6 +148,13 @@ class TestFMReviewEntryNode:
         state = _state(
             action_override="confirm",
             backend_refs={"user_role": "FM_MANAGER", "sr_id": "11711"},
+            collected_data={"unit_readiness_date": "2026-08-20"},
+            documents=[
+                {
+                    "document_id": "d1",
+                    "document_type_id": "SR_HANDOVER_CHECKLIST",
+                }
+            ],
         )
         result = await fm_review_entry_node(state)
         assert result["confirmation_status"] == "CONFIRMED"
@@ -137,6 +167,13 @@ class TestFMReviewEntryNode:
             confirmation_status="PENDING",
             user_message="Yes, please submit",
             backend_refs={"user_role": "FM_MANAGER", "sr_id": "11711"},
+            collected_data={"unit_readiness_date": "2026-08-20"},
+            documents=[
+                {
+                    "document_id": "d1",
+                    "document_type_id": "SR_HANDOVER_CHECKLIST",
+                }
+            ],
         )
         result = await fm_review_entry_node(state)
         assert result["confirmation_status"] == "CONFIRMED"

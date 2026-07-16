@@ -24,6 +24,7 @@ import structlog
 
 from app.agents.graph.state import ServiceRequestState
 from app.agents.prompts.response_generation_prompt import FIELD_LABELS
+from app.agents.services.display_formatters import format_field_display_value
 from app.agents.services.service_request_api_service import get_service_request_api_service
 from app.observability.decorators import trace_node
 
@@ -75,13 +76,12 @@ _PLATFORM_FIELD_ORDER: list[tuple[str, str]] = [
 
 
 def _field(key: str, label: str, value: Any) -> dict[str, Any]:
-    """Build a single preview field dict."""
-    if isinstance(value, list):
-        display = ", ".join(str(v) for v in value) if value else None
-    elif value is None or value == "":
+    """Build a single preview field dict with user-friendly display values."""
+    if value is None or value == "" or value == []:
         display = None
     else:
-        display = str(value)
+        formatted = format_field_display_value(key, value)
+        display = str(formatted) if formatted is not None else None
     return {"key": key, "label": label, "value": display}
 
 

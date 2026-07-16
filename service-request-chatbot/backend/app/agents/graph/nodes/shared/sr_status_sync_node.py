@@ -46,7 +46,17 @@ logger = logging.getLogger(__name__)
 # Role strings that indicate FM review in the operations list.
 _FM_ROLES: frozenset[str] = frozenset({"FM_MANAGER", "OPERATIONS"})
 _RDD_ROLES: frozenset[str] = frozenset({"DD_ENGINEER"})
+# Platform GET often returns numeric assigned_role (role_id). Keep both forms.
+_FM_ROLE_IDS: frozenset[str] = frozenset({"20", "81"})  # FM_MANAGER, OPERATIONS
+_RDD_ROLE_IDS: frozenset[str] = frozenset({"12"})  # DD_ENGINEER
 _TERMINAL_STATUSES: frozenset[str] = frozenset({"FINISHED", "APPROVED", "COMPLETED", "DONE"})
+
+
+def _normalize_operation_role(raw: Any) -> str:
+    """Normalize platform assigned_role (name or id) to an uppercase string."""
+    if raw is None:
+        return ""
+    return str(raw).strip().upper()
 
 
 def _map_operations_to_stage(
@@ -65,17 +75,17 @@ def _map_operations_to_stage(
 
     for op in operations:
         status = (op.get("status") or "").upper()
-        # Platform returns "assigned_role"; fall back to "role" for flexibility.
-        role = (op.get("assigned_role") or op.get("role") or "").upper()
+        # Platform returns "assigned_role" as name or role_id; fall back to "role".
+        role = _normalize_operation_role(op.get("assigned_role") or op.get("role"))
         if status == "IN_PROGRESS":
             in_progress_roles.add(role)
             any_terminal = False
         elif status not in _TERMINAL_STATUSES:
             any_terminal = False
 
-    if _RDD_ROLES & in_progress_roles:
+    if (_RDD_ROLES | _RDD_ROLE_IDS) & in_progress_roles:
         return "RDD_REVIEW"
-    if _FM_ROLES & in_progress_roles:
+    if (_FM_ROLES | _FM_ROLE_IDS) & in_progress_roles:
         return "FM_REVIEW"
     if any_terminal:
         return "SR_COMPLETED"
@@ -324,9 +334,32 @@ async def sr_status_sync_node(state: ServiceRequestState) -> dict[str, Any]:
         )
 
     if not state.get("response_message") and sr_id and effective_stage in ("FM_REVIEW", "RDD_REVIEW"):
-        updates["response_message"] = (
-            f"Opening Handover SR **{sr_id}** ({effective_stage.replace('_', ' ').title()}). "
-            "Review the details below, upload any required documents, then choose an action."
-        )
+        if effective_stage == "RDD_REVIEW":
+            collected = dict(merged_state.get("collected_data") or {})
+            dates_ready = all(
+                collected.get(f) not in (None, "")
+                for f in (
+                    "actual_handover_date",
+                    "fitout_start_date",
+                    "fitout_end_date",
+                )
+            )
+            if dates_ready:
+                updates["response_message"] = (
+                    f"Opening Handover SR **{sr_id}** (Rdd Review). "
+                    "Review the details below, upload any required documents, then choose an action."
+                )
+            else:
+                updates["response_message"] = (
+                    f"Opening Handover SR **{sr_id}** (Rdd Review). "
+                    "Please provide the required dates first "
+                    "(actual handover, fitout start, and fitout end). "
+                    "Document upload will be available after the dates are set."
+                )
+        else:
+            updates["response_message"] = (
+                f"Opening Handover SR **{sr_id}** ({effective_stage.replace('_', ' ').title()}). "
+                "Review the details below, upload any required documents, then choose an action."
+            )
 
     return updates
