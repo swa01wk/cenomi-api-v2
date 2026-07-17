@@ -901,10 +901,104 @@ _S47 = LifecycleScenario(
 )
 
 
+# ─── Scenarios 48–49: MM optional upload gate (CREATE_SR) ────────────────────
+#
+# These scenarios test the MM optional upload offer introduced in staging
+# (handover_entry_node._handle_mm_optional_upload_gate).  The gate activates
+# when collected_data contains mm_optional_upload_status == "awaiting_choice"
+# after field extraction detects a Mall Manager context.
+
+_S48 = LifecycleScenario(
+    id=48,
+    name="CREATE_SR — MM Optional Upload Accepted",
+    goal=(
+        "Mall Manager is offered the optional MM document upload after all required "
+        "fields are filled, accepts it, uploads a document, then continues to submit."
+    ),
+    tags=["create-sr", "mm-upload", "optional-upload", "happy-path"],
+    phases=[
+        PhaseConfig(
+            user_email=_MALL[0], user_password=_MALL[1], role=_MALL[2],
+            stage="CREATE_SR",
+            turns=[
+                Turn(
+                    message=(
+                        "Create a handover request for lease t0105712. "
+                        "Description: MM upload test — happy path. "
+                        "Start 2026-09-01, end 2026-09-10, FM Manager. No notes."
+                    ),
+                    note="All fields provided; confirmation card expected",
+                ),
+                Turn(
+                    message="",
+                    note="Accept the optional MM upload offer",
+                    action="accept_optional_upload",
+                    expect_keywords=["upload", "document"],
+                ),
+                Turn(
+                    message="",
+                    note="Continue after uploading — mark upload done",
+                    action="continue_optional_upload",
+                    expect_keywords=["continue", "next", "proceed", "upload"],
+                ),
+                Turn(
+                    message="Confirm",
+                    note="Submit SR",
+                    action="confirm",
+                    expect_workflow_stage="SR_CREATED",
+                    expect_keywords=["submitted", "reference", "successfully", "created"],
+                ),
+            ],
+        ),
+    ],
+)
+
+
+_S49 = LifecycleScenario(
+    id=49,
+    name="CREATE_SR — MM Optional Upload Skipped",
+    goal=(
+        "Mall Manager is offered the optional MM document upload, declines it, "
+        "and the SR is submitted without any extra document."
+    ),
+    tags=["create-sr", "mm-upload", "optional-upload", "skip"],
+    phases=[
+        PhaseConfig(
+            user_email=_MALL[0], user_password=_MALL[1], role=_MALL[2],
+            stage="CREATE_SR",
+            turns=[
+                Turn(
+                    message=(
+                        "Create a handover request for lease t0208831. "
+                        "Description: MM upload test — skip path. "
+                        "Start 2026-09-05, end 2026-09-15, FM Manager. No notes."
+                    ),
+                    note="All fields provided; optional upload offer shown",
+                ),
+                Turn(
+                    message="",
+                    note="Skip the optional MM upload",
+                    action="skip_optional_upload",
+                    expect_keywords=["skip", "continue", "proceed", "without"],
+                ),
+                Turn(
+                    message="Confirm",
+                    note="Submit SR immediately after skipping",
+                    action="confirm",
+                    expect_workflow_stage="SR_CREATED",
+                    expect_keywords=["submitted", "reference", "successfully", "created"],
+                ),
+            ],
+        ),
+    ],
+)
+
+
 # ─── Master list ───────────────────────────────────────────────────────────────
 
 LIFECYCLE_SCENARIOS: list[LifecycleScenario] = [
     _S34, _S35, _S36, _S37, _S38, _S39,   # FM_REVIEW (6)
     _S40, _S41, _S42, _S43, _S44, _S45,   # RDD_REVIEW (6)
     _S46, _S47,                            # Full lifecycle (2)
+    _S48, _S49,                            # MM optional upload gate (2)
 ]
