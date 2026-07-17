@@ -55,7 +55,7 @@ _ALLOWED_CONTENT_TYPES: frozenset[str] = frozenset(
     }
 )
 
-# RDD report document types require the APPROVED status flag on upload.
+# Per-type status is applied for Meeting / Rejected reports on platform upload.
 _RDD_DOC_TYPES: frozenset[str] = frozenset(RDD_ALLOWED_DOCUMENTS)
 _FM_DOC_TYPES: frozenset[str] = frozenset(FM_ALLOWED_DOCUMENTS)
 # Optional "Other" is allowed for MM create, FM review, and RDD review.
@@ -301,6 +301,7 @@ async def upload_document(
                     "tenant_profile_id": collected.get("tenant_profile_id", ""),
                     "existing_documents": list(draft.documents or []),
                     "workflow_stage": draft.workflow_stage or "CREATE_SR",
+                    "document_status": collected.get("document_status", ""),
                 }
         except (ValueError, Exception) as exc:
             logger.warning(
@@ -325,8 +326,15 @@ async def upload_document(
         filename = file.filename or "unknown"
         optional_comment = (comment or "").strip()
 
-        # RDD report documents must carry document_type_status=APPROVED
-        doc_type_status = "APPROVED" if document_type in _RDD_DOC_TYPES else ""
+        # Per-type status for platform PUT /files.
+        if document_type == "SR_REJECTED_HANDOVER_REPORT":
+            doc_type_status = "DISAPPROVED"
+        elif document_type == "DR_SR_HANDOVER_REPORT":
+            doc_type_status = (
+                str(draft_backend.get("document_status") or "").strip() or "APPROVED"
+            )
+        else:
+            doc_type_status = ""
 
         # Forward the caller's AI session Bearer to PUT /files (agentic route).
         ctx_token = set_current_auth_context(auth)

@@ -118,6 +118,13 @@ class ChatStatePayload(BaseModel):
     rdd_status: str | None = None
     fm_status: str | None = None
     sr_id: str | None = None
+    action_result: str | None = Field(
+        default=None,
+        description=(
+            "Outcome of a platform-mutating turn: 'success' after SUBMITTED/COMPLETED, "
+            "'failed' after FAILED, null for field-collection / waiting turns."
+        ),
+    )
 
 
 class ServiceRequestChatResponse(BaseModel):
@@ -244,6 +251,7 @@ async def post_service_request_chat(
             rdd_status=result.state.rdd_status,
             fm_status=result.state.fm_status,
             sr_id=result.state.sr_id,
+            action_result=result.state.action_result,
         ),
         trace_id=str(result.trace_id) if result.trace_id else None,
     )

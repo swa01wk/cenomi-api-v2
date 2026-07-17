@@ -22,13 +22,20 @@ from typing import Any
 
 from app.agents.graph.state import ServiceRequestState
 from app.agents.registries.workflow_config import get_workflow_config
-from app.agents.schemas.handover_schema import STAGE_REGISTRY
+from app.agents.schemas.handover_schema import (
+    RDD_DOC_TYPE_MEETING,
+    RDD_DOC_TYPE_OTHER,
+    RDD_DOC_TYPE_REJECTED,
+    STAGE_REGISTRY,
+    get_missing_fields as handover_get_missing_fields,
+)
 from app.agents.services.missing_field_service import (
     HANDOVER_FIELD_QUESTIONS,
     get_missing_fields,
 )
 from app.agents.services.review_decorations_service import (
     build_document_upload_ask_response,
+    maybe_reset_rdd_upload_slot,
 )
 from app.observability.decorators import trace_node
 
@@ -130,8 +137,18 @@ async def missing_field_node(state: ServiceRequestState) -> dict[str, Any]:
     required: tuple[str, ...] = STAGE_REGISTRY[workflow_stage].required_fields
     collected: dict[str, Any] = state.get("collected_data") or {}
     validation_errors: list[dict[str, Any]] = state.get("validation_errors") or []
+    documents: list[dict[str, Any]] = list(state.get("documents") or [])
 
-    all_missing: list[str] = get_missing_fields(collected, list(required))
+    # After optional Rejected/Other upload, clear the slot so Meeting Report
+    # can be selected next (Submit still requires the Meeting Report).
+    if workflow_stage == "RDD_REVIEW":
+        collected = maybe_reset_rdd_upload_slot(collected, documents)
+
+    # Handover schema owns stage-aware missing logic (e.g. conditional document_status).
+    if (active_agent or "") == "work_permit_agent":
+        all_missing: list[str] = get_missing_fields(collected, list(required))
+    else:
+        all_missing = handover_get_missing_fields(workflow_stage, collected)
 
     backend_missing = [f for f in all_missing if f in _effective_backend_fields]
     # Auto-generated fields are excluded from both lists — the bot must not ask
@@ -205,6 +222,8 @@ async def missing_field_node(state: ServiceRequestState) -> dict[str, Any]:
         effective_missing.insert(0, next_field)
 
     updates: dict[str, Any] = {"missing_fields": effective_missing}
+    if workflow_stage == "RDD_REVIEW":
+        updates["collected_data"] = collected
 
     if next_question:
         updates["response_message"] = next_question
@@ -217,6 +236,49 @@ async def missing_field_node(state: ServiceRequestState) -> dict[str, Any]:
         # Persist so the next turn's extraction can bind a bare answer to this
         # field even though load_session clears missing_fields.
         updates["active_field"] = next_field
+
+        # Type-first RDD upload: offer chips for document type / meeting status.
+        if next_field == "rdd_upload_doc_type":
+            updates["response_decorations"] = {
+                "suggestions": {
+                    "kind": "labeled_options",
+                    "options": [
+                        {
+                            "label": "Handover Meeting Report",
+                            "value": RDD_DOC_TYPE_MEETING,
+                            "action": "select_rdd_doc_meeting",
+                        },
+                        {
+                            "label": "Rejected Fitout and Handover Report",
+                            "value": RDD_DOC_TYPE_REJECTED,
+                            "action": "select_rdd_doc_rejected",
+                        },
+                        {
+                            "label": "Other",
+                            "value": RDD_DOC_TYPE_OTHER,
+                            "action": "select_rdd_doc_other",
+                        },
+                    ],
+                }
+            }
+        elif next_field == "document_status":
+            updates["response_decorations"] = {
+                "suggestions": {
+                    "kind": "labeled_options",
+                    "options": [
+                        {
+                            "label": "Approve",
+                            "value": "APPROVED",
+                            "action": "select_rdd_status_approved",
+                        },
+                        {
+                            "label": "Approve with changes",
+                            "value": "APPROVED_WITH_CHANGES",
+                            "action": "select_rdd_status_approved_with_changes",
+                        },
+                    ],
+                }
+            }
     else:
         # Fields complete — if FM/RDD still need documents, ask for upload
         # instead of silently advancing (document_count was skipped above).
@@ -226,10 +288,16 @@ async def missing_field_node(state: ServiceRequestState) -> dict[str, Any]:
         )
         if doc_count_blocking and workflow_stage in ("FM_REVIEW", "RDD_REVIEW"):
             ask = build_document_upload_ask_response(
-                {**dict(state), "workflow_stage": workflow_stage}
+                {
+                    **dict(state),
+                    "workflow_stage": workflow_stage,
+                    "collected_data": collected,
+                }
             )
             if ask:
                 ask["missing_fields"] = effective_missing
+                if workflow_stage == "RDD_REVIEW":
+                    ask["collected_data"] = collected
                 return ask
 
         # Nothing left to ask — signal readiness for the next pipeline step.
@@ -238,3 +306,4 @@ async def missing_field_node(state: ServiceRequestState) -> dict[str, Any]:
         updates["active_field"] = None
 
     return updates
+

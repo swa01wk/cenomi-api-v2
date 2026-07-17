@@ -10,7 +10,14 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.agents.schemas.handover_schema import STAGE_REGISTRY
+from app.agents.schemas.handover_schema import (
+    RDD_DOC_TYPE_MEETING,
+    RDD_DOC_TYPE_OTHER,
+    RDD_DOC_TYPE_REJECTED,
+    RDD_REJECTED_STATUS,
+    STAGE_REGISTRY,
+    get_missing_fields,
+)
 from app.agents.services.permission_service import ROLE_PERMISSION_MAP
 from app.agents.services.resource_picker_decorations import build_handover_inbox_picker
 from app.types.chat import AuthContext
@@ -122,23 +129,33 @@ def _document_requirement_block(
     documents: list[dict[str, Any]],
     session_id: str | None,
     sr_id: str | None,
+    collected: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     stage_def = STAGE_REGISTRY.get(stage)
     if not stage_def or not stage_def.required_documents:
         return None
 
     uploaded = _uploaded_type_ids(documents)
+    collected = collected or {}
     doc_types = _FM_DOC_TYPES if stage == "FM_REVIEW" else _RDD_DOC_TYPES
     relevant = [d for d in stage_def.required_documents if d in doc_types]
     if not relevant:
         relevant = list(stage_def.required_documents)
+
+    # Type-first RDD: only show the chosen document type's upload row.
+    if stage == "RDD_REVIEW":
+        chosen = collected.get("rdd_upload_doc_type")
+        if chosen in _RDD_DOC_TYPES:
+            relevant = [chosen]
+        else:
+            return None
 
     doc_rows = [
         {
             "key": doc_type,
             "label": _DOC_LABELS.get(doc_type, doc_type),
             "required": (
-                doc_type == "DR_SR_HANDOVER_REPORT"
+                doc_type == RDD_DOC_TYPE_MEETING
                 if stage == "RDD_REVIEW"
                 else False  # FM needs any one of the three — none individually mandatory
             ),
@@ -152,8 +169,17 @@ def _document_requirement_block(
     # type is uploaded (or, for FM, when at least one is uploaded *and* the
     # caller is past the upload step — we still show statuses after the first
     # attach so the UI clearly reflects success).
-    if stage == "RDD_REVIEW" and "DR_SR_HANDOVER_REPORT" in uploaded:
+    if stage == "RDD_REVIEW" and RDD_DOC_TYPE_MEETING in uploaded:
         # Report is the only mandatory RDD doc; hide once it is present.
+        return None
+    # After optional Rejected/Other upload, hide the single-type card so the
+    # flow can re-ask for the next type (Meeting Report still required).
+    if (
+        stage == "RDD_REVIEW"
+        and len(relevant) == 1
+        and relevant[0] in uploaded
+        and relevant[0] != RDD_DOC_TYPE_MEETING
+    ):
         return None
 
     return {
@@ -163,6 +189,29 @@ def _document_requirement_block(
             "sr_id": sr_id or "",
         },
     }
+
+
+def maybe_reset_rdd_upload_slot(
+    collected: dict[str, Any],
+    documents: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Clear chosen type after optional Rejected/Other upload if Meeting Report missing.
+
+    Keeps Submit gated on Meeting Report while allowing additional uploads first.
+    """
+    uploaded = _uploaded_type_ids(documents)
+    if RDD_DOC_TYPE_MEETING in uploaded:
+        return collected
+    chosen = collected.get("rdd_upload_doc_type")
+    if chosen not in (RDD_DOC_TYPE_REJECTED, RDD_DOC_TYPE_OTHER):
+        return collected
+    if chosen not in uploaded:
+        return collected
+    out = dict(collected)
+    out.pop("rdd_upload_doc_type", None)
+    if out.get("document_status") == RDD_REJECTED_STATUS:
+        out.pop("document_status", None)
+    return out
 
 
 # Terminal / post-approval RDD statuses — no action chips (View SR deferred).
@@ -206,8 +255,22 @@ _FM_UPLOAD_REVIEW_MESSAGE = (
     "Site Survey, or Other), then choose an action."
 )
 _RDD_UPLOAD_ASK_MESSAGE = (
-    "Please upload the Handover Meeting Report to continue with the review."
+    "Please upload the selected document to continue with the review. "
+    "A Handover Meeting Report is required before you can submit."
 )
+
+_RDD_UPLOAD_ASK_BY_TYPE: dict[str, str] = {
+    RDD_DOC_TYPE_MEETING: (
+        "Please upload the Handover Meeting Report to continue with the review."
+    ),
+    RDD_DOC_TYPE_REJECTED: (
+        "Please upload the Rejected Fitout and Handover Report "
+        "(status will be Disapproved)."
+    ),
+    RDD_DOC_TYPE_OTHER: (
+        "Please upload the additional supporting document (Other)."
+    ),
+}
 
 
 def build_document_upload_ask_response(state: dict[str, Any]) -> dict[str, Any]:
@@ -226,7 +289,8 @@ def build_document_upload_ask_response(state: dict[str, Any]) -> dict[str, Any]:
             else _FM_UPLOAD_ASK_MESSAGE
         )
     elif stage == "RDD_REVIEW":
-        message = _RDD_UPLOAD_ASK_MESSAGE
+        chosen = collected.get("rdd_upload_doc_type")
+        message = _RDD_UPLOAD_ASK_BY_TYPE.get(str(chosen or ""), _RDD_UPLOAD_ASK_MESSAGE)
     else:
         return {}
 
@@ -246,6 +310,21 @@ def build_document_upload_ask_response(state: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _rdd_ready_to_submit(
+    collected: dict[str, Any],
+    documents: list[dict[str, Any]],
+) -> bool:
+    """True when Submit Report may be offered: fields complete + Meeting Report uploaded.
+
+    Must stay false while the bot is still asking for dates, type, status, or
+    the mandatory handover meeting report — otherwise the Submit chip appears
+    beside upload / field questions.
+    """
+    if RDD_DOC_TYPE_MEETING not in _uploaded_type_ids(documents):
+        return False
+    return not get_missing_fields("RDD_REVIEW", collected)
+
+
 def _action_suggestions(
     *,
     stage: str,
@@ -259,6 +338,9 @@ def _action_suggestions(
     FM shows exactly one chip:
     - Save Progress while incomplete (persists data, does not approve)
     - Approve Review when ready (advances toward RDD)
+
+    RDD Submit Report is shown only when ``_rdd_ready_to_submit`` — never while
+    required data or the Meeting Report is still outstanding.
     """
     options: list[dict[str, str]] = []
     collected = collected or {}
@@ -294,7 +376,7 @@ def _action_suggestions(
                     "action": "approve_rdd_final",
                 },
             ]
-        else:
+        elif _rdd_ready_to_submit(collected, documents):
             options = [
                 {
                     "label": "Submit Report",
@@ -302,6 +384,9 @@ def _action_suggestions(
                     "action": "submit_rdd_report",
                 },
             ]
+        else:
+            # Still collecting fields / documents — no Submit chip.
+            options = []
     # CREATE_SR / SR_COMPLETED / unknown stage → no review action chips
 
     if not options:
@@ -360,17 +445,24 @@ def build_review_decorations(state: dict[str, Any]) -> dict[str, Any]:
 
     # After report submit, the mandatory RDD doc is already on the platform —
     # don't re-prompt uploads while offering Final Approve.
-    # For RDD, also wait until required dates are collected before showing
-    # the document upload card.
+    # For RDD, also wait until required dates + chosen doc type (and Meeting
+    # Report status when needed) are collected before showing the upload card.
     show_docs = not (stage == "RDD_REVIEW" and (rdd_status or "").upper() == "REPORT_SUBMITTED")
     if stage == "RDD_REVIEW" and not _rdd_required_dates_complete(collected):
         show_docs = False
+    if stage == "RDD_REVIEW":
+        chosen = collected.get("rdd_upload_doc_type")
+        if not chosen:
+            show_docs = False
+        elif chosen == RDD_DOC_TYPE_MEETING and not collected.get("document_status"):
+            show_docs = False
     if show_docs:
         doc_req = _document_requirement_block(
             stage=stage,
             documents=documents,
             session_id=session_id,
             sr_id=sr_id,
+            collected=collected,
         )
         if doc_req:
             decorations["document_requirement"] = doc_req

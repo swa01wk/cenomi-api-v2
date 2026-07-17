@@ -20,6 +20,12 @@ from typing import Any
 from app.agents.graph.state import ServiceRequestState
 from app.observability.decorators import trace_node
 
+# RDD upload type codes (mirrored from handover_schema to avoid circular import).
+_RDD_DOC_TYPE_MEETING = "DR_SR_HANDOVER_REPORT"
+_RDD_DOC_TYPE_REJECTED = "SR_REJECTED_HANDOVER_REPORT"
+_RDD_DOC_TYPE_OTHER = "SR_HANDOVER_OTHER"
+_RDD_REJECTED_STATUS = "DISAPPROVED"
+
 # ---------------------------------------------------------------------------
 # Backend-derived protected fields
 # ---------------------------------------------------------------------------
@@ -321,6 +327,31 @@ async def merge_state_node(state: ServiceRequestState) -> dict[str, Any]:
         )
         if recomputed != collected.get("trading_date"):
             collected["trading_date"] = recomputed
+
+    # Type-first RDD status: Rejected → DISAPPROVED; Other → no status.
+    if workflow_stage == "RDD_REVIEW":
+        doc_type = collected.get("rdd_upload_doc_type")
+        # Normalise friendly labels from free-text answers.
+        _DOC_TYPE_ALIASES = {
+            "meeting report": _RDD_DOC_TYPE_MEETING,
+            "handover meeting report": _RDD_DOC_TYPE_MEETING,
+            "rejected": _RDD_DOC_TYPE_REJECTED,
+            "rejected fitout and handover report": _RDD_DOC_TYPE_REJECTED,
+            "other": _RDD_DOC_TYPE_OTHER,
+        }
+        if isinstance(doc_type, str) and doc_type not in (
+            _RDD_DOC_TYPE_MEETING,
+            _RDD_DOC_TYPE_REJECTED,
+            _RDD_DOC_TYPE_OTHER,
+        ):
+            aliased = _DOC_TYPE_ALIASES.get(doc_type.strip().lower())
+            if aliased:
+                collected["rdd_upload_doc_type"] = aliased
+                doc_type = aliased
+        if doc_type == _RDD_DOC_TYPE_REJECTED:
+            collected["document_status"] = _RDD_REJECTED_STATUS
+        elif doc_type == _RDD_DOC_TYPE_OTHER:
+            collected.pop("document_status", None)
 
     return {"collected_data": collected}
 

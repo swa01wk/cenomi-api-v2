@@ -81,6 +81,7 @@ class ChatTurnState:
     rdd_status: str | None = None
     fm_status: str | None = None
     sr_id: str | None = None
+    action_result: str | None = None  # "success" | "failed" | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -387,6 +388,13 @@ class ChatOrchestrationService:
         fm_status: str | None = final_backend_refs.get("fm_status")
         # faq_sources already extracted in step 9 above
 
+        if graph_status in ("SUBMITTED", "COMPLETED"):
+            action_result: str | None = "success"
+        elif graph_status == "FAILED":
+            action_result = "failed"
+        else:
+            action_result = None
+
         # Build a preview snapshot from collected_data on every turn.
         # Sent alongside every response so the frontend keeps its SR preview card
         # in sync regardless of the primary response_ui type.
@@ -427,6 +435,7 @@ class ChatOrchestrationService:
                 rdd_status=rdd_status,
                 fm_status=fm_status,
                 sr_id=sr_id,
+                action_result=action_result,
             ),
             trace_id=trace_id,
             draft_preview=draft_preview,
