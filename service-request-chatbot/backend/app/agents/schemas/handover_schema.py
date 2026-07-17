@@ -125,7 +125,9 @@ RDD_REVIEW_STAGE = StageDefinition(
         # trading_date intentionally removed — auto-computed as fitout_end_date + 8 days
         # by merge_state_node. It is NOT asked of the user.
         "guideLineLink",
-        "document_status",    # "APPROVED" | "APPROVED_WITH_CHANGES" — chosen by RDD PM
+        # Type-first upload: Meeting Report / Rejected / Other.
+        # document_status is NOT unconditionally required — asked only for Meeting Report.
+        "rdd_upload_doc_type",
         # "comments" intentionally removed — same pattern as CREATE_SR and FM_REVIEW.
         # RDD PM can provide comments inline; rdd_action gates submission, not comments.
     ),
@@ -151,10 +153,13 @@ WORKFLOW_STAGES: tuple[str, ...] = ("CREATE_SR", "FM_REVIEW", "RDD_REVIEW")
 # ── Derived field sets ────────────────────────────────────────────────────────
 
 # All fields that the LLM / user may supply across every stage.
+# document_status is conditional (Meeting Report path) so it is not in
+# RDD required_fields, but remains extractable / confirmable.
 ALLOWED_EXTRACTED_FIELDS: frozenset[str] = frozenset(
     CREATE_SR_STAGE.required_fields
     + FM_REVIEW_STAGE.required_fields
     + RDD_REVIEW_STAGE.required_fields
+    + ("document_status",)
 )
 
 # Fields populated from backend APIs (lease lookup, tenant profile, etc.).
@@ -198,6 +203,18 @@ RDD_ALLOWED_DOCUMENTS: tuple[str, ...] = RDD_REVIEW_STAGE.required_documents
 
 # The single document type that MUST be present before RDD submission.
 RDD_REQUIRED_DOCUMENTS: tuple[str, ...] = ("DR_SR_HANDOVER_REPORT",)
+
+# RDD upload type codes (collected_data.rdd_upload_doc_type).
+RDD_DOC_TYPE_MEETING = "DR_SR_HANDOVER_REPORT"
+RDD_DOC_TYPE_REJECTED = "SR_REJECTED_HANDOVER_REPORT"
+RDD_DOC_TYPE_OTHER = "SR_HANDOVER_OTHER"
+RDD_UPLOAD_DOC_TYPES: frozenset[str] = frozenset(
+    {RDD_DOC_TYPE_MEETING, RDD_DOC_TYPE_REJECTED, RDD_DOC_TYPE_OTHER}
+)
+
+# Meeting Report statuses vs Rejected (auto DISAPPROVED).
+RDD_MEETING_STATUSES: frozenset[str] = frozenset({"APPROVED", "APPROVED_WITH_CHANGES"})
+RDD_REJECTED_STATUS = "DISAPPROVED"
 
 ALL_DOCUMENT_TYPES: frozenset[str] = frozenset(
     FM_ALLOWED_DOCUMENTS + RDD_ALLOWED_DOCUMENTS
@@ -253,6 +270,9 @@ def get_missing_fields(stage_name: str, collected: dict) -> list[str]:
     (which ``merge_state_node`` writes when the user declines, e.g. "no
     comments").  A ``None`` value for an optional field still counts as
     missing so the bot still asks proactively on the first pass.
+
+    For RDD_REVIEW, ``document_status`` is required only when the chosen upload
+    type is the Handover Meeting Report.
     """
 
     def _is_missing(value: object) -> bool:
@@ -265,11 +285,20 @@ def get_missing_fields(stage_name: str, collected: dict) -> list[str]:
             return value is None
         return _is_missing(value)
 
-    return [
+    missing = [
         f
         for f in get_required_fields(stage_name)
         if _is_missing_for_field(f, collected.get(f))
     ]
+
+    if stage_name == "RDD_REVIEW":
+        doc_type = collected.get("rdd_upload_doc_type")
+        if doc_type == RDD_DOC_TYPE_MEETING and _is_missing(
+            collected.get("document_status")
+        ):
+            missing.append("document_status")
+
+    return missing
 
 
 def role_can_act_on_stage(role: str, stage_name: str) -> bool:
@@ -321,7 +350,8 @@ EXTRACTABLE_FIELDS: frozenset[str] = frozenset(
         "unit_readiness_date",
         "expected_handover_date",
         "guideLineLink",
-        "document_status",    # "APPROVED" or "APPROVED_WITH_CHANGES" — RDD stage
+        "document_status",    # APPROVED | APPROVED_WITH_CHANGES | DISAPPROVED
+        "rdd_upload_doc_type",  # DR_SR_HANDOVER_REPORT | SR_REJECTED_* | SR_HANDOVER_OTHER
         "actual_handover_date",
         "fitout_start_date",
         "fitout_end_date",

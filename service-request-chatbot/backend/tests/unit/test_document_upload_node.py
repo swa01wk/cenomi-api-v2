@@ -129,6 +129,33 @@ class TestRDDDocumentPartitioning:
         result = await document_upload_node(state)
         assert result["backend_refs"]["rdd_document_id"] == "rdd-002"
 
+    @pytest.mark.asyncio
+    async def test_rejected_report_tracked(self) -> None:
+        docs = [
+            {
+                "document_id": "rej-001",
+                "document_type_id": "SR_REJECTED_HANDOVER_REPORT",
+            }
+        ]
+        state = _state(documents=docs)
+        result = await document_upload_node(state)
+        assert result["backend_refs"]["rdd_rejected_document_ids"] == ["rej-001"]
+        assert "rdd_document_id" not in result["backend_refs"]
+
+    @pytest.mark.asyncio
+    async def test_meeting_and_rejected_both_tracked(self) -> None:
+        docs = [
+            _rdd_doc("meet-001"),
+            {
+                "document_id": "rej-001",
+                "document_type_id": "SR_REJECTED_HANDOVER_REPORT",
+            },
+        ]
+        state = _state(documents=docs)
+        result = await document_upload_node(state)
+        assert result["backend_refs"]["rdd_document_id"] == "meet-001"
+        assert result["backend_refs"]["rdd_rejected_document_ids"] == ["rej-001"]
+
 
 # ---------------------------------------------------------------------------
 # Mixed FM + RDD

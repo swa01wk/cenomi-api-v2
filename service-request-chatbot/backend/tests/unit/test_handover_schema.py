@@ -151,11 +151,12 @@ class TestFMReviewStage:
 
 class TestRDDReviewStage:
     _EXPECTED_FIELDS = (
-        "guideLineLink",
-        "document_status",    # APPROVED | APPROVED_WITH_CHANGES — chosen by RDD PM
         "actual_handover_date",
         "fitout_start_date",
         "fitout_end_date",
+        "guideLineLink",
+        "rdd_upload_doc_type",  # type-first; status is conditional
+        # document_status is conditional (Meeting Report only) — not in required_fields
         # trading_date intentionally excluded — auto-computed as fitout_end_date + 8 days
         # "comments" removed: Option B fix — bot no longer proactively asks
     )
@@ -170,6 +171,9 @@ class TestRDDReviewStage:
 
     def test_required_fields_complete(self) -> None:
         assert set(RDD_REVIEW_STAGE.required_fields) == set(self._EXPECTED_FIELDS)
+
+    def test_document_status_not_unconditionally_required(self) -> None:
+        assert "document_status" not in RDD_REVIEW_STAGE.required_fields
 
     def test_required_documents_complete(self) -> None:
         assert set(RDD_REVIEW_STAGE.required_documents) == set(self._EXPECTED_DOCS)
@@ -187,6 +191,7 @@ class TestDerivedFieldSets:
             CREATE_SR_STAGE.required_fields
             + FM_REVIEW_STAGE.required_fields
             + RDD_REVIEW_STAGE.required_fields
+            + ("document_status",)  # conditional Meeting Report path
         )
         assert ALLOWED_EXTRACTED_FIELDS == expected
 

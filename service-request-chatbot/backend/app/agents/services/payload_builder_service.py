@@ -415,7 +415,8 @@ def _rdd_document_status_entry(
     ----------
     document_status:
         The RDD Project Manager's document review decision.
-        Accepted values: ``"APPROVED"`` or ``"APPROVED_WITH_CHANGES"``.
+        Accepted values: ``"APPROVED"``, ``"APPROVED_WITH_CHANGES"``,
+        or ``"DISAPPROVED"`` (Rejected Fitout report).
         Defaults to ``"APPROVED"`` when not yet collected.
     """
     return {
@@ -617,18 +618,27 @@ def build_rdd_report_payload(
             fm_doc_ids.append(existing_id)
 
     rdd_doc_id: str | None = backend_refs.get("rdd_document_id")
+    rejected_ids: list[str] = [
+        d
+        for d in list(backend_refs.get("rdd_rejected_document_ids") or [])
+        if d
+    ]
 
     all_doc_ids = list(fm_doc_ids)
     if rdd_doc_id and rdd_doc_id not in all_doc_ids:
         all_doc_ids.append(rdd_doc_id)
+    for rejected_id in rejected_ids:
+        if rejected_id not in all_doc_ids:
+            all_doc_ids.append(rejected_id)
 
     actual = data.get("actual_handover_date") or inner.get("actual_handover_date") or ""
     fit_start = data.get("fitout_start_date") or inner.get("fitout_start_date") or ""
     fit_end = data.get("fitout_end_date") or inner.get("fitout_end_date") or ""
     trading = data.get("trading_date") or inner.get("trading_date") or ""
 
-    # FM map entries: keep ids that are not the RDD report.
-    fm_only_ids = [d for d in all_doc_ids if d != rdd_doc_id]
+    # FM map entries: keep ids that are not the Meeting / Rejected reports.
+    rdd_special_ids = {d for d in [rdd_doc_id, *rejected_ids] if d}
+    fm_only_ids = [d for d in all_doc_ids if d not in rdd_special_ids]
     fm_status_map = [_fm_document_status_entry(doc_id) for doc_id in fm_only_ids]
     rdd_status_entry = (
         _rdd_document_status_entry(
@@ -642,7 +652,18 @@ def build_rdd_report_payload(
         if rdd_doc_id
         else None
     )
-    document_status_map = fm_status_map + ([rdd_status_entry] if rdd_status_entry else [])
+    rejected_status_entries = [
+        _rdd_document_status_entry(
+            doc_id=rejected_id,
+            document_status="DISAPPROVED",
+        )
+        for rejected_id in rejected_ids
+    ]
+    document_status_map = (
+        fm_status_map
+        + ([rdd_status_entry] if rdd_status_entry else [])
+        + rejected_status_entries
+    )
 
     comments = data.get("comments") or inner.get("comments") or inner.get("comment") or ""
     guide = data.get("guideLineLink") or inner.get("guideLineLink") or ""

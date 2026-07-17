@@ -18,6 +18,7 @@ ENUM_DISPLAY_LABELS: dict[str, str] = {
     "ADMIN": "Admin",
     "APPROVED": "Approved",
     "APPROVED_WITH_CHANGES": "Approved with changes",
+    "DISAPPROVED": "Disapproved",
 }
 
 _DATE_FIELD_KEYS: frozenset[str] = frozenset(

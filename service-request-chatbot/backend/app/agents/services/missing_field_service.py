@@ -50,11 +50,17 @@ HANDOVER_FIELD_QUESTIONS: dict[str, str] = {
     "expected_handover_date": "Ask the FM Manager for the expected handover date.",
     # ── RDD_REVIEW — RDD Project Manager ──────────────────────────────────────
     "guideLineLink": "Ask the RDD Project Manager to provide the guideline link for the handover report.",
+    "rdd_upload_doc_type": (
+        "Ask which document they want to upload next. "
+        "They must choose one of: Handover Meeting Report, "
+        "Rejected Fitout and Handover Report, or Other. "
+        "Make the three choices explicit."
+    ),
     "document_status": (
-        "Ask the RDD Project Manager for the document status. "
+        "Ask the RDD Project Manager for the Handover Meeting Report status. "
         "They must choose one of exactly two options: "
-        "'Approve' (APPROVED) if the handover report is accepted as-is, or "
-        "'Approve with changes' (APPROVED_WITH_CHANGES) if it is accepted with required amendments. "
+        "'Approve' (APPROVED) if the report is accepted as-is, or "
+        "'Approve with changes' (APPROVED_WITH_CHANGES) if it needs amendments. "
         "Make both choices explicit."
     ),
     "actual_handover_date": "Ask the RDD Project Manager for the actual handover date.",

@@ -122,6 +122,35 @@ async def rdd_review_entry_node(state: ServiceRequestState) -> dict[str, Any]:
         backend_refs["rdd_action"] = "final_approve"
         return {"backend_refs": backend_refs}
 
+    # Type-first RDD upload selection chips.
+    _DOC_TYPE_ACTIONS: dict[str, tuple[str, str | None]] = {
+        "select_rdd_doc_meeting": ("DR_SR_HANDOVER_REPORT", None),
+        "select_rdd_doc_rejected": ("SR_REJECTED_HANDOVER_REPORT", "DISAPPROVED"),
+        "select_rdd_doc_other": ("SR_HANDOVER_OTHER", None),
+    }
+    if action_override in _DOC_TYPE_ACTIONS:
+        doc_type, auto_status = _DOC_TYPE_ACTIONS[action_override]
+        log.info("rdd_review_entry.select_doc_type", doc_type=doc_type)
+        collected = dict(state.get("collected_data") or {})
+        collected["rdd_upload_doc_type"] = doc_type
+        if auto_status:
+            collected["document_status"] = auto_status
+        elif doc_type != "DR_SR_HANDOVER_REPORT":
+            # Other: clear any stale meeting status
+            collected.pop("document_status", None)
+        return {"collected_data": collected}
+
+    _STATUS_ACTIONS: dict[str, str] = {
+        "select_rdd_status_approved": "APPROVED",
+        "select_rdd_status_approved_with_changes": "APPROVED_WITH_CHANGES",
+    }
+    if action_override in _STATUS_ACTIONS:
+        status_val = _STATUS_ACTIONS[action_override]
+        log.info("rdd_review_entry.select_document_status", status=status_val)
+        collected = dict(state.get("collected_data") or {})
+        collected["document_status"] = status_val
+        return {"collected_data": collected}
+
     # ── Single-turn confirm actions — set action AND mark CONFIRMED in one turn ──
     # Required because rdd_action is not persisted across turns; a generic
     # "confirm" on Turn N+1 would find rdd_action empty and loop back to
