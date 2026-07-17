@@ -156,6 +156,7 @@ def test_build_review_decorations_rdd_hides_docs_until_dates() -> None:
 
 
 def test_build_review_decorations_rdd_shows_docs_after_dates() -> None:
+    """Dates alone are not enough for Submit — still collecting type/docs."""
     state = {
         "backend_refs": {
             "sr_id": "11721",
@@ -172,7 +173,61 @@ def test_build_review_decorations_rdd_shows_docs_after_dates() -> None:
         },
     }
     deco = build_review_decorations(state)
+    # Type-first: upload card waits for rdd_upload_doc_type; never show Submit yet.
+    assert "suggestions" not in deco
+
+
+def test_build_review_decorations_rdd_no_submit_during_upload_ask() -> None:
+    """Upload ask turn: Meeting type chosen but file not attached → no Submit chip."""
+    state = {
+        "backend_refs": {
+            "sr_id": "11721",
+            "user_role": "DD_ENGINEER",
+            "rdd_status": "IN_PROGRESS",
+        },
+        "workflow_stage": "RDD_REVIEW",
+        "session_id": "sess-1",
+        "documents": [],
+        "collected_data": {
+            "actual_handover_date": "2026-07-01",
+            "fitout_start_date": "2026-07-02",
+            "fitout_end_date": "2026-07-10",
+            "guideLineLink": "https://example.com/g",
+            "rdd_upload_doc_type": "DR_SR_HANDOVER_REPORT",
+            "document_status": "APPROVED",
+        },
+    }
+    deco = build_review_decorations(state)
     assert deco.get("document_requirement") is not None
+    assert "suggestions" not in deco
+
+
+def test_build_review_decorations_rdd_submit_when_ready() -> None:
+    """Submit Report only after Meeting Report uploaded and required fields set."""
+    state = {
+        "backend_refs": {
+            "sr_id": "11721",
+            "user_role": "DD_ENGINEER",
+            "rdd_status": "IN_PROGRESS",
+        },
+        "workflow_stage": "RDD_REVIEW",
+        "session_id": "sess-1",
+        "documents": [
+            {
+                "document_id": "m1",
+                "document_type_id": "DR_SR_HANDOVER_REPORT",
+            }
+        ],
+        "collected_data": {
+            "actual_handover_date": "2026-07-01",
+            "fitout_start_date": "2026-07-02",
+            "fitout_end_date": "2026-07-10",
+            "guideLineLink": "https://example.com/g",
+            "rdd_upload_doc_type": "DR_SR_HANDOVER_REPORT",
+            "document_status": "APPROVED",
+        },
+    }
+    deco = build_review_decorations(state)
     assert deco["suggestions"]["options"][0]["action"] == "submit_rdd_report"
 
 

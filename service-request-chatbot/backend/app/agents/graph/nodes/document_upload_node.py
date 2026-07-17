@@ -7,8 +7,10 @@ Responsibilities
 - FM documents (SR_HANDOVER_CHECKLIST, SR_HANDOVER_SITE_SURVEY,
   SR_HANDOVER_OTHER) → merged into ``backend_refs["uploaded_documents"]``
   (deduplicated, preserving pre-existing IDs).
-- RDD report (DR_SR_HANDOVER_REPORT) → stored as
-  ``backend_refs["rdd_document_id"]`` (last one wins).
+- RDD Meeting Report (DR_SR_HANDOVER_REPORT) → ``backend_refs["rdd_document_id"]``
+  (last one wins).
+- RDD Rejected report (SR_REJECTED_HANDOVER_REPORT) →
+  ``backend_refs["rdd_rejected_document_ids"]`` (deduplicated list).
 - Documents with None or missing ``document_id`` are silently skipped.
 - Unknown document types are silently ignored (neither FM nor RDD bucket).
 
@@ -35,7 +37,8 @@ _FM_DOCUMENT_TYPES: frozenset[str] = frozenset({
     "SR_HANDOVER_OTHER",
 })
 
-_RDD_DOCUMENT_TYPE = "DR_SR_HANDOVER_REPORT"
+_RDD_MEETING_REPORT = "DR_SR_HANDOVER_REPORT"
+_RDD_REJECTED_REPORT = "SR_REJECTED_HANDOVER_REPORT"
 
 
 async def document_upload_node(state: ServiceRequestState) -> dict[str, Any]:
@@ -48,6 +51,8 @@ async def document_upload_node(state: ServiceRequestState) -> dict[str, Any]:
     fm_ids_set: set[str] = set(existing_fm_ids)
 
     rdd_document_id: str | None = backend_refs.get("rdd_document_id")
+    rejected_ids: list[str] = list(backend_refs.get("rdd_rejected_document_ids") or [])
+    rejected_set: set[str] = set(rejected_ids)
 
     for doc in documents:
         doc_id: str | None = doc.get("document_id")
@@ -60,20 +65,26 @@ async def document_upload_node(state: ServiceRequestState) -> dict[str, Any]:
             if doc_id not in fm_ids_set:
                 fm_ids_set.add(doc_id)
                 existing_fm_ids.append(doc_id)
-        elif doc_type == _RDD_DOCUMENT_TYPE:
+        elif doc_type == _RDD_MEETING_REPORT:
             rdd_document_id = doc_id
+        elif doc_type == _RDD_REJECTED_REPORT:
+            if doc_id not in rejected_set:
+                rejected_set.add(doc_id)
+                rejected_ids.append(doc_id)
 
     updated_refs: dict[str, Any] = {
         **backend_refs,
         "uploaded_documents": existing_fm_ids,
+        "rdd_rejected_document_ids": rejected_ids,
     }
     if rdd_document_id is not None:
         updated_refs["rdd_document_id"] = rdd_document_id
 
     logger.info(
-        "document_upload_node: fm_docs=%d rdd_doc=%s",
+        "document_upload_node: fm_docs=%d rdd_doc=%s rejected=%d",
         len(existing_fm_ids),
         rdd_document_id,
+        len(rejected_ids),
     )
 
     return {"backend_refs": updated_refs}

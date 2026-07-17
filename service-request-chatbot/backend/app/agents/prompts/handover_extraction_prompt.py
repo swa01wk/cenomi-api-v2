@@ -45,7 +45,8 @@ use, the expected format, and a short description.
 | unit_readiness_date    | ISO 8601 date (YYYY-MM-DD)       | Date the unit is ready for handover (FM stage)  |
 | expected_handover_date | ISO 8601 date (YYYY-MM-DD)       | Expected handover date (FM stage)               |
 | guideLineLink          | string (URL or reference)        | Link to the relevant guidelines (RDD stage)     |
-| document_status        | APPROVED or APPROVED_WITH_CHANGES | RDD review decision — map "Approve" → APPROVED, "Approve with changes" → APPROVED_WITH_CHANGES |
+| document_status        | APPROVED, APPROVED_WITH_CHANGES, or DISAPPROVED | Meeting Report decision — map "Approve" → APPROVED, "Approve with changes" → APPROVED_WITH_CHANGES. Rejected reports use DISAPPROVED (usually set automatically). Omit for Other uploads. |
+| rdd_upload_doc_type    | DR_SR_HANDOVER_REPORT, SR_REJECTED_HANDOVER_REPORT, or SR_HANDOVER_OTHER | Which RDD document the user wants to upload next — map "Meeting Report" / "Handover Meeting Report" → DR_SR_HANDOVER_REPORT, "Rejected" → SR_REJECTED_HANDOVER_REPORT, "Other" → SR_HANDOVER_OTHER |
 | actual_handover_date   | ISO 8601 date (YYYY-MM-DD)       | Actual handover date (RDD stage)                |
 | fitout_start_date      | ISO 8601 date (YYYY-MM-DD)       | Date fit-out works begin (RDD stage)            |
 | fitout_end_date        | ISO 8601 date (YYYY-MM-DD)       | Date fit-out works complete (RDD stage)         |
@@ -64,9 +65,15 @@ use, the expected format, and a short description.
      Do NOT store these strings as date values; they must be rejected so the bot re-asks.
    - Impossible dates like "June 40th", "13/13/2026", "99-99-9999" → omit the field.
 2. **document_status**: Map to exactly one of:
-   - "APPROVED"              — ONLY when the user says "approve", "approved", "accept", "confirm", or equivalent
+   - "APPROVED"              — ONLY when the user says "approve", "approved", "accept", "confirm", or equivalent (Meeting Report path)
    - "APPROVED_WITH_CHANGES" — ONLY when the user says "approve with changes", "approved with changes", "accept with changes", or equivalent
-   - Omit entirely for any ambiguous or unclear phrasing.
+   - "DISAPPROVED"           — ONLY when the user says "disapprove", "rejected", "reject", or equivalent for a Rejected report
+   - Omit entirely for Other uploads or any ambiguous phrasing.
+2b. **rdd_upload_doc_type**: Map to exactly one of:
+   - "DR_SR_HANDOVER_REPORT" — Meeting / Handover Meeting Report
+   - "SR_REJECTED_HANDOVER_REPORT" — Rejected Fitout and Handover Report
+   - "SR_HANDOVER_OTHER" — Other supporting document
+   - Omit entirely when unclear.
 3. **inspection_done_by**: Map to exactly one of:
    - "FM_MANAGER"  — ONLY if the user explicitly references FM manager, facilities management, FM team, or facility manager
    - "OPERATIONS"  — ONLY if the user explicitly references operations, ops, ops team, or operations department/manager

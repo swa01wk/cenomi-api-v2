@@ -204,11 +204,24 @@ def _build_confirmation_card(
 
     # Enum fields that must render as a <select> dropdown on the frontend.
     _ENUM_OPTIONS: dict[str, list[str]] = {
-        "document_status": ["APPROVED", "APPROVED_WITH_CHANGES"],
+        "document_status": [
+            "APPROVED",
+            "APPROVED_WITH_CHANGES",
+            "DISAPPROVED",
+        ],
     }
 
+    display_keys = list(display_fields)
+    # Hide document_status on the card unless Meeting Report path (or already set).
+    if workflow_stage == "RDD_REVIEW":
+        doc_type = collected_data.get("rdd_upload_doc_type")
+        if doc_type != "DR_SR_HANDOVER_REPORT" and not collected_data.get(
+            "document_status"
+        ):
+            display_keys = [k for k in display_keys if k != "document_status"]
+
     fields: list[dict[str, Any]] = []
-    for field_key in display_fields:
+    for field_key in display_keys:
         raw_value = collected_data.get(field_key)
         is_editable = field_key in editable
         # Keep raw ISO / enum codes for editable inputs (selects + round-trip).
