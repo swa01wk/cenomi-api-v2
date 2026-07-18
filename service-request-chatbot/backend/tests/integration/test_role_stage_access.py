@@ -196,15 +196,23 @@ class TestFMReviewEntryRoleAccess:
 
     @pytest.mark.asyncio
     async def test_operations_can_approve_fm(self) -> None:
-        """OPERATIONS must be able to trigger approve_fm_review, same as FM_MANAGER."""
+        """OPERATIONS must be able to trigger approve_fm_review (role allowed, not denied)."""
         state = _fm_state("OPERATIONS", action="approve_fm_review")
+        # Provide FM readiness data so the approve path is not blocked by the
+        # document-upload gate (which also returns WAITING_FOR_USER).
+        state["collected_data"] = {"unit_readiness_date": "2026-07-10"}
+        state["documents"] = [{"document_id": "d1", "document_type_id": "SR_HANDOVER_CHECKLIST"}]
         result = await fm_review_entry_node(state)
+        # Role allowed → not denied for permission reasons; fm_action set to approve.
         assert result.get("status") != "WAITING_FOR_USER"
         assert result["backend_refs"].get("fm_action") == "approve"
 
     @pytest.mark.asyncio
     async def test_fm_manager_can_approve_fm(self) -> None:
+        """FM_MANAGER must be able to trigger approve_fm_review (role allowed, not denied)."""
         state = _fm_state("FM_MANAGER", action="approve_fm_review")
+        state["collected_data"] = {"unit_readiness_date": "2026-07-10"}
+        state["documents"] = [{"document_id": "d1", "document_type_id": "SR_HANDOVER_CHECKLIST"}]
         result = await fm_review_entry_node(state)
         assert result.get("status") != "WAITING_FOR_USER"
         assert result["backend_refs"].get("fm_action") == "approve"

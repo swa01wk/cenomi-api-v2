@@ -152,6 +152,20 @@ def _route_after_load(state: dict[str, Any]) -> str:
         return "supervisor"
 
     sr_id = (state.get("backend_refs") or {}).get("sr_id")
+
+    # Cancel-family actions always route to handover_entry regardless of the
+    # current workflow_stage.  If we let sr_status_sync run first, it maps the
+    # platform operations to FM_REVIEW / RDD_REVIEW and the cancel handler in
+    # handover_entry is never reached (fm/rdd entry nodes don't handle cancel_sr).
+    _CANCEL_BYPASS_ACTIONS: frozenset[str] = frozenset({
+        "cancel_sr", "cancel_create_sr",
+        "confirm_cancel_sr", "decline_cancel_sr",
+    })
+    action = state.get("action_override") or ""
+    if action in _CANCEL_BYPASS_ACTIONS and sr_id:
+        agent = state.get("active_agent") or ""
+        return _AGENT_ENTRY_NODES.get(agent, "handover_entry")
+
     if sr_id:
         return "sr_status_sync"
 
@@ -280,9 +294,22 @@ def _route_after_validation(state: dict[str, Any]) -> str:
     Adding a new workflow with new collection stages and confirmation nodes
     requires only a registry entry plus a get_missing_fields dispatch below.
     """
+    from app.agents.schemas.handover_schema import OPTIONAL_FIELDS
+
+    already_confirmed = state.get("confirmation_status") == "CONFIRMED"
+
+    # When the user has already explicitly confirmed (e.g. via confirm_fm_approve
+    # or confirm_rdd_submit), "required" type blocking errors for OPTIONAL fields
+    # (e.g. comments=None) must not block the flow.  Non-optional and non-required
+    # blocking errors (date_range, enum, document_count, …) still block as normal.
     blocking = [
         e for e in (state.get("validation_errors") or [])
         if e.get("blocking", True)
+        and not (
+            already_confirmed
+            and e.get("validation_type") == "required"
+            and e.get("field") in OPTIONAL_FIELDS
+        )
     ]
     if blocking:
         return "missing_field"
@@ -317,7 +344,20 @@ def _route_after_validation(state: dict[str, Any]) -> str:
         still_missing = rdd_missing(original_stage, collected)
 
     if still_missing:
-        return "missing_field"
+        # When the user has already explicitly confirmed (e.g. via confirm_fm_approve
+        # or confirm_rdd_submit), only non-optional fields should block submission.
+        # Optional fields that are still None at confirmation time are acceptable —
+        # bypassing them here allows the confirmation node (and payload builder) to
+        # proceed rather than asking for an optional field the user chose not to provide.
+        if already_confirmed:
+            non_optional_missing = [f for f in still_missing if f not in OPTIONAL_FIELDS]
+            if not non_optional_missing:
+                # Only optional fields remain missing — fall through to confirmation.
+                pass
+            else:
+                return "missing_field"
+        else:
+            return "missing_field"
 
     return confirmation_nodes.get(original_stage, "confirmation")
 
@@ -332,15 +372,16 @@ def _route_after_handover_entry(state: dict[str, Any]) -> str:
 
 
 def _route_after_fm_entry(state: dict[str, Any]) -> str:
-    if state.get("status") == "WAITING_FOR_USER":
-        return "response_generation"
-    # Single-turn confirm already set CONFIRMED — skip extraction and go
-    # straight through merge → validation → fm_confirmation → payload builder.
+    # Check fm_action / confirmation_status BEFORE stale status so that an
+    # approve or confirm action set this turn is never shadowed by a persisted
+    # WAITING_FOR_USER value from the previous save_state.
     if state.get("confirmation_status") == "CONFIRMED":
         return "merge_state"
     backend_refs = state.get("backend_refs") or {}
     if backend_refs.get("fm_action"):
         return "merge_state"
+    if state.get("status") == "WAITING_FOR_USER":
+        return "response_generation"
     return "field_extraction"
 
 

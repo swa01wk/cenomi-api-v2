@@ -512,6 +512,165 @@ class TestActiveFieldRemap:
         assert "actual_handover_date" not in result["collected_data"]
 
 
+class TestNonDateActiveFieldRemap:
+    """Fix 3: non-date active_field must also be remapped correctly."""
+
+    @pytest.mark.asyncio
+    async def test_inspection_done_by_remapped_when_llm_maps_to_notes(self) -> None:
+        """LLM extracted 'Operations' to notes; active_field=inspection_done_by → remap."""
+        state = _state(
+            active_field="inspection_done_by",
+            user_message="Operations",
+            extracted_fields={"notes": _ext("Operations")},
+            collected_data={},
+        )
+        result = await merge_state_node(state)
+        cd = result["collected_data"]
+        assert cd.get("inspection_done_by") == "Operations"
+        assert "notes" not in cd
+
+    @pytest.mark.asyncio
+    async def test_guideline_link_remapped_when_llm_maps_to_notes(self) -> None:
+        """LLM extracted URL to notes; active_field=guideLineLink → remap."""
+        state = _state(
+            active_field="guideLineLink",
+            user_message="https://guidelines.example.com",
+            extracted_fields={"notes": _ext("https://guidelines.example.com")},
+            collected_data={},
+        )
+        result = await merge_state_node(state)
+        cd = result["collected_data"]
+        assert cd.get("guideLineLink") == "https://guidelines.example.com"
+        assert "notes" not in cd
+
+    @pytest.mark.asyncio
+    async def test_no_remap_when_multi_fields_extracted(self) -> None:
+        """Multiple extracted fields → do not remap; return all as-is."""
+        state = _state(
+            active_field="inspection_done_by",
+            user_message="FM Manager, starts July 10",
+            extracted_fields={
+                "notes": _ext("FM Manager"),
+                "startDate": _ext("2026-07-10"),
+            },
+            collected_data={},
+        )
+        result = await merge_state_node(state)
+        cd = result["collected_data"]
+        assert "inspection_done_by" not in cd
+        assert cd.get("notes") == "FM Manager"
+        assert cd.get("startDate") == "2026-07-10"
+
+    @pytest.mark.asyncio
+    async def test_date_active_field_remap_still_works(self) -> None:
+        """Regression guard: date active_field remap still works after Fix 3."""
+        state = _state(
+            active_field="actual_handover_date",
+            user_message="5th august",
+            extracted_fields={"fitout_start_date": _ext("2026-08-05")},
+            collected_data={},
+        )
+        result = await merge_state_node(state)
+        cd = result["collected_data"]
+        assert cd.get("actual_handover_date") == "2026-08-05"
+        assert "fitout_start_date" not in cd
+
+    @pytest.mark.asyncio
+    async def test_backend_protected_field_never_remapped_to(self) -> None:
+        """active_field in BACKEND_PROTECTED_FIELDS → no remap."""
+        state = _state(
+            active_field="tenant_profile_id",
+            user_message="12345",
+            extracted_fields={"notes": _ext("12345")},
+            collected_data={},
+        )
+        result = await merge_state_node(state)
+        cd = result["collected_data"]
+        assert "tenant_profile_id" not in cd
+        assert cd.get("notes") == "12345"
+
+
+class TestInspectionTimeField:
+    """Fix 2: inspectionTime must be preserved as-is (not passed through _to_date_only)."""
+
+    @pytest.mark.asyncio
+    async def test_inspection_time_preserved_as_hhmm(self) -> None:
+        state = _state(
+            extracted_fields={"inspectionTime": _ext("14:00")},
+            collected_data={},
+        )
+        result = await merge_state_node(state)
+        assert result["collected_data"]["inspectionTime"] == "14:00"
+
+    @pytest.mark.asyncio
+    async def test_inspection_time_not_truncated_to_date(self) -> None:
+        """HH:MM must never be truncated to 10 chars like a date."""
+        state = _state(
+            extracted_fields={"inspectionTime": _ext("09:30")},
+            collected_data={},
+        )
+        result = await merge_state_node(state)
+        assert result["collected_data"]["inspectionTime"] == "09:30"
+
+    @pytest.mark.asyncio
+    async def test_date_update_preserves_stored_inspection_time(self) -> None:
+        """Updating startDate must not wipe a previously stored inspectionTime."""
+        state = _state(
+            extracted_fields={"startDate": _ext("2026-08-10")},
+            collected_data={"inspectionTime": "10:30", "startDate": "2026-08-01"},
+        )
+        result = await merge_state_node(state)
+        cd = result["collected_data"]
+        assert cd["startDate"] == "2026-08-10"
+        assert cd["inspectionTime"] == "10:30"
+
+    @pytest.mark.asyncio
+    async def test_inspection_time_auto_defaulted_in_create_sr_when_absent(self) -> None:
+        """When inspectionTime is absent in CREATE_SR, it is seeded with the current HH:MM."""
+        import datetime
+        import re
+
+        state = _state(
+            extracted_fields={},
+            collected_data={},
+            workflow_stage="CREATE_SR",
+        )
+        before = datetime.datetime.now().strftime("%H:%M")
+        result = await merge_state_node(state)
+        after = datetime.datetime.now().strftime("%H:%M")
+
+        time_value = result["collected_data"].get("inspectionTime")
+        assert time_value is not None, "inspectionTime must be auto-defaulted"
+        assert re.fullmatch(r"\d{2}:\d{2}", time_value), f"Expected HH:MM, got {time_value!r}"
+        # The defaulted time must be within the window of the test run.
+        assert before <= time_value <= after or time_value == before or time_value == after
+
+    @pytest.mark.asyncio
+    async def test_inspection_time_not_overwritten_when_already_set(self) -> None:
+        """An existing inspectionTime must never be replaced by the auto-default."""
+        state = _state(
+            extracted_fields={},
+            collected_data={"inspectionTime": "08:00"},
+            workflow_stage="CREATE_SR",
+        )
+        result = await merge_state_node(state)
+        assert result["collected_data"]["inspectionTime"] == "08:00"
+
+    @pytest.mark.asyncio
+    async def test_inspection_time_not_auto_defaulted_outside_create_sr(self) -> None:
+        """Auto-default must only fire in CREATE_SR, not FM_REVIEW or RDD_REVIEW."""
+        for stage in ("FM_REVIEW", "RDD_REVIEW"):
+            state = _state(
+                extracted_fields={},
+                collected_data={},
+                workflow_stage=stage,
+            )
+            result = await merge_state_node(state)
+            assert "inspectionTime" not in result["collected_data"], (
+                f"inspectionTime must not be auto-defaulted in {stage}"
+            )
+
+
 class TestNotesCommentsIndependence:
     """Notes and comments are independent form fields — never mirrored."""
 

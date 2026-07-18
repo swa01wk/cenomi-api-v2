@@ -20,6 +20,9 @@ From the backend/ directory:
     # Show detailed turn-by-turn output (bot messages included)
     python -m tests.eval.run_eval --verbose
 
+    # Write structured JSON results
+    python -m tests.eval.run_eval --json results/tier_a.json
+
     # Point at a different server
     python -m tests.eval.run_eval --base-url http://staging.example.com
 
@@ -33,15 +36,32 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json as _json
 import re
 import sys
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Optional
 
 import httpx
 
-from tests.eval.scenarios import SCENARIOS, Scenario, Turn
+from tests.eval.scenarios import (
+    SCENARIOS,
+    TIER0_SCENARIOS,
+    TIER1_SCENARIOS,
+    TIER2_SCENARIOS,
+    TIER3_SCENARIOS,
+    Scenario,
+    Turn,
+)
+
+_TIER_MAP: dict[int, list[Scenario]] = {
+    0: TIER0_SCENARIOS,
+    1: TIER1_SCENARIOS,
+    2: TIER2_SCENARIOS,
+    3: TIER3_SCENARIOS,
+}
 
 # ── ANSI colours ─────────────────────────────────────────────────────────────
 
@@ -103,11 +123,41 @@ class ScenarioResult:
 # ── HTTP helpers ──────────────────────────────────────────────────────────────
 
 _ENDPOINT = "/api/chat/service-request"
-_EVAL_USER_ID = "eval_runner"
+_AUTH_ENDPOINT = "/api/auth/login"
+# Default eval user credentials — MALL_MANAGER role so RBAC permits CREATE_SR.
+_EVAL_USER_EMAIL = "aisha@cenomi.com"
+_EVAL_USER_PASSWORD = "test1234"
 _UUID_RE = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
     re.IGNORECASE,
 )
+
+
+async def _authenticate(
+    client: httpx.AsyncClient,
+    base_url: str,
+    email: str = _EVAL_USER_EMAIL,
+    password: str = _EVAL_USER_PASSWORD,
+) -> tuple[Optional[str], Optional[str]]:
+    """Authenticate against the local chatbot JWT endpoint.
+
+    Returns (access_token, user_id).  Both may be None when auth fails.
+    Without a token the supervisor RBAC check blocks action intents for
+    anonymous users, causing packed-message CREATE_SR turns to return a
+    plain ``message`` denial instead of a ``confirmation_card``.
+    """
+    try:
+        resp = await client.post(
+            f"{base_url.rstrip('/')}{_AUTH_ENDPOINT}",
+            json={"username": email, "password": password},
+            timeout=15.0,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        return data.get("access_token"), data.get("user_id")
+    except Exception as exc:
+        print(yellow(f"  ⚠ Auth failed for {email}: {exc}"), file=sys.stderr)
+        return None, None
 
 
 async def _post_turn(
@@ -115,10 +165,12 @@ async def _post_turn(
     base_url: str,
     spec: Turn,
     session_id: Optional[str],
+    token: Optional[str] = None,
+    user_id: Optional[str] = None,
 ) -> tuple[dict[str, Any], int]:
     """POST one chat turn; return (response_body, latency_ms)."""
     payload: dict[str, Any] = {
-        "user_id": _EVAL_USER_ID,
+        "user_id": user_id or "eval_runner",
         "message": spec.message,
         "attachments": [],
     }
@@ -131,10 +183,15 @@ async def _post_turn(
     if spec.selected_lease_id:
         payload["selected_lease_id"] = spec.selected_lease_id
 
+    headers: dict[str, str] = {}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
     t0 = time.monotonic()
     resp = await client.post(
         f"{base_url.rstrip('/')}{_ENDPOINT}",
         json=payload,
+        headers=headers,
         timeout=90.0,
     )
     latency_ms = int((time.monotonic() - t0) * 1000)
@@ -252,10 +309,18 @@ async def run_scenario(
     session_id: Optional[str] = None
 
     async with httpx.AsyncClient() as client:
+        # Authenticate as MALL_MANAGER so the supervisor RBAC check permits
+        # CREATE_RDD_SERVICE_REQUEST.  Without a token, anonymous callers only
+        # receive read-only intents (ASK_HELP / CHECK_STATUS / PREVIEW) and
+        # every packed CREATE_SR message returns a plain denial ``message``.
+        token, user_id = await _authenticate(client, base_url)
+
         for idx, spec in enumerate(scenario.turns, start=1):
             # ── Send turn ─────────────────────────────────────────────────────
             try:
-                body, latency_ms = await _post_turn(client, base_url, spec, session_id)
+                body, latency_ms = await _post_turn(
+                    client, base_url, spec, session_id, token=token, user_id=user_id
+                )
             except httpx.HTTPStatusError as exc:
                 result.turn_results.append(TurnResult(
                     turn_idx=idx,
@@ -465,6 +530,42 @@ def _print_report(results: list[ScenarioResult], elapsed: float) -> None:
     print(bold(_HDR) + "\n")
 
 
+# ── JSON serialiser ───────────────────────────────────────────────────────────
+
+
+def _to_json(results: list[ScenarioResult]) -> list[dict[str, Any]]:
+    out = []
+    for res in results:
+        sc = res.scenario
+        turns_out = []
+        for tr in res.turn_results:
+            turns_out.append({
+                "turn": tr.turn_idx,
+                "message": tr.message[:120],
+                "note": tr.note,
+                "passed": tr.passed,
+                "failures": tr.failures,
+                "warnings": tr.warnings,
+                "ui_type": tr.ui_type,
+                "workflow_stage": tr.workflow_stage,
+                "sr_reference": tr.sr_reference,
+                "latency_ms": tr.latency_ms,
+                "http_error": tr.http_error,
+            })
+        out.append({
+            "scenario_id": sc.id,
+            "scenario_name": sc.name,
+            "scenario_tags": sc.tags,
+            "goal": sc.goal,
+            "passed": res.passed,
+            "turns_passed": res.turns_passed,
+            "turns_total": res.turns_total,
+            "turns_expected": res.turns_expected,
+            "turns": turns_out,
+        })
+    return out
+
+
 # ── Main entry point ──────────────────────────────────────────────────────────
 
 
@@ -473,6 +574,8 @@ async def _main(
     scenario_ids: Optional[list[int]],
     tags: Optional[list[str]],
     verbose: bool,
+    json_out: Optional[Path] = None,
+    tier: Optional[int] = None,
 ) -> int:
     # Health check
     print(bold("Checking server..."), end=" ", flush=True)
@@ -483,8 +586,15 @@ async def _main(
         return 1
     print(green("✓ OK"))
 
-    # Filter scenarios
-    scenarios = [s for s in SCENARIOS if s.enabled]
+    # Filter scenarios — tier takes precedence, then explicit IDs / tags
+    if tier is not None:
+        if tier not in _TIER_MAP:
+            print(yellow(f"Unknown tier {tier}. Valid: 0, 1, 2, 3"))
+            return 1
+        scenarios = [s for s in _TIER_MAP[tier] if s.enabled]
+        print(bold(f"Tier {tier}: {len(scenarios)} scenario(s) selected"))
+    else:
+        scenarios = [s for s in SCENARIOS if s.enabled]
     if scenario_ids:
         scenarios = [s for s in scenarios if s.id in scenario_ids]
     if tags:
@@ -535,6 +645,12 @@ async def _main(
     _print_report(results, elapsed)
 
     failed = sum(1 for r in results if not r.passed)
+
+    if json_out:
+        json_out.parent.mkdir(parents=True, exist_ok=True)
+        json_out.write_text(_json.dumps(_to_json(results), indent=2))
+        print(f"  JSON report → {json_out}")
+
     return 0 if failed == 0 else 1
 
 
@@ -567,6 +683,27 @@ def main() -> None:
         action="store_true",
         help="Print detailed turn-by-turn output during execution",
     )
+    parser.add_argument(
+        "--json",
+        dest="json_out",
+        default=None,
+        type=Path,
+        metavar="FILE",
+        help="Write structured JSON results to FILE, e.g. results/tier_1.json",
+    )
+    parser.add_argument(
+        "--tier",
+        dest="tier",
+        default=None,
+        type=int,
+        choices=[0, 1, 2, 3],
+        metavar="N",
+        help=(
+            "Run only scenarios in tier N: "
+            "0=smoke, 1=core CREATE_SR, 2=edge cases, 3=battle tests. "
+            "Overrides --scenarios; can still combine with --tags."
+        ),
+    )
     args = parser.parse_args()
 
     scenario_ids: Optional[list[int]] = None
@@ -580,7 +717,7 @@ def main() -> None:
     if args.tags:
         tags = [t.strip() for t in args.tags.split(",")]
 
-    sys.exit(asyncio.run(_main(args.base_url, scenario_ids, tags, args.verbose)))
+    sys.exit(asyncio.run(_main(args.base_url, scenario_ids, tags, args.verbose, args.json_out, args.tier)))
 
 
 if __name__ == "__main__":

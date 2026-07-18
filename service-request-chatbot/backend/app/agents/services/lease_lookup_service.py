@@ -436,7 +436,13 @@ class MockLeaseLookupService(AbstractLeaseLookupService):
 
 
 def get_lease_lookup_service() -> AbstractLeaseLookupService:
-    """Return the appropriate service based on whether a real API URL is configured."""
-    if settings.lease_tenant_api_base_url:
+    """Return the appropriate lease-lookup adapter.
+
+    ``MockLeaseLookupService`` is used when either:
+    - No ``LEASE_TENANT_API_BASE_URL`` is configured (local/POC mode), or
+    - ``LEASE_LOOKUP_USE_MOCK=true`` is set (local eval runs where the UAT API
+      rejects the chatbot's locally-signed JWT).
+    """
+    if settings.lease_tenant_api_base_url and not settings.lease_lookup_use_mock:
         return HttpLeaseLookupService()
     return MockLeaseLookupService()

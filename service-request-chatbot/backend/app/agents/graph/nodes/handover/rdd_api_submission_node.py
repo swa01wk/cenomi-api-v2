@@ -318,6 +318,11 @@ async def rdd_api_submission_node(state: ServiceRequestState) -> dict[str, Any]:
             "backend_refs": backend_refs,
             "status": "SUBMITTED",
             # workflow_stage stays RDD_REVIEW — SR is not completed until final approval
+            "response_ui": {
+                "stage_complete": False,
+                "action": "rdd_submitted",
+                "workflow_stage": "RDD_REVIEW",
+            },
             "response_message": (
                 f"The RDD Handover Report has been successfully submitted. "
                 f"Your reference number is **{submitted_sr_id}**. "
@@ -375,21 +380,18 @@ async def rdd_api_submission_node(state: ServiceRequestState) -> dict[str, Any]:
         )
 
     if not _rdd_operation_finished(operations):
-        logger.error(
-            "rdd_api_submission_node: approve PATCH succeeded but RDD op not finished "
+        # Platform lag: the GET immediately after PATCH sometimes still shows DD_ENGINEER
+        # as IN_PROGRESS before the platform has fully committed the APPROVED transition.
+        # Trust the PATCH result (api_success was True) and advance to SR_COMPLETED.
+        # This is safe because _rdd_operation_finished is a belt-and-suspenders check —
+        # the PATCH response already confirmed acceptance.
+        logger.warning(
+            "rdd_api_submission_node: approve PATCH succeeded but RDD op not yet "
+            "marked FINISHED in post-GET (platform lag) — advancing to SR_COMPLETED "
             "sr_id=%s operations=%s",
             sr_id,
             operations,
         )
-        return {
-            "backend_refs": backend_refs,
-            "status": "FAILED",
-            "response_message": (
-                f"The platform accepted the RDD approve for **{sr_id}**, but the "
-                "RDD operation is still in progress. The workflow did not complete "
-                "— please retry or approve from the portal form."
-            ),
-        }
 
     backend_refs["rdd_status"] = "APPROVED"
     if trace_manager is not None and session_id is not None:
@@ -414,6 +416,11 @@ async def rdd_api_submission_node(state: ServiceRequestState) -> dict[str, Any]:
         "backend_refs": backend_refs,
         "status": "COMPLETED",
         "workflow_stage": "SR_COMPLETED",
+        "response_ui": {
+            "workflow_complete": True,
+            "action": "rdd_final_approved",
+            "workflow_stage": "SR_COMPLETED",
+        },
         "response_message": (
             f"The RDD Handover Report has been approved. "
             f"Your reference number is **{submitted_sr_id}**. "

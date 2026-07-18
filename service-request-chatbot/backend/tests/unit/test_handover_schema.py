@@ -91,11 +91,10 @@ class TestCreateSRStage:
         "description",
         "startDate",
         "endDate",
+        "inspectionTime",    # Fix 2: optional HH:MM time field
         "inspection_done_by",
         "notes",
-        # "comments" removed: the bot no longer proactively asks for it.
-        # It is still extractable and stored when provided inline, but
-        # "notes" is the single optional catch-all field for CREATE_SR.
+        "comments",          # Fix 4: comments re-added as required (optional value allowed)
     )
 
     def test_role(self) -> None:
@@ -107,9 +106,9 @@ class TestCreateSRStage:
     def test_required_fields_count(self) -> None:
         assert len(CREATE_SR_STAGE.required_fields) == len(self._EXPECTED_FIELDS)
 
-    def test_comments_not_in_required_fields(self) -> None:
-        """comments must not be a proactively-asked field — it causes a double optional question."""
-        assert "comments" not in CREATE_SR_STAGE.required_fields
+    def test_comments_in_required_fields(self) -> None:
+        """comments is now a required (optional) field — bot asks for it as a distinct turn (Fix 4)."""
+        assert "comments" in CREATE_SR_STAGE.required_fields
 
     def test_no_required_documents(self) -> None:
         assert CREATE_SR_STAGE.required_documents == ()
@@ -121,7 +120,7 @@ class TestCreateSRStage:
 class TestFMReviewStage:
     _EXPECTED_FIELDS = (
         "unit_readiness_date",
-        # "comments" removed: same Option B fix as CREATE_SR — bot no longer proactively asks
+        "comments",  # Fix 4: comments re-added as required (optional value allowed)
     )
     _EXPECTED_DOCS = (
         "SR_HANDOVER_CHECKLIST",
@@ -151,14 +150,14 @@ class TestFMReviewStage:
 
 class TestRDDReviewStage:
     _EXPECTED_FIELDS = (
-        "actual_handover_date",
-        "fitout_start_date",
-        "fitout_end_date",
         "guideLineLink",
-        "rdd_upload_doc_type",  # type-first; status is conditional
+        "rdd_upload_doc_type",  # Fix 6: guideline + doc type first; status is conditional
         # document_status is conditional (Meeting Report only) — not in required_fields
         # trading_date intentionally excluded — auto-computed as fitout_end_date + 8 days
-        # "comments" removed: Option B fix — bot no longer proactively asks
+        "actual_handover_date",  # Fix 6: dates now after doc type
+        "fitout_start_date",
+        "fitout_end_date",
+        "comments",  # Fix 4: comments re-added as required (optional value allowed)
     )
     _EXPECTED_DOCS = (
         "DR_SR_HANDOVER_REPORT",         # mandatory

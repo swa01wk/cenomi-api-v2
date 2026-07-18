@@ -448,13 +448,29 @@ class MockServiceRequestAPIService(AbstractServiceRequestAPIService):
                 self._sr_states[sr_id]["status"] = status
             if status == "APPROVED":
                 ops = self._sr_states[sr_id].get("service_request_operations", [])
+                # Determine who was active before this PATCH so we can correctly
+                # advance the workflow:
+                #   FM approval  → FM_MANAGER was IN_PROGRESS → DD_ENGINEER moves to IN_PROGRESS
+                #   RDD final    → DD_ENGINEER was IN_PROGRESS → DD_ENGINEER moves to FINISHED
+                fm_was_active = any(
+                    op.get("assigned_role") in ("FM_MANAGER", "OPERATIONS")
+                    and (op.get("status") or "").upper() == "IN_PROGRESS"
+                    for op in ops
+                )
                 for op in ops:
-                    if op["assigned_role"] in ("FM_MANAGER", "OPERATIONS"):
+                    role = op.get("assigned_role", "")
+                    op_status = (op.get("status") or "").upper()
+                    if role in ("FM_MANAGER", "OPERATIONS"):
                         # Only finish ops that were active; leave YET_TO_START alone.
-                        if (op.get("status") or "").upper() in ("IN_PROGRESS", "FINISHED", "APPROVED"):
+                        if op_status in ("IN_PROGRESS", "FINISHED", "APPROVED"):
                             op["status"] = "FINISHED"
-                    if op["assigned_role"] == "DD_ENGINEER":
-                        op["status"] = "IN_PROGRESS"
+                    if role == "DD_ENGINEER":
+                        if fm_was_active:
+                            # FM just approved → DD_ENGINEER becomes the next active role.
+                            op["status"] = "IN_PROGRESS"
+                        else:
+                            # RDD final approve → DD_ENGINEER step is complete.
+                            op["status"] = "FINISHED"
         return ServiceRequestCreationResult(
             sr_id=sr_id,
             endpoint=endpoint,
@@ -506,8 +522,14 @@ class MockServiceRequestAPIService(AbstractServiceRequestAPIService):
 
 
 def get_service_request_api_service() -> AbstractServiceRequestAPIService:
-    """Return the appropriate adapter based on whether a real API URL is configured."""
-    if settings.service_request_api_base_url:
+    """Return the appropriate service-request adapter.
+
+    ``MockServiceRequestAPIService`` is used when either:
+    - No ``SERVICE_REQUEST_API_BASE_URL`` is configured (local/POC mode), or
+    - ``SERVICE_REQUEST_USE_MOCK=true`` is set (local eval runs where the UAT API
+      rejects the chatbot's locally-signed JWT).
+    """
+    if settings.service_request_api_base_url and not settings.service_request_use_mock:
         return HttpServiceRequestAPIService()
     return MockServiceRequestAPIService()
 

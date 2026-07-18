@@ -262,6 +262,17 @@ async def sr_status_sync_node(state: ServiceRequestState) -> dict[str, Any]:
 
     new_stage = _map_operations_to_stage(operations, current_stage)
 
+    # Never regress from RDD_REVIEW back to FM_REVIEW: platform lag can keep
+    # the FM operation visible briefly after fm_api_submission_node has already
+    # advanced the workflow.  Trust the locally-committed stage.
+    if new_stage == "FM_REVIEW" and current_stage == "RDD_REVIEW":
+        log.info(
+            "sr_status_sync_node: suppressing FM_REVIEW regression (current=%s) for sr_id=%s",
+            current_stage,
+            sr_id,
+        )
+        new_stage = "RDD_REVIEW"
+
     backend_refs["platform_sr_status"] = platform_status
     backend_refs["sr_operations"] = operations
 

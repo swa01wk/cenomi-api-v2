@@ -61,8 +61,8 @@ class TestMissingFieldNodeBasic:
         missing = set(result["missing_fields"])
         assert "unit_readiness_date" in missing
         # expected_handover_date is auto-computed (not in FM_REVIEW required_fields)
-        # comments removed from required_fields (Option B fix) — bot no longer asks for it
-        assert "comments" not in missing
+        # comments is now back in FM_REVIEW required_fields (Fix 4)
+        assert "comments" in missing
 
     @pytest.mark.asyncio
     async def test_status_is_waiting_when_question_asked(self) -> None:
@@ -129,8 +129,8 @@ class TestOneQuestionAtATime:
 
     @pytest.mark.asyncio
     async def test_after_first_field_answered_next_is_asked(self) -> None:
-        """FM_REVIEW has only unit_readiness_date now (comments removed). After it's
-        answered, the node returns IN_PROGRESS (no more mandatory fields)."""
+        """FM_REVIEW has unit_readiness_date + comments. After unit_readiness_date
+        is answered, the node asks for comments (optional). After comments → IN_PROGRESS."""
         state1 = _state(workflow_stage="FM_REVIEW", collected_data={})
         result1 = await missing_field_node(state1)
         first_field = result1["response_ui"]["field"]
@@ -141,8 +141,15 @@ class TestOneQuestionAtATime:
         state2 = _state(workflow_stage="FM_REVIEW", collected_data=collected)
         result2 = await missing_field_node(state2)
 
-        # FM_REVIEW now only has unit_readiness_date; after it's answered → IN_PROGRESS
-        assert result2["status"] == "IN_PROGRESS"
+        # FM_REVIEW now has comments as optional; after unit_readiness_date → asks comments
+        assert result2["status"] == "WAITING_FOR_USER"
+        assert result2["response_ui"]["field"] == "comments"
+
+        # Simulate declining comments
+        collected2 = {**collected, "comments": ""}
+        state3 = _state(workflow_stage="FM_REVIEW", collected_data=collected2)
+        result3 = await missing_field_node(state3)
+        assert result3["status"] == "IN_PROGRESS"
 
     @pytest.mark.asyncio
     async def test_rdd_review_asks_first_user_field_only(self) -> None:

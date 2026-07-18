@@ -68,9 +68,9 @@ class DocumentUploadService:
 
     @property
     def _mock_mode(self) -> bool:
-        """True when no platform URL is configured — same sentinel as MockServiceRequestAPIService."""
+        """True when no platform URL is configured, or when mock mode is forced via SERVICE_REQUEST_USE_MOCK."""
         from app.core.config import settings
-        return not bool(settings.service_request_api_base_url)
+        return not bool(settings.service_request_api_base_url) or settings.service_request_use_mock
 
     async def upload_document(
         self,

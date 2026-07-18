@@ -46,6 +46,26 @@ async def load_session_node(state: ServiceRequestState) -> dict[str, Any]:
         # Resetting prevents stale citations from a FAQ turn leaking into a
         # subsequent SR workflow turn's API response.
         loaded.pop("faq_sources", None)
+
+        # Session isolation: if the loaded session has no active workflow
+        # (workflow_stage is None or CANCELLED), clear transient per-turn state
+        # so a new request always starts clean without stale field leakage.
+        workflow_stage = loaded.get("workflow_stage")
+        if workflow_stage in (None, "CANCELLED"):
+            for transient_key in (
+                "active_field",
+                "extracted_fields",
+                "corrected_fields",
+                "validation_errors",
+                "response_ui",
+            ):
+                loaded.pop(transient_key, None)
+            log.debug(
+                "load_session_node.transient_state_cleared",
+                session_id=session_id,
+                workflow_stage=workflow_stage,
+            )
+
         return loaded
     except Exception:
         log.exception("load_session_node.failed", session_id=session_id)

@@ -39,9 +39,10 @@ use, the expected format, and a short description.
 | description            | string                           | Detailed description of the request             |
 | startDate              | ISO 8601 date (YYYY-MM-DD)       | Requested start date                            |
 | endDate                | ISO 8601 date (YYYY-MM-DD)       | Requested end date                              |
+| inspectionTime         | HH:MM (24-hour)                  | Inspection time — e.g. "14:00" for 2 PM. Defaults to current time if not provided. Do NOT combine with startDate. |
 | inspection_done_by     | FM_MANAGER or OPERATIONS         | Who performed or will perform the inspection    |
-| notes                  | string                           | Free-form notes OR additional comments — use for any remark, note, or comment the user provides, including "no comments", "no additional comments", "none", or any free-text aside. Prefer this field over `comments`. |
-| comments               | string                           | Additional comments — use only if `notes` is already populated. Prefer `notes`. |
+| notes                  | string                           | Free-form remarks — ONLY when no specific `active_field` is set. Do NOT extract to `notes` when the bot is asking for any other field (e.g. `inspection_done_by`, `description`, `comments`). |
+| comments               | string                           | Extract when (a) the bot is explicitly asking for comments (`active_field = comments`), OR (b) the user explicitly names the "comments" field (e.g. "no comments", "comments: none", "my comment is…"). Do NOT use as a catch-all for generic notes or unrelated text. |
 | unit_readiness_date    | ISO 8601 date (YYYY-MM-DD)       | Date the unit is ready for handover (FM stage)  |
 | expected_handover_date | ISO 8601 date (YYYY-MM-DD)       | Expected handover date (FM stage)               |
 | guideLineLink          | string (URL or reference)        | Link to the relevant guidelines (RDD stage)     |
@@ -53,7 +54,14 @@ use, the expected format, and a short description.
 
 ## Normalisation rules
 
-1. **Dates**: Convert any date expression to ISO 8601 (YYYY-MM-DD).
+1. **inspectionTime**: Convert any time expression to 24-hour HH:MM format.
+   - "2 PM" → "14:00"
+   - "9:30 AM" → "09:30"
+   - "noon" → "12:00"
+   - "3 o'clock" (ambiguous) → omit the field; wait for a clearer answer.
+   - Do NOT merge inspectionTime into startDate — keep them as separate fields.
+
+2. **Dates**: Convert any date expression to ISO 8601 (YYYY-MM-DD).
    - "15th Jan 2025" → "2025-01-15"
    - "June 1st" (no year) → assume the current year (2026) → "2026-06-01"
    - "June 1, 2026" → "2026-06-01"
@@ -64,17 +72,17 @@ use, the expected format, and a short description.
      "as soon as possible", "when ready", "sometime" → ALWAYS omit — these are NOT valid dates.
      Do NOT store these strings as date values; they must be rejected so the bot re-asks.
    - Impossible dates like "June 40th", "13/13/2026", "99-99-9999" → omit the field.
-2. **document_status**: Map to exactly one of:
+3. **document_status**: Map to exactly one of:
    - "APPROVED"              — ONLY when the user says "approve", "approved", "accept", "confirm", or equivalent (Meeting Report path)
    - "APPROVED_WITH_CHANGES" — ONLY when the user says "approve with changes", "approved with changes", "accept with changes", or equivalent
    - "DISAPPROVED"           — ONLY when the user says "disapprove", "rejected", "reject", or equivalent for a Rejected report
    - Omit entirely for Other uploads or any ambiguous phrasing.
-2b. **rdd_upload_doc_type**: Map to exactly one of:
+3b. **rdd_upload_doc_type**: Map to exactly one of:
    - "DR_SR_HANDOVER_REPORT" — Meeting / Handover Meeting Report
    - "SR_REJECTED_HANDOVER_REPORT" — Rejected Fitout and Handover Report
    - "SR_HANDOVER_OTHER" — Other supporting document
    - Omit entirely when unclear.
-3. **inspection_done_by**: Map to exactly one of:
+4. **inspection_done_by**: Map to exactly one of:
    - "FM_MANAGER"  — ONLY if the user explicitly references FM manager, facilities management, FM team, or facility manager
    - "OPERATIONS"  — ONLY if the user explicitly references operations, ops, ops team, or operations department/manager
    - Omit entirely (do NOT include this field) for ANY ambiguous phrasing, including but not limited to:
@@ -82,7 +90,7 @@ use, the expected format, and a short description.
      "the contractor", "third party", "whoever is available", "not sure yet",
      "someone", "the inspector", "us", "we", or any person's name.
    - When in doubt, omit — it is better to ask again than to guess wrong.
-4. **Confidence**: Assign a score between 0.0 and 1.0:
+5. **Confidence**: Assign a score between 0.0 and 1.0:
    - 0.9–1.0  — the value is stated verbatim in the message
    - 0.7–0.89 — the value is strongly implied with minimal interpretation
    - 0.5–0.69 — the value requires moderate inference
@@ -120,12 +128,55 @@ these keys in the "fields" object.
   the higher confidence or omit both.
 - Do not add any keys outside the extractable fields table above.
 
+## Lease code vs mall / brand disambiguation — CRITICAL
+
+`lease_code` values are short alphanumeric identifiers such as `t0105712`,
+`LC-1234`, `T0208831`.  They are typically 6–10 characters with no spaces.
+
+**If the user's response contains a multi-word mall / property name** (e.g.,
+"Jawharat Jeddah mall", "Riyadh Park", "Dubai Festival City", "Mall of Arabia")
+**extract it as `mall`, NOT `lease_code` — even when the bot asked for a lease
+code.**
+
+**If the response looks like a brand name** (e.g., "Nike", "Zara", "H&M",
+"Under Armour"), extract it as `brand`, NOT `lease_code`.
+
+The question context identifies what the user *intended* to answer — but the
+user may have responded with a mall/brand name instead of a lease code, which
+is valid and must be routed correctly.
+
+Examples:
+- Question: "Please share the lease code for this handover request."
+  User: "Jawharat Jeddah mall"
+  → Extract `mall: "Jawharat Jeddah"` (confidence 1.0) — NOT `lease_code`
+
+- Question: "Please share the lease code for this handover request."
+  User: "Nike at Riyadh Park"
+  → Extract `brand: "Nike"` (confidence 1.0), `mall: "Riyadh Park"` (confidence 1.0)
+
+- Question: "Please share the lease code for this handover request."
+  User: "t0105712"
+  → Extract `lease_code: "t0105712"` (confidence 1.0) — this IS a lease code
+
 ## Handling question context — CRITICAL RULE
 
 When a "Previous assistant question" is provided in the input, you MUST use it
 to identify the field being asked about and map the user's response to that
 field.  **The question context identifies the PRIMARY field** — but it does NOT
 restrict extraction to that field alone (see Multi-field responses below).
+
+**CRITICAL — Non-date active_field rule**: When the question context identifies
+a specific field that is NOT a date (e.g. `inspection_done_by`, `notes`,
+`description`, `comments`, `guideLineLink`), map the user's response value to
+that exact field key — do NOT default to `notes` or any other field.
+
+**CRITICAL — notes / comments / inspection_done_by are distinct fields**:
+- `notes` and `comments` are separate portal form fields — never substitute one
+  for the other.  When `active_field = notes`, extract to `notes`; when
+  `active_field = comments`, extract to `comments`.
+- `inspection_done_by` must ONLY contain `FM_MANAGER` or `OPERATIONS`.  Never
+  extract a person's name, team name, or any ambiguous phrase to this field —
+  omit it entirely (the remap layer will not accept arbitrary strings here).
 
 Examples:
 - Question: "Do you have any additional comments?"
@@ -140,6 +191,11 @@ Examples:
 - Question: "Who will perform the inspection — FM Manager or Operations?"
   User: "The FM team"
   → Extract `inspection_done_by: "FM_MANAGER"` (confidence 1.0)
+
+- Question: "Ask the user for a short description of this handover request."
+  User: "Standard fit-out inspection"
+  → Extract `description: "Standard fit-out inspection"` (confidence 1.0)
+  → Do NOT extract this as `notes`
 
 ## Multi-field responses — always extract ALL supplied values
 
@@ -162,6 +218,34 @@ Examples:
 
 Always prefer extracting MORE fields over fewer when values are explicitly stated.
 Never skip a clearly-stated field just because it was not the one being asked about.
+
+## Extracting brand and mall from action-intent phrases
+
+When the user's message contains a **brand name and/or mall/location** embedded
+in an intent phrase (e.g. "raise a handover for Zara Dubai", "create a request
+for Nike Riyadh Park", "I need a handover for Under Armour at Jawharat Jeddah"),
+extract the brand and/or mall even though the user did not provide them as bare
+field values.
+
+Rules:
+- The word immediately after "for", "at", "on behalf of", or "regarding" is
+  likely a brand or mall name — extract accordingly.
+- If two proper nouns appear (Brand + Mall/City), extract both.
+- Use the location as `mall` even when only a city is named (e.g. "Dubai" →
+  `mall: "Dubai"`) — the backend search handles partial matching.
+
+Examples:
+- User: "I need to raise a handover for Zara Dubai"
+  → Extract `brand: "Zara"` (confidence 0.85), `mall: "Dubai"` (confidence 0.80)
+
+- User: "I want to open a handover request for Nike at Riyadh Park"
+  → Extract `brand: "Nike"` (confidence 1.0), `mall: "Riyadh Park"` (confidence 1.0)
+
+- User: "Create a handover for Under Armour Jawharat Jeddah"
+  → Extract `brand: "Under Armour"` (confidence 0.85), `mall: "Jawharat Jeddah"` (confidence 0.85)
+
+- User: "Q3 fit-out handover for Zara unit UF301"
+  → Extract `brand: "Zara"` (confidence 0.85), `description: "Q3 fit-out handover"` (confidence 0.80)
 
 ## Handling reference and instruction phrases
 

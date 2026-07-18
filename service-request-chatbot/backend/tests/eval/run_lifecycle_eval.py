@@ -53,10 +53,21 @@ import httpx
 
 from tests.eval.lifecycle_scenarios import (
     LIFECYCLE_SCENARIOS,
+    TIER0_LIFECYCLE_SCENARIOS,
+    TIER4_SCENARIOS,
+    TIER5_SCENARIOS,
+    TIER6_SCENARIOS,
     LifecycleScenario,
     PhaseConfig,
 )
 from tests.eval.scenarios import Turn
+
+_TIER_MAP: dict[int, list[LifecycleScenario]] = {
+    0: TIER0_LIFECYCLE_SCENARIOS,
+    4: TIER4_SCENARIOS,
+    5: TIER5_SCENARIOS,
+    6: TIER6_SCENARIOS,
+}
 
 # ─── ANSI colours ─────────────────────────────────────────────────────────────
 
@@ -326,6 +337,13 @@ async def run_phase(
 
     session_id: Optional[str] = None
     sr_id = captured_sr_id  # may be None for phase 1
+    # Track sr_id captured *within this phase* separately from the inherited
+    # captured_sr_id.  For phases that start a new SR (open_existing_sr=False)
+    # we must NOT pass the inherited sr_id to the first turn or to subsequent
+    # turns until this phase itself creates an SR — otherwise a stale id from a
+    # completed earlier phase forces the server into FM/RDD routing instead of
+    # letting the user raise a fresh request.
+    phase_own_sr_id: Optional[str] = None
 
     async with httpx.AsyncClient() as client:
         # Upload mock document if required (need session_id + sr_id, so do after first turn)
@@ -337,8 +355,19 @@ async def run_phase(
             if phase.open_existing_sr and idx == 1:
                 # First turn of FM/RDD phase — pass the captured SR ID to open it
                 turn_sr_id = sr_id
-            elif sr_id:
-                # Subsequent turns — always pass sr_id so the session stays on the right SR
+            elif phase_own_sr_id:
+                # This phase has already received its own SR ID — use it for
+                # subsequent turns so the session stays anchored to the new SR.
+                turn_sr_id = phase_own_sr_id
+            elif phase.open_existing_sr and sr_id:
+                # Subsequent turns of an open-existing phase — keep the same SR.
+                turn_sr_id = sr_id
+            elif sr_id and idx == 1 and turn.action:
+                # T1 with an explicit action (e.g. cancel_sr, confirm_cancel_sr)
+                # operates on the existing SR and needs the inherited sr_id.
+                # T1 WITHOUT an action is a new-SR turn and must NOT receive the
+                # inherited sr_id, or the server will route into FM/RDD instead of
+                # letting the user raise a fresh request.
                 turn_sr_id = sr_id
 
             # Upload document after the first turn (session_id is now known)
@@ -377,11 +406,13 @@ async def run_phase(
             new_sr = state.get("sr_id") or body.get("sr_id")
             if new_sr:
                 sr_id = str(new_sr)
+                phase_own_sr_id = str(new_sr)
             elif not sr_id:
                 # Try to extract UUID from the message (CREATE_SR submit response)
                 uuids = _UUID_RE.findall(body.get("message", ""))
                 if uuids:
                     sr_id = uuids[0]
+                    phase_own_sr_id = uuids[0]
 
             # Assert
             passed, failures, warnings = _assert_turn(turn, body)
@@ -413,15 +444,26 @@ async def run_scenario(
     scenario: LifecycleScenario,
     base_url: str,
     verbose: bool = False,
+    sr_id_override: Optional[str] = None,
+    allowed_stages: Optional[set[str]] = None,
 ) -> ScenarioResult:
     result = ScenarioResult(scenario=scenario)
-    captured_sr_id: Optional[str] = None
+    # Start with injected sr_id (skips CREATE_SR setup if provided)
+    captured_sr_id: Optional[str] = sr_id_override
 
-    # Reset mock SR state between scenarios
+    # Reset mock SR state between scenarios (no-op in production mode)
     async with httpx.AsyncClient() as hc:
         await _reset_mock_state(hc, base_url)
 
     for phase_idx, phase in enumerate(scenario.phases, start=1):
+        # --phase filter: skip phases not in allowed_stages
+        if allowed_stages is not None and phase.stage not in allowed_stages:
+            if verbose:
+                print(f"    {dim(f'Phase {phase_idx}: {phase.role} ({phase.stage}) — skipped by --phase filter')}")
+            # If this was a CREATE_SR setup phase being skipped, keep the sr_id_override
+            # so subsequent FM/RDD phases still get a valid SR ID
+            continue
+
         if verbose:
             print(f"    {dim(f'Phase {phase_idx}: {phase.role} ({phase.stage})')}")
 
@@ -603,6 +645,9 @@ async def _main(
     tags: Optional[list[str]],
     verbose: bool,
     json_out: Optional[Path],
+    tier: Optional[int] = None,
+    sr_id_override: Optional[str] = None,
+    phase_filter: Optional[str] = None,
 ) -> int:
     print(bold("Checking server…"), end=" ", flush=True)
     if not await _server_ok(base_url):
@@ -611,11 +656,38 @@ async def _main(
         return 1
     print(green("✓ OK"))
 
-    scenarios = [s for s in LIFECYCLE_SCENARIOS if s.enabled]
+    # Select scenario pool
+    if tier is not None:
+        if tier not in _TIER_MAP:
+            print(yellow(f"Unknown lifecycle tier {tier}. Valid: 0, 4, 5, 6"))
+            return 1
+        scenarios = [s for s in _TIER_MAP[tier] if s.enabled]
+        print(bold(f"Lifecycle tier {tier}: {len(scenarios)} scenario(s)"))
+    else:
+        scenarios = [s for s in LIFECYCLE_SCENARIOS if s.enabled]
     if scenario_ids:
         scenarios = [s for s in scenarios if s.id in scenario_ids]
     if tags:
         scenarios = [s for s in scenarios if any(t in s.tags for t in tags)]
+
+    # --sr-id: inject a pre-existing SR ID so the CREATE_SR setup phase is skipped
+    # and the runner starts directly at the FM or RDD phase.
+    if sr_id_override:
+        print(yellow(f"  ⚡ --sr-id override: skipping CREATE_SR setup; using SR={sr_id_override[:8]}…"))
+
+    # --phase: restrict which phase stages run
+    _PHASE_STAGES: dict[str, set[str]] = {
+        "fm":   {"FM_REVIEW"},
+        "rdd":  {"RDD_REVIEW"},
+        "full": {"CREATE_SR", "FM_REVIEW", "RDD_REVIEW"},
+    }
+    allowed_stages: Optional[set[str]] = None
+    if phase_filter:
+        if phase_filter not in _PHASE_STAGES:
+            print(yellow(f"Unknown --phase value '{phase_filter}'. Valid: fm, rdd, full"))
+            return 1
+        allowed_stages = _PHASE_STAGES[phase_filter]
+        print(bold(f"Phase filter: running only stages {allowed_stages}"))
 
     if not scenarios:
         print(yellow("No matching scenarios."))
@@ -639,7 +711,11 @@ async def _main(
         if verbose:
             print(f"  {dim(scenario.goal)}")
 
-        result = await run_scenario(scenario, base_url, verbose=verbose)
+        result = await run_scenario(
+            scenario, base_url, verbose=verbose,
+            sr_id_override=sr_id_override,
+            allowed_stages=allowed_stages,
+        )
         results.append(result)
 
         sr_display = f"SR={dim(result.captured_sr_id[:8] + '…')}" if result.captured_sr_id else ""
@@ -677,12 +753,38 @@ def main() -> None:
         epilog=__doc__,
     )
     parser.add_argument("--base-url", default="http://127.0.0.1:8000", metavar="URL")
-    parser.add_argument("--scenarios", default=None, metavar="IDS",
-                        help="Comma-separated scenario IDs, e.g. 34,40,46")
+    parser.add_argument(
+        "--scenarios", default=None, metavar="IDS",
+        help="Comma-separated scenario IDs, e.g. 134,140,146 (note: IDs are 134–172 after rename)",
+    )
     parser.add_argument("--tags", default=None, metavar="TAGS",
                         help="Comma-separated tags, e.g. full-lifecycle,rbac")
     parser.add_argument("--verbose", "-v", action="store_true")
     parser.add_argument("--json", dest="json_out", default=None, type=Path, metavar="FILE")
+    parser.add_argument(
+        "--tier", dest="tier", default=None, type=int,
+        choices=[0, 4, 5, 6], metavar="N",
+        help=(
+            "Run only lifecycle tier N: "
+            "0=smoke FM, 4=FM_REVIEW, 5=RDD_REVIEW, 6=full lifecycle+battle. "
+            "Overrides --scenarios."
+        ),
+    )
+    parser.add_argument(
+        "--sr-id", dest="sr_id", default=None, metavar="UUID",
+        help=(
+            "Inject a pre-existing SR UUID to skip the CREATE_SR setup phase "
+            "and test FM/RDD review in isolation. "
+            "e.g. --sr-id 12345678-1234-1234-1234-123456789abc"
+        ),
+    )
+    parser.add_argument(
+        "--phase", dest="phase", default=None, choices=["fm", "rdd", "full"],
+        help=(
+            "Run only specific phase stages: "
+            "fm=FM_REVIEW only, rdd=RDD_REVIEW only, full=all phases (default)."
+        ),
+    )
     args = parser.parse_args()
 
     ids: Optional[list[int]] = None
@@ -696,7 +798,12 @@ def main() -> None:
     if args.tags:
         tags = [t.strip() for t in args.tags.split(",")]
 
-    sys.exit(asyncio.run(_main(args.base_url, ids, tags, args.verbose, args.json_out)))
+    sys.exit(asyncio.run(_main(
+        args.base_url, ids, tags, args.verbose, args.json_out,
+        tier=args.tier,
+        sr_id_override=args.sr_id,
+        phase_filter=args.phase,
+    )))
 
 
 if __name__ == "__main__":

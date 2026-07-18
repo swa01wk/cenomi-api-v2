@@ -215,12 +215,22 @@ class TestBuildDocumentUploadAskResponseDecorations:
         assert "DR_SR_HANDOVER_REPORT" not in keys
 
     def test_rdd_decorations_contain_document_requirement(self) -> None:
-        result = build_document_upload_ask_response(_rdd_state())
+        # Fix 6: guideLineLink + rdd_upload_doc_type must be collected before upload card appears
+        result = build_document_upload_ask_response(_rdd_state(collected={
+            "guideLineLink": "https://guidelines.com",
+            "rdd_upload_doc_type": "DR_SR_HANDOVER_REPORT",
+            "document_status": "APPROVED",
+        }))
         deco = result.get("response_decorations") or {}
         assert "document_requirement" in deco
 
     def test_rdd_doc_key_is_rdd_report(self) -> None:
-        result = build_document_upload_ask_response(_rdd_state())
+        # Fix 6: guideLineLink + rdd_upload_doc_type must be collected before upload card appears
+        result = build_document_upload_ask_response(_rdd_state(collected={
+            "guideLineLink": "https://guidelines.com",
+            "rdd_upload_doc_type": "DR_SR_HANDOVER_REPORT",
+            "document_status": "APPROVED",
+        }))
         deco = result["response_decorations"]
         keys = {d["key"] for d in deco["document_requirement"]["documents"]}
         assert "DR_SR_HANDOVER_REPORT" in keys

@@ -16,7 +16,7 @@ def _fm_state(**overrides: Any) -> dict[str, Any]:
         "session_id": "sess-fm-docs",
         "workflow_stage": "FM_REVIEW",
         "active_agent": "rdd_agent",
-        "collected_data": {"unit_readiness_date": "2026-08-20"},
+        "collected_data": {"unit_readiness_date": "2026-08-20", "comments": "none"},
         "documents": [],
         "validation_errors": [],
         "backend_refs": {

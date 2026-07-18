@@ -340,6 +340,16 @@ async def fm_api_submission_node(state: ServiceRequestState) -> dict[str, Any]:
         next_stage = _map_stage_after_fm_approve(
             list(backend_refs.get("sr_operations") or [])
         )
+        if not next_stage:
+            # Platform may not yet reflect the DD_ENGINEER IN_PROGRESS operation
+            # immediately after approve; default to RDD_REVIEW rather than
+            # leaving the stage unknown (which previously caused a FAILED exit).
+            next_stage = "RDD_REVIEW"
+            logger.info(
+                "fm_api_submission_node: no DD_ENGINEER IN_PROGRESS op found post-approve "
+                "sr_id=%s — defaulting next_stage=RDD_REVIEW",
+                sr_id,
+            )
 
     # Audit log
     session_id: UUID | None = _to_uuid(state.get("session_id"))
@@ -365,23 +375,33 @@ async def fm_api_submission_node(state: ServiceRequestState) -> dict[str, Any]:
         except Exception:
             logger.warning("fm_api_submission_node: audit log write failed (non-fatal)", exc_info=True)
 
-    fm_message = (
-        f"Your Handover Service Request has been approved at the FM review stage. "
-        f"Reference: **{sr_id}**."
-        + (
-            " It has moved to RDD review."
-            if next_stage == "RDD_REVIEW"
-            else ""
+    if fm_action == "approve":
+        fm_message = (
+            f"Your Handover Service Request has been approved at the FM review stage. "
+            f"Reference: **{sr_id}**."
+            + (" It has moved to RDD review." if next_stage == "RDD_REVIEW" else "")
         )
-        if fm_action == "approve"
-        else f"FM review progress has been saved for Service Request **{sr_id}**. "
-        "The request remains in progress."
-    )
+        response_ui: dict[str, Any] = {
+            "stage_complete": True,
+            "action": "fm_approved",
+            "workflow_stage": next_stage or "FM_REVIEW",
+        }
+    else:
+        fm_message = (
+            f"FM review progress has been saved for Service Request **{sr_id}**. "
+            "The request remains in progress."
+        )
+        response_ui = {
+            "stage_complete": False,
+            "action": "fm_saved",
+            "workflow_stage": "FM_REVIEW",
+        }
 
     out: dict[str, Any] = {
         "backend_refs": backend_refs,
         "status": "SUBMITTED",
         "response_message": fm_message,
+        "response_ui": response_ui,
         # Clear confirmation so the next turn does not re-show a stale FM card.
         "confirmation_status": None,
         "confirmation_required": False,

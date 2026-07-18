@@ -225,6 +225,7 @@ def test_build_review_decorations_rdd_submit_when_ready() -> None:
             "guideLineLink": "https://example.com/g",
             "rdd_upload_doc_type": "DR_SR_HANDOVER_REPORT",
             "document_status": "APPROVED",
+            "comments": "",  # optional — explicitly declined
         },
     }
     deco = build_review_decorations(state)

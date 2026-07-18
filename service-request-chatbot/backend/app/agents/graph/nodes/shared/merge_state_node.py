@@ -97,6 +97,9 @@ _USER_DATE_FIELDS: frozenset[str] = frozenset({
     "fitout_end_date",
 })
 
+# Time-only fields — stored as HH:MM; must NOT pass through _to_date_only.
+_USER_TIME_FIELDS: frozenset[str] = frozenset({"inspectionTime"})
+
 _EXPLICIT_YEAR_RE = re.compile(r"\b(?:19|20)\d{2}\b")
 
 
@@ -153,25 +156,37 @@ def _remap_extracted_to_active_field(
     extracted: dict[str, Any],
     active_field: str | None,
 ) -> dict[str, Any]:
-    """Bind a single bare date extraction to the field the bot just asked for.
+    """Bind a single bare extraction to the field the bot just asked for.
 
     ``load_session`` clears ``missing_fields``, so extraction often guesses the
-    wrong RDD date key (e.g. maps "10th August" → ``fitout_start_date`` when the
-    question was ``actual_handover_date``).  When exactly one date field was
-    extracted and ``active_field`` is a different date field, remap the value.
+    wrong key (e.g. maps "10th August" → ``fitout_start_date`` when the
+    question was ``actual_handover_date``, or maps a name → ``notes`` when the
+    question was ``inspection_done_by``).
+
+    When exactly one non-backend-protected field was extracted and it differs
+    from ``active_field``, remap the value to ``active_field``.  For date
+    fields the existing behaviour is preserved.  For non-date fields the same
+    remap logic now applies so field-update intent routing works correctly.
+
+    Special isolation: ``notes`` and ``comments`` are semantically distinct
+    portal fields — they must not be silently remapped to each other.  If
+    ``active_field`` is ``comments`` and the LLM put the value in ``notes``
+    (or vice-versa), we remap correctly.  However, if both are present we do
+    not remap (multiple candidates → return as-is).
     """
     if not active_field or active_field in BACKEND_PROTECTED_FIELDS:
         return extracted
     if active_field in extracted:
-        return extracted
-    if active_field not in _USER_DATE_FIELDS:
-        return extracted
-
-    date_keys = [k for k in extracted if k in _USER_DATE_FIELDS]
-    if len(date_keys) != 1:
+        # The LLM already mapped to the right field — nothing to remap.
         return extracted
 
-    wrong_key = date_keys[0]
+    # Find all non-backend-protected keys in the extraction.
+    candidate_keys = [k for k in extracted if k not in BACKEND_PROTECTED_FIELDS]
+    if len(candidate_keys) != 1:
+        # Multiple or zero candidates — don't guess; return as-is.
+        return extracted
+
+    wrong_key = candidate_keys[0]
     remapped = dict(extracted)
     remapped[active_field] = remapped.pop(wrong_key)
     return remapped
@@ -207,7 +222,7 @@ async def merge_state_node(state: ServiceRequestState) -> dict[str, Any]:
         if field_name in BACKEND_PROTECTED_FIELDS:
             continue
         if value is not None:
-            if field_name in _USER_DATE_FIELDS:
+            if field_name in _USER_DATE_FIELDS and field_name not in _USER_TIME_FIELDS:
                 value = _to_date_only(value)
             collected[field_name] = value
 
@@ -249,8 +264,11 @@ async def merge_state_node(state: ServiceRequestState) -> dict[str, Any]:
         if new_value is None:
             continue
 
+        # Time fields: keep raw HH:MM, never strip via _to_date_only.
+        if field_name in _USER_TIME_FIELDS:
+            pass  # preserve value as-is
         # Repair hallucinated years on bare dates (no year typed by the user).
-        if (
+        elif (
             can_coerce_year
             and field_name in _USER_DATE_FIELDS
             and isinstance(new_value, str)
@@ -303,6 +321,18 @@ async def merge_state_node(state: ServiceRequestState) -> dict[str, Any]:
     # Only computed when unit_readiness_date is present and the workflow is
     # in the FM_REVIEW stage, and expected_handover_date has not already been set.
     workflow_stage: str = state.get("workflow_stage") or ""
+
+    # Once either notes or comments has been answered (non-None, even empty-string)
+    # in CREATE_SR, auto-satisfy the sibling by setting it to "" so the bot stops
+    # asking for it.  Empty string is accepted as valid for OPTIONAL_FIELDS; this
+    # prevents an infinite loop of asking for the other optional field when the user
+    # has already addressed one of them.  We set "" (not a copy of the value) to
+    # avoid duplicate text in the confirmation card.
+    if workflow_stage == "CREATE_SR":
+        if collected.get("notes") is not None and collected.get("comments") is None:
+            collected["comments"] = ""
+        if collected.get("comments") is not None and collected.get("notes") is None:
+            collected["notes"] = ""
     if (
         workflow_stage == "FM_REVIEW"
         and collected.get("unit_readiness_date")
@@ -327,6 +357,14 @@ async def merge_state_node(state: ServiceRequestState) -> dict[str, Any]:
         )
         if recomputed != collected.get("trading_date"):
             collected["trading_date"] = recomputed
+
+    # ── Auto-default inspectionTime to current time (CREATE_SR) ─────────────
+    # When the user has not provided an inspection time, seed it with the
+    # current wall-clock time (HH:MM) rather than leaving it blank or using
+    # an arbitrary 9:00 AM sentinel.  Recompute only when absent so that an
+    # explicit user-supplied value is never overwritten.
+    if workflow_stage == "CREATE_SR" and not collected.get("inspectionTime"):
+        collected["inspectionTime"] = datetime.datetime.now().strftime("%H:%M")
 
     # Type-first RDD status: Rejected → DISAPPROVED; Other → no status.
     if workflow_stage == "RDD_REVIEW":

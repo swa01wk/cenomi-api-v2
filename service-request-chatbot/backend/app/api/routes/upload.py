@@ -313,7 +313,10 @@ async def upload_document(
     # 5. Platform upload when lease refs are available (sr_id optional for
     #    pre-create MM uploads — classic form behaviour).
     from app.core.config import settings as _settings
-    _in_mock_mode = not bool(_settings.service_request_api_base_url)
+    _in_mock_mode = (
+        not bool(_settings.service_request_api_base_url)
+        or _settings.service_request_use_mock
+    )
 
     if draft_sr_id and not draft_backend.get("lease_id") and not _in_mock_mode:
         draft_backend = await _hydrate_backend_refs_from_platform(

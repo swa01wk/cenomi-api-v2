@@ -38,6 +38,22 @@ class Settings(BaseSettings):
     lease_tenant_api_base_url: str | None = Field(
         default=None, validation_alias="LEASE_TENANT_API_BASE_URL"
     )
+    lease_lookup_use_mock: bool = Field(
+        default=False,
+        validation_alias="LEASE_LOOKUP_USE_MOCK",
+        description=(
+            "Force in-memory mock lease data even when LEASE_TENANT_API_BASE_URL is set. "
+            "Use for local eval runs where the UAT API rejects the chatbot's local JWT."
+        ),
+    )
+    service_request_use_mock: bool = Field(
+        default=False,
+        validation_alias="SERVICE_REQUEST_USE_MOCK",
+        description=(
+            "Force in-memory mock SR state even when SERVICE_REQUEST_API_BASE_URL is set. "
+            "Use for local eval runs where the UAT API rejects the chatbot's local JWT."
+        ),
+    )
     # FILE_UPLOAD_API_BASE_URL is accepted in .env for forward compatibility but
     # is not currently used — file uploads route through SERVICE_REQUEST_API_BASE_URL
     # + PUT /files per the Postman collection.  Keeping the field avoids noisy

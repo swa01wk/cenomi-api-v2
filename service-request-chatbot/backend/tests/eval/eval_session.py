@@ -18,13 +18,25 @@ From the backend/ directory:
 
 Criteria evaluated per turn
 ----------------------------
-1. STATUS          — trace status must be SUCCESS
-2. LATENCY         — warn when total_latency_ms > 5 000 ms
-3. INTENT          — flag UNKNOWN intent after Turn 1 on an active agent
-4. STAGE           — workflow_stage must not regress (only forward or stay same)
-5. EXTRACTION      — flag when no fields were extracted on a field-collection turn
-6. CONFIRMATION    — warn when all fields are present but confirmation_card not issued
-7. SUBMISSION      — verify SR_CREATED stage reached on the final successful turn
+Original criteria (1–7):
+1. STATUS              — trace status must be SUCCESS
+2. LATENCY             — warn when total_latency_ms > 5 000 ms
+3. INTENT              — flag UNKNOWN intent after Turn 1 on an active agent
+4. STAGE               — workflow_stage must not regress (only forward or stay same)
+5. EXTRACTION          — flag when no fields were extracted on a field-collection turn
+6. CONFIRMATION        — warn when all fields are present but confirmation_card not issued
+7. SUBMISSION          — verify SR_CREATED stage reached on the final successful turn
+
+Extended criteria from agent_ui_fixes.md (8–16):
+8.  CANCEL_FLOW        — cancel action without confirmation prompt before completion → FAIL
+9.  NOTES_VS_DESCRIPTION — notes field populated when description was the active field → WARN
+10. ACTIVE_FIELD_BINDING — field extracted does not match active_field on that turn → WARN
+11. COMMENTS_PROMPTED  — all other fields collected but comments never explicitly asked → WARN
+12. RDD_FIELD_ORDER    — actual_handover_date extracted before guideLineLink + rdd_upload_doc_type → WARN
+13. STALE_STATE        — collected_data from previous SR leaks into a new SR intent turn → FAIL
+14. STAGE_COMPLETE_EMITTED — FM/RDD submission does not emit stage_complete → WARN
+15. CANCEL_STATE_CLEARED — after cancel, collected_data is non-empty → FAIL
+16. CONFIRMATION_STATUS_LEAK — confirmation_status=CONFIRMED persists into a new-SR turn → FAIL
 """
 
 from __future__ import annotations
@@ -55,10 +67,29 @@ USER_SUPPLIED_FIELDS = frozenset(
         "description",
         "startDate",
         "endDate",
+        "inspectionTime",
         "inspection_done_by",
         "comments",
         "notes",
+        "guideLineLink",
+        "rdd_upload_doc_type",
+        "document_status",
+        "actual_handover_date",
+        "fitout_start_date",
+        "fitout_end_date",
     }
+)
+
+# RDD date fields that must NOT appear before guideLineLink AND rdd_upload_doc_type
+# are collected (used by the RDD_FIELD_ORDER check).
+_RDD_DATE_FIELDS = frozenset({"actual_handover_date", "fitout_start_date", "fitout_end_date"})
+
+# RDD pre-upload required fields — must both be present before dates are asked.
+_RDD_PRE_UPLOAD_FIELDS = frozenset({"guideLineLink", "rdd_upload_doc_type"})
+
+# Fields that must all be collected before comments can be considered "never prompted".
+_COMMENTS_PREREQUISITE_FIELDS = frozenset(
+    {"description", "startDate", "endDate", "inspectionTime", "inspection_done_by", "notes"}
 )
 
 
@@ -163,6 +194,89 @@ def _confirmation_card_issued(turn_data: dict[str, Any]) -> bool:
         if "confirmation" in out.lower():
             return True
     return False
+
+
+# ---------------------------------------------------------------------------
+# Extended check helpers (Issues 1–7 from agent_ui_fixes.md)
+# ---------------------------------------------------------------------------
+
+
+def _get_collected_data_after(turn_data: dict[str, Any]) -> dict[str, Any]:
+    """Return collected_data from the last AFTER_NODE state snapshot on this turn."""
+    for snap in reversed(turn_data.get("state_snapshots", [])):
+        if snap.get("snapshot_type") == "AFTER_NODE":
+            cd = (snap.get("state") or {}).get("collected_data")
+            if isinstance(cd, dict):
+                return cd
+    return {}
+
+
+def _get_collected_data_before(turn_data: dict[str, Any]) -> dict[str, Any]:
+    """Return collected_data from the first BEFORE_NODE state snapshot on this turn."""
+    for snap in turn_data.get("state_snapshots", []):
+        if snap.get("snapshot_type") == "BEFORE_NODE":
+            cd = (snap.get("state") or {}).get("collected_data")
+            if isinstance(cd, dict):
+                return cd
+    return {}
+
+
+def _get_active_field(turn_data: dict[str, Any]) -> str | None:
+    """Return the active_field set at the END of this turn (after missing_field_node)."""
+    for snap in reversed(turn_data.get("state_snapshots", [])):
+        state = snap.get("state") or {}
+        if "active_field" in state:
+            return state["active_field"]
+    return None
+
+
+def _get_response_ui(turn_data: dict[str, Any]) -> dict[str, Any]:
+    """Return response_ui from the last available state snapshot."""
+    for snap in reversed(turn_data.get("state_snapshots", [])):
+        ui = (snap.get("state") or {}).get("response_ui")
+        if isinstance(ui, dict):
+            return ui
+    return {}
+
+
+def _cancel_action_on_turn(turn_data: dict[str, Any]) -> bool:
+    """True when action_override contained a cancel_sr action on this turn."""
+    trace = turn_data.get("trace", {})
+    action = str(trace.get("action_override") or "").lower()
+    return action in ("cancel_sr",)
+
+
+def _confirmation_prompt_in_output(turn_data: dict[str, Any]) -> bool:
+    """True when the output message contains a cancel-confirmation prompt."""
+    trace = turn_data.get("trace", {})
+    output = (trace.get("output_message") or "").lower()
+    return any(kw in output for kw in ("are you sure", "sure you want", "cannot be undone", "confirm cancel"))
+
+
+def _extracted_fields_this_turn(turn_data: dict[str, Any]) -> set[str]:
+    """Return set of field names extracted by the LLM on this turn."""
+    fields: set[str] = set()
+    for llm in turn_data.get("llm_calls", []):
+        out = llm.get("structured_output") or {}
+        for fname in (out.get("fields") or {}).keys():
+            fields.add(fname)
+    return fields
+
+
+def _workflow_stage_after(turn_data: dict[str, Any]) -> str | None:
+    return turn_data.get("trace", {}).get("workflow_stage_after")
+
+
+def _workflow_stage_before(turn_data: dict[str, Any]) -> str | None:
+    return turn_data.get("trace", {}).get("workflow_stage_before")
+
+
+def _confirmation_status_after(turn_data: dict[str, Any]) -> str | None:
+    """Return confirmation_status from the last after-node state snapshot."""
+    for snap in reversed(turn_data.get("state_snapshots", [])):
+        if snap.get("snapshot_type") == "AFTER_NODE":
+            return (snap.get("state") or {}).get("confirmation_status")
+    return None
 
 
 def _all_user_fields_present(trace: dict[str, Any], turn_data: dict[str, Any]) -> bool:
@@ -273,6 +387,187 @@ def evaluate_turn(
                     te.add("SUBMISSION", Severity.PASS, f"SR submitted successfully — reference: {ref_id}")
                 else:
                     te.add("SUBMISSION", Severity.FAIL, f"SR submission failed: {tc.get('error_message')}")
+
+    # ── 8. CANCEL_FLOW ───────────────────────────────────────────────────────
+    # If cancel_sr action was sent but the output does NOT contain a confirmation
+    # prompt, the cancel flow is broken — agent acted without user confirmation.
+    if _cancel_action_on_turn(turn_data):
+        if _confirmation_prompt_in_output(turn_data):
+            te.add(
+                "CANCEL_FLOW",
+                Severity.PASS,
+                "cancel_sr action triggered a confirmation prompt as expected",
+            )
+        else:
+            output_snippet = (trace.get("output_message") or "")[:120]
+            te.add(
+                "CANCEL_FLOW",
+                Severity.FAIL,
+                f"cancel_sr action did not produce a confirmation prompt — "
+                f"output: \"{output_snippet}\"",
+            )
+
+    # ── 9. NOTES_VS_DESCRIPTION ──────────────────────────────────────────────
+    # If active_field was 'description' but LLM extracted 'notes' (not 'description'),
+    # the description answer was wrongly routed to notes.
+    active_field_before = _get_active_field(turn_data)
+    extracted_this_turn = _extracted_fields_this_turn(turn_data)
+    if (
+        active_field_before == "description"
+        and "notes" in extracted_this_turn
+        and "description" not in extracted_this_turn
+    ):
+        te.add(
+            "NOTES_VS_DESCRIPTION",
+            Severity.WARN,
+            "active_field=description but LLM extracted 'notes' instead of 'description' — "
+            "description answer routed to wrong field",
+        )
+    elif active_field_before == "description" and "description" in extracted_this_turn:
+        te.add(
+            "NOTES_VS_DESCRIPTION",
+            Severity.PASS,
+            "Description field correctly extracted on description turn",
+        )
+
+    # ── 10. ACTIVE_FIELD_BINDING ─────────────────────────────────────────────
+    # If active_field is set and a single different user field was extracted,
+    # the extraction did not bind to the active field.
+    if active_field_before and active_field_before in USER_SUPPLIED_FIELDS and extracted_this_turn:
+        user_extracted = extracted_this_turn & USER_SUPPLIED_FIELDS
+        if user_extracted and active_field_before not in user_extracted and len(user_extracted) == 1:
+            wrong_field = next(iter(user_extracted))
+            te.add(
+                "ACTIVE_FIELD_BINDING",
+                Severity.WARN,
+                f"active_field={active_field_before} but only '{wrong_field}' was extracted — "
+                "possible field binding mismatch (may be caused by notes/description confusion)",
+            )
+        elif active_field_before in (extracted_this_turn & USER_SUPPLIED_FIELDS):
+            te.add(
+                "ACTIVE_FIELD_BINDING",
+                Severity.PASS,
+                f"active_field={active_field_before} correctly extracted",
+            )
+
+    # ── 11. COMMENTS_PROMPTED ────────────────────────────────────────────────
+    # If SR is submitted (SR_CREATED) but comments was never collected,
+    # warn that comments was not explicitly prompted.
+    stage_after = trace.get("workflow_stage_after")
+    if stage_after == "SR_CREATED":
+        cd_before_submit = _get_collected_data_before(turn_data)
+        prereqs_met = all(
+            cd_before_submit.get(f) not in (None, "")
+            for f in _COMMENTS_PREREQUISITE_FIELDS
+        )
+        comments_never_asked = cd_before_submit.get("comments") is None
+        if prereqs_met and comments_never_asked:
+            te.add(
+                "COMMENTS_PROMPTED",
+                Severity.WARN,
+                "SR submitted but comments field was never collected (remained None); "
+                "comments must be explicitly prompted per agent_ui_fixes.md",
+            )
+
+    # ── 12. RDD_FIELD_ORDER ───────────────────────────────────────────────────
+    # In RDD_REVIEW: date field extracted before guideLineLink or rdd_upload_doc_type.
+    stage_before = trace.get("workflow_stage_before")
+    if stage_before == "RDD_REVIEW" and (extracted_this_turn & _RDD_DATE_FIELDS):
+        cd_before_rdd = _get_collected_data_before(turn_data)
+        guideline_present = bool(cd_before_rdd.get("guideLineLink"))
+        doc_type_present = bool(cd_before_rdd.get("rdd_upload_doc_type"))
+        if not guideline_present or not doc_type_present:
+            te.add(
+                "RDD_FIELD_ORDER",
+                Severity.WARN,
+                f"RDD date field(s) {extracted_this_turn & _RDD_DATE_FIELDS} extracted before "
+                f"guideLineLink={'present' if guideline_present else 'MISSING'} / "
+                f"rdd_upload_doc_type={'present' if doc_type_present else 'MISSING'} — "
+                "wrong collection order (expected: guidelines → doc type → dates)",
+            )
+        else:
+            te.add(
+                "RDD_FIELD_ORDER",
+                Severity.PASS,
+                "RDD date field extracted after guidelines and doc type — correct order",
+            )
+
+    # ── 13. STALE_STATE ───────────────────────────────────────────────────────
+    # New CREATE_SR intent turn with non-empty collected_data = stale state leak.
+    intent = trace.get("intent")
+    active_agent_after = trace.get("active_agent")
+    if intent == "CREATE_SR" and active_agent_after is None:
+        cd_after_intent = _get_collected_data_after(turn_data)
+        stale_keys = [
+            k for k in ("lease_code", "description", "startDate")
+            if cd_after_intent.get(k) not in (None, "")
+        ]
+        if stale_keys:
+            te.add(
+                "STALE_STATE",
+                Severity.FAIL,
+                f"New CREATE_SR intent but collected_data still has stale keys: {stale_keys} — "
+                "state not cleared between SRs",
+            )
+
+    # ── 14. STAGE_COMPLETE_EMITTED ────────────────────────────────────────────
+    # After FM approve or RDD submit/final_approve, check stage_complete emitted.
+    _stage_complete_tools = {
+        "service_request_api.fm.patch_approve",
+        "service_request_api.rdd.submit_report",
+    }
+    for tc in (turn_data.get("tool_calls") or []):
+        tool = tc.get("tool_name", "")
+        if tool in _stage_complete_tools and tc.get("success"):
+            response_ui = _get_response_ui(turn_data)
+            if not response_ui.get("stage_complete") and not response_ui.get("workflow_complete"):
+                te.add(
+                    "STAGE_COMPLETE_EMITTED",
+                    Severity.WARN,
+                    f"FM/RDD tool '{tool}' succeeded but response_ui missing "
+                    "stage_complete / workflow_complete — Update button may remain visible on UI",
+                )
+            else:
+                te.add(
+                    "STAGE_COMPLETE_EMITTED",
+                    Severity.PASS,
+                    f"stage_complete / workflow_complete correctly emitted after '{tool}'",
+                )
+
+    # ── 15. CANCEL_STATE_CLEARED ─────────────────────────────────────────────
+    # After confirm_cancel_sr, collected_data must be empty.
+    action_this_turn = str(trace.get("action_override") or "").lower()
+    if action_this_turn == "confirm_cancel_sr":
+        cd_after_cancel = _get_collected_data_after(turn_data)
+        non_empty = {
+            k: v for k, v in cd_after_cancel.items()
+            if v not in (None, "", [], {}) and not k.startswith("_")
+        }
+        if non_empty:
+            te.add(
+                "CANCEL_STATE_CLEARED",
+                Severity.FAIL,
+                f"After confirm_cancel_sr, collected_data is non-empty — "
+                f"stale fields: {list(non_empty.keys())}",
+            )
+        else:
+            te.add(
+                "CANCEL_STATE_CLEARED",
+                Severity.PASS,
+                "collected_data correctly cleared after SR cancellation",
+            )
+
+    # ── 16. CONFIRMATION_STATUS_LEAK ─────────────────────────────────────────
+    # New CREATE_SR intent turn with confirmation_status=CONFIRMED = stale leak.
+    if intent == "CREATE_SR" and active_agent_after is None:
+        conf_status = _confirmation_status_after(turn_data)
+        if conf_status == "CONFIRMED":
+            te.add(
+                "CONFIRMATION_STATUS_LEAK",
+                Severity.FAIL,
+                "confirmation_status=CONFIRMED persists into a new CREATE_SR intent turn — "
+                "stale confirmation from prior SR leaked into new session state",
+            )
 
     return te
 

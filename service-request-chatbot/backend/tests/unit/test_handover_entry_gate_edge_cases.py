@@ -92,27 +92,36 @@ async def test_gate_bypassed_for_sr_created_stage() -> None:
 
 @pytest.mark.asyncio
 async def test_gate_bypassed_when_confirmation_pending() -> None:
-    """If a confirmation card is already showing, do not intercept the message."""
+    """If a confirmation card is already showing, the MM upload gate must not intercept.
+    The confirmation parsing runs first: 'Yes' → CONFIRMED."""
     result = await handover_entry_node(
         _state(
             confirmation_status="PENDING",
             user_message="Yes",
         )
     )
-    # Gate returns None → node continues to other logic, which returns {}
-    assert result == {}
+    # Confirmation parsing intercepts before the gate — 'Yes' → CONFIRMED.
+    # mm_optional_upload_status must NOT have changed (gate did not run).
+    assert result.get("confirmation_status") == "CONFIRMED"
+    collected = result.get("collected_data") or {}
+    assert collected.get("mm_optional_upload_status") != "done"
 
 
 @pytest.mark.asyncio
 async def test_gate_bypassed_for_accept_action_while_confirmation_pending() -> None:
-    """action_override=accept_optional_upload while PENDING must not mutate status."""
+    """action_override=accept_optional_upload while PENDING must not mutate mm status.
+    Confirmation parsing runs first and returns ambiguous-input message."""
     result = await handover_entry_node(
         _state(
             confirmation_status="PENDING",
             action_override="accept_optional_upload",
         )
     )
-    assert result == {}
+    # Confirmation parsing intercepts — ambiguous (no yes/no phrase) → re-prompt.
+    # mm_optional_upload_status must NOT have changed.
+    assert "confirmation_status" not in result or result.get("confirmation_status") != "done"
+    collected = result.get("collected_data") or {}
+    assert collected.get("mm_optional_upload_status") != "done"
 
 
 # ---------------------------------------------------------------------------
@@ -180,14 +189,16 @@ async def test_rdd_agent_no_stage_initialises_create_sr() -> None:
 
 @pytest.mark.asyncio
 async def test_cancel_phrase_handled_before_gate() -> None:
-    """Cancellation check (step 1 & 2 in the node) runs before the MM gate."""
+    """Cancellation check runs before the MM gate — 'cancel this request' triggers
+    cancel_sr confirmation flow (CANCEL_PENDING), not upload status mutation."""
     result = await handover_entry_node(
         _state(user_message="cancel this request")
     )
-    # Node returns cancel patch — status WAITING_FOR_USER with cancel confirmation
+    # cancel_sr triggers CANCEL_PENDING (asks user to confirm cancellation),
+    # OR clears state immediately if no sr_id. Either way, upload must not be marked done.
     status = result.get("status")
     assert status in ("WAITING_FOR_USER", "CANCELLED", "IN_PROGRESS", None)
-    # Most importantly: mm_optional_upload_status must not have changed
+    # Most importantly: mm_optional_upload_status must not have been mutated to "done"
     collected = result.get("collected_data") or {}
     mm = collected.get("mm_optional_upload_status")
     assert mm != "done"  # cancel should not mark upload done

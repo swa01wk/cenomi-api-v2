@@ -46,7 +46,12 @@ VALID INTENTS
 
   CREATE_RDD_SERVICE_REQUEST
       User wants to raise / create a new RDD handover service request.
-      Keywords: create, raise, submit, open, new, initiate, start handover
+      Keywords: create, raise, submit, open, new, initiate, start handover,
+                "handover for <Brand>", "handover for <Brand> <Mall>",
+                "raise a handover for", "I need a handover for",
+                "I want to raise/create/submit a handover"
+      NOTE: Any message containing "handover" together with a brand or location
+      name is ALWAYS CREATE_RDD_SERVICE_REQUEST — even if no prior context exists.
 
   UPDATE_RDD_SERVICE_REQUEST
       User wants to modify or update an existing RDD handover service request.
@@ -166,6 +171,12 @@ and "Recent conversation" in the user content.  Use these to infer continuity:
   • If the user uses cancellation phrases ("cancel", "start over", "restart",
     "different request", "nevermind", "stop"), set intent to UNKNOWN and let
     the node handle re-routing.
+  • CRITICAL — NEVER inherit UNKNOWN: If the "Previously classified intent" is
+    UNKNOWN (typically the result of a cancellation or ambiguity), do NOT inherit
+    it.  Always perform a fresh, independent classification on the new message.
+    A message like "I need to raise a handover for Zara Dubai" that follows a
+    cancellation MUST be classified as CREATE_RDD_SERVICE_REQUEST (confidence ≥ 0.9),
+    not UNKNOWN.
 
 ════════════════════════════════════════════════════════════
 OUTPUT FORMAT — STRICT

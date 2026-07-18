@@ -34,7 +34,7 @@ WorkflowStage = Literal["CREATE_SR", "FM_REVIEW", "RDD_REVIEW"]
 
 WorkflowRole = Literal["MALL_MANAGER", "FM_MANAGER", "DD_ENGINEER"]
 
-ConfirmationStatus = Literal["PENDING", "CONFIRMED", "REJECTED"]
+ConfirmationStatus = Literal["PENDING", "CONFIRMED", "REJECTED", "CANCEL_PENDING"]
 
 FMDocumentType = Literal[
     "SR_HANDOVER_CHECKLIST",
@@ -82,14 +82,10 @@ CREATE_SR_STAGE = StageDefinition(
         "description",
         "startDate",
         "endDate",
+        "inspectionTime",  # optional HH:MM — combined with startDate/endDate in payload
         "inspection_done_by",
-        "notes",          # optional — already in OPTIONAL_FIELDS, never blocks
-        # "comments" intentionally removed from required_fields.
-        # It is still extractable (in EXTRACTABLE_FIELDS) and stored when provided,
-        # but the bot no longer proactively asks for it — "notes" covers the same UX
-        # intent and is the single catch-all optional field for free-form input.
-        # This prevents the agent from asking two nearly-identical optional questions
-        # ("notes" then "comments") before showing the confirmation card.
+        "notes",
+        "comments",
     ),
 )
 
@@ -100,10 +96,7 @@ FM_REVIEW_STAGE = StageDefinition(
         "unit_readiness_date",
         # expected_handover_date is auto-computed as unit_readiness_date + 7 days
         # by merge_state_node. It is NOT asked of the user.
-        # "comments" intentionally removed: same rationale as CREATE_SR — the bot
-        # was asking for comments as a mandatory turn even though it's optional.
-        # FM Manager can provide comments inline; fm_action gates approval, not
-        # the presence of a comments value.
+        "comments",
     ),
     # At least one of these must be uploaded before FM save/approve.
     # Platform FM stage: Checklist, Site survey, Other (no COP checklist).
@@ -118,18 +111,18 @@ RDD_REVIEW_STAGE = StageDefinition(
     stage="RDD_REVIEW",
     role="DD_ENGINEER",
     required_fields=(
-        # Dates first — document upload UI is gated until these are present.
-        "actual_handover_date",
-        "fitout_start_date",
-        "fitout_end_date",
-        # trading_date intentionally removed — auto-computed as fitout_end_date + 8 days
-        # by merge_state_node. It is NOT asked of the user.
+        # Guidelines and doc type first — document upload UI is gated on these.
         "guideLineLink",
         # Type-first upload: Meeting Report / Rejected / Other.
         # document_status is NOT unconditionally required — asked only for Meeting Report.
         "rdd_upload_doc_type",
-        # "comments" intentionally removed — same pattern as CREATE_SR and FM_REVIEW.
-        # RDD PM can provide comments inline; rdd_action gates submission, not comments.
+        # Dates collected after doc type so the upload card can appear before dates.
+        # trading_date intentionally removed — auto-computed as fitout_end_date + 8 days
+        # by merge_state_node. It is NOT asked of the user.
+        "actual_handover_date",
+        "fitout_start_date",
+        "fitout_end_date",
+        "comments",
     ),
     # DR_SR_HANDOVER_REPORT is mandatory; SR_REJECTED_HANDOVER_REPORT and
     # SR_HANDOVER_OTHER are optional additional uploads allowed at this stage.
@@ -191,7 +184,7 @@ USER_SUPPLIED_FIELDS: frozenset[str] = ALLOWED_EXTRACTED_FIELDS - BACKEND_DERIVE
 # ``description`` is included here because users legitimately respond with
 # "no description" — the resulting empty string must not be treated as missing
 # and must not block title auto-generation or the confirmation card.
-OPTIONAL_FIELDS: frozenset[str] = frozenset({"description", "comments", "notes"})
+OPTIONAL_FIELDS: frozenset[str] = frozenset({"description", "comments", "notes", "inspectionTime"})
 
 # ── Document type registries ──────────────────────────────────────────────────
 
@@ -344,6 +337,7 @@ EXTRACTABLE_FIELDS: frozenset[str] = frozenset(
         "description",
         "startDate",
         "endDate",
+        "inspectionTime",   # HH:MM (24-hour); combined with startDate/endDate in payload
         "inspection_done_by",
         "comments",
         "notes",

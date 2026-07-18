@@ -135,8 +135,29 @@ def _parse_lt_display(value: str) -> datetime | None:
         return None
 
 
-def _parse_inspection_datetime(value: str) -> datetime | None:
-    """Parse date-only ISO or full ISO into Asia/Riyadh-aware datetime."""
+def _parse_hhmm(value: str) -> tuple[int, int] | None:
+    """Parse HH:MM (24-hour) or H:MM into (hour, minute), or None on failure."""
+    text = (value or "").strip()
+    if not text:
+        return None
+    m = re.fullmatch(r"(\d{1,2}):(\d{2})", text)
+    if not m:
+        return None
+    hour, minute = int(m.group(1)), int(m.group(2))
+    if 0 <= hour <= 23 and 0 <= minute <= 59:
+        return hour, minute
+    return None
+
+
+def _parse_inspection_datetime(
+    value: str, inspection_time: str | None = None
+) -> datetime | None:
+    """Parse date-only ISO or full ISO into Asia/Riyadh-aware datetime.
+
+    When *inspection_time* is provided (HH:MM from ``collected_data.inspectionTime``),
+    it overrides the time component so the user's explicit inspection time is
+    preserved.  Falls back to ``_DEFAULT_INSPECTION_HOUR`` when absent.
+    """
     text = (value or "").strip()
     if not text:
         return None
@@ -146,11 +167,12 @@ def _parse_inspection_datetime(value: str) -> datetime | None:
             day = datetime.strptime(text, "%Y-%m-%d").date()
         except ValueError:
             return None
-        return datetime.combine(
-            day,
-            time(_DEFAULT_INSPECTION_HOUR, 0, 0),
-            tzinfo=_PORTAL_TZ,
-        )
+        parsed_time = _parse_hhmm(inspection_time or "")
+        if parsed_time:
+            hour, minute = parsed_time
+        else:
+            hour, minute = _DEFAULT_INSPECTION_HOUR, 0
+        return datetime.combine(day, time(hour, minute, 0), tzinfo=_PORTAL_TZ)
 
     normalized = text.replace("Z", "+00:00")
     try:
@@ -159,30 +181,40 @@ def _parse_inspection_datetime(value: str) -> datetime | None:
         return None
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=_PORTAL_TZ)
-    return parsed.astimezone(_PORTAL_TZ)
+    local_dt = parsed.astimezone(_PORTAL_TZ)
+    # Override time when inspectionTime is explicitly provided
+    parsed_time = _parse_hhmm(inspection_time or "")
+    if parsed_time:
+        hour, minute = parsed_time
+        local_dt = local_dt.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    return local_dt
 
 
 def _normalize_inspection_datetime(
     iso_or_date: Any,
     existing_lt: Any = None,
+    inspection_time: str | None = None,
 ) -> tuple[str, str]:
     """Return ``(utc_iso, lt_display)`` for CREATE payload inspection dates.
 
     Chatbot extraction stores date-only ``YYYY-MM-DD``.  The portal CREATE
     contract and DateTimePicker expect UTC ISO plus ``DD/MM/YYYY h:mm AM/PM``.
+
+    When *inspection_time* (HH:MM) is provided it overrides the time component;
+    an existing LT display string is only used when no inspection_time is given.
     """
     lt_raw = "" if existing_lt is None else str(existing_lt).strip()
     iso_raw = "" if iso_or_date is None else str(iso_or_date).strip()
 
-    local_dt = _parse_lt_display(lt_raw) if lt_raw else None
+    local_dt = _parse_lt_display(lt_raw) if (lt_raw and not inspection_time) else None
     if local_dt is None:
-        local_dt = _parse_inspection_datetime(iso_raw)
+        local_dt = _parse_inspection_datetime(iso_raw, inspection_time)
     if local_dt is None:
         return iso_raw, lt_raw
 
     utc = local_dt.astimezone(timezone.utc)
     utc_iso = utc.strftime("%Y-%m-%dT%H:%M:%S.") + f"{utc.microsecond // 1000:03d}Z"
-    lt_display = lt_raw if _parse_lt_display(lt_raw) else _format_lt_display(local_dt)
+    lt_display = _format_lt_display(local_dt)
     return utc_iso, lt_display
 
 
@@ -218,11 +250,21 @@ def build_create_handover_payload(
     """
     _validate_required_keys(data)
 
+    # inspectionTime (HH:MM) from collected_data.
+    # When explicitly provided, it overrides any stored LT display string.
+    # When absent and no LT display exists either, fall back to current wall time
+    # so the payload always carries a meaningful time (not just midnight).
+    inspection_time: str | None = data.get("inspectionTime") or None
+    if not inspection_time and not data.get("startDateLT") and not data.get("endDateLT"):
+        from datetime import datetime as _dt
+        from zoneinfo import ZoneInfo as _ZI
+        inspection_time = _dt.now(_ZI("Asia/Riyadh")).strftime("%H:%M")
+
     start_iso, start_lt = _normalize_inspection_datetime(
-        data["startDate"], data.get("startDateLT")
+        data["startDate"], data.get("startDateLT"), inspection_time=inspection_time
     )
     end_iso, end_lt = _normalize_inspection_datetime(
-        data["endDate"], data.get("endDateLT")
+        data["endDate"], data.get("endDateLT"), inspection_time=inspection_time
     )
 
     doc_ids: list[str] = []

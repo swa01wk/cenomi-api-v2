@@ -183,7 +183,7 @@ class TestShouldOpenExistingSr:
 
 class TestRouteAfterValidation:
     def _all_fields(self) -> dict[str, Any]:
-        """Complete CREATE_SR collected_data."""
+        """Complete CREATE_SR collected_data (includes inspectionTime added in Fix 2)."""
         return {
             "tenant_profile_id": "TP-001", "property_id": "PROP-001",
             "lease_code": "LC-001", "lease_id": "LEASE-001", "brand_id": "BR-001",
@@ -191,6 +191,7 @@ class TestRouteAfterValidation:
             "unit_codes": ["U-01"], "city": "Riyadh", "contracted_area": 150,
             "title": "handover-LC-001-test", "description": "Test",
             "startDate": "2026-07-01", "endDate": "2026-07-03",
+            "inspectionTime": "",   # optional — explicitly declined
             "inspection_done_by": "FM_MANAGER", "notes": "", "comments": "",
         }
 
@@ -225,6 +226,7 @@ class TestRouteAfterValidation:
             workflow_stage="RDD_REVIEW",
             collected_data={
                 "guideLineLink": "http://link",
+                "rdd_upload_doc_type": "DR_SR_HANDOVER_REPORT",
                 "document_status": "APPROVED",
                 "actual_handover_date": "2026-07-15",
                 "fitout_start_date": "2026-07-16",

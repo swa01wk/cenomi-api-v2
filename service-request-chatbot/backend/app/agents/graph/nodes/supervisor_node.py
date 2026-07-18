@@ -189,15 +189,35 @@ def _extract_sr_id_updates(
     state: ServiceRequestState,
     decision: SupervisorDecision,
 ) -> dict[str, Any]:
-    """Parse an SR ref from the user message into ``backend_refs.sr_id``."""
+    """Parse an SR ref from the user message into ``backend_refs.sr_id``.
+
+    Also clears a stale ``sr_id`` when the workflow has no active stage
+    (``workflow_stage`` is ``None`` or ``"CANCELLED"``), preventing a ghost
+    SR from a prior session from contaminating a new request.
+    """
     if decision.intent in _CREATE_NEW_SR_INTENTS:
         return {}
+
+    backend_refs: dict[str, Any] = dict(state.get("backend_refs") or {})
+    workflow_stage: str | None = state.get("workflow_stage")
+
+    # Clear stale sr_id when there is no active workflow — the prior session ended.
+    if workflow_stage in (None, "CANCELLED"):
+        if backend_refs.get("sr_id"):
+            log.info(
+                "supervisor.stale_sr_id_cleared",
+                sr_id=backend_refs["sr_id"],
+                workflow_stage=workflow_stage,
+            )
+            backend_refs = dict(backend_refs)
+            backend_refs["sr_id"] = None
+            return {"backend_refs": backend_refs}
+
     message = state.get("user_message") or ""
     allow_standalone = decision.intent == "CHECK_SERVICE_REQUEST_STATUS"
     parsed = parse_sr_reference(message, allow_standalone=allow_standalone)
     if not parsed:
         return {}
-    backend_refs: dict[str, Any] = dict(state.get("backend_refs") or {})
     if backend_refs.get("sr_id"):
         return {}
     backend_refs["sr_id"] = parsed

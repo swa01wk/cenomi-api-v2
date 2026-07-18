@@ -122,7 +122,7 @@ async def fm_review_entry_node(state: ServiceRequestState) -> dict[str, Any]:
     if action_override == "save_fm_progress":
         log.info("fm_review_entry.action_save_progress")
         backend_refs["fm_action"] = "save_progress"
-        return {"backend_refs": backend_refs}
+        return {"backend_refs": backend_refs, "status": "IN_PROGRESS"}
 
     if action_override == "approve_fm_review":
         collected = dict(state.get("collected_data") or {})
@@ -132,7 +132,7 @@ async def fm_review_entry_node(state: ServiceRequestState) -> dict[str, Any]:
             return build_document_upload_ask_response(state)
         log.info("fm_review_entry.action_approve")
         backend_refs["fm_action"] = "approve"
-        return {"backend_refs": backend_refs}
+        return {"backend_refs": backend_refs, "status": "IN_PROGRESS"}
 
     # ── Single-turn confirm actions — set action AND mark CONFIRMED in one turn ──
     # Required because fm_action is not persisted across turns by the state
@@ -141,7 +141,7 @@ async def fm_review_entry_node(state: ServiceRequestState) -> dict[str, Any]:
     if action_override == "confirm_fm_save":
         log.info("fm_review_entry.action_confirm_fm_save")
         backend_refs["fm_action"] = "save_progress"
-        return {"backend_refs": backend_refs, "confirmation_status": "CONFIRMED"}
+        return {"backend_refs": backend_refs, "confirmation_status": "CONFIRMED", "status": "IN_PROGRESS"}
 
     if action_override in ("confirm_fm_approve", "confirm"):
         collected = dict(state.get("collected_data") or {})
@@ -154,7 +154,7 @@ async def fm_review_entry_node(state: ServiceRequestState) -> dict[str, Any]:
             action=action_override,
         )
         backend_refs["fm_action"] = "approve"
-        return {"backend_refs": backend_refs, "confirmation_status": "CONFIRMED"}
+        return {"backend_refs": backend_refs, "confirmation_status": "CONFIRMED", "status": "IN_PROGRESS"}
 
     if action_override in ("cancel", "cancel_fm"):
         log.info("fm_review_entry.action_cancel")
@@ -203,16 +203,13 @@ async def fm_review_entry_node(state: ServiceRequestState) -> dict[str, Any]:
             return {
                 "backend_refs": backend_refs,
                 "confirmation_status": "CONFIRMED",
+                "status": "IN_PROGRESS",
             }
         if _contains_phrase(user_message, _REJECT_PHRASES):
             log.info("fm_review_entry.confirmation_rejected_text")
             return {
                 "confirmation_status": "REJECTED",
-                "status": "WAITING_FOR_USER",
-                "response_message": (
-                    "No problem — what would you like to change? "
-                    "Please tell me which field to update."
-                ),
+                "status": "IN_PROGRESS",
             }
 
     # ── 3. No action override — fall through to field_extraction ──────────

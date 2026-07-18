@@ -34,6 +34,11 @@ from typing import Any
 from uuid import UUID
 
 from app.agents.graph.state import ServiceRequestState
+from app.agents.services.review_decorations_service import (
+    MM_OPTIONAL_UPLOAD_STATUS_KEY,
+    MM_OPTIONAL_AWAITING_CHOICE,
+    build_mm_optional_upload_offer_decorations,
+)
 from app.agents.services.service_request_api_service import (
     AbstractServiceRequestAPIService,
     get_service_request_api_service,
@@ -272,13 +277,29 @@ async def api_submission_node(state: ServiceRequestState) -> dict[str, Any]:
             )
 
     # ── 10. Return success state updates ──────────────────────────────────────
+    # Present the optional MM upload offer immediately after submission so the
+    # user can attach a supporting document while the SR reference is fresh.
+    collected_data_with_offer = dict(state.get("collected_data") or {})
+    collected_data_with_offer[MM_OPTIONAL_UPLOAD_STATUS_KEY] = MM_OPTIONAL_AWAITING_CHOICE
+
+    offer_message = (
+        f"Your Handover Service Request has been submitted — reference **{result.sr_id}**. "
+        "Would you like to upload an optional supporting document for this request?"
+    )
     return {
         "backend_refs": backend_refs,
-        "status": "SUBMITTED",
+        "status": "WAITING_FOR_USER",
         "workflow_stage": "SR_CREATED",
-        "response_message": (
-            f"Your Handover Service Request has been successfully submitted. "
-            f"Your reference number is **{result.sr_id}**. "
-            "You will be notified of any updates."
-        ),
+        # Clear confirmation so the next FM turn does not see a stale CONFIRMED status.
+        "confirmation_status": None,
+        "confirmation_required": False,
+        "collected_data": collected_data_with_offer,
+        "response_message": offer_message,
+        "response_ui": {
+            "type": "message",
+            "message": offer_message,
+            "stage_complete": False,
+            "workflow_stage": "SR_CREATED",
+        },
+        "response_decorations": build_mm_optional_upload_offer_decorations(),
     }

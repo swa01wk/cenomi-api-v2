@@ -6,7 +6,7 @@ Usage:
     python scripts/seed_users.py
 
 Requires DATABASE_URL to be set (or .env present).
-Safe to run multiple times — skips existing usernames.
+Safe to run multiple times — upserts roles/properties for existing users.
 """
 
 from __future__ import annotations
@@ -97,7 +97,24 @@ async def seed() -> None:
             existing = result.scalar_one_or_none()
 
             if existing is not None:
-                print(f"  SKIP  {data['username']} (already exists, role={existing.role})")
+                # Upsert: always sync role, properties, and admin flag
+                changed: list[str] = []
+                if existing.role != data["role"]:
+                    existing.role = data["role"]
+                    changed.append("role")
+                if existing.unique_property_ids != data["unique_property_ids"]:
+                    existing.unique_property_ids = data["unique_property_ids"]
+                    changed.append("unique_property_ids")
+                if existing.mall_names != data["mall_names"]:
+                    existing.mall_names = data["mall_names"]
+                    changed.append("mall_names")
+                if existing.is_global_admin != data["is_global_admin"]:
+                    existing.is_global_admin = data["is_global_admin"]
+                    changed.append("is_global_admin")
+                if changed:
+                    print(f"  UPDATE {data['username']} (updated: {', '.join(changed)})")
+                else:
+                    print(f"  OK     {data['username']} (role={existing.role}, no changes)")
                 skipped += 1
                 continue
 

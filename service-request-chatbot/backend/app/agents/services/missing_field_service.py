@@ -29,9 +29,16 @@ HANDOVER_FIELD_QUESTIONS: dict[str, str] = {
         "Let them know the system will auto-generate one from the lease code and description "
         "if they do not provide one."
     ),
-    "description": "Ask the user for a short description of this handover request.",
+    "description": (
+        "Ask the user for a short description of this handover request "
+        "(or say 'none' to skip)."
+    ),
     "startDate": "Ask the user when the inspection should start (date).",
     "endDate": "Ask the user when the inspection should end (date).",
+    "inspectionTime": (
+        "Ask the user what time the inspection should start (e.g. '10:00 AM', '14:30'). "
+        "Accept 'skip' or 'none' to use the current time."
+    ),
     "inspection_done_by": (
         "Ask the user who will perform the inspection. "
         "They must choose one of exactly two options: FM Manager or Operations. "
@@ -42,7 +49,7 @@ HANDOVER_FIELD_QUESTIONS: dict[str, str] = {
         "Accept 'none', 'skip', or any similar declination as a valid answer."
     ),
     "comments": (
-        "Ask the user if they have any comments for this handover request. "
+        "Ask the user if they have any additional comments for this handover request. "
         "Accept 'no comments', 'none', 'skip', or any similar declination as a valid answer."
     ),
     # ── FM_REVIEW — FM Manager / Operations ───────────────────────────────────

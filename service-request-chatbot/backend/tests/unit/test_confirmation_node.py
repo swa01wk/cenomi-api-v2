@@ -17,9 +17,11 @@ import pytest
 
 from app.agents.graph.nodes.handover.confirmation_node import (
     _CONFIRMATION_DISPLAY_FIELDS,
+    _CREATE_SR_EDITABLE,
     _build_confirmation_card,
     confirmation_node,
 )
+from app.agents.services.display_formatters import format_field_display_value
 
 
 # ---------------------------------------------------------------------------
@@ -45,6 +47,7 @@ def _minimal_create_sr() -> dict[str, Any]:
         "description": "Tenant handover request",
         "startDate": "2025-03-01",
         "endDate": "2025-09-01",
+        "inspectionTime": "",       # optional — empty string marks it as answered
         "inspection_done_by": "FM_MANAGER",
         "notes": "",
         "comments": "Ready for handover",
@@ -89,17 +92,25 @@ class TestBuildConfirmationCard:
         data = _minimal_create_sr()
         card = _build_confirmation_card(data, "CREATE_SR")
         for field in card["fields"]:
-            assert field["value"] == data.get(field["key"])
+            raw = data.get(field["key"])
+            if field["editable"]:
+                # Editable fields are stored as raw values (no formatting).
+                assert field["value"] == raw
+            else:
+                # Non-editable fields are formatted for display.
+                assert field["value"] == format_field_display_value(field["key"], raw)
 
     def test_lease_code_label(self) -> None:
         card = _build_confirmation_card(_minimal_create_sr(), "CREATE_SR")
         lc = next(f for f in card["fields"] if f["key"] == "lease_code")
         assert lc["label"] == "Lease Code"
 
-    def test_unit_codes_value_is_list(self) -> None:
+    def test_unit_codes_value_is_formatted_string(self) -> None:
+        """unit_codes is non-editable — formatted as comma-joined string for display."""
         card = _build_confirmation_card(_minimal_create_sr(), "CREATE_SR")
         uc = next(f for f in card["fields"] if f["key"] == "unit_codes")
-        assert uc["value"] == ["U-01"]
+        # Non-editable list fields are joined into a display string.
+        assert uc["value"] == "U-01"
 
     def test_contracted_area_numeric_value(self) -> None:
         card = _build_confirmation_card(_minimal_create_sr(), "CREATE_SR")
@@ -154,10 +165,9 @@ class TestConfirmationNodeSkip:
 
     @pytest.mark.asyncio
     async def test_returns_empty_when_one_field_missing(self) -> None:
-        # "comments" was removed from CREATE_SR required_fields (Option B fix).
-        # Use "notes" (which is still required/optional) as the missing field.
+        # inspection_done_by is a non-optional required field — removing it blocks the card.
         data = _minimal_create_sr()
-        del data["notes"]
+        del data["inspection_done_by"]
         state: dict[str, Any] = {"collected_data": data, "workflow_stage": "CREATE_SR"}
         result = await confirmation_node(state)
         assert result == {}
@@ -270,16 +280,20 @@ class TestConfirmationNodeReady:
         state: dict[str, Any] = {"collected_data": data, "workflow_stage": "CREATE_SR"}
         result = await confirmation_node(state)
         fields_by_key = {f["key"]: f["value"] for f in result["response_ui"]["fields"]}
-        assert fields_by_key["lease_code"] == data["lease_code"]
+        # Non-editable fields are display-formatted; editable fields are raw.
+        assert fields_by_key["lease_code"] == data["lease_code"]  # non-editable, no format change
         assert fields_by_key["brand"] == data["brand"]
         assert fields_by_key["mall"] == data["mall"]
-        assert fields_by_key["unit_codes"] == data["unit_codes"]
+        # unit_codes is non-editable — formatted as comma-joined string.
+        assert fields_by_key["unit_codes"] == "U-01"
         assert fields_by_key["city"] == data["city"]
         assert fields_by_key["contracted_area"] == data["contracted_area"]
+        # Editable fields are stored as raw values:
         assert fields_by_key["title"] == data["title"]
         assert fields_by_key["description"] == data["description"]
         assert fields_by_key["startDate"] == data["startDate"]
         assert fields_by_key["endDate"] == data["endDate"]
+        # inspection_done_by is in _CREATE_SR_EDITABLE — raw value preserved.
         assert fields_by_key["inspection_done_by"] == data["inspection_done_by"]
         assert fields_by_key["comments"] == data["comments"]
 
@@ -402,7 +416,8 @@ def _minimal_rdd_review() -> dict[str, Any]:
     """Minimum collected_data that satisfies RDD_REVIEW required fields."""
     return {
         "guideLineLink": "https://cenomi.com/guidelines",
-        "document_status": "APPROVED",   # required non-optional field
+        "rdd_upload_doc_type": "DR_SR_HANDOVER_REPORT",  # required field; Meeting Report path
+        "document_status": "APPROVED",   # required for Meeting Report path
         "actual_handover_date": "2026-07-15",
         "fitout_start_date": "2026-07-16",
         "fitout_end_date": "2026-07-20",
@@ -508,9 +523,14 @@ class TestStageSpecificConfirmationCards:
         data = _minimal_rdd_review()
         card = _build_confirmation_card(data, "RDD_REVIEW")
         fields_by_key = {f["key"]: f["value"] for f in card["fields"]}
+        # guideLineLink is editable — raw value.
         assert fields_by_key["guideLineLink"] == data["guideLineLink"]
+        # actual_handover_date is editable — raw ISO value.
         assert fields_by_key["actual_handover_date"] == data["actual_handover_date"]
-        assert fields_by_key["trading_date"] == data["trading_date"]
+        # trading_date is NOT editable (auto-computed) — displayed as DD/MM/YYYY.
+        assert fields_by_key["trading_date"] == format_field_display_value(
+            "trading_date", data["trading_date"]
+        )
 
     # ── Stage isolation ─────────────────────────────────────────────────────
 

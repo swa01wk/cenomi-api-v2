@@ -400,10 +400,22 @@ _RDD_DATE_FIELDS_FOR_DOCS: tuple[str, ...] = (
     "fitout_end_date",
 )
 
+# Fields that must be collected BEFORE showing the document upload card.
+# With the reordered RDD flow: guideline + doc type first, then dates.
+_RDD_PRE_UPLOAD_FIELDS: tuple[str, ...] = (
+    "guideLineLink",
+    "rdd_upload_doc_type",
+)
+
 
 def _rdd_required_dates_complete(collected: dict[str, Any]) -> bool:
-    """True when RDD date fields needed before document upload are present."""
-    for field in _RDD_DATE_FIELDS_FOR_DOCS:
+    """True when the pre-upload RDD fields (guideline + doc type) are present.
+
+    Per the updated field order, document upload is gated on guideLineLink and
+    rdd_upload_doc_type being collected — not on the date fields (which are
+    asked after doc type).
+    """
+    for field in _RDD_PRE_UPLOAD_FIELDS:
         value = collected.get(field)
         if value is None or value == "":
             return False
@@ -445,8 +457,9 @@ def build_review_decorations(state: dict[str, Any]) -> dict[str, Any]:
 
     # After report submit, the mandatory RDD doc is already on the platform —
     # don't re-prompt uploads while offering Final Approve.
-    # For RDD, also wait until required dates + chosen doc type (and Meeting
-    # Report status when needed) are collected before showing the upload card.
+    # For RDD, wait until guideLineLink + rdd_upload_doc_type are collected
+    # (and document_status for Meeting Report) before showing the upload card.
+    # Dates are collected AFTER doc type per the updated RDD field order.
     show_docs = not (stage == "RDD_REVIEW" and (rdd_status or "").upper() == "REPORT_SUBMITTED")
     if stage == "RDD_REVIEW" and not _rdd_required_dates_complete(collected):
         show_docs = False
@@ -528,13 +541,13 @@ def build_mm_optional_upload_offer_decorations() -> dict[str, Any]:
 
 
 def build_create_sr_attachment_decorations(state: dict[str, Any]) -> dict[str, Any]:
-    """Optional MM attachment card during CREATE_SR after user accepts the offer.
+    """Optional MM attachment card during CREATE_SR / SR_CREATED after user accepts the offer.
 
     Shown only when ``mm_optional_upload_status == awaiting_upload``.
     Does not block confirmation — attachments remain optional.
     """
     stage: str = state.get("workflow_stage") or "CREATE_SR"
-    if stage != "CREATE_SR":
+    if stage not in ("CREATE_SR", "SR_CREATED"):
         return {}
 
     collected: dict[str, Any] = dict(state.get("collected_data") or {})

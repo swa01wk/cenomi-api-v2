@@ -39,11 +39,6 @@ from app.agents.services.resource_picker_decorations import (
     should_browse_leases,
 )
 from app.agents.services.review_decorations_service import (
-    MM_OPTIONAL_AWAITING_CHOICE,
-    MM_OPTIONAL_AWAITING_UPLOAD,
-    MM_OPTIONAL_DONE,
-    MM_OPTIONAL_UPLOAD_STATUS_KEY,
-    build_mm_optional_upload_waiting_response,
     merge_decorations,
 )
 from app.observability.decorators import trace_node
@@ -113,26 +108,16 @@ def _with_mm_optional_offer_after_lease(
     state: ServiceRequestState,
     enriched: dict[str, Any],
 ) -> dict[str, Any]:
-    """After lease resolve: offer optional MM upload (Yes/No) unless already done."""
-    status = enriched.get(MM_OPTIONAL_UPLOAD_STATUS_KEY)
-    if status not in (
-        MM_OPTIONAL_AWAITING_CHOICE,
-        MM_OPTIONAL_AWAITING_UPLOAD,
-        MM_OPTIONAL_DONE,
-    ):
-        enriched = {**enriched, MM_OPTIONAL_UPLOAD_STATUS_KEY: MM_OPTIONAL_AWAITING_CHOICE}
+    """After lease resolve: return enriched data and continue to field collection.
 
-    if enriched.get(MM_OPTIONAL_UPLOAD_STATUS_KEY) == MM_OPTIONAL_DONE:
-        return {
-            "collected_data": enriched,
-            "lease_matches": [],
-            "status": "IN_PROGRESS",
-        }
-
+    The MM upload offer is seeded post-submission by api_submission_node (not
+    here) so that the offer never fires during CREATE_SR field collection.
+    """
     return {
-        **build_mm_optional_upload_waiting_response(state, collected=enriched),
+        "collected_data": enriched,
         "lease_matches": [],
         "selected_lease": None,
+        "status": "IN_PROGRESS",
     }
 
 

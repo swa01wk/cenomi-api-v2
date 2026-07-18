@@ -25,6 +25,7 @@ def _rdd_base_collected(**extra: object) -> dict:
         "fitout_start_date": "2026-07-10",
         "fitout_end_date": "2026-08-01",
         "guideLineLink": "https://example.com/guidelines",
+        "comments": "",  # optional but now in required_fields; empty = explicitly declined
     }
     data.update(extra)
     return data

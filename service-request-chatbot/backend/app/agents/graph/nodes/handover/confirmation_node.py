@@ -327,17 +327,26 @@ async def confirmation_node(state: ServiceRequestState) -> dict[str, Any]:
         documents = list(state.get("documents") or [])
         fm_action_raw = backend_refs.get("fm_action")
         if not fm_action_raw:
+            if not is_fm_review_ready(collected_data, documents):
+                logger.info(
+                    "confirmation_node: FM fields complete — showing upload/review turn "
+                    "(no fm_action yet, docs not ready)"
+                )
+                return build_document_upload_ask_response(state)
+            # All conditions met; proceed to show the confirmation card.
+            # _build_confirmation_card defaults confirmAction to confirm_fm_approve
+            # so the next turn sets fm_action=approve via the single-turn confirm path.
             logger.info(
-                "confirmation_node: FM fields complete — showing upload/review turn "
-                "(no fm_action yet)"
+                "confirmation_node: FM fields + docs ready, no fm_action — "
+                "showing confirmation card (confirm_fm_approve will set it)"
             )
-            return build_document_upload_ask_response(state)
-        fm_action = str(fm_action_raw).lower()
-        if fm_action == "approve" and not is_fm_review_ready(collected_data, documents):
-            logger.info(
-                "confirmation_node: FM approve blocked — missing documents; asking for upload"
-            )
-            return build_document_upload_ask_response(state)
+        else:
+            fm_action = str(fm_action_raw).lower()
+            if fm_action == "approve" and not is_fm_review_ready(collected_data, documents):
+                logger.info(
+                    "confirmation_node: FM approve blocked — missing documents; asking for upload"
+                )
+                return build_document_upload_ask_response(state)
 
     logger.info(
         "confirmation_node: all required fields present for stage=%s — generating confirmation card",

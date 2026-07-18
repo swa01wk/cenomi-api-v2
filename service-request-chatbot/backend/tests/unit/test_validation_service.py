@@ -565,6 +565,7 @@ class TestValidationServiceDraft:
             "description": "Test description",
             "startDate": "2025-01-01",
             "endDate": "2025-06-01",
+            "inspectionTime": "",  # optional — explicitly declined (Fix 2)
             "inspection_done_by": "FM_MANAGER",
             "notes": "",
             "comments": "All good",
