@@ -223,14 +223,19 @@ Default password for all seeded users: **`test1234`**
 
 ## Implemented features
 
-- **Full RDD Handover lifecycle** — CREATE_SR → FM_REVIEW → RDD_REVIEW → SR_COMPLETED, all three phases tested (47 eval scenarios, 1,387 unit tests passing)
+- **Full RDD Handover lifecycle** — CREATE_SR → FM_REVIEW → RDD_REVIEW → SR_COMPLETED, all three phases tested (99 eval scenarios, 7 tiers, ~1,400 unit tests passing)
 - **Work Permit SR flow** — conversational single-stage creation
 - **MSP Help Agent** — LangGraph-backed supervisor + FAQ answering via Azure AI Search RAG, SSE streaming
 - **Lease lookup** — external API or built-in stateful mock (e.g. lease `t0105712`)
 - **Field extraction, validation, merge, and missing-field re-prompting**
+- **Inspection time field** — `inspectionTime` collected and preserved through to ISO 8601 payload timestamp
+- **Field intent disambiguation** — active-field remapping for all user fields (not just dates); prevents `inspection_done_by` from being written to `notes`
 - **Confirmation gate** — keyword + action_override guard before any outbound SR call
+- **Cancel SR workflow** — `cancel_sr` intent path with CANCEL_PENDING → platform PATCH `status=CANCELLED` → emits `cancelled=true`
 - **Document upload** — platform `PUT /files` integration; FM + RDD document buckets tracked across turns; mock mode supported
+- **MM optional upload** — offered only after SR submission and all required fields collected
 - **SR status sync** — `sr_status_sync_node` auto-advances lifecycle stage from platform `service_request_operations`
+- **UI contract signals** — `stage_complete`, `workflow_complete`, `cancelled` emitted in `response_ui` for frontend state binding
 - **JWT authentication + RBAC** — shadow mode or fully enforced; role names expanded to permissions; 21 RBAC tests
 - **Injection guard** — scans every inbound user message before DB write
 - **Full observability** — per-turn traces, LLM/tool call records, state snapshots, diffs, metrics, user feedback
@@ -287,20 +292,39 @@ Default password for all seeded users: **`test1234`**
 |----------|-------------|
 | [`service-request-chatbot/docs/help-agent-validation.md`](service-request-chatbot/docs/help-agent-validation.md) | Help Agent / MSP integration contract and alignment gap table |
 | [`service-request-chatbot/docs/client-demo-script.md`](service-request-chatbot/docs/client-demo-script.md) | End-to-end client demo walkthrough |
-| [`REPORT.md`](REPORT.md) | UAT readiness report — Help Agent + RDD lifecycle, test coverage, live-platform checklist |
+| [`service-request-chatbot/docs/eval-howto.md`](service-request-chatbot/docs/eval-howto.md) | Local eval workflow — running all 7 tiers, interpreting results |
+| [`docs/reports/REPORT.md`](docs/reports/REPORT.md) | UAT readiness report (Help Agent + RDD lifecycle)
 | [`HANDOVER.md`](HANDOVER.md) | Developer handover document |
-| [`STAKEHOLDER_REPORT.md`](STAKEHOLDER_REPORT.md) | Stakeholder-facing project report |
+| [`docs/reports/STAKEHOLDER_REPORT.md`](docs/reports/STAKEHOLDER_REPORT.md) | Stakeholder-facing project report |
 | [`RELEASE_NOTES.md`](RELEASE_NOTES.md) | Version history and change log |
+| [`docs/CHANGELOG.md`](docs/CHANGELOG.md) | Detailed per-file diff — v1.3.0 → v1.4.0 |
 
 ---
 
 ## Known gaps / remaining work
 
+### Backend (open)
+
 - **Gap 6 — Platform status sync field names:** `sr_status_sync_node` field mapping needs one-time verification against a live platform `GET /service-requests/{sr_id}` response (~30 min once credentials are available)
-- **S32 — Multiple SRs in same session:** After SR1 is submitted, `sr_status_sync_node` detects the SR advancing to FM_REVIEW and routes the whole session there, preventing SR2 from starting. Session state needs to clear `sr_id` when a new CREATE intent is detected after a completed SR.
-- **Redis session caching:** Redis is connected but not yet used for caching — state loads from PostgreSQL each turn (performance optimisation, not a functional gap)
+- **S32 — Multiple SRs in same session:** After SR1 is submitted, `sr_status_sync_node` routes the session to FM_REVIEW, preventing SR2 from starting; `sr_id` needs to be cleared when a new CREATE intent is detected after completion
+- **S35/S37 — Cancel flow confirmation card:** Cancel SR eval scenario fixtures need refinement for the CANCEL_PENDING → confirmation card signal
+- **Redis session caching:** Redis is connected but not yet used for caching (performance optimisation only)
 - **True SSE streaming:** Current streaming is pseudo (full message as one token event); real token-level streaming requires LangGraph/LLM gateway changes
-- **CI/CD pipeline:** `./run-live-tests.sh` is the manual gate; a GitHub Actions workflow is the next step
+- **CI/CD pipeline:** `./run-live-tests.sh` is the manual gate; an Azure DevOps / GitHub Actions pipeline is the next step
+
+### Frontend (pending — agent already emits correct signals)
+
+| # | Item | Agent signal to consume |
+|---|---|---|
+| 1 | Unit Code not populated on SR form | `response.state.draft_preview.unit_codes` |
+| 2 | Title not shown on SR form | `response.state.draft_preview.title` |
+| 3 | Notes not reflected on form | `response.state.draft_preview.notes` |
+| 4 | Cancel SR button + form close | `response.ui.cancelled === true` |
+| 5 | FM Update/Save buttons hidden after approval | `response.ui.stage_complete === true` |
+| 6 | RDD Confirm button shown after document upload | `response.ui.type === "confirmation_card"` |
+| 7 | RDD action buttons hidden after SR_COMPLETED | `response.ui.workflow_complete === true` |
+
+See [`docs/fix-notes/fix_verification_status.md`](docs/fix-notes/fix_verification_status.md) for the full signal reference table.
 
 ---
 

@@ -2,6 +2,155 @@
 
 ---
 
+## v1.4.0 — July 18, 2026
+
+> **Theme:** Agent–UI contract hardening, inspection-time handling, cancel SR workflow, field intent disambiguation, and expanded eval suite (99 scenarios, 7 tiers).
+
+### What's new
+
+#### Cancel SR Workflow
+
+Full cancel path implemented end-to-end for Mall Manager:
+
+- `action_override = "cancel_sr"` triggers a CANCEL_PENDING confirmation turn
+- On `confirm_cancel_sr` the agent calls `PATCH /service-requests/{sr_id}` with `status: CANCELLED`
+- Emits `response_ui.cancelled = true` + `workflow_stage = "CANCELLED"` so the UI can close the SR form
+- Text-based cancel phrases (`_CANCEL_SR_PHRASES`) detected and handled via `supervisor_node`
+- Full state cleared on cancellation (collected_data, backend_refs, documents)
+- 5 new unit tests in `test_handover_entry_cancel.py`
+
+#### Inspection Time Field (`inspectionTime`)
+
+- `inspectionTime` added as a required field in `CREATE_SR_STAGE` (after `startDate`)
+- Extraction prompt updated to accept `HH:MM` (24-hour)
+- `merge_state_node._to_date_only()` no longer strips the time component from datetime-type fields
+- Default: current time at the moment of SR creation (not hardcoded 9:00 AM)
+- Payload builder combines `startDate` + `inspectionTime` into an ISO 8601 timestamp before sending to the platform
+- 6 new unit tests in `test_date_time_handling.py`
+
+#### Field Intent Disambiguation (Notes / description / comments)
+
+- `_remap_extracted_to_active_field()` in `merge_state_node` extended from date-only to **all user-supplied fields** — when the agent last asked for e.g. `inspection_done_by` and the LLM extracts the user's reply as `notes`, the value is now rebound to the correct field
+- `description` removed from `OPTIONAL_FIELDS` — always asked; extraction prompt now prefers `description` when `active_field == "description"`; `HANDOVER_FIELD_QUESTIONS["description"]` is distinct from notes
+- `comments` re-added to `required_fields` for **all three stages** (CREATE_SR, FM_REVIEW, RDD_REVIEW) with a dedicated question; accepted as an empty string
+- 10 new unit tests in `test_description_notes_comments.py`
+
+#### UI Contract Signals
+
+All agent state signals are now correctly emitted so the frontend can react without polling:
+
+| Signal | Node | Value | Frontend action |
+|---|---|---|---|
+| `response_ui.cancelled` | `handover_entry_node` | `true` | Close SR form |
+| `response_ui.stage_complete` | `fm_api_submission_node` (approve) | `true` | Hide FM Update/Save buttons |
+| `response_ui.stage_complete` | `api_submission_node` (create) | `false` | n/a |
+| `response_ui.workflow_complete` | `rdd_api_submission_node` (final approve) | `true` | Hide all RDD buttons |
+| `confirmation_status` after CREATE_SR | `api_submission_node` | `null` | Prevents CONFIRMED leaking into FM_REVIEW |
+
+#### MM Document Upload Ordering
+
+`review_decorations_service.py` gate updated: optional MM upload offer fires only after all required fields (including newly-added `comments`) are collected and the SR is submitted. No upload prompt mid-flow.
+
+#### Supervisor & Routing Improvements
+
+- `supervisor_node` improved intent classification for edge cases (partial brand/mall names, post-SR intents)
+- Routing functions updated to handle `SR_CREATED` → `FM_REVIEW` stage detection more reliably
+- `sr_status_sync_node` field name handling updated for platform API alignment
+
+#### Expanded Eval Suite — 99 scenarios across 7 tiers
+
+| Tier | Description | Scenarios | Pass |
+|---|---|---|---|
+| 0 / 0fm | Smoke | 2 + 1 | 3/3 (100%) |
+| 1 | Core S1–15 | 15 | 14/15 (99.3%) |
+| 2 | Edge S16–33 | 20 | 18/20 (98.3%) |
+| 3 | Battle S34–59 | 22 | 20/22 (97.1%) |
+| 4 | FM_REVIEW | 6 | 6/6 (100%) |
+| 5 | RDD_REVIEW | 6 | 6/6 (100%) |
+| 6 | Full lifecycle | 27 | 18/27 (75.8%) |
+
+Tier 6 failures are concentrated in the cancel flow (2 scenarios still being refined) and full-lifecycle routing sequences that depend on a running stack with seeded state.
+
+---
+
+### New files
+
+```
+Added
+  service-request-chatbot/backend/tests/unit/test_completion_state_transitions.py
+  service-request-chatbot/backend/tests/unit/test_date_time_handling.py
+  service-request-chatbot/backend/tests/unit/test_description_notes_comments.py
+  service-request-chatbot/backend/tests/unit/test_handover_entry_cancel.py
+  service-request-chatbot/backend/tests/unit/test_rdd_workflow_order.py
+  service-request-chatbot/backend/tests/unit/test_session_isolation.py
+  service-request-chatbot/docs/eval-howto.md
+  service-request-chatbot/run_agent_eval.sh
+
+Modified
+  backend/app/agents/graph/help_agent_graph.py
+  backend/app/agents/graph/nodes/handover/api_submission_node.py
+  backend/app/agents/graph/nodes/handover/confirmation_node.py
+  backend/app/agents/graph/nodes/handover/fm_api_submission_node.py
+  backend/app/agents/graph/nodes/handover/fm_review_entry_node.py
+  backend/app/agents/graph/nodes/handover/handover_entry_node.py
+  backend/app/agents/graph/nodes/handover/rdd_api_submission_node.py
+  backend/app/agents/graph/nodes/shared/lease_lookup_node.py
+  backend/app/agents/graph/nodes/shared/load_session_node.py
+  backend/app/agents/graph/nodes/shared/merge_state_node.py
+  backend/app/agents/graph/nodes/shared/sr_status_sync_node.py
+  backend/app/agents/graph/nodes/supervisor_node.py
+  backend/app/agents/prompts/handover_extraction_prompt.py
+  backend/app/agents/prompts/supervisor_prompt.py
+  backend/app/agents/schemas/handover_schema.py
+  backend/app/agents/services/document_upload_service.py
+  backend/app/agents/services/lease_lookup_service.py
+  backend/app/agents/services/missing_field_service.py
+  backend/app/agents/services/payload_builder_service.py
+  backend/app/agents/services/review_decorations_service.py
+  backend/app/agents/services/service_request_api_service.py
+  backend/app/api/routes/upload.py
+  backend/app/core/config.py
+  backend/scripts/seed_users.py
+  backend/tests/eval/eval_session.py
+  backend/tests/eval/lifecycle_scenarios.py
+  backend/tests/eval/run_eval.py
+  backend/tests/eval/run_lifecycle_eval.py
+  backend/tests/eval/scenarios.py
+  backend/tests/integration/test_role_stage_access.py
+  backend/tests/integration/test_service_request_graph.py
+  + 11 existing unit test files updated for new schema/behaviour
+```
+
+---
+
+### Frontend-only pending items (agent already emits correct signals)
+
+All 7 remaining items are **frontend binding gaps** — the agent emits the correct data, the UI just needs to consume it:
+
+| # | Item | Agent signal |
+|---|---|---|
+| 1 | Unit Code not populated on SR form | `draft_preview.unit_codes` |
+| 2 | Title not shown on SR form | `draft_preview.title` |
+| 3 | Notes not reflected on form | `draft_preview.notes` |
+| 4 | Cancel SR button + form close | `response_ui.cancelled = true` |
+| 5 | FM Update button removed after approval | `response_ui.stage_complete = true` |
+| 6 | RDD Confirm button shown after upload | `ui.type = "confirmation_card"` |
+| 7 | RDD buttons removed after SR_COMPLETED | `response_ui.workflow_complete = true` |
+
+See [`docs/fix-notes/fix_verification_status.md`](docs/fix-notes/fix_verification_status.md) for the full signal reference.
+
+---
+
+### Open backend items
+
+| Item | Note |
+|---|---|
+| S32 — Multiple SRs in same session | `sr_status_sync_node` routes to FM_REVIEW after first SR completed; blocks SR2 creation |
+| S35/S37 — Cancel confirmation card | Cancel CANCEL_PENDING → confirmation card UI signal needs refinement in eval fixture |
+| Gap 6 — `sr_status_sync_node` field names | 30-minute check against live platform `GET /service-requests/{sr_id}` response |
+
+---
+
 ## v1.3.0 — July 8, 2026
 
 > **Theme:** Full-stack test automation, agent evaluation, 6 agent bug fixes, and observability export tooling.

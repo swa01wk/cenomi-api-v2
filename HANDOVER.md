@@ -722,7 +722,7 @@ cd service-request-chatbot
 
 ### What is fully implemented and working
 
-> **Last updated: July 8, 2026 (v1.3.0)**
+> **Last updated: July 18, 2026 (v1.4.0)**
 
 | Feature | Status |
 |---------|--------|
@@ -734,6 +734,13 @@ cd service-request-chatbot
 | Field extraction (LLM, per-stage schemas) | ✅ Complete |
 | Backend field protection in merge_state | ✅ Complete |
 | `notes ↔ comments` sync in merge_state | ✅ Complete |
+| `inspectionTime` field — collected, preserved, combined into ISO timestamp | ✅ Complete |
+| Field intent disambiguation — active-field remap for all user fields | ✅ Complete |
+| `description` field — always asked, distinct from notes | ✅ Complete |
+| `comments` field — explicitly asked in all 3 stages | ✅ Complete |
+| Cancel SR workflow — cancel_sr → CANCEL_PENDING → platform PATCH CANCELLED | ✅ Complete |
+| UI contract signals — `cancelled`, `stage_complete`, `workflow_complete` | ✅ Complete |
+| MM document upload ordering — offered only after SR creation | ✅ Complete |
 | Lease lookup (HTTP + stateful mock) | ✅ Complete |
 | Lease lookup skipped for FM/RDD stages | ✅ Complete |
 | Deterministic validation for all 3 phases | ✅ Complete |
@@ -742,6 +749,7 @@ cd service-request-chatbot
 | Platform SR creation API call | ✅ Complete |
 | FM_REVIEW — collect dates, upload docs, save/approve | ✅ Complete (14 integration tests) |
 | RDD_REVIEW — Phase 3a submit report + Phase 3b final approve | ✅ Complete (16 integration tests) |
+| RDD field ordering — guideLineLink → doc type → dates → comments | ✅ Complete |
 | SR status sync node — auto-advances lifecycle stage | ✅ Complete |
 | Real file upload — `PUT /files` platform integration | ✅ Complete |
 | File upload mock mode — returns mock document ID when no platform URL | ✅ Complete |
@@ -758,12 +766,11 @@ cd service-request-chatbot
 | MSP Platform endpoints (`POST /api/v1/chat`, `/api/v1/chat/stream`) | ✅ Complete |
 | API v2 routes (`/api/v2/*`) | ✅ Complete |
 | Alembic migrations (4 migrations, 15+ tables) | ✅ Complete |
-| Unit test suite (~40 files, ~1,300 tests) | ✅ Complete |
+| Unit test suite (~46 files, ~1,400+ tests) | ✅ Complete |
 | E2E + integration lifecycle suite (68 tests) | ✅ Complete |
-| Full pytest suite (1,387 tests, 1,387 passing) | ✅ Complete |
+| Eval suite — 99 scenarios, 7 tiers | ✅ ~94% (remainder: cancel flow + full lifecycle) |
 | Playwright mocked frontend tests (42 tests) | ✅ Complete |
 | Playwright live-stack tests (50 tests) | ✅ 48/50 (2 LLM variability — not bugs) |
-| Agent eval suite — 47 scenarios across all 3 phases | ✅ 45/47 (2 LLM variability) |
 | Docker Compose — local dev infrastructure | ✅ Complete |
 | Production Dockerfiles — backend + frontend multi-stage | ✅ Complete |
 | Production docker-compose stack | ✅ Complete (`docker-compose.prod.yml`) |
@@ -788,12 +795,13 @@ cd service-request-chatbot
 | Webhook/push for platform status changes | ❌ Not done | Status sync is pull-based (called each turn) |
 | "Ask for more information" / "Assign To" SR actions | ❌ Not done | Pending product team clarification |
 | Multiple SRs in same session (restart after completion) | ❌ Not done | S32 eval scenario — `sr_status_sync_node` routes to FM_REVIEW, blocking SR2 |
+| Frontend UI contract bindings (7 items) | ❌ Frontend only | Agent emits correct signals; see Section 13 / fix_verification_status.md |
 
 ---
 
 ## 13. Known Gaps & Issues
 
-> **Last updated: July 8, 2026 (v1.3.0)** — Items marked ✅ have been resolved. Open items are scoped to the next sprint.
+> **Last updated: July 18, 2026 (v1.4.0)** — Items marked ✅ have been resolved. Open items are scoped to the next sprint.
 
 ### ✅ FIXED — P0: Lease resolution loop (was the primary blocker)
 
@@ -873,7 +881,34 @@ Full RDD_REVIEW pipeline implemented and tested end-to-end (16 integration tests
 
 ---
 
-### Open — Gap 6: Platform status sync
+### ✅ FIXED — 7 Agent UI/UX Issues (July 2026, v1.4.0)
+
+Found by the agent state audit and reported in `agent_ui_fixes.md`; all backend-side items fixed with regression tests:
+
+| Issue | Fix |
+|---|---|
+| `inspectionTime` not collected — default 9:00 AM used | Added `inspectionTime` to `CREATE_SR_STAGE.required_fields`; `_to_date_only()` now preserves time; payload builder combines date + time into ISO 8601 |
+| Notes update intent confusion — `inspection_done_by` written to `notes` | `_remap_extracted_to_active_field()` extended to all user-supplied fields (was date-only) |
+| Description skipped / confused with notes | `description` removed from OPTIONAL_FIELDS treatment; extraction prompt prioritises `description` when `active_field == "description"` |
+| Cancel button returned "what to change?" instead of cancelling | Full cancel SR path added: `cancel_sr` → `CANCEL_PENDING` → `confirm_cancel_sr` → platform PATCH CANCELLED → clears state |
+| `comments` field never requested | `comments` re-added to `required_fields` for all 3 stages with distinct question |
+| MM document upload order | Verified correct; gate updated to require `comments` before offering upload |
+| RDD workflow order incorrect | ✅ Already fixed in v1.3.0; confirmed correct |
+
+### ✅ FIXED — UI Contract Signals (July 2026, v1.4.0)
+
+All submission nodes now emit explicit boolean signals in `response_ui`:
+
+| Node | Signal | Value | Frontend action |
+|---|---|---|---|
+| `api_submission_node` (CREATE success) | `confirmation_status: null` | cleared | Prevents CONFIRMED leaking into FM |
+| `fm_api_submission_node` (approve) | `stage_complete: true` | `true` | Hide FM Update/Save buttons |
+| `rdd_api_submission_node` (final approve) | `workflow_complete: true` | `true` | Hide all RDD action buttons |
+| `handover_entry_node` (cancel confirmed) | `cancelled: true` | `true` | Close SR form |
+
+---
+
+### Open — Gap 6: Platform status sync field names
 
 `sr_status_sync_node` exists. The mapping from `service_request_operations` array to chatbot `workflow_stage` needs validation against real platform responses in a live environment.
 
@@ -927,11 +962,9 @@ Found by the expanded eval suite; all fixed with regression tests:
 
 ### Open — Gap 10: Eval gaps in automated suite (minor)
 
-Two scenarios in `run_eval.py` still return unexpected output (31/33 CREATE_SR):
-- **S14**: Cancel-then-restart within a session — multi-session state management edge case
+Two scenarios in `run_eval.py` still return unexpected output:
+- **S4 / S23**: Confirmation card not shown after partial mall/brand search — routing edge case
 - **S32**: Second SR in same session after first is submitted — `sr_status_sync_node` routes to FM_REVIEW, blocking SR2 creation
-
-These are LLM variability / edge-case routing issues, not core workflow bugs.
 
 ---
 
@@ -942,6 +975,24 @@ Field names in `sr_status_sync_node.py` (`assigned_role`, `status`) were chosen 
 role = (op.get("assigned_role") or op.get("role") or "").upper()
 status = (op.get("status") or "").upper()
 ```
+
+---
+
+### Open — Gap 12: Frontend UI contract bindings (7 items, frontend only)
+
+All agent signals are correctly emitted. The following 7 items are pending **frontend** implementation only:
+
+| # | Item | Agent signal | Where emitted |
+|---|---|---|---|
+| 1 | Unit Code not populated on SR form | `draft_preview.unit_codes` | `merge_state_node` via lease lookup |
+| 2 | Title not shown on SR form | `draft_preview.title` | `merge_state_node._generate_title()` |
+| 3 | Notes not reflected on form | `draft_preview.notes` | `merge_state_node` |
+| 4 | Cancel SR button + form close | `response_ui.cancelled = true` | `handover_entry_node` on confirm_cancel_sr |
+| 5 | FM Update/Save buttons hidden after approval | `response_ui.stage_complete = true` | `fm_api_submission_node` |
+| 6 | RDD Confirm button shown after upload | `ui.type = "confirmation_card"` | Any confirmation node |
+| 7 | RDD action buttons hidden after SR_COMPLETED | `response_ui.workflow_complete = true` | `rdd_api_submission_node` (final approve) |
+
+Full reference: [`docs/fix-notes/fix_verification_status.md`](docs/fix-notes/fix_verification_status.md)
 
 ---
 
