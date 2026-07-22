@@ -102,6 +102,7 @@ class TurnResult:
 class ScenarioResult:
     scenario: Scenario
     turn_results: list[TurnResult] = field(default_factory=list)
+    session_id: Optional[str] = None
 
     @property
     def passed(self) -> bool:
@@ -372,6 +373,7 @@ async def run_scenario(
             if not passed:
                 break
 
+    result.session_id = session_id
     return result
 
 
@@ -558,6 +560,7 @@ def _to_json(results: list[ScenarioResult]) -> list[dict[str, Any]]:
             "scenario_tags": sc.tags,
             "goal": sc.goal,
             "passed": res.passed,
+            "session_id": res.session_id,
             "turns_passed": res.turns_passed,
             "turns_total": res.turns_total,
             "turns_expected": res.turns_expected,

@@ -473,6 +473,116 @@ for tier_id, desc, stem, is_lifecycle in TIER_INFO:
         if not sc.get("passed"):
             all_failed_scenarios.append((tier_id, sc))
 
+# ── Per-scenario log extraction ───────────────────────────────────────────────
+import re as _re
+
+logs_dir = results_dir / "logs"
+logs_dir.mkdir(exist_ok=True)
+
+_STEM_MAP = {
+    "0":   "tier_0_smoke",
+    "0fm": "tier_0_smoke_fm",
+    "1":   "tier_1_core",
+    "2":   "tier_2_edge",
+    "3":   "tier_3_battle",
+    "4":   "tier_4_fm_review",
+    "5":   "tier_5_rdd_review",
+    "6":   "tier_6_full_lifecycle",
+}
+
+# Cache parsed tier log lines keyed by stem
+_tier_log_lines: dict[str, list[str]] = {}
+
+def _get_scenario_log(tier_id: str, scenario_id: int, is_lifecycle: bool) -> str | None:
+    """Extract the block for this scenario from the tier log and write logs/S<N>_<stem>.log.
+    Returns relative path to the written file, or None if not found."""
+    stem = _STEM_MAP.get(tier_id)
+    if not stem:
+        return None
+    if stem not in _tier_log_lines:
+        log_path = results_dir / f"{stem}.log"
+        if not log_path.exists():
+            return None
+        _tier_log_lines[stem] = log_path.read_text(errors="replace").splitlines()
+    raw = _tier_log_lines[stem]
+
+    # Locate the start line for this scenario.
+    # Lifecycle logs:  ▶ S<N> ...
+    # Flat eval logs:  ▶ Scenario <N>: ...
+    if is_lifecycle:
+        start_pat = _re.compile(rf"^▶ S{scenario_id}\b")
+    else:
+        start_pat = _re.compile(rf"^▶ Scenario {scenario_id}[:\s]")
+    next_pat  = _re.compile(r"^▶ ")
+
+    start_idx = next((i for i, ln in enumerate(raw) if start_pat.match(ln)), None)
+    if start_idx is None:
+        return None
+    end_idx = next(
+        (i for i, ln in enumerate(raw) if i > start_idx and next_pat.match(ln)),
+        len(raw),
+    )
+    snippet = raw[start_idx:end_idx]
+
+    out_file = logs_dir / f"S{scenario_id}_{stem}.log"
+    out_file.write_text("\n".join(snippet))
+    return f"logs/S{scenario_id}_{stem}.log"
+
+
+# ── Per-scenario combined trajectory ─────────────────────────────────────────
+
+def _get_scenario_trajectory(s: dict, is_lifecycle: bool) -> str | None:
+    """For flat scenarios: link to obs/<session_id>.md.
+    For lifecycle scenarios: concatenate all phase obs files into obs/S<N>_combined.md."""
+    obs_dir = results_dir / "obs"
+    sid = s["scenario_id"]
+
+    if not is_lifecycle:
+        session_id = s.get("session_id")
+        if not session_id:
+            return None
+        md = obs_dir / f"{session_id}.md"
+        return f"obs/{session_id}.md" if md.exists() else None
+
+    # Lifecycle — collect all phase session IDs in phase order
+    phase_session_ids = [
+        ph.get("session_id")
+        for ph in s.get("phases", [])
+        if ph.get("session_id")
+    ]
+    if not phase_session_ids:
+        return None
+
+    combined_path = obs_dir / f"S{sid}_combined.md"
+    parts: list[str] = [
+        f"# Scenario S{sid} — Combined Observability Trajectory\n",
+        f"**Scenario:** {s['scenario_name']}  ",
+        f"**Phases:** {len(s.get('phases', []))}  ",
+        "",
+    ]
+    for ph in s.get("phases", []):
+        phase_sid = ph.get("session_id")
+        ph_label  = f"Phase {ph['phase_idx']} — {ph.get('stage', '')} ({ph.get('role', '')})"
+        parts.append(f"\n---\n\n## {ph_label}\n")
+        if phase_sid:
+            obs_md = obs_dir / f"{phase_sid}.md"
+            if obs_md.exists():
+                # Strip the top-level H1 from each obs file to avoid duplicate headers
+                body = obs_md.read_text()
+                body_lines = body.splitlines()
+                # Drop the first line if it's an H1
+                if body_lines and body_lines[0].startswith("# "):
+                    body = "\n".join(body_lines[1:]).lstrip("\n")
+                parts.append(body)
+            else:
+                parts.append(f"_Trajectory not found for session `{phase_sid}`_\n")
+        else:
+            parts.append("_No session captured for this phase_\n")
+
+    combined_path.write_text("\n".join(parts))
+    return f"obs/S{sid}_combined.md"
+
+
 # Failing scenarios
 lines += [
     "",
@@ -483,13 +593,14 @@ lines += [
 ]
 if all_failed_scenarios:
     lines += [
-        "| Tier | Scenario | Name | Turn | Assertion |",
-        "|------|----------|------|------|-----------|",
+        "| Tier | Scenario | Name | Turn | Assertion | Trajectory | Logs |",
+        "|------|----------|------|------|-----------|-----------|------|",
     ]
     for tier_id, s in all_failed_scenarios:
         # Find first failed turn (handles both flat and phase-nested formats)
         ft = None
-        if "phases" in s:
+        is_lifecycle = "phases" in s
+        if is_lifecycle:
             for ph in s.get("phases", []):
                 ft = next((t for t in ph.get("turns", []) if not t.get("passed")), None)
                 if ft:
@@ -498,8 +609,14 @@ if all_failed_scenarios:
             ft = next((t for t in s.get("turns", []) if not t.get("passed")), None)
         if ft:
             msg = (ft.get("failures") or ["?"])[0].replace("|", "\\|")[:80]
+            # Per-scenario trajectory link
+            traj_rel = _get_scenario_trajectory(s, is_lifecycle)
+            traj_cell = f"[trajectory]({traj_rel})" if traj_rel else "—"
+            # Per-scenario log snippet
+            log_rel = _get_scenario_log(tier_id, s["scenario_id"], is_lifecycle)
+            log_cell = f"[log]({log_rel})" if log_rel else "—"
             lines.append(
-                f"| {tier_id} | S{s['scenario_id']} | {s['scenario_name']} | T{ft['turn']} | {msg} |"
+                f"| {tier_id} | S{s['scenario_id']} | {s['scenario_name']} | T{ft['turn']} | {msg} | {traj_cell} | {log_cell} |"
             )
 else:
     lines.append("_No failures detected._ ✅")

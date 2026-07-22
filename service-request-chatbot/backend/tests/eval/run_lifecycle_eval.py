@@ -124,6 +124,7 @@ class PhaseResult:
     role: str
     stage: str
     turn_results: list[TurnResult] = field(default_factory=list)
+    session_id: Optional[str] = None
 
     @property
     def passed(self) -> bool:
@@ -435,6 +436,7 @@ async def run_phase(
             if not passed:
                 break  # stop phase on hard failure
 
+    result.session_id = session_id
     return result, sr_id, session_id
 
 
@@ -472,6 +474,7 @@ async def run_scenario(
         )
         result.phase_results.append(phase_result)
         result.captured_sr_id = captured_sr_id
+        # session_id is already stored on phase_result by run_phase
 
         if not phase_result.passed:
             break  # stop scenario on phase failure
@@ -611,6 +614,7 @@ def _to_json(results: list[ScenarioResult]) -> list[dict[str, Any]]:
                 "role": pr.role,
                 "stage": pr.stage,
                 "passed": pr.passed,
+                "session_id": pr.session_id,
                 "turns": turns_out,
             })
         out.append({
@@ -621,6 +625,7 @@ def _to_json(results: list[ScenarioResult]) -> list[dict[str, Any]]:
             "captured_sr_id": res.captured_sr_id,
             "turns_passed": res.turns_passed,
             "turns_expected": res.turns_expected,
+            "session_ids": [pr.session_id for pr in res.phase_results if pr.session_id],
             "phases": phases,
         })
     return out
