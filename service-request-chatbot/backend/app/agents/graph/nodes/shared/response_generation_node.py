@@ -56,6 +56,16 @@ async def response_generation_node(state: ServiceRequestState) -> dict[str, Any]
     # still attempt LLM rewrite for a warmer tone.
     is_terminal = current_status in _TERMINAL_STATUSES
 
+    # Factual blocked-lease card: keep the pre-authored copy (SR # + deep link).
+    # Do not let the LLM rewrite it into a "lease not found" apology.
+    if current_ui and current_ui.get("type") == "existing_handover":
+        message = current_ui.get("message") or current_message or _FALLBACK_RESPONSE
+        return {
+            "response_message": message,
+            "response_ui": {**current_ui, "message": message},
+            "status": "WAITING_FOR_USER",
+        }
+
     # ── Build context for the LLM ───────────────────────────────────────────
     collected_data: dict[str, Any] = state.get("collected_data") or {}
     missing_fields: list[str] = state.get("missing_fields") or []
@@ -97,8 +107,14 @@ async def response_generation_node(state: ServiceRequestState) -> dict[str, Any]
     except Exception as exc:
         logger.warning("response_generation_node.llm_call_failed: %s", exc)
 
-    # Fall back to the raw hint from prior nodes if LLM failed or returned nothing.
-    final_message = llm_message or response_intent or _FALLBACK_RESPONSE
+    # Prefer a pre-authored UI message (e.g. activation_pending) over the raw
+    # LLM hint when the model fails — keeps user-facing copy clean.
+    ui_fallback = (
+        current_ui.get("message")
+        if current_ui and current_ui.get("type") in ("text_question", "message")
+        else None
+    )
+    final_message = llm_message or ui_fallback or response_intent or _FALLBACK_RESPONSE
 
     # ── Merge LLM message into structured UI when present ───────────────────
     updated_ui: dict[str, Any] | None = None

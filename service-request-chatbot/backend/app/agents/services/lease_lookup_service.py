@@ -81,7 +81,15 @@ class LeaseLookupQuery(BaseModel):
 
 @dataclass
 class LeaseLookupResult:
-    """Output of a single lease lookup call — matches plus full trace metadata."""
+    """Output of a single lease lookup call — matches plus full trace metadata.
+
+    When ``matches`` is empty the platform may still signal *why* via
+    ``reason`` / ``existing_handover_sr_id`` (cenomi-api handover eligibility):
+
+    - ``not_found``          — truly no matching lease
+    - ``activation_pending`` — lease exists but activation/start date not reached
+    - ``handover_exists``    — lease exists; a Handover SR already covers it
+    """
 
     matches: list[LeaseRecord]
     endpoint: str
@@ -90,6 +98,9 @@ class LeaseLookupResult:
     latency_ms: int
     status_code: int | None
     error: str | None = None
+    # Eligibility metadata from empty-match responses (see class docstring).
+    reason: str | None = None
+    existing_handover_sr_id: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -182,10 +193,13 @@ class HttpLeaseLookupService(AbstractLeaseLookupService):
                 )
 
             matches = self._parse_matches(body)
+            reason, existing_sr_id = self._parse_eligibility(body)
             log.info(
                 "lease_lookup.http.success",
                 match_count=len(matches),
                 latency_ms=latency_ms,
+                reason=reason,
+                existing_handover_sr_id=existing_sr_id,
             )
             return LeaseLookupResult(
                 matches=matches,
@@ -194,6 +208,8 @@ class HttpLeaseLookupService(AbstractLeaseLookupService):
                 response_payload=body,
                 latency_ms=latency_ms,
                 status_code=response.status_code,
+                reason=reason,
+                existing_handover_sr_id=existing_sr_id,
             )
 
         except httpx.RequestError as exc:
@@ -262,6 +278,34 @@ class HttpLeaseLookupService(AbstractLeaseLookupService):
             except Exception as exc:
                 log.warning("lease_lookup.parse_record.failed", error=str(exc), item=item)
         return records
+
+    @staticmethod
+    def _parse_eligibility(
+        body: dict[str, Any] | list[Any] | None,
+    ) -> tuple[str | None, str | None]:
+        """Extract ``reason`` / ``existing_handover_sr_id`` from the API envelope.
+
+        Looks on the top-level body and inside ``data`` (cenomi-api Success
+        envelope). Empty-string reasons are normalised to ``None``.
+        """
+        if not isinstance(body, dict):
+            return None, None
+
+        def _from_mapping(payload: dict[str, Any]) -> tuple[str | None, str | None]:
+            raw_reason = payload.get("reason")
+            reason = str(raw_reason).strip() if raw_reason not in (None, "") else None
+            raw_sr = payload.get("existing_handover_sr_id")
+            sr_id = str(raw_sr).strip() if raw_sr not in (None, "") else None
+            return reason, sr_id
+
+        reason, sr_id = _from_mapping(body)
+        if reason is not None or sr_id is not None:
+            return reason, sr_id
+
+        data = body.get("data")
+        if isinstance(data, dict):
+            return _from_mapping(data)
+        return None, None
 
 
 # ---------------------------------------------------------------------------

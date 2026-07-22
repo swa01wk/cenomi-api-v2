@@ -97,6 +97,16 @@ export type ResponseUILeaseSelection = {
   leases: LeaseMatch[];
 };
 
+/** Lease found but a Handover SR already exists — do not create another. */
+export type ResponseUIExistingHandover = {
+  type: "existing_handover";
+  message: string;
+  srId: string;
+  leaseCode?: string | null;
+  /** Tenant Central deep link, e.g. /dashboard/servicerequest/servicedetails?sr_number=10473 */
+  detailsUrl: string;
+};
+
 export type ResponseUIConfirmationCard = {
   type: "confirmation_card";
   message: string;
@@ -150,6 +160,7 @@ export type ResponseUISRPreviewCard = {
 export type ResponseUI =
   | ResponseUIMessage
   | ResponseUILeaseSelection
+  | ResponseUIExistingHandover
   | ResponseUIConfirmationCard
   | ResponseUIValidationError
   | ResponseUIWorkflowProgress

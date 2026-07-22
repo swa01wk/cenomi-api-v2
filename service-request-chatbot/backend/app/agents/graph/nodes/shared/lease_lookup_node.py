@@ -5,8 +5,10 @@ Responsibilities
 - Detect lease-identifying signals in ``collected_data`` (lease_code, brand, mall).
 - Delegate the actual API call to ``AbstractLeaseLookupService``.
 - Trace every external call as a ``TOOL_CALL`` child run via ``TraceManager``.
-- Handle three match outcomes:
-    0 matches  → ask user for more details (WAITING_FOR_USER).
+- Handle match outcomes:
+    0 matches  → inspect ``reason`` (not_found / activation_pending /
+                 handover_exists); never collapse all empty results to
+                 "lease not found".
     1 match    → auto-enrich ``collected_data`` with backend-derived fields.
     N matches  → surface choices via ``response_ui.type = "lease_selection"``.
 - Merge a user-selected lease (``selected_lease``) when one is already present.
@@ -17,6 +19,8 @@ Non-responsibilities (enforced)
 - MUST NOT modify fields that are not backend-derived (title, description, dates, …).
 - MUST NOT overwrite backend-derived fields from LLM extraction; only this node
   (and backend API responses) may populate ``BACKEND_PROTECTED_FIELDS``.
+- MUST NOT create / reopen / convert an existing Handover SR when
+  ``reason=handover_exists``.
 """
 
 from __future__ import annotations
@@ -30,8 +34,9 @@ from app.agents.graph.nodes.shared.merge_state_node import BACKEND_PROTECTED_FIE
 from app.agents.graph.state import ServiceRequestState
 from app.agents.services.lease_lookup_service import (
     AbstractLeaseLookupService,
-    LeaseRecord,
     LeaseLookupQuery,
+    LeaseLookupResult,
+    LeaseRecord,
     get_lease_lookup_service,
 )
 from app.agents.services.resource_picker_decorations import (
@@ -41,6 +46,7 @@ from app.agents.services.resource_picker_decorations import (
 from app.agents.services.review_decorations_service import (
     merge_decorations,
 )
+from app.core.config import settings
 from app.observability.decorators import trace_node
 
 log = structlog.get_logger(__name__)
@@ -77,6 +83,137 @@ _MULTI_MATCH_MESSAGE = (
     "Multiple leases matched the search. Ask the user to select the correct one "
     "from the list shown."
 )
+
+# Platform eligibility reasons returned on empty ``leases`` arrays.
+_REASON_HANDOVER_EXISTS = "handover_exists"
+_REASON_ACTIVATION_PENDING = "activation_pending"
+_REASON_NOT_FOUND = "not_found"
+
+
+def build_sr_details_url(sr_id: str) -> str:
+    """Build a Tenant Central deep link to an existing service-request page."""
+    path = f"/dashboard/servicerequest/servicedetails?sr_number={sr_id}"
+    base = (settings.tenant_portal_base_url or "").rstrip("/")
+    return f"{base}{path}" if base else path
+
+
+def _handover_exists_message(
+    *,
+    lease_code: str | None,
+    sr_id: str,
+    details_url: str,
+) -> str:
+    lease_bit = f" for lease {lease_code}" if lease_code else ""
+    return (
+        f"A handover already exists{lease_bit} — Service Request #{sr_id}. "
+        f"You can view it here: {details_url}. "
+        "A new handover cannot be created for this lease."
+    )
+
+
+def _activation_pending_message(*, lease_code: str | None) -> str:
+    lease_bit = f" {lease_code}" if lease_code else ""
+    return (
+        f"Lease{lease_bit} was found, but handover cannot start until the "
+        "lease activation/start date is reached. Please try again later, or "
+        "provide a different lease code."
+    )
+
+
+def _zero_match_response(
+    result: LeaseLookupResult,
+    *,
+    lease_code: str | None,
+) -> dict[str, Any]:
+    """Map empty-match eligibility ``reason`` to the correct user-facing response.
+
+    Never collapses ``handover_exists`` / ``activation_pending`` into "not found".
+    """
+    reason = (result.reason or "").strip().lower() or _REASON_NOT_FOUND
+    sr_id = result.existing_handover_sr_id
+
+    if reason == _REASON_HANDOVER_EXISTS and sr_id:
+        details_url = build_sr_details_url(sr_id)
+        message = _handover_exists_message(
+            lease_code=lease_code,
+            sr_id=sr_id,
+            details_url=details_url,
+        )
+        # Hint for response_generation: preserve facts; do not invent "not found".
+        llm_hint = (
+            "IMPORTANT: Do NOT say the lease was not found — it WAS found. "
+            f"Relay this to the user verbatim in substance: {message} "
+            "Do NOT create a new handover, call it a draft, or offer to reopen it."
+        )
+        log.info(
+            "lease_lookup.handover_exists",
+            lease_code=lease_code,
+            existing_handover_sr_id=sr_id,
+        )
+        return {
+            "status": "WAITING_FOR_USER",
+            "response_message": llm_hint,
+            "response_ui": {
+                "type": "existing_handover",
+                "message": message,
+                "srId": str(sr_id),
+                "leaseCode": lease_code,
+                "detailsUrl": details_url,
+            },
+        }
+
+    if reason == _REASON_HANDOVER_EXISTS:
+        message = (
+            f"Lease {lease_code} was found, but a Handover Service Request "
+            "already exists for it. A new handover cannot be created."
+            if lease_code
+            else (
+                "A matching lease was found, but a Handover Service Request "
+                "already exists for it. A new handover cannot be created."
+            )
+        )
+        llm_hint = (
+            "IMPORTANT: Do NOT say the lease was not found — it WAS found. "
+            f"Relay this to the user: {message}"
+        )
+        log.info("lease_lookup.handover_exists_missing_sr_id", lease_code=lease_code)
+        return {
+            "status": "WAITING_FOR_USER",
+            "response_message": llm_hint,
+            "response_ui": {
+                "type": "message",
+                "message": message,
+            },
+        }
+
+    if reason == _REASON_ACTIVATION_PENDING:
+        message = _activation_pending_message(lease_code=lease_code)
+        llm_hint = (
+            "IMPORTANT: Do NOT say the lease was not found — it WAS found. "
+            f"Relay this to the user: {message}"
+        )
+        log.info("lease_lookup.activation_pending", lease_code=lease_code)
+        return {
+            "status": "WAITING_FOR_USER",
+            "response_message": llm_hint,
+            "response_ui": {
+                "type": "text_question",
+                "field": "lease_code",
+                "message": message,
+            },
+        }
+
+    # not_found or unknown reason with empty matches → keep current copy.
+    log.info("lease_lookup.not_found", lease_code=lease_code, reason=reason)
+    return {
+        "status": "WAITING_FOR_USER",
+        "response_message": _NO_MATCH_MESSAGE,
+        "response_ui": {
+            "type": "text_question",
+            "field": "lease_code",
+            "message": _NO_MATCH_MESSAGE,
+        },
+    }
 
 
 def _extract_uuid(value: Any) -> UUID | None:
@@ -299,19 +436,16 @@ async def lease_lookup_node(
         }
 
     match_count = len(result.matches)
-    log.info("lease_lookup.result", match_count=match_count)
+    log.info(
+        "lease_lookup.result",
+        match_count=match_count,
+        reason=result.reason,
+        existing_handover_sr_id=result.existing_handover_sr_id,
+    )
 
-    # ── 0 matches: ask for more details ──────────────────────────────────────
+    # ── 0 matches: inspect eligibility reason (never collapse to not_found) ──
     if match_count == 0:
-        return {
-            "status": "WAITING_FOR_USER",
-            "response_message": _NO_MATCH_MESSAGE,
-            "response_ui": {
-                "type": "text_question",
-                "field": "lease_code",
-                "message": _NO_MATCH_MESSAGE,
-            },
-        }
+        return _zero_match_response(result, lease_code=normalised_lease_code)
 
     # ── 1 match: auto-enrich collected_data + offer optional MM upload ────────
     if match_count == 1:
