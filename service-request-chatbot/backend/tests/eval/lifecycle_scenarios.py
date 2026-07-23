@@ -69,6 +69,8 @@ class PhaseConfig:
     # validation: at least 1 document must be uploaded before save/approve).
     upload_mock_document: bool = False
     document_type: str = "SR_HANDOVER_CHECKLIST"   # default FM doc type
+    # When non-empty, upload each type (multi-file). Overrides single document_type.
+    document_types: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -1930,6 +1932,53 @@ _S72 = LifecycleScenario(
 )
 
 
+# ─── Multi-file document upload (doc_upload_fix / b9bd469) — L173 ─────────────
+
+_S73 = LifecycleScenario(
+    id=173,
+    name="FM multi-file upload — three docs then approve",
+    goal=(
+        "FM Manager uploads multiple documents (checklist + site survey + other) "
+        "before approve; workflow must remain on FM_REVIEW and still reach "
+        "fm_status=APPROVED (covers multi-file upload e2e path)"
+    ),
+    tags=["multi-file", "document-upload", "fm-review", "doc-upload-fix"],
+    phases=[
+        _create_sr_phase(),
+        PhaseConfig(
+            user_email=_FM[0], user_password=_FM[1], role=_FM[2],
+            stage="FM_REVIEW",
+            open_existing_sr=True,
+            upload_mock_document=True,
+            document_types=[
+                "SR_HANDOVER_CHECKLIST",
+                "SR_HANDOVER_SITE_SURVEY",
+                "SR_HANDOVER_OTHER",
+            ],
+            turns=[
+                Turn(
+                    message=f"Unit readiness date is {_d(25)}. No comments.",
+                    note="Provide unit_readiness_date after multi-file upload",
+                    expect_workflow_stage="FM_REVIEW",
+                ),
+                Turn(
+                    message="",
+                    note="Approve FM review with three documents already attached",
+                    action="approve_fm_review",
+                    expect_workflow_stage="FM_REVIEW",
+                ),
+                Turn(
+                    message="",
+                    note="Confirm approval → fm_status=APPROVED despite multi-file upload",
+                    action="confirm_fm_approve",
+                    expect_keywords=["approved", "fm", "review"],
+                ),
+            ],
+        ),
+    ],
+)
+
+
 # ─── Tier 0: Lifecycle smoke scenario ─────────────────────────────────────────
 
 _S_SMOKE_FM = LifecycleScenario(
@@ -1990,6 +2039,7 @@ TIER6_SCENARIOS: list[LifecycleScenario] = [
     _S63, _S64, _S65,                      # Stale UI state (3)
     _S66, _S67, _S68,                      # active_field binding (3)
     _S69, _S70, _S71, _S72,               # Payload contract (4)
+    _S73,                                  # Multi-file FM upload (doc_upload_fix)
 ]
 
 #: Backward-compatible master list (all lifecycle scenarios)

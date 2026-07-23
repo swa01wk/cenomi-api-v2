@@ -11,12 +11,22 @@ No Docker orchestration needed for the two-terminal dev workflow.
 |------|--------|-----------|-------|-----------------|
 | **0** | `run_eval.py` + `run_lifecycle_eval.py` | S201–S202 + L203 | Smoke — fast sanity gate | ~60 s |
 | **1** | `run_eval.py` | S1–S15 | Core CREATE_SR happy path | ~5 min |
-| **2** | `run_eval.py` | S16–S33 | Edge — corrections, multi-field, API | ~8 min |
+| **2** | `run_eval.py` | S16–S33, S60–S64 | Edge — corrections, multi-field, API, lease eligibility | ~8 min |
 | **3** | `run_eval.py` | S34–S59 | Battle — issues 1–7 from `agent_ui_fixes.md` | ~12 min |
 | **4** | `run_lifecycle_eval.py` | L134–L139 | FM\_REVIEW — date, save, approve, RBAC | ~10 min |
 | **5** | `run_lifecycle_eval.py` | L140–L145 | RDD\_REVIEW — field order, dates, RBAC | ~12 min |
-| **6** | `run_lifecycle_eval.py` | L146–L172 | Full lifecycle + state/payload battle | ~25 min |
+| **6** | `run_lifecycle_eval.py` | L146–L173 | Full lifecycle + state/payload battle + multi-file upload | ~25 min |
 | **all** | both runners | all tiers | Equivalent to running 0→6 in sequence | ~75 min |
+
+### Lease eligibility + multi-file (v1.4.1 / `doc_upload_fix`)
+
+| ID | Tags | Notes |
+|----|------|-------|
+| S63 | `lease-eligibility`, `handover-exists` | Mock code `t0028568` → `ui.type=existing_handover` |
+| S64 | `lease-eligibility`, `activation-pending` | Mock code `t0999999` → activation messaging |
+| L173 | `multi-file`, `document-upload` | FM uploads 3 docs then approve |
+
+Requires mock leases for S63/S64 (`LEASE_LOOKUP_USE_MOCK=true` or unset platform lease URL). See `docs/fix-notes/lease_eligibility_and_multifile_upload.md`.
 
 ---
 

@@ -4,11 +4,11 @@
 # Tier structure:
 #   0  Smoke     (~1 min)   S201–S202 + lifecycle FM smoke — fast sanity gate
 #   1  Core      (~5 min)   S1–S15    — CREATE_SR happy path & basic flows
-#   2  Edge      (~8 min)   S16–S33   — corrections, multi-field, API edge cases
+#   2  Edge      (~8 min)   S16–S33, S60–S64 — edge + lease eligibility (S63/S64)
 #   3  Battle    (~12 min)  S34–S59   — Issues 1–7 from agent_ui_fixes.md
 #   4  FM        (~10 min)  L134–L139 — FM_REVIEW lifecycle
 #   5  RDD       (~12 min)  L140–L145 — RDD_REVIEW lifecycle
-#   6  Full-LC   (~25 min)  L146–L172 — full lifecycle + battle tests
+#   6  Full-LC   (~25 min)  L146–L173 — full lifecycle + battle + multi-file (L173)
 #   all           All tiers in sequence (equivalent to old a+b+c)
 #
 # Usage:

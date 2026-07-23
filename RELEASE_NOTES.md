@@ -2,6 +2,19 @@
 
 ---
 
+## v1.4.1 — July 22, 2026 (Unreleased)
+
+> **Theme:** Lease eligibility reasons (`handover_exists` / `activation_pending`) + multi-file document uploads.
+
+### What's new
+
+- Empty lease-lookup responses honour platform `reason` instead of always saying “not found”
+- `ui.type = existing_handover` with SR deep link when a handover already exists
+- Multi-file document upload with coalesced chat refresh
+- Eval tracking: **S63**, **S64** (Tier 2), **L173** (Tier 6) — see `docs/CHANGELOG.md` and `docs/fix-notes/lease_eligibility_and_multifile_upload.md`
+
+---
+
 ## v1.4.0 — July 18, 2026
 
 > **Theme:** Agent–UI contract hardening, inspection-time handling, cancel SR workflow, field intent disambiguation, and expanded eval suite (99 scenarios, 7 tiers).

@@ -377,6 +377,19 @@ _MOCK_LEASES: list[dict[str, Any]] = [
 
 _MOCK_RECORDS: list[LeaseRecord] = [LeaseRecord.model_validate(r) for r in _MOCK_LEASES]
 
+# Empty-match eligibility fixtures for local eval / unit tests.
+# Keys are lowercased lease codes. These codes intentionally do NOT appear in
+# ``_MOCK_LEASES`` so the filter returns zero matches and the reason is surfaced.
+_MOCK_ELIGIBILITY: dict[str, dict[str, str]] = {
+    "t0028568": {
+        "reason": "handover_exists",
+        "existing_handover_sr_id": "10473",
+    },
+    "t0999999": {
+        "reason": "activation_pending",
+    },
+}
+
 
 class MockLeaseLookupService(AbstractLeaseLookupService):
     """In-memory lease lookup for local POC development and unit tests.
@@ -387,6 +400,9 @@ class MockLeaseLookupService(AbstractLeaseLookupService):
         Optional override for the seed data.  Defaults to ``_MOCK_RECORDS``.
     simulated_latency_ms:
         Latency value reported in ``LeaseLookupResult`` (no real sleep).
+    eligibility:
+        Optional override for empty-match eligibility fixtures keyed by
+        lowercased lease code.  Defaults to ``_MOCK_ELIGIBILITY``.
     """
 
     _MOCK_ENDPOINT = "mock://lease-tenant-api/leases"
@@ -395,9 +411,13 @@ class MockLeaseLookupService(AbstractLeaseLookupService):
         self,
         records: list[LeaseRecord] | None = None,
         simulated_latency_ms: int = 12,
+        eligibility: dict[str, dict[str, str]] | None = None,
     ) -> None:
         self._records: list[LeaseRecord] = records if records is not None else list(_MOCK_RECORDS)
         self._latency_ms = simulated_latency_ms
+        self._eligibility: dict[str, dict[str, str]] = (
+            eligibility if eligibility is not None else dict(_MOCK_ELIGIBILITY)
+        )
 
     async def lookup(self, query: LeaseLookupQuery) -> LeaseLookupResult:
         request_payload: dict[str, Any] = {
@@ -412,10 +432,23 @@ class MockLeaseLookupService(AbstractLeaseLookupService):
             "count": len(matches),
         }
 
+        reason: str | None = None
+        existing_sr_id: str | None = None
+        if not matches and query.lease_code:
+            fixture = self._eligibility.get(query.lease_code.strip().lower())
+            if fixture:
+                reason = fixture.get("reason")
+                existing_sr_id = fixture.get("existing_handover_sr_id")
+                if reason:
+                    response_payload["reason"] = reason
+                if existing_sr_id:
+                    response_payload["existing_handover_sr_id"] = existing_sr_id
+
         log.debug(
             "lease_lookup.mock",
             query=query.model_dump(exclude_none=True),
             match_count=len(matches),
+            reason=reason,
         )
 
         return LeaseLookupResult(
@@ -425,6 +458,8 @@ class MockLeaseLookupService(AbstractLeaseLookupService):
             response_payload=response_payload,
             latency_ms=self._latency_ms,
             status_code=200,
+            reason=reason,
+            existing_handover_sr_id=existing_sr_id,
         )
 
     def _filter(self, query: LeaseLookupQuery) -> list[LeaseRecord]:

@@ -455,6 +455,40 @@ class TestMockLookupCustomRecords:
 
 
 # ---------------------------------------------------------------------------
+# TestMockLookupEligibilityReasons
+# ---------------------------------------------------------------------------
+
+
+class TestMockLookupEligibilityReasons:
+    """Mock must surface handover_exists / activation_pending for eval fixtures."""
+
+    @pytest.mark.asyncio
+    async def test_handover_exists_fixture(self) -> None:
+        svc = MockLeaseLookupService()
+        result = await svc.lookup(LeaseLookupQuery(lease_code="t0028568"))
+        assert result.matches == []
+        assert result.reason == "handover_exists"
+        assert result.existing_handover_sr_id == "10473"
+        assert result.response_payload is not None
+        assert result.response_payload["reason"] == "handover_exists"
+
+    @pytest.mark.asyncio
+    async def test_activation_pending_fixture(self) -> None:
+        svc = MockLeaseLookupService()
+        result = await svc.lookup(LeaseLookupQuery(lease_code="t0999999"))
+        assert result.matches == []
+        assert result.reason == "activation_pending"
+        assert result.existing_handover_sr_id is None
+
+    @pytest.mark.asyncio
+    async def test_unknown_code_has_no_eligibility_reason(self) -> None:
+        svc = MockLeaseLookupService()
+        result = await svc.lookup(LeaseLookupQuery(lease_code="DOES_NOT_EXIST"))
+        assert result.matches == []
+        assert result.reason is None
+
+
+# ---------------------------------------------------------------------------
 # TestHttpLeaseLookupServiceSuccess
 # ---------------------------------------------------------------------------
 

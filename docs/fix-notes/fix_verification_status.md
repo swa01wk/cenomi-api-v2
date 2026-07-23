@@ -1,7 +1,7 @@
 # Fix Verification Status
 
-**Verified:** 2026-07-18  
-**Scope:** `agent_ui_fixes.md` + `agent_ui_contract_and_frontend_alignment.md`  
+**Verified:** 2026-07-18 (UI contract) · **Updated:** 2026-07-22 (lease eligibility + multi-file)  
+**Scope:** `agent_ui_fixes.md` + `agent_ui_contract_and_frontend_alignment.md` + lease eligibility / multi-file upload  
 **Codebase:** `cenomi-api-v2 / service-request-chatbot`
 
 ---
@@ -10,6 +10,7 @@
 
 - **Agent (backend): All fixes complete** — every agent-side item from both documents is implemented and verified in code.
 - **Frontend: 7 items still pending** — these are frontend-only responsibilities. The agent already emits the correct signals for all of them; no further backend changes are needed.
+- **2026-07-22 add-on:** Lease eligibility reasons + multi-file upload — code shipped on `doc_upload_fix`; e2e tracked via **S63 / S64 / L173** (see `lease_eligibility_and_multifile_upload.md`).
 
 ---
 
