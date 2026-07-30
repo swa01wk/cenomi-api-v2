@@ -314,6 +314,27 @@ def _assert_turn(turn: Turn, body: dict[str, Any]) -> tuple[bool, list[str], lis
                 f"Keywords {turn.expect_keywords!r} not found. Got: \"{msg[:160]}\""
             )
 
+    # Soft: forbidden keywords
+    if turn.expect_no_keywords:
+        ui_msg = str(ui.get("message") or "")
+        haystack = f"{msg}\n{ui_msg}".lower()
+        for kw in turn.expect_no_keywords:
+            if kw.lower() in haystack:
+                warnings.append(
+                    f"Forbidden keyword {kw!r} found in message/ui.message"
+                )
+
+    # Soft: top-level ui key checks
+    if turn.expect_ui_contains:
+        for key, expected_val in turn.expect_ui_contains.items():
+            actual_val = ui.get(key)
+            if actual_val is None:
+                warnings.append(f"ui.{key}: missing (expected '{expected_val}')")
+            elif str(actual_val) != str(expected_val):
+                warnings.append(
+                    f"ui.{key}: expected '{expected_val}', got '{actual_val}'"
+                )
+
     return len(failures) == 0, failures, warnings
 
 
@@ -371,12 +392,15 @@ async def run_phase(
                 # letting the user raise a fresh request.
                 turn_sr_id = sr_id
 
-            # Upload document after the first turn (session_id is now known)
+            # Upload document(s) after the first turn (session_id is now known).
+            # document_types enables multi-file uploads (doc_upload_fix / L173).
             if phase.upload_mock_document and not doc_uploaded and session_id and sr_id:
-                await _upload_mock_document(
-                    client, base_url, session_id, sr_id,
-                    phase.document_type, token,
-                )
+                types_to_upload = list(phase.document_types) or [phase.document_type]
+                for doc_type in types_to_upload:
+                    await _upload_mock_document(
+                        client, base_url, session_id, sr_id,
+                        doc_type, token,
+                    )
                 doc_uploaded = True
 
             # Post the turn

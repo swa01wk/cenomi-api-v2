@@ -38,6 +38,15 @@ class Settings(BaseSettings):
     lease_tenant_api_base_url: str | None = Field(
         default=None, validation_alias="LEASE_TENANT_API_BASE_URL"
     )
+    tenant_portal_base_url: str | None = Field(
+        default=None,
+        validation_alias="TENANT_PORTAL_BASE_URL",
+        description=(
+            "Base URL for Tenant Central (no trailing slash). Used to build deep "
+            "links to existing service-request details pages when lease lookup "
+            "returns reason=handover_exists. When unset, relative paths are used."
+        ),
+    )
     lease_lookup_use_mock: bool = Field(
         default=False,
         validation_alias="LEASE_LOOKUP_USE_MOCK",

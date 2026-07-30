@@ -7,6 +7,7 @@ import { WorkflowProgressCard } from "./WorkflowProgressCard";
 import { ServiceRequestSummaryCard } from "./ServiceRequestSummaryCard";
 import { FieldCorrectionPanel } from "./FieldCorrectionPanel";
 import { LeaseSelectionCard } from "./LeaseSelectionCard";
+import { ExistingHandoverCard } from "./ExistingHandoverCard";
 import { DocumentRequirementCard } from "./DocumentRequirementCard";
 import { SRPreviewCard } from "./SRPreviewCard";
 import { LifecycleStepper } from "./LifecycleStepper";
@@ -20,6 +21,7 @@ import type {
   ChatMessage,
   ResponseUI,
   ResponseUIConfirmationCard,
+  ResponseUIExistingHandover,
   ResponseUILeaseSelection,
   ResponseUISRPreviewCard,
   UploadedDoc,
@@ -82,6 +84,10 @@ export function ServiceRequestChat() {
   const [openSrInput, setOpenSrInput] = useState("");
 
   const scrollRef = useRef<HTMLDivElement>(null);
+  // Coalesce chat-refresh turns when several documents are uploaded in quick
+  // succession (e.g. multi-file selection) so uploads don't race each other.
+  const uploadRefreshTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pendingUploadCount = useRef(0);
 
   // Get role from stored JWT user
   const userRole = getStoredUser()?.role ?? null;
@@ -249,6 +255,8 @@ export function ServiceRequestChat() {
 
   // Handles a successfully uploaded document — updates local list and refreshes
   // graph decorations so DocumentRequirementCard / stage UI reflect the upload.
+  // Multiple uploads (multi-file selection) are coalesced into a single refresh
+  // turn so the graph re-syncs all documents at once instead of racing.
   const handleUploadComplete = useCallback(
     (doc: UploadedDoc) => {
       setUploadedDocuments((prev) => {
@@ -257,9 +265,19 @@ export function ServiceRequestChat() {
         }
         return [...prev, doc];
       });
-      void sendTurn("", {
-        apiMessage: `I've uploaded the ${doc.documentTypeLabel || "document"}.`,
-      });
+      pendingUploadCount.current += 1;
+      if (uploadRefreshTimer.current) clearTimeout(uploadRefreshTimer.current);
+      uploadRefreshTimer.current = setTimeout(() => {
+        const count = pendingUploadCount.current;
+        pendingUploadCount.current = 0;
+        uploadRefreshTimer.current = null;
+        void sendTurn("", {
+          apiMessage:
+            count > 1
+              ? `I've uploaded ${count} documents.`
+              : `I've uploaded the ${doc.documentTypeLabel || "document"}.`,
+        });
+      }, 250);
     },
     [sendTurn],
   );
@@ -338,6 +356,8 @@ export function ServiceRequestChat() {
                 const isLastMsg = idx === messages.length - 1;
                 const isConfirmCard = m.role === "assistant" && m.responseUI?.type === "confirmation_card";
                 const isPreviewCard = m.role === "assistant" && m.responseUI?.type === "sr_preview_card";
+                const isExistingHandover =
+                  m.role === "assistant" && m.responseUI?.type === "existing_handover";
                 return (
                   <div key={m.id}>
                     <MessageBubble
@@ -365,6 +385,13 @@ export function ServiceRequestChat() {
                               ? handleCorrections
                               : undefined
                           }
+                        />
+                      </div>
+                    )}
+                    {isExistingHandover && (
+                      <div className="mt-2">
+                        <ExistingHandoverCard
+                          data={m.responseUI as ResponseUIExistingHandover}
                         />
                       </div>
                     )}
@@ -448,7 +475,11 @@ export function ServiceRequestChat() {
             onUploadComplete={handleUploadComplete}
             onDeleteComplete={handleDeleteComplete}
             preferChatDocumentCard={
-              sidebarUI?.type === "document_requirement" && isLifecycleStage
+              // During RDD review the panel must stay available so the DD
+              // engineer can attach multiple supporting documents; only FM
+              // defers to the in-chat requirement card.
+              sidebarUI?.type === "document_requirement" &&
+              workflowStage === "FM_REVIEW"
             }
             collectedData={latestSRPreview?.fields?.reduce(
               (acc, f) => ({ ...acc, [f.key]: f.value ?? "" }),
@@ -462,6 +493,10 @@ export function ServiceRequestChat() {
 
         {sidebarUI?.type === "lease_selection" && (
           <LeaseSelectionCard data={sidebarUI} onSelect={handleLeaseSelect} />
+        )}
+
+        {sidebarUI?.type === "existing_handover" && (
+          <ExistingHandoverCard data={sidebarUI} />
         )}
 
         {sidebarUI?.type === "confirmation_card" && (

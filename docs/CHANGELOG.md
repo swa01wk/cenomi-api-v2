@@ -1,3 +1,44 @@
+# Changelog
+
+---
+
+## v1.4.1 — 2026-07-22 (Unreleased / `doc_upload_fix`)
+
+> **Theme:** Lease lookup eligibility reasons + multi-file document uploads  
+> **Commit:** `b9bd469` — *fix: honor lease lookup eligibility reasons and multi-file uploads*
+
+### What changed
+
+| Area | Change |
+|---|---|
+| Lease lookup | Empty `leases[]` from GET `/leases` now honours `reason` (`handover_exists`, `activation_pending`, `not_found`) instead of collapsing everything to “lease not found” |
+| Existing handover UX | `ui.type = "existing_handover"` with `srId`, `detailsUrl`, `leaseCode`; response generation preserves factual copy (no LLM rewrite to “not found”) |
+| Multi-file upload | Frontend accepts multi-file selection; chat refresh turns are coalesced so rapid uploads do not race |
+| Config | Optional `TENANT_PORTAL_BASE_URL` for Tenant Central deep links on `handover_exists` |
+| Mock lease service | Fixtures `t0028568` → `handover_exists` (sr `10473`), `t0999999` → `activation_pending` for local/eval |
+
+### Eval suite tracking (e2e)
+
+| ID | Tier | Scenario | Asserts |
+|---|---|---|---|
+| **S63** | 2 | Lease eligibility — `handover_exists` | `ui.type=existing_handover`, `ui.srId=10473`, forbidden “not found”, resume with `t0105712` |
+| **S64** | 2 | Lease eligibility — `activation_pending` | Explains activation block, forbidden “not found”, resume with `t0105712` |
+| **L173** | 6 | FM multi-file upload (3 docs) then approve | Uploads checklist + site survey + other, then FM approve succeeds |
+
+**How to run:**
+
+```bash
+# Eligibility scenarios (requires LEASE_LOOKUP_USE_MOCK=true or mock mode)
+./run_agent_eval.sh --no-start --tier 2 --tags lease-eligibility
+
+# Multi-file FM upload
+./run_agent_eval.sh --no-start --tier 6 --tags multi-file
+```
+
+See also: [`docs/fix-notes/lease_eligibility_and_multifile_upload.md`](fix-notes/lease_eligibility_and_multifile_upload.md)
+
+---
+
 # Detailed Changelog — v1.3.0 → v1.4.0
 
 > **Date:** July 18, 2026  

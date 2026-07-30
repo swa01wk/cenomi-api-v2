@@ -33,6 +33,11 @@ Mock lease data
   t0208831  Nike          Riyadh Park       Riyadh  GF101/102  680 sqm
   t0301144  Nike          Mall of Arabia    Jeddah  LG220      510 sqm
   t0419977  Zara          Dubai Festival City Dubai  UF301      900 sqm
+
+Mock eligibility fixtures (empty matches + reason — MockLeaseLookupService)
+---------------------------------------------------------------------------
+  t0028568  reason=handover_exists     existing_handover_sr_id=10473
+  t0999999  reason=activation_pending
 """
 
 from __future__ import annotations
@@ -96,6 +101,9 @@ class Turn:
     expect_keywords: list[str] = field(default_factory=list)
     """At least one keyword must appear (case-insensitive) in response.message."""
 
+    expect_no_keywords: list[str] = field(default_factory=list)
+    """Soft: none of these keywords may appear in response.message or ui.message."""
+
     expect_no_submit: bool = False
     """Assert that state.ready_to_submit is False (error / pre-submit turn)."""
 
@@ -115,6 +123,9 @@ class Turn:
 
     expect_field_value: Optional[dict] = None
     """Soft: {label: expected_value} — check ui.fields entries on a confirmation_card."""
+
+    expect_ui_contains: Optional[dict] = None
+    """Soft: {key: expected_value} — check top-level keys on response.ui (e.g. srId)."""
 
 
 @dataclass
@@ -2548,6 +2559,87 @@ _S62 = Scenario(
 )
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Lease eligibility reasons (doc_upload_fix / b9bd469) — S63–S64
+# Mock fixtures: t0028568 → handover_exists; t0999999 → activation_pending
+# ─────────────────────────────────────────────────────────────────────────────
+
+_S63 = Scenario(
+    id=63,
+    name="Lease eligibility — handover_exists surfaces existing_handover card",
+    goal=(
+        "When GET /leases returns empty leases[] with reason=handover_exists, "
+        "agent must emit ui.type='existing_handover' with SR deep link — "
+        "never collapse to 'lease not found' or start a new CREATE_SR"
+    ),
+    tier=2,
+    turns=[
+        Turn(
+            message="I want to create a handover service request",
+            note="Bot asks for lease identifier",
+            expect_keywords=["lease", "code", "brand", "mall"],
+        ),
+        Turn(
+            message="t0028568",
+            note=(
+                "Mock eligibility: handover_exists + sr_id 10473 → "
+                "existing_handover card; must NOT say lease not found"
+            ),
+            expect_ui_type="existing_handover",
+            expect_no_submit=True,
+            expect_keywords=["already exists", "10473", "handover", "view"],
+            expect_no_keywords=["not found", "couldn't find", "could not find", "no lease"],
+            expect_ui_contains={"srId": "10473", "type": "existing_handover"},
+        ),
+        Turn(
+            message="t0105712",
+            note=(
+                "User switches to an eligible lease; flow must resume CREATE_SR "
+                "and resolve Under Armour (not stuck on blocked lease)"
+            ),
+            expect_keywords=["description", "under armour", "jawharat", "title", "what"],
+        ),
+    ],
+    tags=["lease-eligibility", "handover-exists", "existing-handover", "doc-upload-fix"],
+)
+
+
+_S64 = Scenario(
+    id=64,
+    name="Lease eligibility — activation_pending does not say not found",
+    goal=(
+        "When GET /leases returns empty leases[] with reason=activation_pending, "
+        "agent must explain activation/start-date block and ask for another lease — "
+        "never collapse to 'lease not found'"
+    ),
+    tier=2,
+    turns=[
+        Turn(
+            message="I want to create a handover service request",
+            note="Bot asks for lease identifier",
+            expect_keywords=["lease", "code", "brand", "mall"],
+        ),
+        Turn(
+            message="t0999999",
+            note=(
+                "Mock eligibility: activation_pending → explain lease was found "
+                "but activation not reached; must NOT say not found"
+            ),
+            expect_ui_type="text_question",
+            expect_no_submit=True,
+            expect_keywords=["activation", "start date", "found", "later", "lease"],
+            expect_no_keywords=["not found", "couldn't find", "could not find", "no lease"],
+        ),
+        Turn(
+            message="t0105712",
+            note="Eligible lease accepted; CREATE_SR continues with Under Armour",
+            expect_keywords=["description", "under armour", "jawharat", "title", "what"],
+        ),
+    ],
+    tags=["lease-eligibility", "activation-pending", "doc-upload-fix"],
+)
+
+
 # =============================================================================
 # TIER 0 — Smoke scenarios (S201–S202)
 # Fast sanity gate: ~60 seconds. Run before any longer tier.
@@ -2614,6 +2706,7 @@ TIER2_SCENARIOS: list[Scenario] = [
     _S16, _S17, _S18, _S19, _S20, _S21, _S22,
     _S23, _S24, _S25, _S26, _S27, _S28, _S29, _S30, _S31, _S32, _S33,
     _S60, _S61, _S62,
+    _S63, _S64,  # Lease eligibility (handover_exists / activation_pending)
 ]
 
 #: Agent-fix battle tests (Issues 1–7 from agent_ui_fixes.md)
