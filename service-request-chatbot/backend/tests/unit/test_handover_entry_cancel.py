@@ -122,7 +122,7 @@ class TestConfirmCancelSR:
             )
             result = await handover_entry_node(state)
 
-        assert result.get("workflow_stage") is None
+        assert result.get("workflow_stage") == "CANCELLED"
         assert result.get("active_agent") is None
         assert result.get("collected_data") == {}
         assert result.get("response_ui", {}).get("cancelled") is True
@@ -310,7 +310,7 @@ class TestStateAfterConfirmedCancel:
 
         assert result.get("collected_data") == {}
         assert result.get("active_agent") is None
-        assert result.get("workflow_stage") is None
+        assert result.get("workflow_stage") == "CANCELLED"
         assert result.get("confirmation_status") is None
         assert result.get("validation_errors") == []
         assert result.get("missing_fields") == []

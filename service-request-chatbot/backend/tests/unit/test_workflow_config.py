@@ -31,28 +31,28 @@ from app.agents.graph.help_agent_graph import _SR_ACTION_INTENTS
 
 class TestHandoverConfigRegistered:
     def test_handover_config_is_registered(self) -> None:
-        cfg = get_workflow_config("rdd_agent")
+        cfg = get_workflow_config("rdd_handover_agent")
         assert cfg is not None
 
     def test_agent_name_matches_key(self) -> None:
-        cfg = get_workflow_config("rdd_agent")
+        cfg = get_workflow_config("rdd_handover_agent")
         assert cfg is not None
-        assert cfg.agent_name == "rdd_agent"
+        assert cfg.agent_name == "rdd_handover_agent"
 
     def test_extraction_prompt_is_non_empty_string(self) -> None:
-        cfg = get_workflow_config("rdd_agent")
+        cfg = get_workflow_config("rdd_handover_agent")
         assert cfg is not None
         assert isinstance(cfg.extraction_prompt, str)
         assert len(cfg.extraction_prompt) > 100
 
     def test_field_questions_is_dict(self) -> None:
-        cfg = get_workflow_config("rdd_agent")
+        cfg = get_workflow_config("rdd_handover_agent")
         assert cfg is not None
         assert isinstance(cfg.field_questions, dict)
         assert len(cfg.field_questions) > 0
 
     def test_stage_sync_nodes_covers_fm_and_rdd(self) -> None:
-        cfg = get_workflow_config("rdd_agent")
+        cfg = get_workflow_config("rdd_handover_agent")
         assert cfg is not None
         assert "FM_REVIEW" in cfg.stage_sync_nodes
         assert "RDD_REVIEW" in cfg.stage_sync_nodes
@@ -60,46 +60,55 @@ class TestHandoverConfigRegistered:
         assert cfg.stage_sync_nodes["RDD_REVIEW"] == "rdd_review_entry"
 
     def test_collection_stages_non_empty(self) -> None:
-        cfg = get_workflow_config("rdd_agent")
+        cfg = get_workflow_config("rdd_handover_agent")
         assert cfg is not None
         assert len(cfg.collection_stages) > 0
         assert "CREATE_SR" in cfg.collection_stages
 
     def test_confirmation_nodes_per_stage(self) -> None:
-        cfg = get_workflow_config("rdd_agent")
+        cfg = get_workflow_config("rdd_handover_agent")
         assert cfg is not None
         assert cfg.confirmation_nodes.get("CREATE_SR") == "confirmation"
         assert cfg.confirmation_nodes.get("FM_REVIEW") == "fm_confirmation"
         assert cfg.confirmation_nodes.get("RDD_REVIEW") == "rdd_confirmation"
 
     def test_terminal_stages_non_empty(self) -> None:
-        cfg = get_workflow_config("rdd_agent")
+        cfg = get_workflow_config("rdd_handover_agent")
         assert cfg is not None
         assert "SR_CREATED" in cfg.terminal_stages
         assert "SR_COMPLETED" in cfg.terminal_stages
 
     def test_backend_fields_non_empty(self) -> None:
-        cfg = get_workflow_config("rdd_agent")
+        cfg = get_workflow_config("rdd_handover_agent")
         assert cfg is not None
         assert "tenant_profile_id" in cfg.backend_fields
         assert "lease_id" in cfg.backend_fields
 
     def test_auto_generated_fields_contains_title(self) -> None:
-        cfg = get_workflow_config("rdd_agent")
+        cfg = get_workflow_config("rdd_handover_agent")
         assert cfg is not None
         assert "title" in cfg.auto_generated_fields
 
     def test_lease_trigger_fields_non_empty(self) -> None:
-        cfg = get_workflow_config("rdd_agent")
+        cfg = get_workflow_config("rdd_handover_agent")
         assert cfg is not None
         assert len(cfg.lease_trigger_fields) > 0
         assert "lease_code" in cfg.lease_trigger_fields
 
     def test_action_intents_non_empty(self) -> None:
-        cfg = get_workflow_config("rdd_agent")
+        cfg = get_workflow_config("rdd_handover_agent")
         assert cfg is not None
         assert len(cfg.action_intents) > 0
         assert "CREATE_RDD_SERVICE_REQUEST" in cfg.action_intents
+
+    def test_create_handed_over_sr_in_rdd_agent_action_intents(self) -> None:
+        """CREATE_HANDED_OVER_SR must be in rdd_agent action_intents so that the
+        RBAC layer and supervisor routing both treat it as a valid workflow intent."""
+        cfg = get_workflow_config("rdd_handover_agent")
+        assert cfg is not None
+        assert "CREATE_HANDED_OVER_SR" in cfg.action_intents, (
+            "CREATE_HANDED_OVER_SR must be registered in rdd_agent.action_intents"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -125,7 +134,7 @@ class TestUnknownAgent:
 
 class TestSRActionIntentsDerived:
     def test_sr_action_intents_includes_handover_intents(self) -> None:
-        cfg = get_workflow_config("rdd_agent")
+        cfg = get_workflow_config("rdd_handover_agent")
         assert cfg is not None
         for intent in cfg.action_intents:
             assert intent in _SR_ACTION_INTENTS
@@ -151,7 +160,7 @@ class TestListRegisteredWorkflows:
 
     def test_handover_is_in_list(self) -> None:
         names = [cfg.agent_name for cfg in list_registered_workflows()]
-        assert "rdd_agent" in names
+        assert "rdd_handover_agent" in names
 
 
 # ---------------------------------------------------------------------------
@@ -197,9 +206,32 @@ class TestRegisterWorkflow:
         )
         try:
             register_workflow(mock_cfg)
-            handover_cfg = get_workflow_config("rdd_agent")
+            handover_cfg = get_workflow_config("rdd_handover_agent")
             assert handover_cfg is not None
-            assert handover_cfg.agent_name == "rdd_agent"
+            assert handover_cfg.agent_name == "rdd_handover_agent"
             assert "CREATE_RDD_SERVICE_REQUEST" in handover_cfg.action_intents
         finally:
             WORKFLOW_CONFIG_REGISTRY.pop("test_isolation_agent", None)
+
+
+# ---------------------------------------------------------------------------
+# B2 gap: CREATE_HANDED_OVER_SR in rdd_agent action_intents
+# ---------------------------------------------------------------------------
+
+
+class TestCreateHandedOverSrInActionIntents:
+    def test_create_handed_over_sr_in_rdd_agent_action_intents(self) -> None:
+        """B2 gap: CREATE_HANDED_OVER_SR must be in rdd_agent.action_intents so it routes
+        through the SR action path (not FAQ)."""
+        cfg = get_workflow_config("rdd_handover_agent")
+        assert cfg is not None
+        assert "CREATE_HANDED_OVER_SR" in cfg.action_intents, (
+            "CREATE_HANDED_OVER_SR must be in rdd_agent.action_intents so it is "
+            "included in _SR_ACTION_INTENTS and routed to the registry."
+        )
+
+    def test_create_handed_over_sr_in_sr_action_intents_graph(self) -> None:
+        """_SR_ACTION_INTENTS derived from registry must include CREATE_HANDED_OVER_SR."""
+        assert "CREATE_HANDED_OVER_SR" in _SR_ACTION_INTENTS, (
+            "CREATE_HANDED_OVER_SR must be in _SR_ACTION_INTENTS"
+        )

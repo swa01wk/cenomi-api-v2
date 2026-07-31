@@ -12,8 +12,8 @@ from app.agents.graph.nodes.handover.handover_entry_node import handover_entry_n
 def _state(**overrides: Any) -> dict[str, Any]:
     base: dict[str, Any] = {
         "session_id": "sess-1",
-        "active_agent": "rdd_agent",
-        "workflow_stage": "CREATE_SR",
+        "active_agent": "rdd_handover_agent",
+        "workflow_stage": "SR_CREATED",  # gate fires for SR_CREATED (post-submission stage)
         "user_message": "",
         "action_override": None,
         "confirmation_status": None,

@@ -2,22 +2,71 @@
 # run_agent_eval.sh — Tiered agent evaluation suite
 #
 # Tier structure:
-#   0  Smoke     (~1 min)   S201–S202 + lifecycle FM smoke — fast sanity gate
-#   1  Core      (~5 min)   S1–S15    — CREATE_SR happy path & basic flows
-#   2  Edge      (~8 min)   S16–S33   — corrections, multi-field, API edge cases
-#   3  Battle    (~12 min)  S34–S59   — Issues 1–7 from agent_ui_fixes.md
-#   4  FM        (~10 min)  L134–L139 — FM_REVIEW lifecycle
-#   5  RDD       (~12 min)  L140–L145 — RDD_REVIEW lifecycle
-#   6  Full-LC   (~25 min)  L146–L172 — full lifecycle + battle tests
-#   all           All tiers in sequence (equivalent to old a+b+c)
+#   0    Smoke-Agent    (~2 min)   S200–S201, S203–S206 + FM lifecycle smoke — per-agent sanity
+#   0p   Smoke-Pipeline (~5 min)   L298–L299 — Handover A 3-phase + FOS create→approve
+#
+#   ── Handover A — Stage 1: CREATE_SR (Mall Manager) ──────────────────────────
+#   1    CREATE_SR Happy  (~5 min)   S1–S15, S63–S64 — core flows
+#   2    CREATE_SR Edge   (~8 min)   S16–S33, S60–S68 — corrections, date violations
+#   3    CREATE_SR Battle (~10 min)  S34–S59 — Issues 1–7 agent-fix regressions
+#
+#   ── Handover A — Stage 2: FM_REVIEW (FM Manager / Operations) ───────────────
+#   3a   FM_REVIEW Happy      (~3 min)   L134–L135 — date+approve, save-progress
+#   3b   FM_REVIEW Edge       (~3 min)   L136–L137, L139 — NL date, multi-field, Ops role
+#   3c   FM_REVIEW Battle+RBAC (~2 min)  L138 — DD_ENGINEER denied
+#
+#   ── Handover A — Stage 3: RDD_REVIEW (DD Engineer) ──────────────────────────
+#   3d   RDD_REVIEW Happy      (~4 min)  L140–L141 — packed + turn-by-turn
+#   3e   RDD_REVIEW Edge       (~5 min)  L142–L144 — date-chain, APPROVED_WITH_CHANGES, NL dates
+#   3f   RDD_REVIEW Battle+RBAC (~2 min) L145 — FM_MANAGER denied
+#
+#   ── Handover A — Full Lifecycle (all 3 phases) ───────────────────────────────
+#   3g   Full LC Happy  (~3 min)   L146 — CREATE→FM→RDD→SR_COMPLETED clean run
+#   3h   Full LC Edge   (~5 min)   L147–L149 — corrections at each stage + MM upload gate
+#   3i   Full LC Battle (~12 min)  L150–L172 — state isolation, persistence, payload contracts
+#
+#   ── Handover B ───────────────────────────────────────────────────────────────
+#   4    Handover-B Happy      (~3 min)   L150–L151 — already_trading packed + gradual
+#   5    Handover-B Edge+Battle (~5 min)  L152–L159 — date ordering, path switch, RBAC
+#
+#   ── Fitout Start (FOS) — DD_ENGINEER ─────────────────────────────────────────
+#   6a   FOS Happy       (~2 min)  S73 + L170 — yes-branch create → SR_CREATED
+#   6b   FOS Edge        (~3 min)  S70, S75, S78, S82 + L171 — no-branch, delay, date-order, title
+#   6c   FOS Battle+RBAC (~3 min)  S79, S81 + L179, L181, L182 — cancel, RBAC, stale state
+#   6d   FOS Lifecycle   (~2 min)  L172 — APPROVE_SR: open existing FOS SR → SR_APPROVED
+#
+#   ── Fitout End (END) — DD_ENGINEER ───────────────────────────────────────────
+#   6e   END Happy       (~2 min)  S83 + L173 — yes-branch create → SR_CREATED
+#   6f   END Edge        (~3 min)  S71, S77 + L174 — no-branch, planned dates required
+#   6g   END Lifecycle   (~2 min)  L175 — APPROVE_SR: open existing END SR → SR_APPROVED
+#
+#   ── Trading Confirmation (TRADING) — MALL_MANAGER / OPERATIONS ───────────────
+#   6h   TRADING Happy       (~2 min)  S74 + L176 — yes-branch create → SR_CREATED
+#   6i   TRADING Edge        (~2 min)  S72, S76 + L177 — no-branch, delay optional
+#   6j   TRADING Battle+RBAC (~2 min)  S80 + L178, L180 — approve, DD_ENGINEER denied
+#
+#   ── FAQ + RBAC ───────────────────────────────────────────────────────────────
+#   8    FAQ + RBAC (~5 min)   S201, S208–S212 — help queries, status, RBAC denials
+#
+#   all  All tiers in sequence (~83 min)
 #
 # Usage:
 #   ./run_agent_eval.sh                            # full suite (all tiers), starts services
 #   ./run_agent_eval.sh --no-start                 # services already running
-#   ./run_agent_eval.sh --no-start --tier 0        # smoke only (~60s sanity gate)
-#   ./run_agent_eval.sh --no-start --tier 1        # Tier 1 core only
-#   ./run_agent_eval.sh --no-start --tier 1,2      # Tier 1 + 2 combined
-#   ./run_agent_eval.sh --no-start --tier 4        # FM review only
+#   ./run_agent_eval.sh --no-start --tier 0        # smoke only (~2 min sanity gate)
+#   ./run_agent_eval.sh --no-start --tier 0p       # pipeline smoke (~5 min)
+#   ./run_agent_eval.sh --no-start --tier 1        # CREATE_SR happy
+#   ./run_agent_eval.sh --no-start --tier 1,2,3    # CREATE_SR full suite
+#   ./run_agent_eval.sh --no-start --tier 3a,3b,3c # FM_REVIEW full suite
+#   ./run_agent_eval.sh --no-start --tier 3d,3e,3f # RDD_REVIEW full suite
+#   ./run_agent_eval.sh --no-start --tier 3g,3h,3i # Full lifecycle full suite
+#   ./run_agent_eval.sh --no-start --tier 1,2,3,3a,3b,3c,3d,3e,3f,3g,3h,3i  # all Handover A
+#   ./run_agent_eval.sh --no-start --tier 4        # Handover B happy only
+#   ./run_agent_eval.sh --no-start --tier 6a,6b,6c,6d  # FOS full suite
+#   ./run_agent_eval.sh --no-start --tier 6e,6f,6g     # END full suite
+#   ./run_agent_eval.sh --no-start --tier 6h,6i,6j     # TRADING full suite
+#   ./run_agent_eval.sh --no-start --tier 6a,6b,6c,6d,6e,6f,6g,6h,6i,6j  # all Fitout per-agent
+#   ./run_agent_eval.sh --no-start --tier 8        # FAQ + RBAC
 #   ./run_agent_eval.sh --no-start --tier all      # all tiers
 #   ./run_agent_eval.sh --no-start --verbose       # verbose turn-by-turn output
 #   ./run_agent_eval.sh --no-start --no-obs        # skip observability export
@@ -52,7 +101,7 @@ while [[ $# -gt 0 ]]; do
       case "$2" in
         a)   TIERS="1" ;;
         b)   TIERS="3" ;;
-        c)   TIERS="4,5,6" ;;
+        c)   TIERS="4,5,6a,6b,6c,6d,6e,6f,6g,6h,6i,6j" ;;
         ab)  TIERS="1,2,3" ;;
         abc) TIERS="all" ;;
         *)   TIERS="$2" ;;  # pass-through numeric tier
@@ -72,9 +121,9 @@ while [[ $# -gt 0 ]]; do
   shift
 done
 
-# Expand "all" to every tier
+# Expand "all" to every tier in sequence
 if [[ "$TIERS" == "all" ]]; then
-  TIERS="0,1,2,3,4,5,6"
+  TIERS="0,0p,1,2,3,3a,3b,3c,3d,3e,3f,3g,3h,3i,4,5,6a,6b,6c,6d,6e,6f,6g,6h,6i,6j,8"
 fi
 
 # ── Results dir ───────────────────────────────────────────────────────────────
@@ -184,9 +233,13 @@ _ok "Baseline captured → metrics_baseline.json"
 # ─────────────────────────────────────────────────────────────────────────────
 # Helper: run one eval tier and capture exit code
 # ─────────────────────────────────────────────────────────────────────────────
-declare -A TIER_EXIT          # exit code per tier (0=pass, 1=fail, -1=skipped)
-declare -A TIER_LOG           # log file per tier
-declare -A TIER_JSON          # json file per tier
+# Tier exit-code tracking — uses temp files so any tier name (including "0p")
+# works on all bash versions (bash 3.x on macOS lacks associative array support).
+TIER_EXIT_DIR="$RESULTS/.tier_exits"
+mkdir -p "$TIER_EXIT_DIR"
+
+_tier_set_exit() { echo "${2}" > "$TIER_EXIT_DIR/${1}"; }
+_tier_get_exit() { cat "$TIER_EXIT_DIR/${1}" 2>/dev/null || echo 0; }
 
 _run_scenarios_tier() {
     local tier="$1"
@@ -197,8 +250,6 @@ _run_scenarios_tier() {
 
     local log_file="$RESULTS/${log_name}.log"
     local json_file="$RESULTS/${log_name}.json"
-    TIER_LOG[$tier]="$log_file"
-    TIER_JSON[$tier]="$json_file"
 
     local args=(
         --base-url "$BASE_URL"
@@ -211,7 +262,7 @@ _run_scenarios_tier() {
     (cd "$BACKEND_DIR" && PYTHONUNBUFFERED=1 python -u -m tests.eval.run_eval "${args[@]}") \
         2>&1 | tee "$log_file"
     local exit_code="${PIPESTATUS[0]}"
-    TIER_EXIT[$tier]="$exit_code"
+    _tier_set_exit "$tier" "$exit_code"
 
     if [[ $exit_code -eq 0 ]]; then
         _ok "Tier ${tier} PASSED"
@@ -229,8 +280,6 @@ _run_lifecycle_tier() {
 
     local log_file="$RESULTS/${log_name}.log"
     local json_file="$RESULTS/${log_name}.json"
-    TIER_LOG[$tier]="$log_file"
-    TIER_JSON[$tier]="$json_file"
 
     local args=(
         --base-url "$BASE_URL"
@@ -243,7 +292,7 @@ _run_lifecycle_tier() {
     (cd "$BACKEND_DIR" && PYTHONUNBUFFERED=1 python -u -m tests.eval.run_lifecycle_eval "${args[@]}") \
         2>&1 | tee "$log_file"
     local exit_code="${PIPESTATUS[0]}"
-    TIER_EXIT[$tier]="$exit_code"
+    _tier_set_exit "$tier" "$exit_code"
 
     if [[ $exit_code -eq 0 ]]; then
         _ok "Lifecycle tier ${tier} PASSED"
@@ -260,27 +309,98 @@ IFS=',' read -ra TIER_LIST <<< "$TIERS"
 for tier in "${TIER_LIST[@]}"; do
   case "$tier" in
     0)
-      _run_scenarios_tier 0 "Smoke — server health + quick CREATE_SR (~60s)" "tier_0_smoke"
+      _run_scenarios_tier 0 "Smoke-Agent — per-agent sanity (S200–S201, S203–S206)" "tier_0_smoke"
       # Also run lifecycle smoke if tier 0 is selected
       _run_lifecycle_tier 0 "Smoke — FM approve lifecycle" "tier_0_smoke_fm"
       ;;
+    0p)
+      _run_lifecycle_tier 0p "Smoke-Pipeline — Handover A 3-phase + FOS create→approve (L298–L299)" "tier_0p_pipeline_smoke"
+      ;;
     1)
-      _run_scenarios_tier 1 "Core — CREATE_SR happy path (S1–S15)" "tier_1_core"
+      _run_scenarios_tier 1 "Handover A Happy — CREATE_SR core (S1–S15, S63–S64)" "tier_1_handover_a_happy"
       ;;
     2)
-      _run_scenarios_tier 2 "Edge — corrections, multi-field, API (S16–S33)" "tier_2_edge"
+      _run_scenarios_tier 2 "Handover A Edge — corrections, date violations (S16–S33, S60–S68)" "tier_2_handover_a_edge"
       ;;
     3)
-      _run_scenarios_tier 3 "Battle — Issues 1–7 agent-fix tests (S34–S59)" "tier_3_battle"
+      _run_scenarios_tier 3 "CREATE_SR Battle — Issues 1–7 agent-fix regressions (S34–S59)" "tier_3_battle"
+      ;;
+    3a)
+      _run_lifecycle_tier "3a" "FM_REVIEW Happy — date+approve, save-progress (L134–L135)" "tier_3a_fm_happy"
+      ;;
+    3b)
+      _run_lifecycle_tier "3b" "FM_REVIEW Edge — NL date, multi-field, Operations role (L136–L137, L139)" "tier_3b_fm_edge"
+      ;;
+    3c)
+      _run_lifecycle_tier "3c" "FM_REVIEW Battle+RBAC — DD_ENGINEER denied (L138)" "tier_3c_fm_battle"
+      ;;
+    3d)
+      _run_lifecycle_tier "3d" "RDD_REVIEW Happy — packed + turn-by-turn (L140–L141)" "tier_3d_rdd_happy"
+      ;;
+    3e)
+      _run_lifecycle_tier "3e" "RDD_REVIEW Edge — date-chain, APPROVED_WITH_CHANGES, NL dates (L142–L144)" "tier_3e_rdd_edge"
+      ;;
+    3f)
+      _run_lifecycle_tier "3f" "RDD_REVIEW Battle+RBAC — FM_MANAGER denied (L145)" "tier_3f_rdd_battle"
+      ;;
+    3g)
+      _run_lifecycle_tier "3g" "Full Lifecycle Happy — CREATE→FM→RDD→SR_COMPLETED (L146)" "tier_3g_lc_happy"
+      ;;
+    3h)
+      _run_lifecycle_tier "3h" "Full Lifecycle Edge — corrections + MM upload gate (L147–L149)" "tier_3h_lc_edge"
+      ;;
+    3i)
+      _run_lifecycle_tier "3i" "Full Lifecycle Battle — state isolation, persistence, contracts (L150–L172)" "tier_3i_lc_battle"
       ;;
     4)
-      _run_lifecycle_tier 4 "FM_REVIEW — date, save, approve, RBAC (L134–L139)" "tier_4_fm_review"
+      _run_lifecycle_tier 4 "Handover B Happy — already_trading packed + gradual (L150–L151)" "tier_4_handover_b_happy"
       ;;
     5)
-      _run_lifecycle_tier 5 "RDD_REVIEW — field order, dates, RBAC (L140–L145)" "tier_5_rdd_review"
+      _run_lifecycle_tier 5 "Handover B Edge+Battle — date ordering, path switch, RBAC (L152–L159)" "tier_5_handover_b_edge"
       ;;
-    6)
-      _run_lifecycle_tier 6 "Full lifecycle + state/payload battle tests (L146–L172)" "tier_6_full_lifecycle"
+    # ── Fitout Start (FOS) — per-agent sub-tiers ──────────────────────────────
+    6a)
+      _run_scenarios_tier "6a" "FOS Happy flat — yes-branch create (S73)" "tier_6a_fos_happy"
+      _run_lifecycle_tier "6a" "FOS Happy lifecycle — single-turn create (L170)" "tier_6a_fos_happy_lc"
+      ;;
+    6b)
+      _run_scenarios_tier "6b" "FOS Edge flat — intent, no-branch, date-order, title (S70, S75, S78, S82)" "tier_6b_fos_edge"
+      _run_lifecycle_tier "6b" "FOS Edge lifecycle — no-branch with delay_reason (L171)" "tier_6b_fos_edge_lc"
+      ;;
+    6c)
+      _run_scenarios_tier "6c" "FOS Battle+RBAC flat — payload, DD_ENGINEER approve (S79, S81)" "tier_6c_fos_battle"
+      _run_lifecycle_tier "6c" "FOS Battle+RBAC lifecycle — cancel, RBAC, stale state (L179, L181, L182)" "tier_6c_fos_battle_lc"
+      ;;
+    6d)
+      _run_lifecycle_tier "6d" "FOS Lifecycle — APPROVE_SR: open existing FOS SR → SR_APPROVED (L172)" "tier_6d_fos_lifecycle"
+      ;;
+    # ── Fitout End (END) — per-agent sub-tiers ────────────────────────────────
+    6e)
+      _run_scenarios_tier "6e" "END Happy flat — yes-branch create (S83)" "tier_6e_end_happy"
+      _run_lifecycle_tier "6e" "END Happy lifecycle — packed create (L173)" "tier_6e_end_happy_lc"
+      ;;
+    6f)
+      _run_scenarios_tier "6f" "END Edge flat — intent, no-branch planned dates (S71, S77)" "tier_6f_end_edge"
+      _run_lifecycle_tier "6f" "END Edge lifecycle — no-branch with delay_reason (L174)" "tier_6f_end_edge_lc"
+      ;;
+    6g)
+      _run_lifecycle_tier "6g" "END Lifecycle — APPROVE_SR: open existing END SR → SR_APPROVED (L175)" "tier_6g_end_lifecycle"
+      ;;
+    # ── Trading Confirmation (TRADING) — per-agent sub-tiers ─────────────────
+    6h)
+      _run_scenarios_tier "6h" "TRADING Happy flat — yes-branch create (S74)" "tier_6h_trading_happy"
+      _run_lifecycle_tier "6h" "TRADING Happy lifecycle — packed create (L176)" "tier_6h_trading_happy_lc"
+      ;;
+    6i)
+      _run_scenarios_tier "6i" "TRADING Edge flat — intent, no-branch delay optional (S72, S76)" "tier_6i_trading_edge"
+      _run_lifecycle_tier "6i" "TRADING Edge lifecycle — no-branch no delay_reason (L177)" "tier_6i_trading_edge_lc"
+      ;;
+    6j)
+      _run_scenarios_tier "6j" "TRADING Battle+RBAC flat — MALL_MANAGER create (S80)" "tier_6j_trading_battle"
+      _run_lifecycle_tier "6j" "TRADING Battle+RBAC lifecycle — approve, DD_ENGINEER denied (L178, L180)" "tier_6j_trading_battle_lc"
+      ;;
+    8)
+      _run_scenarios_tier 8 "FAQ + RBAC — help queries, status, RBAC denials (S201, S208–S212)" "tier_8_faq_rbac"
       ;;
     *)
       _warn "Unknown tier '${tier}' — skipped"
@@ -315,6 +435,7 @@ fi
 _step "REPORT.md"
 
 python3 - "$RESULTS" "$TIMESTAMP" "$BASE_URL" "$TIERS" <<'PYEOF'
+from __future__ import annotations
 import json, sys, glob
 from pathlib import Path
 
@@ -409,14 +530,51 @@ avg_latency = int(sum(latencies) / len(latencies)) if latencies else 0
 
 # Build per-tier rows
 TIER_INFO = [
-    ("0",  "Smoke",         "tier_0_smoke",         False),
-    ("0fm","Smoke FM",      "tier_0_smoke_fm",       True),
-    ("1",  "Core (S1–15)",  "tier_1_core",           False),
-    ("2",  "Edge (S16–33)", "tier_2_edge",           False),
-    ("3",  "Battle (S34–59)","tier_3_battle",        False),
-    ("4",  "FM_REVIEW",     "tier_4_fm_review",      True),
-    ("5",  "RDD_REVIEW",    "tier_5_rdd_review",     True),
-    ("6",  "Full lifecycle","tier_6_full_lifecycle",  True),
+    ("0",    "Smoke-Agent",              "tier_0_smoke",              False),
+    ("0fm",  "Smoke FM lifecycle",       "tier_0_smoke_fm",           True),
+    ("0p",   "Smoke-Pipeline",           "tier_0p_pipeline_smoke",    True),
+    # Handover A — Stage 1: CREATE_SR
+    ("1",    "CREATE_SR Happy",          "tier_1_handover_a_happy",   False),
+    ("2",    "CREATE_SR Edge",           "tier_2_handover_a_edge",    False),
+    ("3",    "CREATE_SR Battle",         "tier_3_battle",             False),
+    # Handover A — Stage 2: FM_REVIEW
+    ("3a",   "FM_REVIEW Happy",          "tier_3a_fm_happy",          True),
+    ("3b",   "FM_REVIEW Edge",           "tier_3b_fm_edge",           True),
+    ("3c",   "FM_REVIEW Battle+RBAC",    "tier_3c_fm_battle",         True),
+    # Handover A — Stage 3: RDD_REVIEW
+    ("3d",   "RDD_REVIEW Happy",         "tier_3d_rdd_happy",         True),
+    ("3e",   "RDD_REVIEW Edge",          "tier_3e_rdd_edge",          True),
+    ("3f",   "RDD_REVIEW Battle+RBAC",   "tier_3f_rdd_battle",        True),
+    # Handover A — Full Lifecycle
+    ("3g",   "Full LC Happy",            "tier_3g_lc_happy",          True),
+    ("3h",   "Full LC Edge",             "tier_3h_lc_edge",           True),
+    ("3i",   "Full LC Battle",           "tier_3i_lc_battle",         True),
+    # Handover B
+    ("4",    "Handover B Happy",         "tier_4_handover_b_happy",   True),
+    ("5",    "Handover B Edge+Battle",   "tier_5_handover_b_edge",    True),
+    # Fitout Start (FOS) per-agent
+    ("6a",   "FOS Happy flat",           "tier_6a_fos_happy",         False),
+    ("6alc", "FOS Happy LC",             "tier_6a_fos_happy_lc",      True),
+    ("6b",   "FOS Edge flat",            "tier_6b_fos_edge",          False),
+    ("6blc", "FOS Edge LC",              "tier_6b_fos_edge_lc",       True),
+    ("6c",   "FOS Battle+RBAC flat",     "tier_6c_fos_battle",        False),
+    ("6clc", "FOS Battle+RBAC LC",       "tier_6c_fos_battle_lc",     True),
+    ("6d",   "FOS Lifecycle",            "tier_6d_fos_lifecycle",      True),
+    # Fitout End (END) per-agent
+    ("6e",   "END Happy flat",           "tier_6e_end_happy",         False),
+    ("6elc", "END Happy LC",             "tier_6e_end_happy_lc",      True),
+    ("6f",   "END Edge flat",            "tier_6f_end_edge",          False),
+    ("6flc", "END Edge LC",              "tier_6f_end_edge_lc",       True),
+    ("6g",   "END Lifecycle",            "tier_6g_end_lifecycle",      True),
+    # Trading Confirmation (TRADING) per-agent
+    ("6h",   "TRADING Happy flat",       "tier_6h_trading_happy",     False),
+    ("6hlc", "TRADING Happy LC",         "tier_6h_trading_happy_lc",  True),
+    ("6i",   "TRADING Edge flat",        "tier_6i_trading_edge",      False),
+    ("6ilc", "TRADING Edge LC",          "tier_6i_trading_edge_lc",   True),
+    ("6j",   "TRADING Battle+RBAC flat", "tier_6j_trading_battle",    False),
+    ("6jlc", "TRADING Battle+RBAC LC",   "tier_6j_trading_battle_lc", True),
+    # FAQ + RBAC
+    ("8",    "FAQ + RBAC",               "tier_8_faq_rbac",           False),
 ]
 
 lines = [
@@ -449,8 +607,7 @@ all_failed_scenarios = []
 for tier_id, desc, stem, is_lifecycle in TIER_INFO:
     data = tier_data.get(stem, [])
     if not data:
-        lines.append(f"| {tier_id} | {desc} | — | — | — | — | — | — |")
-        continue
+        continue  # tier was not executed — omit row rather than show dashes
     if is_lifecycle:
         s = _lifecycle_tier_stats(data)
         slow = sum(
@@ -480,14 +637,42 @@ logs_dir = results_dir / "logs"
 logs_dir.mkdir(exist_ok=True)
 
 _STEM_MAP = {
-    "0":   "tier_0_smoke",
-    "0fm": "tier_0_smoke_fm",
-    "1":   "tier_1_core",
-    "2":   "tier_2_edge",
-    "3":   "tier_3_battle",
-    "4":   "tier_4_fm_review",
-    "5":   "tier_5_rdd_review",
-    "6":   "tier_6_full_lifecycle",
+    "0":    "tier_0_smoke",
+    "0fm":  "tier_0_smoke_fm",
+    "0p":   "tier_0p_pipeline_smoke",
+    "1":    "tier_1_handover_a_happy",
+    "2":    "tier_2_handover_a_edge",
+    "3":    "tier_3_battle",
+    "3a":   "tier_3a_fm_happy",
+    "3b":   "tier_3b_fm_edge",
+    "3c":   "tier_3c_fm_battle",
+    "3d":   "tier_3d_rdd_happy",
+    "3e":   "tier_3e_rdd_edge",
+    "3f":   "tier_3f_rdd_battle",
+    "3g":   "tier_3g_lc_happy",
+    "3h":   "tier_3h_lc_edge",
+    "3i":   "tier_3i_lc_battle",
+    "4":    "tier_4_handover_b_happy",
+    "5":    "tier_5_handover_b_edge",
+    "6a":   "tier_6a_fos_happy",
+    "6alc": "tier_6a_fos_happy_lc",
+    "6b":   "tier_6b_fos_edge",
+    "6blc": "tier_6b_fos_edge_lc",
+    "6c":   "tier_6c_fos_battle",
+    "6clc": "tier_6c_fos_battle_lc",
+    "6d":   "tier_6d_fos_lifecycle",
+    "6e":   "tier_6e_end_happy",
+    "6elc": "tier_6e_end_happy_lc",
+    "6f":   "tier_6f_end_edge",
+    "6flc": "tier_6f_end_edge_lc",
+    "6g":   "tier_6g_end_lifecycle",
+    "6h":   "tier_6h_trading_happy",
+    "6hlc": "tier_6h_trading_happy_lc",
+    "6i":   "tier_6i_trading_edge",
+    "6ilc": "tier_6i_trading_edge_lc",
+    "6j":   "tier_6j_trading_battle",
+    "6jlc": "tier_6j_trading_battle_lc",
+    "8":    "tier_8_faq_rbac",
 }
 
 # Cache parsed tier log lines keyed by stem
@@ -666,10 +851,13 @@ echo
 _div
 
 ALL_EXIT=0
-for tier in "${!TIER_EXIT[@]}"; do
-    if [[ "${TIER_EXIT[$tier]}" -ne 0 ]]; then
+for f in "$TIER_EXIT_DIR"/*; do
+    [[ -f "$f" ]] || continue
+    tier="$(basename "$f")"
+    ec="$(cat "$f")"
+    if [[ "$ec" -ne 0 ]]; then
         ALL_EXIT=1
-        _warn "Tier ${tier} FAILED (exit ${TIER_EXIT[$tier]})"
+        _warn "Tier ${tier} FAILED (exit ${ec})"
     fi
 done
 

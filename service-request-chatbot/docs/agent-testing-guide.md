@@ -2,7 +2,7 @@
 
 > **Scope:** This document defines the complete testing strategy for LangGraph-based conversational agents built on the Cenomi chatbot platform. It covers every layer of the test pyramid — unit, functional, integration, end-to-end, evaluation, and security — and is written as a reusable reference for implementing and verifying any new agent.
 >
-> **Current implementation reference:** The Handover SR agent (`rdd_agent`) and Work Permit agent (`work_permit_agent`) are the canonical examples used throughout. All patterns apply equally to future agents.
+> **Current implementation reference:** The Handover SR agent (`rdd_handover_agent`) and Work Permit agent (`work_permit_agent`) are the canonical examples used throughout. All patterns apply equally to future agents.
 >
 > **Test counts (July 2026 baseline):**
 > - Unit tests: **1,126**
@@ -1138,7 +1138,7 @@ def base_state(**overrides) -> dict:
         "backend_refs": {},
         "action_override": None,
         "workflow_stage": "CREATE_SR",
-        "active_agent": "rdd_agent",
+        "active_agent": "rdd_handover_agent",
         "confirmation_status": None,
         "documents": [],
         "auth_context": None,

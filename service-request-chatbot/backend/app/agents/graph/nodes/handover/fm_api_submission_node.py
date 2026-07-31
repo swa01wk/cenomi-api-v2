@@ -408,5 +408,5 @@ async def fm_api_submission_node(state: ServiceRequestState) -> dict[str, Any]:
     }
     if next_stage:
         out["workflow_stage"] = next_stage
-        out["active_agent"] = "rdd_agent"
+        out["active_agent"] = "rdd_handover_agent"
     return out

@@ -80,7 +80,8 @@ def _base_fm_state(**kwargs: Any) -> dict[str, Any]:
         "documents": [
             {"document_id": "fm-doc-checklist", "document_type_id": "SR_HANDOVER_CHECKLIST"},
             {"document_id": "fm-doc-survey", "document_type_id": "SR_HANDOVER_SITE_SURVEY"},
-            {"document_id": "fm-doc-other", "document_type_id": "SR_HANDOVER_OTHER"},
+            # Fix 2: SR_COP_CHECKLIST_OTHER is the FM "other" type (SR_HANDOVER_OTHER is RDD)
+            {"document_id": "fm-doc-other", "document_type_id": "SR_COP_CHECKLIST_OTHER"},
         ],
         "workflow_stage": "FM_REVIEW",
         "action_override": None,
@@ -204,7 +205,8 @@ class TestFMPayloadWithDocuments:
 
         result = await fm_payload_builder_node(state)
         payload_inner = result["backend_refs"]["fm_payload"]["payload"]
-        assert payload_inner["unit_readiness_date"] == "18/06/2026"
+        # Fix 5: dates are now in YYYY-MM-DD (ISO) format
+        assert payload_inner["unit_readiness_date"] == "2026-06-18"
 
     @pytest.mark.asyncio
     async def test_payload_includes_expected_handover_date(self) -> None:
@@ -215,7 +217,8 @@ class TestFMPayloadWithDocuments:
 
         result = await fm_payload_builder_node(state)
         payload_inner = result["backend_refs"]["fm_payload"]["payload"]
-        assert payload_inner["expected_handover_date"] == "25/06/2026"
+        # Fix 5: dates are now in YYYY-MM-DD (ISO) format
+        assert payload_inner["expected_handover_date"] == "2026-06-25"
 
     @pytest.mark.asyncio
     async def test_approve_payload_has_approved_status(self) -> None:
@@ -311,7 +314,8 @@ class TestFMFullChainedPipeline:
         payload = state["backend_refs"]["fm_payload"]
         assert payload["status"] == "APPROVED"
         inner = payload["payload"]
-        assert inner["expected_handover_date"] == "25/06/2026"
+        # Fix 5: dates are now in YYYY-MM-DD (ISO) format
+        assert inner["expected_handover_date"] == "2026-06-25"
         assert "fm-doc-checklist" in inner["documents_ids"]
 
         # 4. Submit to platform

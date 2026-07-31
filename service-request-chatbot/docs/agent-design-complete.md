@@ -298,7 +298,7 @@ The state is a `TypedDict` with `total=False` — all keys are optional because 
 | `attachments` | `list[dict]` | — | File attachment metadata for this turn |
 | `trace_id` | `str` | ✓ (agent_traces) | Observability trace for this turn |
 | `conversation_history` | `list[dict]` | ✓ (chat_messages) | `[{"role": "user/assistant", "content": "..."}]` (last 10) |
-| `active_agent` | `str \| None` | ✓ (chat_sessions) | e.g. `"rdd_agent"` |
+| `active_agent` | `str \| None` | ✓ (chat_sessions) | e.g. `"rdd_handover_agent"` |
 | `intent` | `str \| None` | ✓ (chat_sessions) | e.g. `"CREATE_RDD_SERVICE_REQUEST"` |
 | `service_category` | `str \| None` | ✓ (draft) | e.g. `"FIT_OUT_AND_HANDOVER"` |
 | `sub_category` | `str \| None` | ✓ (draft) | e.g. `"HANDOVER"` |
@@ -437,7 +437,7 @@ Calls `lookup_agent(service_category, sub_category)` against `SERVICE_REQUEST_AG
 SERVICE_REQUEST_AGENT_REGISTRY = {
     "FIT_OUT_AND_HANDOVER": {
         "HANDOVER": {
-            "agent_name": "rdd_agent",
+            "agent_name": "rdd_handover_agent",
             "display_name": "RDD Agent",
             "schema_key": "handover_service_request_schema",
         }
@@ -664,7 +664,7 @@ All routing is implemented as pure Python functions in `app/agents/graph/service
 
 ```python
 _AGENT_ENTRY_NODES = {
-    "rdd_agent": "handover_entry",
+    "rdd_handover_agent": "handover_entry",
     # FM/RDD are routed by workflow_stage after sr_status_sync, not by active_agent
 }
 ```

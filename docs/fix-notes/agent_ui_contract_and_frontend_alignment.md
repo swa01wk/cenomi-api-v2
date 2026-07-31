@@ -121,12 +121,16 @@ interface AgentState {
 }
 
 type WorkflowStage =
+  // Path A — standard HANDOVER multi-level
   | "CREATE_SR"
   | "FM_REVIEW"
   | "RDD_REVIEW"
   | "SR_CREATED"
   | "SR_COMPLETED"
-  | "CANCELLED"         // Emitted after confirmed SR cancellation
+  | "CANCELLED"                  // Emitted after confirmed SR cancellation
+  // Path B — HANDED_OVER (Already Trading fast-path)
+  | "CREATE_HANDED_OVER_SR"      // Collecting the 4 actual dates
+  | "HANDED_OVER_COMPLETED"      // Terminal: SR auto-approved, no FM/RDD steps
   ;
 
 type AgentStatus =
@@ -157,7 +161,7 @@ interface DraftPreview {
   // FM_REVIEW fields
   unit_readiness_date?: string;
   expected_handover_date?: string;  // Auto-computed
-  
+
   // RDD_REVIEW fields
   guideLineLink?: string;
   rdd_upload_doc_type?: string;
@@ -166,6 +170,12 @@ interface DraftPreview {
   fitout_start_date?: string;
   fitout_end_date?: string;
   trading_date?: string;            // Auto-computed
+
+  // Path B — HANDED_OVER (Already Trading) fields
+  actual_shop_handover_date?: string;  // YYYY-MM-DD
+  actual_fitout_start_date?: string;   // YYYY-MM-DD  (≥ actual_shop_handover_date)
+  actual_fitout_end_date?: string;     // YYYY-MM-DD  (≥ actual_fitout_start_date)
+  actual_trading_date?: string;        // YYYY-MM-DD  (≥ actual_fitout_end_date)
 }
 ```
 
@@ -266,19 +276,25 @@ The frontend must show/hide buttons based on these agent signals:
 ### `workflow_stage` lifecycle
 
 ```
+Path A (standard HANDOVER):
 null → CREATE_SR → SR_CREATED → FM_REVIEW → RDD_REVIEW → SR_COMPLETED
                               ↘ (if no RDD op) → SR_COMPLETED
+
+Path B (HANDED_OVER — Already Trading fast-path):
+null → CREATE_HANDED_OVER_SR → HANDED_OVER_COMPLETED
 ```
 
 | `workflow_stage` value | Meaning | Frontend action |
 |---|---|---|
 | `null` | No active workflow | Show greeting / intent classifier |
-| `CREATE_SR` | MM collecting fields | Show field collection UI |
+| `CREATE_SR` | MM collecting fields (Path A) | Show field collection UI |
 | `SR_CREATED` | SR submitted; awaiting FM | Show SR reference number; optionally poll |
 | `FM_REVIEW` | FM reviewing | Show FM review UI with action buttons |
 | `RDD_REVIEW` | RDD PM reviewing | Show RDD review UI with upload + action buttons |
 | `SR_COMPLETED` | Final approval done | Show completion confirmation; hide all action buttons |
 | `CANCELLED` | SR cancelled (⚠️ not yet emitted) | Show cancellation message; close form |
+| `CREATE_HANDED_OVER_SR` | MM collecting 4 actual dates (Path B) | Show Path B date collection UI; no FM/RDD action buttons |
+| `HANDED_OVER_COMPLETED` | Already Trading SR auto-approved | Show immediate approval message; `workflow_complete: true`; no FM/RDD steps |
 
 ### `status` values
 
@@ -608,7 +624,7 @@ The payload builder combines `startDate` + `inspectionTime` → UTC ISO for the 
       "documents": [
         { "key": "SR_HANDOVER_CHECKLIST", "label": "Handover Checklist", "required": false, "status": "missing" },
         { "key": "SR_HANDOVER_SITE_SURVEY", "label": "Site Survey", "required": false, "status": "missing" },
-        { "key": "SR_HANDOVER_OTHER", "label": "Other", "required": false, "status": "missing" }
+        { "key": "SR_COP_CHECKLIST_OTHER", "label": "COP Checklist / Other", "required": false, "status": "missing" }
       ],
       "uploadContext": { "session_id": "abc-123", "sr_id": "SR-20260001" }
     }
@@ -715,3 +731,137 @@ interface ResponseDecorations {
 - The `response_ui` schema is currently loosely typed. Phase 3 work will formalise it as a Pydantic model.
 - `corrected_fields` keys must exactly match the `collected_data` key names. Using platform API field names (e.g. `unitCode` instead of `unit_codes`) will silently fail.
 - All date fields use ISO 8601 `YYYY-MM-DD` format. Do not send timestamps or locale-formatted dates.
+
+---
+
+## 16. Path B — HANDED_OVER (Already Trading) Contract
+
+Path B is triggered when the supervisor classifies the user intent as `CREATE_HANDED_OVER_SR`. It applies exclusively to units that are **already trading** and therefore bypasses FM and RDD review entirely.
+
+### 16.1 Trigger & RBAC
+
+| Condition | Value |
+|---|---|
+| Intent | `CREATE_HANDED_OVER_SR` |
+| Permitted role | `MALL_MANAGER` only |
+| `sub_category` set by supervisor | `HANDED_OVER` |
+| `already_handovered` value in payload | `"already_trading"` |
+
+The supervisor sets `sub_category = "HANDED_OVER"` and routes to the `rdd_agent`. The `already_handovered` field is set to `"already_trading"` in the POST payload by `payload_builder_service.py`.
+
+### 16.2 Collected Data Fields (Path B)
+
+Path B collects **four actual-date fields** (no inspection fields, no fit-out scheduling fields):
+
+| Field | Type | Description |
+|---|---|---|
+| `actual_shop_handover_date` | `YYYY-MM-DD` | When the shop was physically handed over to the tenant |
+| `actual_fitout_start_date` | `YYYY-MM-DD` | When tenant fit-out work actually started |
+| `actual_fitout_end_date` | `YYYY-MM-DD` | When tenant fit-out work actually ended |
+| `actual_trading_date` | `YYYY-MM-DD` | When the unit started trading |
+
+**Date ordering constraint:** `actual_shop_handover_date` ≤ `actual_fitout_start_date` ≤ `actual_fitout_end_date` ≤ `actual_trading_date`. Violating this blocks confirmation and returns an inline validation error.
+
+### 16.3 Workflow Stage Progression (Path B)
+
+```
+CREATE_HANDED_OVER_SR   ← collecting dates
+       │
+       ▼  (all 4 dates collected → auto-approved)
+HANDED_OVER_COMPLETED   ← terminal stage
+```
+
+There is no `FM_REVIEW` or `RDD_REVIEW` stage for Path B. The SR is immediately approved upon creation.
+
+### 16.4 Confirmation Card (Path B)
+
+The confirmation card for Path B shows the following fields:
+
+```typescript
+{
+  type: "confirmation_card",
+  fields: [
+    { key: "actual_shop_handover_date",  label: "Actual Shop Handover Date", value: "YYYY-MM-DD" },
+    { key: "actual_fitout_start_date",   label: "Actual Fitout Start Date",  value: "YYYY-MM-DD" },
+    { key: "actual_fitout_end_date",     label: "Actual Fitout End Date",    value: "YYYY-MM-DD" },
+    { key: "actual_trading_date",        label: "Actual Trading Date",       value: "YYYY-MM-DD" },
+  ],
+  confirmAction: "confirm",
+}
+```
+
+**No** `startDate`, `endDate`, `inspection_done_by`, or other Path A fields are present in the Path B confirmation card.
+
+### 16.5 Success Response (Path B)
+
+When submission succeeds the agent returns:
+
+```typescript
+{
+  message: "Your Already Trading SR has been created and automatically approved — reference **{sr_id}**. No further FM or RDD review steps are required.",
+  ui: {
+    type: "message",
+    message: "...",
+    workflow_complete: true,
+    workflow_stage: "HANDED_OVER_COMPLETED",
+  },
+  state: {
+    workflow_stage: "HANDED_OVER_COMPLETED",
+    sr_id: "{sr_id}",
+  },
+}
+```
+
+Key contract points:
+- `ui.workflow_complete` is `true` (not present / `false` in Path A success messages).
+- `ui.workflow_stage` is `"HANDED_OVER_COMPLETED"`.
+- The message always contains `"automatically approved"`.
+- No MM optional upload offer is shown (`mm_optional_upload` is absent from the response).
+
+### 16.6 LifecycleStepper Behaviour (Path B)
+
+| Condition | Stepper behaviour |
+|---|---|
+| `workflow_stage = "CREATE_HANDED_OVER_SR"` | Show single active step labelled "Already Trading" |
+| `workflow_stage = "HANDED_OVER_COMPLETED"` | Show single green completed step; **no** FM Review or RDD Review steps |
+| Path A stages (`CREATE_SR`, `FM_REVIEW`, `RDD_REVIEW`, `SR_COMPLETED`) | Unchanged — show full 4-step Path A stepper |
+
+The frontend stepper must branch on `workflow_stage`:
+- If `workflow_stage` starts with `"HANDED_OVER"` → render Path B single-step layout.
+- Otherwise → render Path A multi-step layout.
+
+### 16.7 Create Payload Fields (Path B)
+
+The HTTP POST payload sent to the platform API for `CREATE_HANDED_OVER_SR` includes:
+
+```json
+{
+  "already_handovered": "already_trading",
+  "actual_shop_handover_date": "YYYY-MM-DD",
+  "actual_fitout_start_date": "YYYY-MM-DD",
+  "actual_fitout_end_date": "YYYY-MM-DD",
+  "actual_trading_date": "YYYY-MM-DD"
+}
+```
+
+The `already_handovered` field **must** be present with the literal string value `"already_trading"`. This is a backend platform API requirement that distinguishes the Already Trading fast-path from the legacy `"already_handovered"` value used by older platform versions.
+
+### 16.8 Document Upload (Path B)
+
+Path B does not require document upload. If the frontend optionally shows a document upload panel, it must use `SR_HANDED_OVER_OTHER` as the document type (not `SR_HANDOVER_OTHER` which is Path A specific). The MM optional upload offer is **not** automatically triggered after Path B completion.
+
+### 16.9 Mid-Session Path Switch
+
+If the user switches from Path A to Path B (or vice versa) mid-session:
+
+- **Path A → Path B**: The agent clears Path A specific fields (`startDate`, `endDate`, `inspection_done_by`, `comments`) and sets `sub_category = "HANDED_OVER"`.
+- **Path B → Path A**: The agent clears Path B actual-date fields (`actual_shop_handover_date`, etc.) and resets `sub_category = "HANDOVER"`.
+
+The frontend does not need to handle this — the agent manages state clearing internally. However, the frontend should re-render the confirmation card whenever it receives a new `confirmation_card` ui response, as field keys may change.
+
+### 16.10 Stale State Clear (Path B)
+
+If `workflow_stage = "HANDED_OVER_COMPLETED"` (terminal) and the user sends a new `CREATE_HANDED_OVER_SR` intent:
+- The agent calls `_clear_all_state()` before starting the new collection phase.
+- The frontend will see a `CREATE_HANDED_OVER_SR` stage with empty `collected_data`.
+- The previous `sr_id` must be discarded by the frontend (a new SR will be assigned a new ID on submission).

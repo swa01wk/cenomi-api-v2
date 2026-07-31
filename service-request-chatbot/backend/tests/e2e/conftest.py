@@ -35,6 +35,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.services.lease_lookup_service import LeaseRecord, LeaseLookupResult
 from app.agents.schemas.supervisor_schema import SupervisorDecision
+from app.types.chat import AuthContext
 
 # Expose builders for backward-compat imports in test modules that may import
 # from conftest (via sys.path when pytest is run from the backend directory)
@@ -183,7 +184,7 @@ def _make_supervisor_mock(
     confidence: float = 0.92,
     service_category: str | None = "FIT_OUT_AND_HANDOVER",
     sub_category: str | None = "HANDOVER",
-    target_agent: str | None = "rdd_agent",
+    target_agent: str | None = "rdd_handover_agent",
 ) -> AsyncMock:
     decision = SupervisorDecision(
         intent=intent,  # type: ignore[arg-type]
@@ -270,17 +271,31 @@ async def app_client() -> AsyncGenerator[AsyncClient, None]:
 
     Yields an ``AsyncClient`` scoped to one test function.  The DB override
     is active for the duration of the test and cleaned up afterwards.
+
+    Auth is overridden to a MALL_MANAGER context so that all graph RBAC checks
+    pass by default.  Individual tests that need to test permission denial can
+    patch the validation service directly (see test_permission_denied).
     """
     from app.main import app
     from app.db.session import _get_db
+    from app.core.security import get_auth_context
 
     transport = ASGITransport(app=app)
     mock_db = _make_mock_db()
 
+    _mall_manager_auth = AuthContext(
+        subject_id="e2e_mall_manager",
+        roles=frozenset({"MALL_MANAGER"}),
+    )
+
     def _override_db():
         yield mock_db
 
+    def _override_auth() -> AuthContext:
+        return _mall_manager_auth
+
     app.dependency_overrides[_get_db] = _override_db
+    app.dependency_overrides[get_auth_context] = _override_auth
 
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         yield client

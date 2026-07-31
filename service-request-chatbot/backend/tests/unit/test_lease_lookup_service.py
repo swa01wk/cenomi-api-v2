@@ -704,7 +704,10 @@ class TestGetLeaseLookupServiceFactory:
     def test_returns_http_when_base_url_set(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(
             "app.agents.services.lease_lookup_service.settings",
-            MagicMock(lease_tenant_api_base_url="http://api.example.com"),
+            MagicMock(
+                lease_tenant_api_base_url="http://api.example.com",
+                lease_lookup_use_mock=False,
+            ),
         )
         svc = get_lease_lookup_service()
         assert isinstance(svc, HttpLeaseLookupService)

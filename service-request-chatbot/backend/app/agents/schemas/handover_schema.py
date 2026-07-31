@@ -26,11 +26,12 @@ from pydantic import BaseModel, Field as PydanticField, field_validator, model_v
 
 SERVICE_CATEGORY: Final[str] = "FIT_OUT_AND_HANDOVER"
 SUB_CATEGORY: Final[str] = "HANDOVER"
+SUB_CATEGORY_HANDED_OVER: Final[str] = "HANDED_OVER"
 ASSIGNMENT_TYPE: Final[str] = "workflow"
 
 # ── Literal types ─────────────────────────────────────────────────────────────
 
-WorkflowStage = Literal["CREATE_SR", "FM_REVIEW", "RDD_REVIEW"]
+WorkflowStage = Literal["CREATE_SR", "FM_REVIEW", "RDD_REVIEW", "CREATE_HANDED_OVER_SR"]
 
 WorkflowRole = Literal["MALL_MANAGER", "FM_MANAGER", "DD_ENGINEER"]
 
@@ -39,7 +40,7 @@ ConfirmationStatus = Literal["PENDING", "CONFIRMED", "REJECTED", "CANCEL_PENDING
 FMDocumentType = Literal[
     "SR_HANDOVER_CHECKLIST",
     "SR_HANDOVER_SITE_SURVEY",
-    "SR_HANDOVER_OTHER",
+    "SR_COP_CHECKLIST_OTHER",
 ]
 
 RDDDocumentType = Literal[
@@ -47,6 +48,8 @@ RDDDocumentType = Literal[
     "SR_REJECTED_HANDOVER_REPORT",
     "SR_HANDOVER_OTHER",
 ]
+
+HandedOverDocumentType = Literal["SR_HANDED_OVER_OTHER"]
 
 # ── Stage definition dataclass ────────────────────────────────────────────────
 
@@ -96,14 +99,17 @@ FM_REVIEW_STAGE = StageDefinition(
         "unit_readiness_date",
         # expected_handover_date is auto-computed as unit_readiness_date + 7 days
         # by merge_state_node. It is NOT asked of the user.
+        # comments is in OPTIONAL_FIELDS — asked once but never blocks the flow.
+        # Must appear here so _route_after_validation can detect it and ask once.
         "comments",
     ),
     # At least one of these must be uploaded before FM save/approve.
-    # Platform FM stage: Checklist, Site survey, Other (no COP checklist).
+    # Platform roles 20 (FM_MANAGER) and 81 (OPERATIONS): Checklist, Site survey,
+    # COP Checklist. Note: SR_HANDOVER_OTHER belongs to Leasing Admin (role 11) only.
     required_documents=(
         "SR_HANDOVER_CHECKLIST",
         "SR_HANDOVER_SITE_SURVEY",
-        "SR_HANDOVER_OTHER",
+        "SR_COP_CHECKLIST_OTHER",
     ),
 )
 
@@ -133,15 +139,55 @@ RDD_REVIEW_STAGE = StageDefinition(
     ),
 )
 
+CREATE_HANDED_OVER_SR_STAGE = StageDefinition(
+    stage="CREATE_HANDED_OVER_SR",
+    role="MALL_MANAGER",
+    required_fields=(
+        "tenant_profile_id",
+        "property_id",
+        "lease_code",
+        "lease_id",
+        "brand_id",
+        "mall",
+        "brand",
+        "lease",
+        "unit_codes",
+        "city",
+        "contracted_area",
+        "title",
+        "actual_shop_handover_date",
+        "actual_fitout_start_date",
+        "actual_fitout_end_date",
+        "actual_trading_date",
+        # comments is in OPTIONAL_FIELDS — asked once but never blocks the flow.
+        # Must appear here so _route_after_validation can detect it and ask once.
+        "comments",
+    ),
+    required_documents=(),  # SR_HANDED_OVER_OTHER is optional
+)
+
+# Ordered date chain for Path B validation (earlier → later).
+HANDED_OVER_DATE_CHAIN: tuple[tuple[str, str], ...] = (
+    ("actual_shop_handover_date", "actual_fitout_start_date"),
+    ("actual_fitout_start_date", "actual_fitout_end_date"),
+    ("actual_fitout_end_date", "actual_trading_date"),
+)
+
 # ── Registry / ordered stage list ────────────────────────────────────────────
 
 STAGE_REGISTRY: dict[str, StageDefinition] = {
     "CREATE_SR": CREATE_SR_STAGE,
     "FM_REVIEW": FM_REVIEW_STAGE,
     "RDD_REVIEW": RDD_REVIEW_STAGE,
+    "CREATE_HANDED_OVER_SR": CREATE_HANDED_OVER_SR_STAGE,
 }
 
-WORKFLOW_STAGES: tuple[str, ...] = ("CREATE_SR", "FM_REVIEW", "RDD_REVIEW")
+WORKFLOW_STAGES: tuple[str, ...] = (
+    "CREATE_SR",
+    "FM_REVIEW",
+    "RDD_REVIEW",
+    "CREATE_HANDED_OVER_SR",
+)
 
 # ── Derived field sets ────────────────────────────────────────────────────────
 
@@ -197,6 +243,9 @@ RDD_ALLOWED_DOCUMENTS: tuple[str, ...] = RDD_REVIEW_STAGE.required_documents
 # The single document type that MUST be present before RDD submission.
 RDD_REQUIRED_DOCUMENTS: tuple[str, ...] = ("DR_SR_HANDOVER_REPORT",)
 
+# All document types accepted at the CREATE_HANDED_OVER_SR stage (all optional).
+HANDED_OVER_ALLOWED_DOCUMENTS: tuple[str, ...] = ("SR_HANDED_OVER_OTHER",)
+
 # RDD upload type codes (collected_data.rdd_upload_doc_type).
 RDD_DOC_TYPE_MEETING = "DR_SR_HANDOVER_REPORT"
 RDD_DOC_TYPE_REJECTED = "SR_REJECTED_HANDOVER_REPORT"
@@ -210,7 +259,7 @@ RDD_MEETING_STATUSES: frozenset[str] = frozenset({"APPROVED", "APPROVED_WITH_CHA
 RDD_REJECTED_STATUS = "DISAPPROVED"
 
 ALL_DOCUMENT_TYPES: frozenset[str] = frozenset(
-    FM_ALLOWED_DOCUMENTS + RDD_ALLOWED_DOCUMENTS
+    FM_ALLOWED_DOCUMENTS + RDD_ALLOWED_DOCUMENTS + HANDED_OVER_ALLOWED_DOCUMENTS
 )
 
 # ── Auto-computed (backend-computed) field set ────────────────────────────────
@@ -228,6 +277,8 @@ PERMISSION_MAP: dict[str, tuple[str, ...]] = {
 # stage_def.role (there is only one role per StageDefinition), so it is
 # added explicitly here.
 PERMISSION_MAP["OPERATIONS"] = ("FM_REVIEW",)
+# MALL_MANAGER can act on both CREATE_SR and CREATE_HANDED_OVER_SR.
+PERMISSION_MAP["MALL_MANAGER"] = ("CREATE_SR", "CREATE_HANDED_OVER_SR")
 
 # ── Helper utilities ──────────────────────────────────────────────────────────
 
@@ -331,8 +382,7 @@ EXTRACTABLE_FIELDS: frozenset[str] = frozenset(
         # Tenant / company name — maps to platform GET /leases?company=
         "company",
         # "title" is extractable: the user may provide their own title.
-        # If not provided, merge_state_node auto-generates it as
-        # "handover-{lease_code}-{description_slug}".
+        # If not provided, merge_state_node auto-generates it.
         "title",
         "description",
         "startDate",
@@ -351,6 +401,26 @@ EXTRACTABLE_FIELDS: frozenset[str] = frozenset(
         "fitout_end_date",
         # trading_date intentionally excluded — auto-computed from fitout_end_date + 8 days.
         # The LLM must never extract or propose this field.
+        # ── Path B (HANDED_OVER / Already Trading) fields ─────────────────────
+        "already_handovered",        # already_trading | initiate_handover discriminator
+        "actual_shop_handover_date",
+        "actual_fitout_start_date",
+        "actual_fitout_end_date",
+        "actual_trading_date",
+        # ── Fitout Confirmation workflow fields ────────────────────────────────
+        # Radio fields (yes/no) for each sub-category
+        "fitout_start_done",
+        "fitout_complete_done",
+        "trading_done",
+        # Actual date fields
+        "actual_fitout_complete_date",
+        # Planned date fields
+        "planned_fitout_start_date",
+        "planned_fitout_end_date",
+        "planned_fitout_complete_date",
+        "planned_trading_date",
+        # Optional shared field
+        "delay_reason",
     }
 )
 

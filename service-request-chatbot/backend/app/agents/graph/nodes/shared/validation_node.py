@@ -30,12 +30,23 @@ import logging
 from typing import Any
 
 from app.agents.graph.state import ServiceRequestState
+from app.agents.schemas.fitout_confirm_schema import (
+    get_missing_fields as fitout_get_missing_fields,
+)
 from app.agents.services.validation_service import ValidationService
 from app.observability.decorators import trace_node
 
 logger = logging.getLogger(__name__)
 
 _validation_service = ValidationService()
+
+# Fitout confirmation agents have their own required-field schema; skip the
+# handover STAGE_REGISTRY validation entirely and use fitout schema instead.
+_FITOUT_CONFIRM_AGENTS: frozenset[str] = frozenset({
+    "rdd_fitout_start_agent",
+    "rdd_fitout_end_agent",
+    "rdd_trading_confirmation_agent",
+})
 
 
 @trace_node("validation", "AGENT")
@@ -49,6 +60,8 @@ async def validation_node(state: ServiceRequestState) -> dict[str, Any]:
     ``documents``       — uploaded documents whose types must be validated.
     ``role``            — optional user role for permission hook (not in TypedDict;
                           injected at runtime by the API layer when available).
+    ``active_agent``    — agent name; fitout agents use fitout-schema validation.
+    ``sub_category``    — fitout sub-category (FOS / END / TRADING).
 
     Writes to state
     ---------------
@@ -61,13 +74,34 @@ async def validation_node(state: ServiceRequestState) -> dict[str, Any]:
     workflow_stage: str = state.get("workflow_stage") or "CREATE_SR"
     documents: list[dict] = state.get("documents") or []
     role: str | None = state.get("role")  # type: ignore[arg-type]
+    active_agent: str | None = state.get("active_agent")
 
-    validation_errors = _validation_service.validate_draft(
-        data=collected_data,
-        workflow_stage=workflow_stage,
-        documents=documents,
-        role=role,
-    )
+    if active_agent in _FITOUT_CONFIRM_AGENTS:
+        # Use fitout-specific required-field check — the handover STAGE_REGISTRY
+        # requires description / startDate / title which fitout does not use.
+        sub_category: str = state.get("sub_category") or ""  # type: ignore[assignment]
+        missing_fields = fitout_get_missing_fields(workflow_stage, sub_category, collected_data)
+        from app.agents.schemas.fitout_confirm_schema import OPTIONAL_FIELDS as _FITOUT_OPTIONAL
+        validation_errors: list[dict[str, Any]] = [
+            {
+                "field": f,
+                "validation_type": "required",
+                "status": "FAILED",
+                "message": f"Required field '{f}' is missing.",
+                # Optional fields (comments, delay_reason for TRADING) must not block
+                # submission — the user may leave them blank. Setting blocking=False here
+                # ensures fitout_confirm_api_submission can proceed even when they are None.
+                "blocking": f not in _FITOUT_OPTIONAL,
+            }
+            for f in missing_fields
+        ]
+    else:
+        validation_errors = _validation_service.validate_draft(
+            data=collected_data,
+            workflow_stage=workflow_stage,
+            documents=documents,
+            role=role,
+        )
 
     blocking_errors = [e for e in validation_errors if e["blocking"]]
     has_blocking = len(blocking_errors) > 0

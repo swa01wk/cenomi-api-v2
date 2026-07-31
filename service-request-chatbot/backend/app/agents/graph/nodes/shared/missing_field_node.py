@@ -22,6 +22,9 @@ from typing import Any
 
 from app.agents.graph.state import ServiceRequestState
 from app.agents.registries.workflow_config import get_workflow_config
+from app.agents.schemas.fitout_confirm_schema import (
+    get_missing_fields as fitout_confirm_get_missing_fields,
+)
 from app.agents.schemas.handover_schema import (
     RDD_DOC_TYPE_MEETING,
     RDD_DOC_TYPE_OTHER,
@@ -98,6 +101,14 @@ _NON_FIELD_VALIDATION_TYPES: frozenset[str] = frozenset({
     "permission",
 })
 
+# Fitout confirmation agents use fitout_confirm_schema.get_missing_fields instead
+# of handover_get_missing_fields — their required fields are completely different.
+_FITOUT_CONFIRM_AGENTS: frozenset[str] = frozenset({
+    "rdd_fitout_start_agent",
+    "rdd_fitout_end_agent",
+    "rdd_trading_confirmation_agent",
+})
+
 
 # ---------------------------------------------------------------------------
 # Node
@@ -113,13 +124,14 @@ async def missing_field_node(state: ServiceRequestState) -> dict[str, Any]:
     """
     workflow_stage: str = state.get("workflow_stage") or "CREATE_SR"
 
-    # Gracefully degrade if an unrecognised stage arrives.
-    if workflow_stage not in STAGE_REGISTRY:
-        workflow_stage = "CREATE_SR"
-
     # ── Look up per-workflow config — fall back to handover defaults ──────────
     active_agent: str | None = state.get("active_agent")
     workflow_cfg = get_workflow_config(active_agent)
+
+    # Gracefully degrade if an unrecognised stage arrives — but only for agents
+    # that use the handover STAGE_REGISTRY (fitout agents have their own stages).
+    if active_agent not in _FITOUT_CONFIRM_AGENTS and workflow_stage not in STAGE_REGISTRY:
+        workflow_stage = "CREATE_SR"
 
     field_questions: dict[str, str] = (
         workflow_cfg.field_questions if workflow_cfg else HANDOVER_FIELD_QUESTIONS
@@ -134,7 +146,13 @@ async def missing_field_node(state: ServiceRequestState) -> dict[str, Any]:
         workflow_cfg.lease_trigger_fields if workflow_cfg else _LEASE_TRIGGER_FIELDS
     )
 
-    required: tuple[str, ...] = STAGE_REGISTRY[workflow_stage].required_fields
+    # required_fields is only used by the work_permit path (get_missing_fields signature).
+    # For handover/fitout agents, all_missing is computed via their own schema functions.
+    required: tuple[str, ...] = (
+        STAGE_REGISTRY[workflow_stage].required_fields
+        if workflow_stage in STAGE_REGISTRY
+        else ()
+    )
     collected: dict[str, Any] = state.get("collected_data") or {}
     validation_errors: list[dict[str, Any]] = state.get("validation_errors") or []
     documents: list[dict[str, Any]] = list(state.get("documents") or [])
@@ -145,8 +163,12 @@ async def missing_field_node(state: ServiceRequestState) -> dict[str, Any]:
         collected = maybe_reset_rdd_upload_slot(collected, documents)
 
     # Handover schema owns stage-aware missing logic (e.g. conditional document_status).
+    # Fitout confirm agents have their own required-field logic driven by sub_category.
     if (active_agent or "") == "work_permit_agent":
         all_missing: list[str] = get_missing_fields(collected, list(required))
+    elif active_agent in _FITOUT_CONFIRM_AGENTS:
+        sub_category: str = state.get("sub_category") or ""  # type: ignore[assignment]
+        all_missing = fitout_confirm_get_missing_fields(workflow_stage, sub_category, collected)
     else:
         all_missing = handover_get_missing_fields(workflow_stage, collected)
 

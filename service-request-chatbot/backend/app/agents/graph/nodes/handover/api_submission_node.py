@@ -277,8 +277,30 @@ async def api_submission_node(state: ServiceRequestState) -> dict[str, Any]:
             )
 
     # ── 10. Return success state updates ──────────────────────────────────────
-    # Present the optional MM upload offer immediately after submission so the
-    # user can attach a supporting document while the SR reference is fresh.
+    # Path B (HANDED_OVER): SR is auto-approved immediately — no FM/RDD steps.
+    submitted_sub_category = payload.get("sub_category", "")
+    if submitted_sub_category == "HANDED_OVER":
+        success_message = (
+            f"Your Already Trading SR has been created and automatically approved "
+            f"— reference **{result.sr_id}**. "
+            "No further FM or RDD review steps are required."
+        )
+        return {
+            "backend_refs": backend_refs,
+            "status": "WAITING_FOR_USER",
+            "workflow_stage": "HANDED_OVER_COMPLETED",
+            "confirmation_status": None,
+            "confirmation_required": False,
+            "response_message": success_message,
+            "response_ui": {
+                "type": "message",
+                "message": success_message,
+                "workflow_complete": True,
+                "workflow_stage": "HANDED_OVER_COMPLETED",
+            },
+        }
+
+    # Path A (HANDOVER): Present the optional MM upload offer.
     collected_data_with_offer = dict(state.get("collected_data") or {})
     collected_data_with_offer[MM_OPTIONAL_UPLOAD_STATUS_KEY] = MM_OPTIONAL_AWAITING_CHOICE
 

@@ -242,8 +242,8 @@ class TestSelectedLeaseMerge:
         svc = MagicMock(spec=AbstractLeaseLookupService)
         svc.lookup = AsyncMock()
         result = await lease_lookup_node(state, service=svc)
-        assert result["status"] == "WAITING_FOR_USER"
-        assert result["collected_data"]["mm_optional_upload_status"] == "awaiting_choice"
+        # MM upload offer is now seeded post-submission (api_submission_node), not here.
+        assert result["status"] == "IN_PROGRESS"
 
     @pytest.mark.asyncio
     async def test_selected_lease_clears_lease_matches(self) -> None:
@@ -372,12 +372,14 @@ class TestZeroMatches:
 
 class TestSingleMatch:
     @pytest.mark.asyncio
-    async def test_single_match_status_waiting_for_optional_upload_offer(self) -> None:
+    async def test_single_match_status_in_progress_after_enrichment(self) -> None:
+        """MM upload offer is seeded by api_submission_node post-SR-creation, not by
+        lease_lookup_node. Single match enrichment returns IN_PROGRESS to continue
+        field collection."""
         state = _state(collected_data={"lease_code": "t0105712"})
         svc = _MockService(_make_result([_UA_RECORD]))
         result = await lease_lookup_node(state, service=svc)
-        assert result["status"] == "WAITING_FOR_USER"
-        assert result["collected_data"]["mm_optional_upload_status"] == "awaiting_choice"
+        assert result["status"] == "IN_PROGRESS"
 
     @pytest.mark.asyncio
     async def test_single_match_enriches_collected_data(self) -> None:
@@ -415,16 +417,15 @@ class TestSingleMatch:
         assert result.get("lease_matches") == []
 
     @pytest.mark.asyncio
-    async def test_single_match_offers_yes_no_without_document_requirement(self) -> None:
+    async def test_single_match_no_upload_offer_decorations(self) -> None:
+        """Lease lookup no longer emits an upload offer — that is deferred to
+        api_submission_node after SR creation."""
         state = _state(collected_data={"lease_code": "t0105712"}, session_id="sess-1")
         svc = _MockService(_make_result([_UA_RECORD]))
         result = await lease_lookup_node(state, service=svc)
         deco = result.get("response_decorations") or {}
         assert "document_requirement" not in deco
-        suggestions = deco["suggestions"]
-        assert suggestions["kind"] == "labeled_options"
-        actions = {o["action"] for o in suggestions["options"]}
-        assert actions == {"accept_optional_upload", "skip_optional_upload"}
+        assert "suggestions" not in deco
 
     @pytest.mark.asyncio
     async def test_single_match_skips_offer_when_already_done(self) -> None:
@@ -715,7 +716,7 @@ class TestTracing:
         state = _state(collected_data={"lease_code": "t0105712"})
         svc = _MockService(_make_result([_UA_RECORD]))
         result = await lease_lookup_node(state, service=svc)
-        assert result["status"] == "WAITING_FOR_USER"
+        assert result["status"] == "IN_PROGRESS"
 
     @pytest.mark.asyncio
     async def test_capture_tool_call_request_payload_has_endpoint(self) -> None:

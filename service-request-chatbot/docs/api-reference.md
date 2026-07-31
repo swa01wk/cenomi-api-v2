@@ -180,7 +180,7 @@ Authorization: Bearer <token>   (optional)
 ```json
 {
   "session_id": "550e8400-e29b-41d4-a716-446655440000",
-  "active_agent": "rdd_agent",
+  "active_agent": "rdd_handover_agent",
   "message": "I found 2 leases for your account. Please select the one you'd like to use:",
   "ui": {
     "type": "lease_selection",
@@ -393,7 +393,7 @@ GET /api/observability/traces?session_id=<uuid>&agent=<agent_name>&status=<statu
       "session_id": "session-uuid-1",
       "status": "SUCCESS",
       "intent": "CREATE_RDD_SERVICE_REQUEST",
-      "active_agent": "rdd_agent",
+      "active_agent": "rdd_handover_agent",
       "workflow_stage_before": "CREATE_SR",
       "workflow_stage_after": "SR_CREATED",
       "total_latency_ms": 4200,
@@ -425,7 +425,7 @@ Returns full trace detail. Arrays are flat (not nested); the run tree is a separ
     "session_id": "session-uuid-1",
     "status": "SUCCESS",
     "intent": "CREATE_RDD_SERVICE_REQUEST",
-    "active_agent": "rdd_agent",
+    "active_agent": "rdd_handover_agent",
     "total_latency_ms": 4200,
     "total_token_count": 1840,
     "started_at": "2026-05-14T08:30:00Z",

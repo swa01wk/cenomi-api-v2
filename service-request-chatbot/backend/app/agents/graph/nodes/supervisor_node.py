@@ -58,6 +58,12 @@ _CANCEL_PHRASES: frozenset[str] = frozenset(
         "reset",
         "begin again",
         "new request",
+        "another request",
+        "another handover",
+        "raise another",
+        "new handover",
+        "create another",
+        "submit another",
     }
 )
 

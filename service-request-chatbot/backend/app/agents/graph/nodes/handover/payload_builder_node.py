@@ -20,7 +20,10 @@ import logging
 from typing import Any
 
 from app.agents.graph.state import ServiceRequestState
-from app.agents.services.payload_builder_service import build_create_handover_payload
+from app.agents.services.payload_builder_service import (
+    build_create_handover_payload,
+    build_create_handed_over_payload,
+)
 from app.observability.decorators import trace_node
 
 logger = logging.getLogger(__name__)
@@ -43,23 +46,38 @@ async def payload_builder_node(state: ServiceRequestState) -> dict[str, Any]:
     collected_data: dict[str, Any] = state.get("collected_data") or {}
     workflow_stage: str = state.get("workflow_stage") or "CREATE_SR"
 
-    if workflow_stage != "CREATE_SR":
+    if workflow_stage not in ("CREATE_SR", "CREATE_HANDED_OVER_SR"):
         logger.info(
-            "payload_builder_node: skipped for stage=%s (only handles CREATE_SR)",
+            "payload_builder_node: skipped for stage=%s (only handles CREATE_SR / CREATE_HANDED_OVER_SR)",
             workflow_stage,
         )
         return {}
 
-    try:
-        payload = build_create_handover_payload(
-            collected_data,
-            documents=list(state.get("documents") or []),
+    backend_refs: dict[str, Any] = dict(state.get("backend_refs") or {})
+    documents = list(state.get("documents") or [])
+
+    if workflow_stage == "CREATE_HANDED_OVER_SR":
+        try:
+            payload = build_create_handed_over_payload(collected_data, documents=documents)
+        except ValueError as exc:
+            logger.warning(
+                "payload_builder_node: handed_over payload build failed — %s", exc
+            )
+            return {"status": "FAILED"}
+        backend_refs["create_handed_over_payload"] = payload
+        backend_refs["create_payload"] = payload  # unified key for api_submission_node
+        logger.info(
+            "payload_builder_node: handed_over payload built for lease_code=%s",
+            collected_data.get("lease_code"),
         )
+        return {"backend_refs": backend_refs}
+
+    try:
+        payload = build_create_handover_payload(collected_data, documents=documents)
     except ValueError as exc:
         logger.warning("payload_builder_node: payload build failed — %s", exc)
         return {"status": "FAILED"}
 
-    backend_refs: dict[str, Any] = dict(state.get("backend_refs") or {})
     backend_refs["create_payload"] = payload
 
     logger.info(

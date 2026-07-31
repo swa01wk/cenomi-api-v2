@@ -51,6 +51,20 @@ _FM_ROLE_IDS: frozenset[str] = frozenset({"20", "81"})  # FM_MANAGER, OPERATIONS
 _RDD_ROLE_IDS: frozenset[str] = frozenset({"12"})  # DD_ENGINEER
 _TERMINAL_STATUSES: frozenset[str] = frozenset({"FINISHED", "APPROVED", "COMPLETED", "DONE"})
 
+# Fitout confirmation sub-categories — their single approval step maps to APPROVE_SR.
+_FITOUT_CONFIRM_SUB_CATEGORIES: frozenset[str] = frozenset({
+    "FIT_OUT_CONFIRM_FOS",
+    "FIT_OUT_CONFIRM_END",
+    "FIT_OUT_CONFIRM_TRADING",
+})
+
+# Map fitout sub-category → active_agent name for re-hydrating the agent on open-SR.
+_FITOUT_SUB_CATEGORY_AGENTS: dict[str, str] = {
+    "FIT_OUT_CONFIRM_FOS": "rdd_fitout_start_agent",
+    "FIT_OUT_CONFIRM_END": "rdd_fitout_end_agent",
+    "FIT_OUT_CONFIRM_TRADING": "rdd_trading_confirmation_agent",
+}
+
 
 def _normalize_operation_role(raw: Any) -> str:
     """Normalize platform assigned_role (name or id) to an uppercase string."""
@@ -62,11 +76,36 @@ def _normalize_operation_role(raw: Any) -> str:
 def _map_operations_to_stage(
     operations: list[dict[str, Any]],
     current_stage: str | None,
+    *,
+    sub_category: str | None = None,
+    platform_status: str | None = None,
 ) -> str | None:
     """Derive workflow_stage from ``service_request_operations`` list.
 
-    Priority: RDD_REVIEW > FM_REVIEW > SR_COMPLETED > unchanged.
+    Priority: HANDED_OVER early-exit > fitout-confirm early-exit >
+              RDD_REVIEW > FM_REVIEW > SR_COMPLETED > unchanged.
+
+    For Path B (sub_category=HANDED_OVER) SRs that are already APPROVED on the
+    platform, return SR_COMPLETED immediately without consulting operations — there
+    is no FM or RDD stage for the HANDED_OVER sub_category.
+
+    For fitout confirmation SRs (FIT_OUT_CONFIRM_*), any in-progress operation
+    maps to APPROVE_SR (single-stage approval, no FM/RDD phases).
     """
+    # Path B early exit: HANDED_OVER + APPROVED → terminal
+    if sub_category == "HANDED_OVER" and (platform_status or "").upper() == "APPROVED":
+        return "SR_COMPLETED"
+
+    # Fitout confirm early exit: single approval step — any in-progress → APPROVE_SR,
+    # terminal → SR_APPROVED.
+    if sub_category in _FITOUT_CONFIRM_SUB_CATEGORIES:
+        if (platform_status or "").upper() in _TERMINAL_STATUSES:
+            return "SR_APPROVED"
+        for op in operations:
+            if (op.get("status") or "").upper() == "IN_PROGRESS":
+                return "APPROVE_SR"
+        return current_stage  # no in-progress ops yet (e.g. just created)
+
     if not operations:
         return current_stage
 
@@ -260,7 +299,31 @@ async def sr_status_sync_node(state: ServiceRequestState) -> dict[str, Any]:
                 or []
             )
 
-    new_stage = _map_operations_to_stage(operations, current_stage)
+    # Resolve sub_category: prefer state value (set by supervisor) over payload.
+    sr_sub_category: str | None = state.get("sub_category")
+    if not sr_sub_category:
+        payload_tmp: dict[str, Any] = getattr(result, "payload", None) or {}
+        sr_sub_category = payload_tmp.get("sub_category") or payload_tmp.get("already_handovered")
+
+    # When the backend doesn't return sub_category explicitly, infer it from the
+    # fitout-specific fields stored in the inner payload.  These fields are unique
+    # to their respective fitout confirm sub-categories and cannot appear in
+    # standard handover SRs.
+    if not sr_sub_category:
+        payload_tmp2: dict[str, Any] = getattr(result, "payload", None) or {}
+        if "fitout_start_done" in payload_tmp2:
+            sr_sub_category = "FIT_OUT_CONFIRM_FOS"
+        elif "fitout_complete_done" in payload_tmp2:
+            sr_sub_category = "FIT_OUT_CONFIRM_END"
+        elif "trading_done" in payload_tmp2:
+            sr_sub_category = "FIT_OUT_CONFIRM_TRADING"
+
+    new_stage = _map_operations_to_stage(
+        operations,
+        current_stage,
+        sub_category=sr_sub_category,
+        platform_status=platform_status,
+    )
 
     # Never regress from RDD_REVIEW back to FM_REVIEW: platform lag can keep
     # the FM operation visible briefly after fm_api_submission_node has already
@@ -320,7 +383,7 @@ async def sr_status_sync_node(state: ServiceRequestState) -> dict[str, Any]:
             "tenant_profile_id": inner.get("tenant_profile_id"),
             "property_id": inner.get("property_id"),
             "service_category": "FIT_OUT_AND_HANDOVER",
-            "sub_category": "HANDOVER",
+            "sub_category": sr_sub_category or inner.get("sub_category") or "HANDOVER",
             "lease_code": inner.get("lease_code") or inner.get("lease") or "",
             "lease_id": inner.get("lease_id") or inner.get("contract_id"),
             "service_request_id": sr_id,
@@ -330,11 +393,20 @@ async def sr_status_sync_node(state: ServiceRequestState) -> dict[str, Any]:
         if hydrated:
             updates["collected_data"] = {**existing_collected, **hydrated}
 
-    # Ensure active_agent for handover review routing when opening existing SR.
-    if effective_stage in ("FM_REVIEW", "RDD_REVIEW") and not state.get("active_agent"):
-        updates["active_agent"] = "rdd_agent"
-        updates["service_category"] = "FIT_OUT_AND_HANDOVER"
-        updates["sub_category"] = "HANDOVER"
+    # Ensure active_agent for review routing when opening existing SR.
+    if not state.get("active_agent"):
+        if effective_stage in ("FM_REVIEW", "RDD_REVIEW"):
+            updates["active_agent"] = "rdd_handover_agent"
+            updates["service_category"] = "FIT_OUT_AND_HANDOVER"
+            updates["sub_category"] = sr_sub_category or "HANDOVER"
+        elif effective_stage == "APPROVE_SR" and sr_sub_category in _FITOUT_CONFIRM_SUB_CATEGORIES:
+            # Restore the fitout confirm agent so _route_after_sync uses the correct
+            # stage_sync_nodes and validation/missing-field nodes behave correctly.
+            fitout_agent = _FITOUT_SUB_CATEGORY_AGENTS.get(sr_sub_category or "")
+            if fitout_agent:
+                updates["active_agent"] = fitout_agent
+                updates["service_category"] = "FIT_OUT_AND_HANDOVER"
+                updates["sub_category"] = sr_sub_category
 
     merged_state = {**dict(state), **updates}
     review_deco = build_review_decorations(merged_state)

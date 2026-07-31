@@ -28,15 +28,17 @@ _GRAPH_ROLES: tuple[str, ...] = ("FM_MANAGER", "OPERATIONS", "DD_ENGINEER", "MAL
 _DOC_LABELS: dict[str, str] = {
     "SR_HANDOVER_CHECKLIST": "Handover Checklist",
     "SR_HANDOVER_SITE_SURVEY": "Site Survey",
+    "SR_COP_CHECKLIST_OTHER": "COP Checklist / Other",  # Fix 2: was SR_HANDOVER_OTHER
     "SR_HANDOVER_OTHER": "Other",
     "DR_SR_HANDOVER_REPORT": "Handover Meeting Report",
     "SR_REJECTED_HANDOVER_REPORT": "Rejected Fitout and Handover Report",
+    "SR_HANDED_OVER_OTHER": "Other (Already Trading)",
 }
 
 _FM_DOC_TYPES: frozenset[str] = frozenset({
     "SR_HANDOVER_CHECKLIST",
     "SR_HANDOVER_SITE_SURVEY",
-    "SR_HANDOVER_OTHER",
+    "SR_COP_CHECKLIST_OTHER",  # Fix 2: replaced SR_HANDOVER_OTHER
 })
 
 _RDD_DOC_TYPES: frozenset[str] = frozenset({
@@ -90,6 +92,13 @@ def payload_to_collected_data(payload: dict[str, Any]) -> dict[str, Any]:
         "guideLineLink", "document_status",
         "lease_code", "brand", "mall", "city", "unit_codes", "contracted_area",
         "lease_id", "brand_id", "property_id", "tenant_profile_id", "contract_id",
+        # ── Fitout Confirmation workflow fields ────────────────────────────────
+        "lease_brand_mall",
+        "fitout_start_done", "actual_fitout_start_date",
+        "planned_fitout_start_date", "planned_fitout_end_date", "planned_trading_date",
+        "fitout_complete_done", "actual_fitout_complete_date", "planned_fitout_complete_date",
+        "trading_done", "actual_trading_date",
+        "delay_reason",
     ):
         if key in payload and payload[key] not in (None, ""):
             mapped[key] = payload[key]

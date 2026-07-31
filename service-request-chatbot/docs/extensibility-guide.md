@@ -34,7 +34,7 @@ The registry maps `(service_category, sub_category)` pairs to an `AgentConfig`. 
 SERVICE_REQUEST_AGENT_REGISTRY = {
     "FIT_OUT_AND_HANDOVER": {
         "HANDOVER": {
-            "agent_name": "rdd_agent",
+            "agent_name": "rdd_handover_agent",
             "display_name": "RDD Agent",
             "schema_key": "handover_service_request_schema",
         },
@@ -105,7 +105,7 @@ The dispatch dict exists in the codebase:
 
 ```python
 _AGENT_ENTRY_NODES: dict[str, str] = {
-    "rdd_agent": "handover_entry",
+    "rdd_handover_agent": "handover_entry",
     # FM/RDD are stage-routed by workflow_stage after sr_status_sync
 }
 ```

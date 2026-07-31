@@ -5,7 +5,7 @@
 > **Status:** Production-ready design · `gpt-5.4-mini` · Python 3.11 · FastAPI + LangGraph
 >
 > **Related docs:**
-> - [`rdd-agent.md`](rdd-agent.md) — RDD Agent lifecycle, phases, fields, and extension guide
+> - [`rdd-handover-agent.md`](rdd-handover-agent.md) — RDD Agent lifecycle, phases, fields, and extension guide
 > - [`production-readiness.md`](production-readiness.md) — Production gap assessment and hardening plan
 > - [`test-failures-analysis.md`](test-failures-analysis.md) — Open test issues
 
@@ -58,7 +58,7 @@ The system uses two named agents with distinct responsibilities:
 | Agent | Identifier | Responsibilities |
 |-------|-----------|-----------------|
 | **Help Agent** | (this graph) | Supervisor intent classification · FAQ Q&A with hybrid RAG search · Routes SR intents to registered agents |
-| **RDD Agent** | `rdd_agent` | Full RDD SR lifecycle: CREATE_SR → FM_REVIEW → RDD_REVIEW · Three sequential workflow phases · See [`rdd-agent.md`](rdd-agent.md) |
+| **RDD Agent** | `rdd_handover_agent` | Full RDD SR lifecycle: CREATE_SR → FM_REVIEW → RDD_REVIEW · Three sequential workflow phases · See [`rdd-handover-agent.md`](rdd-handover-agent.md) |
 
 Adding a future agent (e.g. `rcd_agent` for renovation) requires only: a new `WorkflowConfig` entry, a `SERVICE_REQUEST_AGENT_REGISTRY` entry, new node files, and wiring in the graph. All shared pipeline nodes pick it up automatically.
 
@@ -1114,7 +1114,7 @@ This is **read-only** — does not advance the workflow or create a draft.
 | `attachments` | `list[dict]` | — | File attachment metadata |
 | `trace_id` | `str` | ✓ (agent_traces) | Observability trace for this turn |
 | `conversation_history` | `list[dict]` | ✓ (messages table) | Last 10 turns `[{role, content}]` |
-| `active_agent` | `str\|None` | ✓ (chat_sessions) | e.g. `"rdd_agent"` |
+| `active_agent` | `str\|None` | ✓ (chat_sessions) | e.g. `"rdd_handover_agent"` |
 | `intent` | `str\|None` | ✓ (chat_sessions) | e.g. `"CREATE_RDD_SERVICE_REQUEST"` |
 | `service_category` | `str\|None` | ✓ (draft) | e.g. `"FIT_OUT_AND_HANDOVER"` |
 | `sub_category` | `str\|None` | ✓ (draft) | e.g. `"HANDOVER"` |

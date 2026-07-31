@@ -15,8 +15,10 @@ from app.agents.schemas.handover_schema import (
     ASSIGNMENT_TYPE,
     BACKEND_DERIVED_FIELDS,
     CREATE_SR_STAGE,
+    CREATE_HANDED_OVER_SR_STAGE,
     FM_ALLOWED_DOCUMENTS,
     FM_REVIEW_STAGE,
+    HANDED_OVER_ALLOWED_DOCUMENTS,
     PERMISSION_MAP,
     RDD_ALLOWED_DOCUMENTS,
     RDD_REQUIRED_DOCUMENTS,
@@ -24,6 +26,7 @@ from app.agents.schemas.handover_schema import (
     SERVICE_CATEGORY,
     STAGE_REGISTRY,
     SUB_CATEGORY,
+    SUB_CATEGORY_HANDED_OVER,
     USER_SUPPLIED_FIELDS,
     WORKFLOW_STAGES,
     HandoverExtractionSchema,
@@ -55,10 +58,12 @@ class TestConstants:
 
 class TestStageRegistry:
     def test_all_stages_present(self) -> None:
-        assert set(STAGE_REGISTRY.keys()) == {"CREATE_SR", "FM_REVIEW", "RDD_REVIEW"}
+        assert set(STAGE_REGISTRY.keys()) == {
+            "CREATE_SR", "FM_REVIEW", "RDD_REVIEW", "CREATE_HANDED_OVER_SR"
+        }
 
     def test_workflow_stages_ordered(self) -> None:
-        assert WORKFLOW_STAGES == ("CREATE_SR", "FM_REVIEW", "RDD_REVIEW")
+        assert set(WORKFLOW_STAGES) == {"CREATE_SR", "FM_REVIEW", "RDD_REVIEW", "CREATE_HANDED_OVER_SR"}
 
     def test_registry_values_are_stage_definitions(self) -> None:
         for stage_def in STAGE_REGISTRY.values():
@@ -120,12 +125,12 @@ class TestCreateSRStage:
 class TestFMReviewStage:
     _EXPECTED_FIELDS = (
         "unit_readiness_date",
-        "comments",  # Fix 4: comments re-added as required (optional value allowed)
+        "comments",  # comments re-added as required (optional value allowed)
     )
     _EXPECTED_DOCS = (
         "SR_HANDOVER_CHECKLIST",
         "SR_HANDOVER_SITE_SURVEY",
-        "SR_HANDOVER_OTHER",
+        "SR_COP_CHECKLIST_OTHER",  # Fix 2: was SR_HANDOVER_OTHER
     )
 
     def test_role(self) -> None:
@@ -140,9 +145,12 @@ class TestFMReviewStage:
     def test_required_documents_count(self) -> None:
         assert len(FM_REVIEW_STAGE.required_documents) == 3
 
-    def test_cop_checklist_not_in_fm_docs(self) -> None:
-        assert "SR_COP_CHECKLIST_OTHER" not in FM_REVIEW_STAGE.required_documents
-        assert "SR_COP_CHECKLIST_OTHER" not in FM_ALLOWED_DOCUMENTS
+    def test_cop_checklist_in_fm_docs(self) -> None:
+        """Fix 2: SR_COP_CHECKLIST_OTHER replaced SR_HANDOVER_OTHER in FM stage."""
+        assert "SR_COP_CHECKLIST_OTHER" in FM_REVIEW_STAGE.required_documents
+        assert "SR_COP_CHECKLIST_OTHER" in FM_ALLOWED_DOCUMENTS
+        assert "SR_HANDOVER_OTHER" not in FM_REVIEW_STAGE.required_documents
+        assert "SR_HANDOVER_OTHER" not in FM_ALLOWED_DOCUMENTS
 
 
 # ── RDD_REVIEW stage ──────────────────────────────────────────────────────────
@@ -179,6 +187,47 @@ class TestRDDReviewStage:
 
     def test_required_documents_count(self) -> None:
         assert len(RDD_REVIEW_STAGE.required_documents) == 3
+
+
+# ── CREATE_HANDED_OVER_SR stage (Path B) ─────────────────────────────────────
+
+
+class TestCreateHandedOverSRStage:
+    _EXPECTED_FIELDS = (
+        "tenant_profile_id",
+        "property_id",
+        "lease_code",
+        "lease_id",
+        "brand_id",
+        "mall",
+        "brand",
+        "lease",
+        "unit_codes",
+        "city",
+        "contracted_area",
+        "title",
+        "actual_shop_handover_date",
+        "actual_fitout_start_date",
+        "actual_fitout_end_date",
+        "actual_trading_date",
+        "comments",
+    )
+
+    def test_role(self) -> None:
+        assert CREATE_HANDED_OVER_SR_STAGE.role == "MALL_MANAGER"
+
+    def test_required_fields_complete(self) -> None:
+        assert set(CREATE_HANDED_OVER_SR_STAGE.required_fields) == set(self._EXPECTED_FIELDS)
+
+    def test_no_required_documents(self) -> None:
+        assert CREATE_HANDED_OVER_SR_STAGE.required_documents == ()
+
+    def test_sub_category_constant(self) -> None:
+        assert SUB_CATEGORY_HANDED_OVER == "HANDED_OVER"
+
+    def test_path_b_stage_in_registry(self) -> None:
+        from app.agents.schemas.handover_schema import STAGE_REGISTRY
+        assert "CREATE_HANDED_OVER_SR" in STAGE_REGISTRY
 
 
 # ── Derived field sets ────────────────────────────────────────────────────────
@@ -231,8 +280,17 @@ class TestDocumentRegistries:
         # lists optional uploads (SR_REJECTED_HANDOVER_REPORT, SR_HANDOVER_OTHER).
         assert frozenset(RDD_REQUIRED_DOCUMENTS) <= frozenset(RDD_REVIEW_STAGE.required_documents)
 
+    def test_all_document_types_includes_handed_over(self) -> None:
+        """ALL_DOCUMENT_TYPES must include Path B doc type SR_HANDED_OVER_OTHER."""
+        assert "SR_HANDED_OVER_OTHER" in ALL_DOCUMENT_TYPES
+
     def test_all_document_types_is_union(self) -> None:
-        expected = frozenset(FM_ALLOWED_DOCUMENTS) | frozenset(RDD_ALLOWED_DOCUMENTS)
+        from app.agents.schemas.handover_schema import HANDED_OVER_ALLOWED_DOCUMENTS
+        expected = (
+            frozenset(FM_ALLOWED_DOCUMENTS)
+            | frozenset(RDD_ALLOWED_DOCUMENTS)
+            | frozenset(HANDED_OVER_ALLOWED_DOCUMENTS)
+        )
         assert ALL_DOCUMENT_TYPES == expected
 
     def test_fm_and_rdd_docs_disjoint(self) -> None:
@@ -249,14 +307,24 @@ class TestPermissionMap:
     def test_mall_manager_can_act_on_create_sr(self) -> None:
         assert "CREATE_SR" in PERMISSION_MAP["MALL_MANAGER"]
 
+    def test_mall_manager_can_act_on_create_handed_over_sr(self) -> None:
+        """Path B: MALL_MANAGER is permitted to CREATE_HANDED_OVER_SR."""
+        assert "CREATE_HANDED_OVER_SR" in PERMISSION_MAP["MALL_MANAGER"]
+
     def test_fm_manager_can_act_on_fm_review(self) -> None:
         assert "FM_REVIEW" in PERMISSION_MAP["FM_MANAGER"]
 
     def test_dd_engineer_can_act_on_rdd_review(self) -> None:
         assert "RDD_REVIEW" in PERMISSION_MAP["DD_ENGINEER"]
 
-    def test_each_role_maps_to_exactly_one_stage(self) -> None:
+    def test_mall_manager_maps_to_two_stages(self) -> None:
+        """MALL_MANAGER has two permitted stages: CREATE_SR and CREATE_HANDED_OVER_SR."""
+        assert len(PERMISSION_MAP["MALL_MANAGER"]) == 2
+
+    def test_non_mm_roles_map_to_exactly_one_stage(self) -> None:
         for role, stages in PERMISSION_MAP.items():
+            if role == "MALL_MANAGER":
+                continue
             assert len(stages) == 1, f"Role '{role}' should map to exactly one stage"
 
     def test_permission_map_stages_cover_all_workflow_stages(self) -> None:

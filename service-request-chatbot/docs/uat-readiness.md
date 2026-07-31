@@ -55,7 +55,7 @@ Cenomi Platform APIs (SR create/patch/fetch, Lease lookup, File upload)
 | Agent | Trigger | Description |
 |-------|---------|-------------|
 | `help_agent` | Every message | Supervisor — classifies intent, routes to FAQ or SR workflow |
-| `rdd_agent` | Handover SR intents | Full 3-phase handover lifecycle (CREATE_SR → FM_REVIEW → RDD_REVIEW) |
+| `rdd_handover_agent` | Handover SR intents | Full 3-phase handover lifecycle (CREATE_SR → FM_REVIEW → RDD_REVIEW) |
 | `work_permit_agent` | Work permit intent | Single-stage work permit SR creation |
 
 ---

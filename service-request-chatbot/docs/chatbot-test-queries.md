@@ -1381,7 +1381,7 @@ start date
 8th june
 ```
 
-**Expected for each turn:** Intent stays `UPDATE_RDD_SERVICE_REQUEST`, `active_agent` remains `rdd_agent`, bot acknowledges the field/value and continues collecting — NOT the generic "create, update, approve, or check" clarification prompt.
+**Expected for each turn:** Intent stays `UPDATE_RDD_SERVICE_REQUEST`, `active_agent` remains `rdd_handover_agent`, bot acknowledges the field/value and continues collecting — NOT the generic "create, update, approve, or check" clarification prompt.
 
 **Failure indicator (the bug):** Any turn where the bot resets to asking "would you like to create, update, approve, or check?" after the intent was already established.
 
@@ -1868,4 +1868,4 @@ curl -s -X POST http://localhost:8000/api/chat/service-request \
   | jq '{message, intent: .state.intent}'
 ```
 
-**Expected for all turns:** `intent` = `UPDATE_RDD_SERVICE_REQUEST` (or `PREVIEW_SERVICE_REQUEST` on turn 5), `active_agent` = `rdd_agent` from turn 1 onwards, no generic re-clarification message.
+**Expected for all turns:** `intent` = `UPDATE_RDD_SERVICE_REQUEST` (or `PREVIEW_SERVICE_REQUEST` on turn 5), `active_agent` = `rdd_handover_agent` from turn 1 onwards, no generic re-clarification message.

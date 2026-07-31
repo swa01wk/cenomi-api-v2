@@ -15,7 +15,7 @@ def _fm_state(**overrides: Any) -> dict[str, Any]:
     base: dict[str, Any] = {
         "session_id": "sess-fm-docs",
         "workflow_stage": "FM_REVIEW",
-        "active_agent": "rdd_agent",
+        "active_agent": "rdd_handover_agent",
         "collected_data": {"unit_readiness_date": "2026-08-20", "comments": "none"},
         "documents": [],
         "validation_errors": [],
@@ -54,7 +54,7 @@ async def test_missing_field_asks_fm_upload_when_docs_blocking() -> None:
     assert keys == {
         "SR_HANDOVER_CHECKLIST",
         "SR_HANDOVER_SITE_SURVEY",
-        "SR_HANDOVER_OTHER",
+        "SR_COP_CHECKLIST_OTHER",  # Fix 2: SR_COP_CHECKLIST_OTHER replaced SR_HANDOVER_OTHER
     }
     assert result.get("response_ui", {}).get("type") != "confirmation_card"
 
@@ -122,17 +122,18 @@ async def test_confirmation_node_blocks_fm_approve_without_docs() -> None:
 
 
 @pytest.mark.asyncio
-async def test_confirmation_node_shows_upload_when_no_fm_action() -> None:
-    """After fields are complete, do not auto-confirm — show upload UI first.
+async def test_confirmation_node_shows_upload_when_rdd_doc_uploaded_not_fm() -> None:
+    """After fields are complete, non-FM docs must NOT satisfy FM upload requirement.
 
-    CREATE-stage SR_HANDOVER_OTHER alone must not skip the FM upload card.
+    Fix 2: SR_HANDOVER_OTHER is now RDD-only. An uploaded SR_HANDOVER_OTHER doc must
+    not skip the FM upload card — FM still requires Checklist / Site Survey / COP Checklist.
     """
     result = await confirmation_node(
         _fm_state(
             documents=[
                 {
-                    "document_id": "create-other",
-                    "document_type_id": "SR_HANDOVER_OTHER",
+                    "document_id": "rdd-other",
+                    "document_type_id": "SR_HANDOVER_OTHER",  # RDD doc, not FM
                 }
             ],
             backend_refs={
@@ -149,10 +150,10 @@ async def test_confirmation_node_shows_upload_when_no_fm_action() -> None:
     assert keys == {
         "SR_HANDOVER_CHECKLIST",
         "SR_HANDOVER_SITE_SURVEY",
-        "SR_HANDOVER_OTHER",
+        "SR_COP_CHECKLIST_OTHER",  # Fix 2
     }
-    other = next(d for d in docs if d["key"] == "SR_HANDOVER_OTHER")
-    assert other["status"] == "uploaded"
+    # None of the FM docs are uploaded — all should be 'missing'
+    assert all(d["status"] == "missing" for d in docs)
     assert result.get("confirmation_status") is None
 
 

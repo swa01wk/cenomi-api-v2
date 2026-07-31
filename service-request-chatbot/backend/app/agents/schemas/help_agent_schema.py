@@ -56,13 +56,18 @@ ALL_INTENTS: frozenset[str] = _build_all_intents()
 # ---------------------------------------------------------------------------
 
 ROLE_PERMITTED_INTENTS: dict[str, frozenset[str]] = {
-    # Phase 1 actor — can create/update RDD SRs and create work permit SRs
+    # Phase 1 actor — can create/update RDD SRs, create work permit SRs, and
+    # create Already Trading (HANDED_OVER) SRs.
+    # Also creates/approves Trading Confirmation SRs (FIT_OUT_CONFIRM_TRADING).
     "MALL_MANAGER": _SR_READ_INTENTS
     | frozenset(
         {
             "CREATE_RDD_SERVICE_REQUEST",
             "UPDATE_RDD_SERVICE_REQUEST",
             "CREATE_WORK_PERMIT_SR",
+            "CREATE_HANDED_OVER_SR",
+            "CREATE_FITOUT_CONFIRM_TRADING",
+            "APPROVE_FITOUT_CONFIRM_TRADING",
         }
     ),
     # Phase 2 actor — FM review: update stage fields, upload docs, approve/save
@@ -73,16 +78,28 @@ ROLE_PERMITTED_INTENTS: dict[str, frozenset[str]] = {
             "APPROVE_RDD_SERVICE_REQUEST",
         }
     ),
-    # Phase 2 support — same FM review actions as FM_MANAGER
+    # Phase 2 support — same FM review actions as FM_MANAGER.
+    # Also creates/approves Trading Confirmation SRs.
     "OPERATIONS": _SR_READ_INTENTS
     | frozenset(
         {
             "UPDATE_RDD_SERVICE_REQUEST",
             "APPROVE_RDD_SERVICE_REQUEST",
+            "CREATE_FITOUT_CONFIRM_TRADING",
+            "APPROVE_FITOUT_CONFIRM_TRADING",
         }
     ),
-    # Phase 3 actor — RDD review is triggered by sr_status_sync, not supervisor intent
-    "DD_ENGINEER": _SR_READ_INTENTS,
+    # Phase 3 actor — RDD review is triggered by sr_status_sync, not supervisor intent.
+    # Also creates/approves Fitout Start and End Confirmation SRs.
+    "DD_ENGINEER": _SR_READ_INTENTS
+    | frozenset(
+        {
+            "CREATE_FITOUT_CONFIRM_FOS",
+            "CREATE_FITOUT_CONFIRM_END",
+            "APPROVE_FITOUT_CONFIRM_FOS",
+            "APPROVE_FITOUT_CONFIRM_END",
+        }
+    ),
     # Unrestricted
     "ADMIN": ALL_INTENTS,
 }

@@ -131,7 +131,7 @@ One row per conversation. Tracks which agent is currently active and the high-le
 |--------|------|-------|
 | `id` | `UUID` PK | |
 | `user_id` | `UUID` NOT NULL | References the platform user (no FK — avoids coupling) |
-| `active_agent` | `TEXT` | `help_agent`, `rdd_agent`, `work_permit_agent` |
+| `active_agent` | `TEXT` | `help_agent`, `rdd_handover_agent`, `work_permit_agent` |
 | `intent` | `TEXT` | Last classified intent |
 | `workflow_stage` | `TEXT` | Current stage within the active agent |
 | `status` | `TEXT` | `IN_PROGRESS`, `COMPLETED`, `ABANDONED` |
@@ -495,7 +495,7 @@ The `env.py` uses an **async engine** (`async_engine_from_config` + `asyncio.run
 | `001` | Initial schema — domain tables (`chat_sessions`, `chat_messages`, `service_request_drafts`, `service_request_chat_audit_logs`) + legacy observability stubs | 2026-05-13 |
 | `002` | Agent observability tables — `agent_traces`, `agent_runs`, `agent_state_snapshots`, `agent_state_diffs`, `agent_tool_calls`, `agent_llm_calls`, `agent_feedback` | 2026-05-13 |
 | `003` | `users` table — platform users with roles and mall property scoping | 2026-06-27 |
-| `004` | Data migration — renames `active_agent` value `handover_service_request_agent` → `rdd_agent` in `chat_sessions` and `agent_traces` | 2026-07-01 |
+| `004` | Data migration — renames `active_agent` value `handover_service_request_agent` → `rdd_handover_agent` in `chat_sessions` and `agent_traces` | 2026-07-01 |
 
 ### 9.3 Running migrations
 

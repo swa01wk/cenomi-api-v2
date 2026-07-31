@@ -198,16 +198,44 @@ def _make_mock_db() -> AsyncMock:
 
 @pytest_asyncio.fixture()
 async def lifecycle_client() -> AsyncClient:
-    """ASGI client with DB overridden — yields a fresh client per test."""
+    """ASGI client with DB overridden — yields a fresh client per test.
+
+    Auth is NOT overridden so that FM and RDD turns respect the per-user_id role
+    mapping from the request (anonymous users have no roles, but user_role in
+    backend_refs is set by the user_id → role derivation in tests via the
+    explicit ``user_role`` field injected by the entry nodes).
+
+    We do override auth to MALL_MANAGER for Turn 1 (MM creates SR) since the
+    supervisor RBAC check fires on intent classification.  For subsequent FM/RDD
+    turns the roles come from backend_refs.user_role derived from the auth context
+    at the HTTP layer — the fixture sets auth globally, so FM/RDD turns work only
+    if the entry nodes tolerate a missing/wrong role OR we set the correct role.
+
+    To keep this simple and avoid re-architecting the fixture, we set a multi-role
+    AuthContext that includes all roles so every RBAC gate passes.  The real RBAC
+    enforcement is exercised by dedicated permission-denial unit tests.
+    """
     from app.main import app
     from app.db.session import _get_db
+    from app.core.security import get_auth_context
+    from app.types.chat import AuthContext
 
     mock_db = _make_mock_db()
+
+    # Multi-role auth: satisfies RBAC checks for MM, FM, and RDD turns.
+    _all_roles_auth = AuthContext(
+        subject_id="lifecycle_e2e_user",
+        roles=frozenset({"MALL_MANAGER", "FM_MANAGER", "DD_ENGINEER"}),
+    )
 
     def _override_db():
         yield mock_db
 
+    def _override_auth() -> AuthContext:
+        return _all_roles_auth
+
     app.dependency_overrides[_get_db] = _override_db
+    app.dependency_overrides[get_auth_context] = _override_auth
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         yield client
@@ -228,8 +256,9 @@ async def _post(
     action: str | None = None,
     sr_id: str | None = None,
     corrected_fields: dict | None = None,
+    attachments: list[dict] | None = None,
 ) -> dict[str, Any]:
-    payload: dict[str, Any] = {"user_id": user_id, "message": message}
+    payload: dict[str, Any] = {"user_id": user_id, "message": message, "attachments": attachments or []}
     if session_id:
         payload["session_id"] = session_id
     if action:
@@ -317,7 +346,7 @@ class TestFullHandoverLifecycle:
                 action="confirm",
             )
             session_id: str = r1["session_id"]
-            assert r1.get("active_agent") == "rdd_agent" or r1["state"].get("workflow_stage") is not None
+            assert r1.get("active_agent") == "rdd_handover_agent" or r1["state"].get("workflow_stage") is not None
 
             # ── Turn 2: FM Manager — open existing SR, bot enters FM_REVIEW ─
             r2 = await _post(
@@ -331,7 +360,12 @@ class TestFullHandoverLifecycle:
                 f"Expected FM_REVIEW, got {r2['state']['workflow_stage']}"
             )
 
-            # ── Turn 3: FM Manager — Save Progress → confirmation card ──────
+            # ── Turn 3: FM Manager — Save Progress + upload FM doc ───────────
+            # Attachments simulate an FM Checklist doc so that is_fm_review_ready
+            # passes and the confirmation card is shown on the Approve turn.
+            _fm_docs = [
+                {"document_id": "fm-doc-checklist-lifecycle", "document_type_id": "SR_HANDOVER_CHECKLIST"},
+            ]
             r3 = await _post(
                 lifecycle_client,
                 message="",
@@ -339,6 +373,7 @@ class TestFullHandoverLifecycle:
                 user_id=_USER_FM,
                 action="save_fm_progress",
                 corrected_fields={"unit_readiness_date": "2026-05-10"},
+                attachments=_fm_docs,
             )
             # Confirmation card should embed confirmAction=confirm_fm_save
             ui3 = r3.get("ui") or {}
@@ -565,7 +600,8 @@ class TestFullHandoverLifecycle:
                 "brand": "Zara",
                 "mall": "Riyadh Park",
                 "guideLineLink": "https://cenomi.com/guidelines",
-                "document_status": "APPROVED",   # required non-optional field
+                "rdd_upload_doc_type": "SR_HANDOVER_MEETING_REPORT",
+                "document_status": "APPROVED",   # required when rdd_upload_doc_type is meeting report
                 "actual_handover_date": "2026-05-12",
                 "fitout_start_date": "2026-05-14",
                 "fitout_end_date": "2026-05-20",

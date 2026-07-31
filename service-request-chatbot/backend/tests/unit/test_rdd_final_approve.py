@@ -201,19 +201,25 @@ class TestBuildRddApprovePayload:
         payload = build_rdd_approve_payload(refs)
         assert payload["payload"]["current_sr_status"] == "REPORT_SUBMITTED"
 
-    def test_service_request_id_matches_sr_id(self) -> None:
+    def test_service_request_id_absent_from_top_level(self) -> None:
+        """Fix 4: minimal PATCH — service_request_id must NOT appear at top level."""
         refs = {"sr_id": "sr-xyz-001"}
         payload = build_rdd_approve_payload(refs)
-        assert payload["service_request_id"] == "sr-xyz-001"
+        assert "service_request_id" not in payload
+        assert payload["payload"]["sr_id"] == "sr-xyz-001"
 
     def test_sr_id_in_inner_payload(self) -> None:
         refs = {"sr_id": "sr-xyz-001"}
         payload = build_rdd_approve_payload(refs)
         assert payload["payload"]["sr_id"] == "sr-xyz-001"
 
-    def test_service_category_correct(self) -> None:
+    def test_service_category_absent_from_top_level(self) -> None:
+        """Fix 4: minimal PATCH — service_category must NOT appear at top level.
+        sub_category is kept for routing; lease_code and lease_id are removed."""
         payload = build_rdd_approve_payload({"sr_id": "sr-001"})
-        assert payload["service_category"] == "FIT_OUT_AND_HANDOVER"
+        assert "service_category" not in payload
+        assert "lease_code" not in payload
+        assert "lease_id" not in payload
         assert payload["sub_category"] == "HANDOVER"
 
     def test_comment_included_when_provided(self) -> None:
@@ -448,7 +454,9 @@ class TestRDDApiSubmissionFinalApprove:
         mock_svc.submit_report.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_approve_fails_when_rdd_op_still_in_progress(self) -> None:
+    async def test_approve_advances_to_completed_despite_platform_lag(self) -> None:
+        """Platform lag (RDD op not yet FINISHED after successful PATCH) is tolerated —
+        the SR advances to SR_COMPLETED rather than returning FAILED."""
         backend_refs = _rdd_backend_refs(
             rdd_action="final_approve",
             rdd_payload={"status": "APPROVED", "payload": {"current_sr_status": "REPORT_SUBMITTED"}},
@@ -461,8 +469,7 @@ class TestRDDApiSubmissionFinalApprove:
         ):
             result = await rdd_api_submission_node(state)
 
-        assert result["status"] == "FAILED"
-        assert "still in progress" in result["response_message"].lower()
+        assert result["status"] == "COMPLETED"
 
 
 # ---------------------------------------------------------------------------

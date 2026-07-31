@@ -414,6 +414,34 @@ class TestBuildCreateHandoverPayloadConstants:
         result = build_create_handover_payload(_full_data())
         assert result["payload"]["guideLineLink"] == ""
 
+    def test_already_handovered_is_initiate_handover(self) -> None:
+        """Fix 1: inner payload must carry already_handovered='initiate_handover'."""
+        result = build_create_handover_payload(_full_data())
+        assert result["payload"]["already_handovered"] == "initiate_handover"
+
+    def test_fm_approve_no_service_category_or_sr_id_at_top(self) -> None:
+        """Fix 3: minimal FM approve PATCH must NOT include service_category or service_request_id."""
+        data = {
+            "unit_readiness_date": "2026-07-01",
+            "expected_handover_date": "2026-07-08",
+        }
+        refs = {
+            "sr_id": "SR-100",
+            "create_payload": {
+                "payload": {
+                    "mall": "M", "brand": "B", "lease": "L",
+                    "title": "T", "tenant_profile_id": 1, "property_id": 2,
+                },
+                "lease_id": "LID",
+            },
+            "uploaded_documents": [],
+            "sr_operations": [],
+        }
+        payload = build_fm_approve_payload(data, refs)
+        assert "service_category" not in payload
+        assert "service_request_id" not in payload
+        assert payload["status"] == "APPROVED"
+
 
 # ===========================================================================
 # TestBuildFmApprovePayload
@@ -498,14 +526,25 @@ class TestBuildFmApprovePayload:
         assert payload["payload"]["comments"] == "Site ready"
         assert payload["payload"]["comment"] == "Site ready"
 
-    def test_fm_iso_dates_converted_to_ddmmyyyy(self) -> None:
+    def test_fm_dates_output_in_iso_yyyy_mm_dd(self) -> None:
+        """Fix 5: FM review payload must emit dates as YYYY-MM-DD, not DD/MM/YYYY."""
         data = {
             "unit_readiness_date": "2026-07-01",
             "expected_handover_date": "2026-07-08",
         }
         payload = build_fm_review_payload(data, self._backend_refs())
-        assert payload["payload"]["unit_readiness_date"] == "01/07/2026"
-        assert payload["payload"]["expected_handover_date"] == "08/07/2026"
+        assert payload["payload"]["unit_readiness_date"] == "2026-07-01"
+        assert payload["payload"]["expected_handover_date"] == "2026-07-08"
+
+    def test_fm_dates_normalised_from_dd_mm_yyyy_to_iso(self) -> None:
+        """Fix 5: DD/MM/YYYY input dates must also be normalised to YYYY-MM-DD."""
+        data = {
+            "unit_readiness_date": "01/07/2026",
+            "expected_handover_date": "08/07/2026",
+        }
+        payload = build_fm_review_payload(data, self._backend_refs())
+        assert payload["payload"]["unit_readiness_date"] == "2026-07-01"
+        assert payload["payload"]["expected_handover_date"] == "2026-07-08"
 
 
 # ===========================================================================
@@ -599,6 +638,110 @@ class TestBuildRddPayloadsPreserveAndMirror:
         assert inner["document_status_map"][0]["id"] == "rdd-1"
         assert inner["comments"] == "Final"
         assert inner["current_sr_status"] == "REPORT_SUBMITTED"
+
+    def test_rdd_report_attaches_sr_operations_and_current_sr_status(self) -> None:
+        """Fix 6: build_rdd_report_payload must explicitly set sr_operations and current_sr_status."""
+        from app.agents.services.payload_builder_service import build_rdd_report_payload
+
+        data = {
+            "guideLineLink": "https://example.com/g",
+            "actual_handover_date": "2026-08-20",
+            "fitout_start_date": "2026-08-30",
+            "fitout_end_date": "2026-09-10",
+            "trading_date": "2026-09-18",
+            "document_status": "APPROVED",
+            "comments": "",
+            "unit_readiness_date": "2026-08-01",
+            "expected_handover_date": "2026-08-08",
+        }
+        sr_ops = [{"assigned_role": "DD_ENGINEER", "status": "IN_PROGRESS"}]
+        refs = {
+            "sr_id": "sr-2",
+            "create_payload": {
+                "payload": {
+                    "mall": "Mall",
+                    "brand": "Brand",
+                    "lease": "L2",
+                    "title": "T2",
+                    "tenant_profile_id": 10,
+                    "property_id": 20,
+                },
+                "lease_id": "LEASE-2",
+            },
+            "uploaded_documents": ["fm-doc"],
+            "rdd_document_id": "rdd-doc",
+            "sr_operations": sr_ops,
+        }
+        payload = build_rdd_report_payload(data, refs)
+        inner = payload["payload"]
+        assert inner["sr_operations"] == sr_ops
+        assert "current_sr_status" in inner  # present (Fix 6 ensures it is set explicitly)
+
+    def test_rdd_approve_minimal_patch_no_extra_keys(self) -> None:
+        """Fix 4: build_rdd_approve_payload must NOT include service_category, lease_code, lease_id."""
+        from app.agents.services.payload_builder_service import build_rdd_approve_payload
+
+        refs = {
+            "sr_id": "sr-3",
+            "create_payload": {
+                "payload": {
+                    "mall": "Mall", "title": "T3",
+                    "tenant_profile_id": 1, "property_id": 2,
+                }
+            },
+            "rdd_payload": {
+                "payload": {
+                    "mall": "Mall", "title": "T3",
+                    "guideLineLink": "https://g",
+                    "actual_handover_date": "20/08/2026",
+                    "fitout_start_date": "30/08/2026",
+                    "trading_date": "18/09/2026",
+                    "document_status_map": [],
+                    "documents_ids": [],
+                    "tenant_profile_id": 1,
+                    "property_id": 2,
+                }
+            },
+        }
+        payload = build_rdd_approve_payload(refs, comment="Done")
+        assert "service_category" not in payload
+        assert "lease_code" not in payload
+        assert "lease_id" not in payload
+        assert "service_request_id" not in payload
+        assert payload["status"] == "APPROVED"
+        # sub_category is intentionally kept for platform routing
+        assert payload["sub_category"] == "HANDOVER"
+
+    def test_rdd_approve_enriches_document_status_map_with_dates(self) -> None:
+        """Fix 4: document_status_map entries must include unit_readiness_date and expected_handover_date."""
+        from app.agents.services.payload_builder_service import build_rdd_approve_payload
+
+        refs = {
+            "sr_id": "sr-4",
+            "create_payload": {"payload": {"tenant_profile_id": 1, "property_id": 2}},
+            "rdd_payload": {
+                "payload": {
+                    "tenant_profile_id": 1,
+                    "property_id": 2,
+                    "unit_readiness_date": "2026-08-01",
+                    "expected_handover_date": "2026-08-08",
+                    "document_status_map": [
+                        {"id": "doc-1", "document_status": "APPROVED"},
+                    ],
+                    "documents_ids": ["doc-1"],
+                    "actual_handover_date": "20/08/2026",
+                    "fitout_start_date": "30/08/2026",
+                    "trading_date": "18/09/2026",
+                    "guideLineLink": "",
+                    "mall": "M",
+                    "title": "T",
+                }
+            },
+        }
+        payload = build_rdd_approve_payload(refs)
+        entry = payload["payload"]["document_status_map"][0]
+        assert "unit_readiness_date" in entry
+        assert "expected_handover_date" in entry
 
     def test_snapshot_create_payload_from_platform(self) -> None:
         from app.agents.services.payload_builder_service import (

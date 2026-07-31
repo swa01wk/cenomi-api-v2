@@ -78,6 +78,29 @@ HANDOVER_FIELD_QUESTIONS: dict[str, str] = {
     ),
     # trading_date intentionally omitted — auto-computed as fitout_end_date + 8 days.
     # missing_field_node will never ask for it (also excluded via auto_generated_fields in WorkflowConfig).
+    # ── CREATE_HANDED_OVER_SR — Path B (Already Trading) ──────────────────────
+    "already_handovered": (
+        "Ask the user which handover type they want. "
+        "Options: 'Already Trading' (already_trading) — for units that are already open and trading, "
+        "or 'Initiate Handover' (initiate_handover) — to start a new handover inspection flow. "
+        "Make both choices explicit."
+    ),
+    "actual_shop_handover_date": (
+        "Ask the user for the actual shop handover date (DD/MM/YYYY). "
+        "This is the date the unit was physically handed over."
+    ),
+    "actual_fitout_start_date": (
+        "Ask the user for the actual fitout start date (DD/MM/YYYY). "
+        "This must be on or after the shop handover date."
+    ),
+    "actual_fitout_end_date": (
+        "Ask the user for the actual fitout end date (DD/MM/YYYY). "
+        "This must be on or after the fitout start date."
+    ),
+    "actual_trading_date": (
+        "Ask the user for the actual trading date — the date the unit opened for business (DD/MM/YYYY). "
+        "This must be on or after the fitout end date."
+    ),
 }
 
 # ---------------------------------------------------------------------------

@@ -81,7 +81,7 @@ def mock_llm_gateway() -> MagicMock:
                 "confidence": 0.92,
                 "service_category": "FIT_OUT_AND_HANDOVER",
                 "sub_category": "HANDOVER",
-                "target_agent": "rdd_agent",
+                "target_agent": "rdd_handover_agent",
                 "reasoning": "Integration test: user wants handover SR",
             },
             100,  # input_tokens
@@ -105,7 +105,7 @@ def mock_supervisor_decision() -> SupervisorDecision:
         confidence=0.92,
         service_category="FIT_OUT_AND_HANDOVER",
         sub_category="HANDOVER",
-        target_agent="rdd_agent",
+        target_agent="rdd_handover_agent",
         reasoning="Integration test decision",
     )
 

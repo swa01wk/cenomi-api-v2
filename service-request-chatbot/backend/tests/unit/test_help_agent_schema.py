@@ -73,7 +73,7 @@ class TestHelpAgentIntentAsStr:
 
 class TestAllIntentsDerived:
     def test_all_intents_includes_handover_action_intents(self) -> None:
-        cfg = WORKFLOW_CONFIG_REGISTRY.get("rdd_agent")
+        cfg = WORKFLOW_CONFIG_REGISTRY.get("rdd_handover_agent")
         assert cfg is not None
         for intent in cfg.action_intents:
             assert intent in ALL_INTENTS, f"{intent!r} missing from ALL_INTENTS"
@@ -162,3 +162,61 @@ class TestIntentsForRoles:
     def test_empty_roles_gets_read_intents(self) -> None:
         result = intents_for_roles(frozenset())
         assert "ASK_HELP" in result
+
+
+# ---------------------------------------------------------------------------
+# HANDED_OVER / Path B — RBAC gate for CREATE_HANDED_OVER_SR
+# ---------------------------------------------------------------------------
+
+
+class TestHandedOverRBAC:
+    def test_mall_manager_has_create_handed_over_sr_intent(self) -> None:
+        """CREATE_HANDED_OVER_SR must be in ROLE_PERMITTED_INTENTS["MALL_MANAGER"]."""
+        mm = ROLE_PERMITTED_INTENTS.get("MALL_MANAGER", frozenset())
+        assert "CREATE_HANDED_OVER_SR" in mm, (
+            "MALL_MANAGER must be permitted to CREATE_HANDED_OVER_SR"
+        )
+
+    def test_fm_manager_does_not_have_create_handed_over_sr(self) -> None:
+        """CREATE_HANDED_OVER_SR must NOT be in ROLE_PERMITTED_INTENTS["FM_MANAGER"]."""
+        fm = ROLE_PERMITTED_INTENTS.get("FM_MANAGER", frozenset())
+        assert "CREATE_HANDED_OVER_SR" not in fm, (
+            "FM_MANAGER must NOT be permitted to CREATE_HANDED_OVER_SR"
+        )
+
+    def test_dd_engineer_does_not_have_create_handed_over_sr(self) -> None:
+        """CREATE_HANDED_OVER_SR must NOT be in ROLE_PERMITTED_INTENTS["DD_ENGINEER"]."""
+        dd = ROLE_PERMITTED_INTENTS.get("DD_ENGINEER", frozenset())
+        assert "CREATE_HANDED_OVER_SR" not in dd, (
+            "DD_ENGINEER must NOT be permitted to CREATE_HANDED_OVER_SR"
+        )
+
+    def test_operations_does_not_have_create_handed_over_sr(self) -> None:
+        """CREATE_HANDED_OVER_SR must NOT be in ROLE_PERMITTED_INTENTS["OPERATIONS"]."""
+        ops = ROLE_PERMITTED_INTENTS.get("OPERATIONS", frozenset())
+        assert "CREATE_HANDED_OVER_SR" not in ops, (
+            "OPERATIONS must NOT be permitted to CREATE_HANDED_OVER_SR"
+        )
+
+    def test_create_handed_over_sr_in_all_intents(self) -> None:
+        """CREATE_HANDED_OVER_SR must be derivable from the workflow config registry
+        and therefore present in ALL_INTENTS."""
+        assert "CREATE_HANDED_OVER_SR" in ALL_INTENTS, (
+            "CREATE_HANDED_OVER_SR must appear in ALL_INTENTS "
+            "(derived from rdd_agent workflow config action_intents)"
+        )
+
+    def test_mall_manager_has_create_handed_over_sr_intent(self) -> None:
+        """B2 gap: MALL_MANAGER must have CREATE_HANDED_OVER_SR intent."""
+        mm = ROLE_PERMITTED_INTENTS.get("MALL_MANAGER", frozenset())
+        assert "CREATE_HANDED_OVER_SR" in mm
+
+    def test_fm_manager_does_not_have_create_handed_over_sr(self) -> None:
+        """B2 gap: FM_MANAGER must NOT have CREATE_HANDED_OVER_SR."""
+        fm = ROLE_PERMITTED_INTENTS.get("FM_MANAGER", frozenset())
+        assert "CREATE_HANDED_OVER_SR" not in fm
+
+    def test_dd_engineer_does_not_have_create_handed_over_sr(self) -> None:
+        """B2 gap: DD_ENGINEER must NOT have CREATE_HANDED_OVER_SR."""
+        dd = ROLE_PERMITTED_INTENTS.get("DD_ENGINEER", frozenset())
+        assert "CREATE_HANDED_OVER_SR" not in dd

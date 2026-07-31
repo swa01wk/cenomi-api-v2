@@ -56,6 +56,9 @@ _SR_TOP_LEVEL_REF_KEYS = (
     "tenant_profile_id",
     "property_id",
     "brand_id",
+    # sub_category must be merged so sr_status_sync_node can distinguish fitout
+    # confirm SRs from standard handover SRs when the approver opens an existing SR.
+    "sub_category",
 )
 
 # Token time-to-live: refresh after this many seconds regardless of JWT exp.

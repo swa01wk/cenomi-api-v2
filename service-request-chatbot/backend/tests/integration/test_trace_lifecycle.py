@@ -97,7 +97,7 @@ def _supervisor_decision_mock() -> AsyncMock:
         confidence=0.92,
         service_category="FIT_OUT_AND_HANDOVER",
         sub_category="HANDOVER",
-        target_agent="rdd_agent",
+        target_agent="rdd_handover_agent",
         reasoning="Integration test",
     )
     return AsyncMock(return_value=(decision, 100, 60, 150))
@@ -211,7 +211,7 @@ async def test_trace_created_for_every_turn() -> None:
     stub_result: dict[str, Any] = {
         "response_message": "Please provide a lease code.",
         "status": "WAITING_FOR_USER",
-        "active_agent": "rdd_agent",
+        "active_agent": "rdd_handover_agent",
         "response_ui": {"type": "message"},
         "missing_fields": ["lease_code"],
         "intent": "CREATE_RDD_SERVICE_REQUEST",
@@ -335,7 +335,7 @@ async def test_llm_call_logged() -> None:
         confidence=0.9,
         service_category="FIT_OUT_AND_HANDOVER",
         sub_category="HANDOVER",
-        target_agent="rdd_agent",
+        target_agent="rdd_handover_agent",
         reasoning="test",
     )
 
@@ -412,7 +412,7 @@ async def test_tool_call_logged() -> None:
             _base_state(
                 trace_manager=tm,
                 user_message="Lease code is LC-TRC-001",
-                active_agent="rdd_agent",
+                active_agent="rdd_handover_agent",
                 collected_data={},
                 workflow_stage="CREATE_SR",
             )
@@ -464,7 +464,7 @@ async def test_state_persistence() -> None:
                 "user_message": "what next?",
                 "trace_manager": tm,
                 "trace_id": str(uuid4()),
-                "active_agent": "rdd_agent",
+                "active_agent": "rdd_handover_agent",
                 "collected_data": {
                     "tenant_profile_id": 77,
                     "property_id": 2018,

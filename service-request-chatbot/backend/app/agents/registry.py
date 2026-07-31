@@ -34,9 +34,29 @@ class AgentConfig(TypedDict):
 SERVICE_REQUEST_AGENT_REGISTRY: dict[str, dict[str, AgentConfig]] = {
     "FIT_OUT_AND_HANDOVER": {
         "HANDOVER": {
-            "agent_name": "rdd_agent",
-            "display_name": "RDD Agent",
+            "agent_name": "rdd_handover_agent",
+            "display_name": "RDD Handover Agent",
             "schema_key": "handover_service_request_schema",
+        },
+        "HANDED_OVER": {
+            "agent_name": "rdd_handover_agent",
+            "display_name": "RDD Handover Agent",
+            "schema_key": "handover_service_request_schema",
+        },
+        "FIT_OUT_CONFIRM_FOS": {
+            "agent_name": "rdd_fitout_start_agent",
+            "display_name": "RDD Fitout Start Agent",
+            "schema_key": "fitout_confirm_schema",
+        },
+        "FIT_OUT_CONFIRM_END": {
+            "agent_name": "rdd_fitout_end_agent",
+            "display_name": "RDD Fitout End Agent",
+            "schema_key": "fitout_confirm_schema",
+        },
+        "FIT_OUT_CONFIRM_TRADING": {
+            "agent_name": "rdd_trading_confirmation_agent",
+            "display_name": "RDD Trading Confirmation Agent",
+            "schema_key": "fitout_confirm_schema",
         },
     },
     "WORK_PERMIT": {

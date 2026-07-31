@@ -50,7 +50,7 @@ def _state(**kwargs: Any) -> dict[str, Any]:
     base: dict[str, Any] = {
         "session_id": "test-session-001",
         "user_id": "test-user-001",
-        "active_agent": "rdd_agent",
+        "active_agent": "rdd_handover_agent",
         "workflow_stage": "CREATE_SR",
         "collected_data": {},
         "validation_errors": [],
@@ -89,7 +89,7 @@ class TestRouteAfterSync:
         assert result == "supervisor"
 
     def test_create_sr_with_active_agent_uses_entry_nodes(self) -> None:
-        state = _state(workflow_stage="CREATE_SR", active_agent="rdd_agent")
+        state = _state(workflow_stage="CREATE_SR", active_agent="rdd_handover_agent")
         result = _route_after_sync(state)
         # CREATE_SR is not in stage_sync_nodes; falls through to _AGENT_ENTRY_NODES
         assert result == "handover_entry"
@@ -363,7 +363,7 @@ class TestHandoverEntryStage:
         from app.agents.graph.nodes.handover.handover_entry_node import handover_entry_node
 
         result = await handover_entry_node(
-            {"active_agent": "rdd_agent", "user_message": "create handover"}
+            {"active_agent": "rdd_handover_agent", "user_message": "create handover"}
         )
         assert result["workflow_stage"] == "CREATE_SR"
 
@@ -373,7 +373,7 @@ class TestHandoverEntryStage:
 
         result = await handover_entry_node(
             {
-                "active_agent": "rdd_agent",
+                "active_agent": "rdd_handover_agent",
                 "workflow_stage": "FM_REVIEW",
                 "user_message": "update",
             }

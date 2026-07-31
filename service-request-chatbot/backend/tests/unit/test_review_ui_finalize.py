@@ -47,9 +47,9 @@ def test_build_review_decorations_fm_stage() -> None:
     assert {d["key"] for d in docs} == {
         "SR_HANDOVER_CHECKLIST",
         "SR_HANDOVER_SITE_SURVEY",
-        "SR_HANDOVER_OTHER",
+        "SR_COP_CHECKLIST_OTHER",  # Fix 2: SR_COP_CHECKLIST_OTHER replaced SR_HANDOVER_OTHER
     }
-    assert "SR_COP_CHECKLIST_OTHER" not in {d["key"] for d in docs}
+    assert "SR_HANDOVER_OTHER" not in {d["key"] for d in docs}
 
 
 def test_build_review_decorations_fm_approve_when_ready() -> None:

@@ -1,8 +1,8 @@
 # RDD Agent — Technical Reference
 
-> **Agent identifier:** `rdd_agent`
-> **Lifecycle:** RDD Handover Service Request — three sequential workflow phases
-> **Entry point:** Activated by the Help Agent supervisor when intent is `CREATE_RDD_SERVICE_REQUEST`, `UPDATE_RDD_SERVICE_REQUEST`, or `APPROVE_RDD_SERVICE_REQUEST`
+> **Agent identifier:** `rdd_handover_agent`
+> **Lifecycle:** RDD Handover Service Request — Path A (three sequential phases) and Path B (Already Trading fast-path)
+> **Entry point:** Activated by the Help Agent supervisor when intent is `CREATE_RDD_SERVICE_REQUEST`, `UPDATE_RDD_SERVICE_REQUEST`, `APPROVE_RDD_SERVICE_REQUEST`, or `CREATE_HANDED_OVER_SR`
 >
 > **Related docs:**
 > - [`help-agent-pipeline.md`](help-agent-pipeline.md) — Help Agent (supervisor + FAQ) that routes to this agent
@@ -14,27 +14,31 @@
 
 1. [Overview](#1-overview)
 2. [Lifecycle Architecture](#2-lifecycle-architecture)
-3. [Phase 1 — CREATE_SR (Mall Manager)](#3-phase-1--create_sr-mall-manager)
-4. [Phase 2 — FM_REVIEW (FM Manager / Operations)](#4-phase-2--fm_review-fm-manager--operations)
-5. [Phase 3 — RDD_REVIEW (DD Engineer)](#5-phase-3--rdd_review-dd-engineer)
-6. [Shared Pipeline Nodes](#6-shared-pipeline-nodes)
-7. [WorkflowConfig](#7-workflowconfig)
-8. [RBAC — Role Permissions](#8-rbac--role-permissions)
-9. [State Schema](#9-state-schema)
-10. [File Structure](#10-file-structure)
-11. [Adding a New Phase (Extension Guide)](#11-adding-a-new-phase-extension-guide)
+3. [Phase 0 — CREATE_HANDED_OVER_SR (Path B — Already Trading)](#3-phase-0--create_handed_over_sr-path-b--already-trading)
+4. [Phase 1 — CREATE_SR (Mall Manager)](#4-phase-1--create_sr-mall-manager)
+5. [Phase 2 — FM_REVIEW (FM Manager / Operations)](#5-phase-2--fm_review-fm-manager--operations)
+6. [Phase 3 — RDD_REVIEW (DD Engineer)](#6-phase-3--rdd_review-dd-engineer)
+7. [Shared Pipeline Nodes](#7-shared-pipeline-nodes)
+8. [WorkflowConfig](#8-workflowconfig)
+9. [RBAC — Role Permissions](#9-rbac--role-permissions)
+10. [State Schema](#10-state-schema)
+11. [File Structure](#11-file-structure)
+12. [Adding a New Phase (Extension Guide)](#12-adding-a-new-phase-extension-guide)
 
 ---
 
 ## 1. Overview
 
-The **RDD Agent** handles the complete Handover Service Request lifecycle for the Cenomi Mall Management Platform. It is a single LangGraph agent (`rdd_agent`) that owns all three sequential workflow phases from SR creation through final approval.
+The **RDD Agent** handles the complete Handover Service Request lifecycle for the Cenomi Mall Management Platform. It is a single LangGraph agent (`rdd_handover_agent`) that owns two distinct sub-flows:
+
+- **Path A — `HANDOVER` (standard):** Three sequential workflow phases from SR creation through final approval (Mall Manager → FM Manager → DD Engineer).
+- **Path B — `HANDED_OVER` (Already Trading fast-path):** Single-phase SR creation where the SR is automatically approved in the same transaction. No FM or RDD review steps.
 
 ### Core design principles
 
 | Principle | Implementation |
 |-----------|---------------|
-| **One agent, one lifecycle** | `rdd_agent` stays active in `chat_sessions.active_agent` for the entire lifecycle across all three phases |
+| **One agent, one lifecycle** | `rdd_handover_agent` stays active in `chat_sessions.active_agent` for the entire lifecycle across all three phases |
 | **Sequential phases enforced by platform** | `sr_status_sync_node` reads the live platform SR status each turn and routes to the correct phase entry node |
 | **LLM extracts, code validates** | Field extraction is LLM-assisted; all validation, date constraints, and submission logic is deterministic Python |
 | **Per-phase confirmation** | Each phase has its own confirmation card before API submission |
@@ -45,54 +49,220 @@ The **RDD Agent** handles the complete Handover Service Request lifecycle for th
 
 | Role | Phase | Action |
 |------|-------|--------|
-| `MALL_MANAGER` | CREATE_SR | Creates the SR, provides inspection details |
-| `FM_MANAGER` or `OPERATIONS` | FM_REVIEW | Reviews SR, uploads FM documents, sets handover dates |
-| `DD_ENGINEER` | RDD_REVIEW | Uploads handover report, submits final RDD review |
+| `MALL_MANAGER` | CREATE_SR (Path A) | Creates the SR, provides inspection details |
+| `MALL_MANAGER` | CREATE_HANDED_OVER_SR (Path B) | Creates Already Trading SR — auto-approved immediately |
+| `FM_MANAGER` or `OPERATIONS` | FM_REVIEW (Path A only) | Reviews SR, uploads FM documents, sets handover dates |
+| `DD_ENGINEER` | RDD_REVIEW (Path A only) | Uploads handover report, submits final RDD review |
 
 ---
 
 ## 2. Lifecycle Architecture
 
+### 2.1 High-Level Design
+
+The diagram below shows the two paths, the actors, the key state transitions, and where the MSP Platform API is called. Internal pipeline nodes (field extraction, merge, validation, etc.) are collapsed into "Collect + Validate" blocks for clarity.
+
 ```mermaid
-flowchart LR
-    subgraph lifecycle ["RDD Agent Lifecycle (rdd_agent)"]
-        subgraph p1 ["Phase 1 — CREATE_SR"]
-            direction TB
-            MM["Mall Manager"]
-            P1E["handover_entry_node"]
-            P1F["field_extraction\nmerge_state\nlease_lookup\nvalidation"]
-            P1C["confirmation_node\n(17 fields)"]
-            P1S["api_submission_node\nPOST /service-requests"]
-            MM --> P1E --> P1F --> P1C --> P1S
-        end
-
-        subgraph p2 ["Phase 2 — FM_REVIEW"]
-            direction TB
-            FM["FM Manager\nor Operations"]
-            P2E["fm_review_entry_node"]
-            P2F["field_extraction\nmerge_state\nvalidation"]
-            P2C["fm_confirmation_node\n(dates + docs)"]
-            P2S["fm_api_submission_node\nPATCH /service-requests"]
-            FM --> P2E --> P2F --> P2C --> P2S
-        end
-
-        subgraph p3 ["Phase 3 — RDD_REVIEW"]
-            direction TB
-            RDD["DD Engineer"]
-            P3E["rdd_review_entry_node"]
-            P3F["field_extraction\nmerge_state\nvalidation"]
-            P3C["rdd_confirmation_node\n(dates + report)"]
-            P3S["rdd_api_submission_node\nPATCH /service-requests"]
-            RDD --> P3E --> P3F --> P3C --> P3S
-        end
-
-        P1S -->|"platform notifies FM Manager\nSR status → FM_REVIEW"| p2
-        P2S -->|"platform notifies DD Engineer\nSR status → RDD_REVIEW"| p3
-        P3S -->|"SR_COMPLETED"| DONE["Lifecycle complete"]
+flowchart TB
+    subgraph actors ["Actors"]
+        direction LR
+        MM_a["Mall Manager"]
+        FM_a["FM Manager\nor Operations"]
+        RDD_a["DD Engineer"]
     end
+
+    subgraph help_layer ["Help Agent Layer (per-turn shared infra)"]
+        direction LR
+        SUP["Supervisor\nLLM intent classification\nRBAC enforcement"]
+        SYNC["sr_status_sync\nGET platform SR\nMap status → workflow_stage"]
+        FAQ_node["faq_node\nRAG Q&A"]
+    end
+
+    subgraph rdd_block ["RDD Agent"]
+        direction TB
+
+        subgraph pathB ["Path B — HANDED_OVER  (Already Trading fast-path)"]
+            direction LR
+            B_collect["Collect + Validate\n4 actual dates · lease · title"]
+            B_confirm["Confirmation card\n(4 actual dates)"]
+            B_submit["POST /service-requests\nsub_category=HANDED_OVER\nalready_handovered=already_trading"]
+            B_done(["HANDED_OVER_COMPLETED\nSR auto-APPROVED\nworkflow_complete=true"])
+            B_collect --> B_confirm --> B_submit --> B_done
+        end
+
+        subgraph pathA ["Path A — HANDOVER  (Standard multi-level)"]
+            direction TB
+
+            subgraph phase1 ["Phase 1 — CREATE_SR  (Mall Manager)"]
+                direction LR
+                A1_collect["Collect + Validate\ntenant · lease · dates\ninspection_done_by · title"]
+                A1_confirm["Confirmation card\n(17 fields)"]
+                A1_submit["POST /service-requests\nsub_category=HANDOVER\nalready_handovered=initiate_handover"]
+                A1_done(["SR_CREATED\nMM: FINISHED\nFM: IN_PROGRESS"])
+                A1_collect --> A1_confirm --> A1_submit --> A1_done
+            end
+
+            subgraph phase2 ["Phase 2 — FM_REVIEW  (FM Manager / Operations)"]
+                direction LR
+                A2_collect["Upload docs\nSR_HANDOVER_CHECKLIST\nSR_HANDOVER_SITE_SURVEY\nSR_COP_CHECKLIST_OTHER\nSet unit_readiness_date"]
+                A2_confirm["FM confirmation card\n(dates + docs)"]
+                A2_save["PATCH status=IN_PROCESS\n(save progress)"]
+                A2_approve["PATCH status=APPROVED\n(FM approve)"]
+                A2_done(["FM: FINISHED\nRDD: IN_PROGRESS\nstage_complete=true"])
+                A2_collect --> A2_confirm
+                A2_confirm -->|"save"| A2_save
+                A2_confirm -->|"approve"| A2_approve
+                A2_approve --> A2_done
+            end
+
+            subgraph phase3 ["Phase 3 — RDD_REVIEW  (DD Engineer)"]
+                direction LR
+                A3_collect["Upload DR_SR_HANDOVER_REPORT\nProvide 4 actual dates\nactual_handover · fitout_start\nfitout_end · trading_date"]
+                A3_submit["POST status=REPORT_SUBMITTED"]
+                A3_approve["PATCH status=APPROVED\n(final approve)"]
+                A3_done(["SR_COMPLETED\nworkflow_complete=true"])
+                A3_collect --> A3_submit --> A3_approve --> A3_done
+            end
+
+            A1_done -->|"Platform notifies FM Manager"| phase2
+            A2_done -->|"Platform notifies DD Engineer"| phase3
+        end
+    end
+
+    MSP_API[/"MSP Platform API\nPOST · PATCH · GET\n/service-requests"/]
+
+    MM_a -->|"message / action"| SUP
+    FM_a -->|"message / action"| SUP
+    RDD_a -->|"message / action"| SUP
+
+    SUP -->|"ASK_HELP / UNKNOWN"| FAQ_node
+    SUP -->|"sr_id present or extracted"| SYNC
+    SUP -->|"SR action intent, RBAC ok"| SYNC
+
+    SYNC -->|"sub_category=HANDED_OVER"| pathB
+    SYNC -->|"CREATE_SR stage"| phase1
+    SYNC -->|"FM_REVIEW stage"| phase2
+    SYNC -->|"RDD_REVIEW stage"| phase3
+
+    B_submit --> MSP_API
+    A1_submit --> MSP_API
+    A2_save --> MSP_API
+    A2_approve --> MSP_API
+    A3_submit --> MSP_API
+    A3_approve --> MSP_API
 ```
 
-### Phase sequencing
+### 2.2 Detailed Node Graph
+
+The diagram below reflects the actual compiled LangGraph (`help_agent_graph.py`). Every chat turn starts at `load_session` and always ends at `save_state → END`. The RDD agent nodes are grouped inside the dashed boundary; the supervisor, sr_status_sync, and response layer are shared infrastructure.
+
+```mermaid
+flowchart TD
+    START([Start]) --> load_session["load_session\nRestore chat session from DB"]
+    load_session --> doc_upload["document_upload\nPartition uploaded docs\ninto FM / RDD buckets"]
+
+    doc_upload -->|"sr_id present, non-cancel"| sr_sync["sr_status_sync\nGET platform SR status\nMap → workflow_stage"]
+    doc_upload -->|"cancel action + sr_id"| h_entry
+    doc_upload -->|"active_agent set, no sr_id"| h_entry
+    doc_upload -->|"no sr_id, no agent"| sup
+
+    sr_sync -->|"FM_REVIEW"| fm_entry
+    sr_sync -->|"RDD_REVIEW"| rdd_entry
+    sr_sync -->|"CREATE_SR or CREATE_HANDED_OVER_SR"| h_entry
+    sr_sync -->|"terminal stage"| sup
+    sr_sync -->|"sync error"| resp_gen
+
+    sup["supervisor\nLLM intent classification\nRBAC enforcement"] -->|"sr_id extracted in message"| sr_sync
+    sup -->|"ASK_HELP / UNKNOWN"| faq["faq_node\nRAG Q&A answer"]
+    sup -->|"PREVIEW_SR / CHECK_STATUS"| preview["preview\nShow SR draft or status"]
+    sup -->|"SR action intent, RBAC ok"| registry["registry\nResolve agent\nSet active_agent"]
+    sup -->|"RBAC denial / parse fail"| resp_gen
+
+    faq --> save_state
+    preview --> resp_gen
+    registry --> h_entry
+
+    subgraph rdd_agent ["RDD Agent (rdd_agent)"]
+
+        subgraph entry_nodes ["Stage Entry Nodes"]
+            h_entry["handover_entry\nHITL: confirm / cancel / MM upload gate\nPath A vs B pin on first turn"]
+            fm_entry["fm_review_entry\nFM_MANAGER or OPERATIONS role gate\nfm_action detection"]
+            rdd_entry["rdd_review_entry\nDD_ENGINEER role gate\nrdd_action / REPORT_SUBMITTED detection"]
+        end
+
+        subgraph pipeline ["Shared Data Pipeline — runs for every collection stage"]
+            fe["field_extraction\nLLM extracts fields (confidence ≥ 0.6)"]
+            merge["merge_state\nMerge into collected_data\nAuto-compute title / expected dates"]
+            lease["lease_lookup\nGET /leases\nResolve 10 backend fields"]
+            val["validation\nDate chain · enum · required\ndoc count checks"]
+            mf["missing_field\nAsk exactly one field per turn"]
+        end
+
+        subgraph phase_create ["CREATE phase — Path A and Path B share these nodes"]
+            conf["confirmation\nShow draft card\nCREATE_SR and CREATE_HANDED_OVER_SR"]
+            pb["payload_builder\nPath A: build HANDOVER body\nPath B: build HANDED_OVER body"]
+            api_sub["api_submission\nPOST /service-requests\nPath A → stage=SR_CREATED\nPath B → stage=HANDED_OVER_COMPLETED + workflow_complete"]
+        end
+
+        subgraph phase_fm ["FM_REVIEW phase — Path A only"]
+            fm_conf["fm_confirmation\nShow FM draft card\n(unit_readiness_date + docs)"]
+            fm_pb["fm_payload_builder\nBuild save-progress PATCH\nor approve PATCH"]
+            fm_api["fm_api_submission\nPATCH /service-requests/:id\nstage_complete=true on approve"]
+        end
+
+        subgraph phase_rdd ["RDD_REVIEW phase — Path A only"]
+            rdd_conf["rdd_confirmation\nShow RDD dates + document card"]
+            rdd_pb["rdd_payload_builder\nBuild submit-report POST\nor final-approve PATCH"]
+            rdd_api["rdd_api_submission\nPOST status=REPORT_SUBMITTED\nor PATCH status=APPROVED\nSR_COMPLETED on final approve"]
+        end
+
+    end
+
+    h_entry -->|"WAITING_FOR_USER\nMM upload offer or cancel pending"| resp_gen
+    h_entry -->|"action=cancel"| merge
+    h_entry -->|"proceed"| fe
+
+    fm_entry -->|"WAITING_FOR_USER"| resp_gen
+    fm_entry -->|"fm_action or CONFIRMED"| merge
+    fm_entry -->|"proceed"| fe
+
+    rdd_entry -->|"WAITING_FOR_USER or REPORT_SUBMITTED idle"| resp_gen
+    rdd_entry -->|"rdd_action or CONFIRMED"| merge
+    rdd_entry -->|"proceed"| fe
+
+    fe --> merge
+    merge -->|"no lease_id or selected_lease"| lease
+    merge -->|"FM or RDD stage (lease already resolved)"| val
+    lease -->|"resolved"| val
+    lease -->|"WAITING_FOR_USER (0 or N matches)"| resp_gen
+
+    val -->|"blocking errors"| mf
+    mf --> resp_gen
+
+    val -->|"CREATE_SR or CREATE_HANDED_OVER_SR — all valid"| conf
+    val -->|"FM_REVIEW — all valid"| fm_conf
+    val -->|"RDD_REVIEW — all valid"| rdd_conf
+
+    conf -->|"CONFIRMED"| pb
+    conf -->|"not confirmed"| resp_gen
+    pb --> api_sub
+    api_sub --> resp_gen
+
+    fm_conf -->|"CONFIRMED"| fm_pb
+    fm_conf -->|"not confirmed"| resp_gen
+    fm_pb --> fm_api
+    fm_api --> resp_gen
+
+    rdd_conf -->|"CONFIRMED"| rdd_pb
+    rdd_conf -->|"not confirmed"| resp_gen
+    rdd_pb --> rdd_api
+    rdd_api --> resp_gen
+
+    resp_gen["response_generation\nLLM formats reply + builds UI JSON payload"] --> save_state["save_state\nPersist graph state to DB"]
+    save_state --> END_NODE([End])
+```
+
+### 2.3 Phase sequencing — Path A (standard HANDOVER)
 
 The platform's own status machine drives phase transitions:
 
@@ -104,13 +274,107 @@ The platform's own status machine drives phase transitions:
 
 No code-side sequence enforcement is needed — the platform API is the source of truth.
 
+### 2.4 Phase sequencing — Path B (HANDED_OVER / Already Trading)
+
+Path B has no FM or RDD phases. The entire lifecycle is one agent turn:
+
+1. Mall Manager provides 4 actual dates for an already-trading unit
+2. `api_submission_node` POSTs with `sub_category = "HANDED_OVER"` and `already_handovered = "already_trading"`
+3. Backend auto-approves the SR in the same transaction — status immediately becomes `APPROVED`
+4. Agent emits `workflow_complete: true`, `workflow_stage: "HANDED_OVER_COMPLETED"`
+
+No `sr_status_sync_node` routing to FM or RDD occurs for Path B.
+
 ---
 
-## 3. Phase 1 — CREATE_SR (Mall Manager)
+## 3. Phase 0 — CREATE_HANDED_OVER_SR (Path B — Already Trading)
 
 ### Trigger
 
-Intent `CREATE_RDD_SERVICE_REQUEST` classified by the supervisor → registry resolves `rdd_agent` → `handover_entry_node`.
+Intent `CREATE_HANDED_OVER_SR` classified by the supervisor → registry resolves `rdd_handover_agent` → `handover_entry_node`. The entry node detects `already_handovered in ("already_trading", "already_handovered")` or `sub_category == "HANDED_OVER"` and routes the entire session to the Path B collection flow.
+
+### Entry node — `handover_entry_node.py`
+
+Handles:
+- `already_handovered` / `sub_category` pin on first turn — sets `workflow_stage = "CREATE_HANDED_OVER_SR"`
+- Stale-clear when `workflow_stage = "HANDED_OVER_COMPLETED"` (terminal) before starting a new collection
+- Standard confirmation / cancel gates
+
+### Required fields (Path B)
+
+| Field | Source | Description |
+|-------|--------|-------------|
+| `tenant_profile_id` | Backend (lease lookup) | Tenant profile identifier |
+| `property_id` | Backend (lease lookup) | Mall property identifier |
+| `lease_code` | User → Backend | Lease code (e.g. `t0105712`) |
+| `lease_id` | Backend (lease lookup) | Contract/lease UUID |
+| `brand_id` | Backend (lease lookup) | Brand identifier |
+| `mall` | Backend (lease lookup) | Mall display name |
+| `brand` | Backend (lease lookup) | Brand display name |
+| `title` | User (optional) or auto-generated | Defaults to `Already Trading - {lease_code}` |
+| `actual_shop_handover_date` | User | `YYYY-MM-DD` — when the shop was physically handed over |
+| `actual_fitout_start_date` | User | `YYYY-MM-DD` — when tenant fit-out work started |
+| `actual_fitout_end_date` | User | `YYYY-MM-DD` — when tenant fit-out work ended |
+| `actual_trading_date` | User | `YYYY-MM-DD` — when the unit started trading |
+
+**No** `description`, `startDate`, `endDate`, `inspection_done_by`, or `guideLineLink`.
+
+### Validation rules (Path B)
+
+| Rule | Blocking |
+|------|---------|
+| All 4 actual-date fields present and non-empty | Yes |
+| `actual_shop_handover_date` ≤ `actual_fitout_start_date` ≤ `actual_fitout_end_date` ≤ `actual_trading_date` | Yes |
+| `lease_id` confirmed before submission | Yes |
+
+### Confirmation card (Path B)
+
+Shows the 4 actual dates only. No Path A inspection fields. `confirmAction = "confirm"`.
+
+### Submission
+
+`api_submission_node.py` → `POST /service-requests` with:
+- `sub_category = "HANDED_OVER"`
+- `already_handovered = "already_trading"`
+- 4 actual dates in `YYYY-MM-DD` format
+
+### Success response
+
+```python
+{
+  "workflow_stage": "HANDED_OVER_COMPLETED",
+  "workflow_complete": True,
+  "message": "Your Already Trading SR has been created and automatically approved — reference {sr_id}. No further FM or RDD review steps are required."
+}
+```
+
+The SR is immediately `APPROVED` on the platform. No MM optional upload offer is shown.
+
+### Conversation flow (3–5 turns)
+
+```
+Turn 1: "already trading for t0105712"
+  → Extracts lease="t0105712", already_handovered="already_trading"
+  → Lease lookup auto-fills 8 backend fields
+  → Reply: "Found your lease. Please provide the 4 actual dates."
+
+Turn 2–3: Collects actual_shop_handover_date, actual_fitout_start_date,
+           actual_fitout_end_date, actual_trading_date
+
+Turn 4: Shows confirmation card (4 dates + title)
+  → User: "Confirm"
+
+Turn 5: Submits SR → auto-approved → returns sr_id
+  → workflow_complete: true, workflow_stage: HANDED_OVER_COMPLETED
+```
+
+---
+
+## 4. Phase 1 — CREATE_SR (Mall Manager)
+
+### Trigger
+
+Intent `CREATE_RDD_SERVICE_REQUEST` classified by the supervisor → registry resolves `rdd_handover_agent` → `handover_entry_node`.
 
 ### Entry node — `handover_entry_node.py`
 
@@ -176,7 +440,7 @@ Turn 6: Submits SR → returns SR-2026-00741
 
 ---
 
-## 4. Phase 2 — FM_REVIEW (FM Manager / Operations)
+## 5. Phase 2 — FM_REVIEW (FM Manager / Operations)
 
 ### Trigger
 
@@ -238,7 +502,7 @@ Turn 4: Confirmation card → Approve
 
 ---
 
-## 5. Phase 3 — RDD_REVIEW (DD Engineer)
+## 6. Phase 3 — RDD_REVIEW (DD Engineer)
 
 ### Trigger
 
@@ -298,7 +562,7 @@ Turn 4: Uploads DR_SR_HANDOVER_REPORT → Confirmation card → Submit
 
 ---
 
-## 6. Shared Pipeline Nodes
+## 7. Shared Pipeline Nodes
 
 These nodes run identically for all three phases. They sit between the phase entry node and the phase-specific confirmation node.
 
@@ -330,15 +594,15 @@ flowchart LR
 
 ---
 
-## 7. WorkflowConfig
+## 8. WorkflowConfig
 
-The `rdd_agent`'s entire configuration is declared in one `WorkflowConfig` object registered in `WORKFLOW_CONFIG_REGISTRY`.
+The `rdd_handover_agent`'s entire configuration is declared in one `WorkflowConfig` object registered in `WORKFLOW_CONFIG_REGISTRY`.
 
 ```python
 # app/agents/registries/workflow_config.py
 
 WorkflowConfig(
-    agent_name="rdd_agent",
+    agent_name="rdd_handover_agent",
     extraction_prompt=HANDOVER_EXTRACTION_SYSTEM_PROMPT,
     field_questions=HANDOVER_FIELD_QUESTIONS,       # field → question string per phase
 
@@ -350,7 +614,7 @@ WorkflowConfig(
     },
 
     # Phases in which field collection runs
-    collection_stages=frozenset({"CREATE_SR", "FM_REVIEW", "RDD_REVIEW"}),
+    collection_stages=frozenset({"CREATE_SR", "FM_REVIEW", "RDD_REVIEW", "CREATE_HANDED_OVER_SR"}),
 
     # Confirmation node per phase
     confirmation_nodes={
@@ -360,7 +624,7 @@ WorkflowConfig(
     },
 
     # Stages that end the lifecycle (supervisor gets control again)
-    terminal_stages=frozenset({"SR_CREATED", "SR_COMPLETED"}),
+    terminal_stages=frozenset({"SR_CREATED", "SR_COMPLETED", "HANDED_OVER_COMPLETED"}),
 
     # Fields resolved by backend APIs — never asked of the user
     backend_fields=frozenset({
@@ -380,6 +644,7 @@ WorkflowConfig(
         "CREATE_RDD_SERVICE_REQUEST",
         "UPDATE_RDD_SERVICE_REQUEST",
         "APPROVE_RDD_SERVICE_REQUEST",
+        "CREATE_HANDED_OVER_SR",          # Path B — Already Trading fast-path
     }),
 )
 ```
@@ -388,14 +653,14 @@ Shared nodes (`field_extraction_node`, `missing_field_node`, `_route_after_sync`
 
 ---
 
-## 8. RBAC — Role Permissions
+## 9. RBAC — Role Permissions
 
 | Role | Permitted SR intents | Phase access |
 |------|---------------------|-------------|
-| `MALL_MANAGER` | `CREATE_RDD_SERVICE_REQUEST`, `UPDATE_RDD_SERVICE_REQUEST` | Phase 1 (CREATE_SR) |
-| `FM_MANAGER` | `APPROVE_RDD_SERVICE_REQUEST` | Phase 2 (FM_REVIEW) |
+| `MALL_MANAGER` | `CREATE_RDD_SERVICE_REQUEST`, `UPDATE_RDD_SERVICE_REQUEST`, `CREATE_HANDED_OVER_SR` | Phase 1 (CREATE_SR, Path A) · Phase 0 (CREATE_HANDED_OVER_SR, Path B) |
+| `FM_MANAGER` | `APPROVE_RDD_SERVICE_REQUEST` | Phase 2 (FM_REVIEW — Path A only) |
 | `OPERATIONS` | `APPROVE_RDD_SERVICE_REQUEST` | Phase 2 (FM_REVIEW — save only, cannot approve independently) |
-| `DD_ENGINEER` | *(none — phase 3 triggered by `sr_status_sync`, not by intent)* | Phase 3 (RDD_REVIEW) |
+| `DD_ENGINEER` | *(none — phase 3 triggered by `sr_status_sync`, not by intent)* | Phase 3 (RDD_REVIEW — Path A only) |
 | `ADMIN` | All intents | All phases |
 
 All roles additionally have read intents: `ASK_HELP`, `CHECK_SERVICE_REQUEST_STATUS`, `PREVIEW_SERVICE_REQUEST`, `UNKNOWN`.
@@ -406,17 +671,17 @@ Permission enforcement happens at two points:
 
 ---
 
-## 9. State Schema
+## 10. State Schema
 
 The RDD agent uses `ServiceRequestGraphState` (defined in `app/agents/graph/state.py`). Key fields written by RDD agent nodes:
 
 | Field | Type | Written by | Description |
 |-------|------|-----------|-------------|
-| `active_agent` | `str \| None` | supervisor, registry | `"rdd_agent"` for all three phases |
+| `active_agent` | `str \| None` | supervisor, registry | `"rdd_handover_agent"` for all three phases |
 | `intent` | `str \| None` | supervisor | `CREATE_RDD_SERVICE_REQUEST` etc. |
 | `service_category` | `str \| None` | supervisor | `"FIT_OUT_AND_HANDOVER"` |
-| `sub_category` | `str \| None` | supervisor | `"HANDOVER"` |
-| `workflow_stage` | `str \| None` | sr_status_sync, entry nodes | `"CREATE_SR"`, `"FM_REVIEW"`, `"RDD_REVIEW"` |
+| `sub_category` | `str \| None` | supervisor | `"HANDOVER"` (Path A) or `"HANDED_OVER"` (Path B) |
+| `workflow_stage` | `str \| None` | sr_status_sync, entry nodes | `"CREATE_SR"`, `"FM_REVIEW"`, `"RDD_REVIEW"`, `"CREATE_HANDED_OVER_SR"`, `"HANDED_OVER_COMPLETED"` |
 | `collected_data` | `dict` | merge_state_node | All user-supplied + backend-resolved field values |
 | `extracted_fields` | `dict` | field_extraction_node | LLM proposals (pre-merge) with confidence scores |
 | `missing_fields` | `list[str]` | missing_field_node | Fields still needed from the user |
@@ -433,7 +698,7 @@ The RDD agent uses `ServiceRequestGraphState` (defined in `app/agents/graph/stat
 
 ---
 
-## 10. File Structure
+## 11. File Structure
 
 ```
 app/agents/
@@ -476,7 +741,7 @@ app/agents/
 
 ---
 
-## 11. Adding a New Phase (Extension Guide)
+## 12. Adding a New Phase (Extension Guide)
 
 To add a **Phase 4** to the RDD lifecycle (e.g. a final sign-off by a Senior Engineer):
 

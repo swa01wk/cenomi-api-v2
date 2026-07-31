@@ -41,7 +41,7 @@ def _make_decision(
     confidence: float = 0.9,
     service_category: str | None = "FIT_OUT_AND_HANDOVER",
     sub_category: str | None = "HANDOVER",
-    target_agent: str | None = "rdd_agent",
+    target_agent: str | None = "rdd_handover_agent",
     reasoning: str = "User wants to create a handover SR",
 ) -> SupervisorDecision:
     return SupervisorDecision(
@@ -76,7 +76,7 @@ class TestSupervisorDecisionModel:
         assert d.confidence == 0.9
         assert d.service_category == "FIT_OUT_AND_HANDOVER"
         assert d.sub_category == "HANDOVER"
-        assert d.target_agent == "rdd_agent"
+        assert d.target_agent == "rdd_handover_agent"
 
     def test_valid_unknown_intent(self) -> None:
         d = _make_decision(
@@ -146,14 +146,14 @@ class TestServiceRequestRegistry:
 
     def test_handover_agent_config(self) -> None:
         cfg = SERVICE_REQUEST_AGENT_REGISTRY["FIT_OUT_AND_HANDOVER"]["HANDOVER"]
-        assert cfg["agent_name"] == "rdd_agent"
-        assert cfg["display_name"] == "RDD Agent"
+        assert cfg["agent_name"] == "rdd_handover_agent"
+        assert cfg["display_name"] == "RDD Handover Agent"
         assert cfg["schema_key"] == "handover_service_request_schema"
 
     def test_lookup_agent_found(self) -> None:
         cfg = lookup_agent("FIT_OUT_AND_HANDOVER", "HANDOVER")
         assert cfg is not None
-        assert cfg["agent_name"] == "rdd_agent"
+        assert cfg["agent_name"] == "rdd_handover_agent"
 
     def test_lookup_agent_missing_category(self) -> None:
         assert lookup_agent("UNKNOWN_CATEGORY", "HANDOVER") is None
@@ -173,7 +173,7 @@ class TestServiceRequestRegistry:
     def test_list_registered_agents_returns_all(self) -> None:
         agents = list_registered_agents()
         names = [a["agent_name"] for a in agents]
-        assert "rdd_agent" in names
+        assert "rdd_handover_agent" in names
 
     def test_list_registered_agents_non_empty(self) -> None:
         assert len(list_registered_agents()) >= 1
@@ -193,7 +193,7 @@ class TestSupervisorSessionContinuity:
         from app.agents.graph.nodes.supervisor_node import supervisor_node
 
         state = _base_state(
-            active_agent="rdd_agent",
+            active_agent="rdd_handover_agent",
             user_message="What's next?",
         )
 
@@ -204,7 +204,7 @@ class TestSupervisorSessionContinuity:
             result = await supervisor_node(state)
 
         mock_llm.assert_not_called()
-        assert result["active_agent"] == "rdd_agent"
+        assert result["active_agent"] == "rdd_handover_agent"
 
     @pytest.mark.asyncio
     async def test_cancel_phrase_triggers_reclassification(self) -> None:
@@ -216,7 +216,7 @@ class TestSupervisorSessionContinuity:
         )
 
         state = _base_state(
-            active_agent="rdd_agent",
+            active_agent="rdd_handover_agent",
             user_message="cancel, I want to start over with a different request",
         )
 
@@ -239,7 +239,7 @@ class TestSupervisorSessionContinuity:
 
         decision = _make_decision(intent="UNKNOWN", confidence=0.1)
         state = _base_state(
-            active_agent="rdd_agent",
+            active_agent="rdd_handover_agent",
             user_message="nevermind",
         )
 
@@ -302,7 +302,7 @@ class TestSupervisorRouting:
         assert result["intent"] == "CREATE_RDD_SERVICE_REQUEST"
         assert result["service_category"] == "FIT_OUT_AND_HANDOVER"
         assert result["sub_category"] == "HANDOVER"
-        assert result["active_agent"] == "rdd_agent"
+        assert result["active_agent"] == "rdd_handover_agent"
         assert result["status"] == "IN_PROGRESS"
 
     @pytest.mark.asyncio
@@ -588,11 +588,11 @@ class TestRegistryNode:
         state = _base_state(
             service_category="FIT_OUT_AND_HANDOVER",
             sub_category="HANDOVER",
-            active_agent="rdd_agent",
+            active_agent="rdd_handover_agent",
         )
         result = await registry_node(state)
 
-        assert result["active_agent"] == "rdd_agent"
+        assert result["active_agent"] == "rdd_handover_agent"
         assert result["status"] == "IN_PROGRESS"
 
     @pytest.mark.asyncio
@@ -640,7 +640,7 @@ class TestRegistryNode:
         )
         result = await registry_node(state)
 
-        assert result["active_agent"] == "rdd_agent"
+        assert result["active_agent"] == "rdd_handover_agent"
         assert result["status"] == "IN_PROGRESS"
 
     @pytest.mark.asyncio
@@ -666,7 +666,7 @@ class TestRegistryNode:
         )
         result = await registry_node(state)
 
-        assert result["active_agent"] == "rdd_agent"
+        assert result["active_agent"] == "rdd_handover_agent"
         assert result["status"] == "IN_PROGRESS"
 
 
@@ -689,3 +689,140 @@ class TestRegistryExport:
 
         assert isinstance(CONFIDENCE_THRESHOLD, float)
         assert 0.0 < CONFIDENCE_THRESHOLD < 1.0
+
+
+# ---------------------------------------------------------------------------
+# HANDED_OVER / Path B — supervisor and registry assertions
+# ---------------------------------------------------------------------------
+
+
+class TestHandedOverRegistryEntry:
+    def test_handed_over_registered_under_fit_out_and_handover(self) -> None:
+        """HANDED_OVER sub_category must exist in the service request registry."""
+        assert is_registered("FIT_OUT_AND_HANDOVER", "HANDED_OVER") is True
+
+    def test_handed_over_agent_config_is_rdd_agent(self) -> None:
+        """HANDED_OVER must route to rdd_agent (same as HANDOVER)."""
+        cfg = lookup_agent("FIT_OUT_AND_HANDOVER", "HANDED_OVER")
+        assert cfg is not None
+        assert cfg["agent_name"] == "rdd_handover_agent"
+
+
+class TestHandedOverSupervisorRouting:
+    @pytest.mark.asyncio
+    async def test_already_trading_message_classified_as_create_handed_over_sr(
+        self,
+    ) -> None:
+        """Supervisor LLM (mocked) classifying an 'already trading' message must
+        route to intent=CREATE_HANDED_OVER_SR with sub_category=HANDED_OVER."""
+        from app.agents.graph.nodes.supervisor_node import supervisor_node
+
+        decision = _make_decision(
+            intent="CREATE_HANDED_OVER_SR",
+            confidence=0.92,
+            service_category="FIT_OUT_AND_HANDOVER",
+            sub_category="HANDED_OVER",
+            target_agent="rdd_handover_agent",
+            reasoning="Unit is already trading — Path B",
+        )
+        state = _base_state(
+            user_message="The unit for lease t0105712 is already trading, register it"
+        )
+
+        with patch(
+            "app.agents.graph.nodes.supervisor_node._call_supervisor_llm",
+            new_callable=AsyncMock,
+            return_value=(decision, 70, 50, 180),
+        ), patch(
+            "app.agents.graph.nodes.supervisor_node.get_default_gateway",
+            return_value=MagicMock(),
+        ):
+            result = await supervisor_node(state)
+
+        assert result["intent"] == "CREATE_HANDED_OVER_SR"
+        assert result["sub_category"] == "HANDED_OVER"
+        assert result["active_agent"] == "rdd_handover_agent"
+        assert result["status"] == "IN_PROGRESS"
+
+    @pytest.mark.asyncio
+    async def test_create_handed_over_sr_sets_service_category_fit_out_and_handover(
+        self,
+    ) -> None:
+        """When intent=CREATE_HANDED_OVER_SR, service_category must be FIT_OUT_AND_HANDOVER."""
+        from app.agents.graph.nodes.supervisor_node import supervisor_node
+
+        decision = _make_decision(
+            intent="CREATE_HANDED_OVER_SR",
+            confidence=0.88,
+            service_category="FIT_OUT_AND_HANDOVER",
+            sub_category="HANDED_OVER",
+            target_agent="rdd_handover_agent",
+            reasoning="Already trading path",
+        )
+        state = _base_state(user_message="already trading for t0105712")
+
+        with patch(
+            "app.agents.graph.nodes.supervisor_node._call_supervisor_llm",
+            new_callable=AsyncMock,
+            return_value=(decision, 65, 45, 160),
+        ), patch(
+            "app.agents.graph.nodes.supervisor_node.get_default_gateway",
+            return_value=MagicMock(),
+        ):
+            result = await supervisor_node(state)
+
+        assert result["service_category"] == "FIT_OUT_AND_HANDOVER"
+        assert result["sub_category"] == "HANDED_OVER"
+
+    @pytest.mark.asyncio
+    async def test_already_trading_message_classified_as_create_handed_over_sr(self) -> None:
+        """'already trading' phrase must classify as CREATE_HANDED_OVER_SR (B2 gap)."""
+        from app.agents.graph.nodes.supervisor_node import supervisor_node
+
+        decision = _make_decision(
+            intent="CREATE_HANDED_OVER_SR",
+            confidence=0.95,
+            service_category="FIT_OUT_AND_HANDOVER",
+            sub_category="HANDED_OVER",
+            target_agent="rdd_handover_agent",
+            reasoning="Unit already trading",
+        )
+        state = _base_state(user_message="unit t0105712 is already trading")
+        with patch(
+            "app.agents.graph.nodes.supervisor_node._call_supervisor_llm",
+            new_callable=AsyncMock,
+            return_value=(decision, 65, 45, 160),
+        ), patch(
+            "app.agents.graph.nodes.supervisor_node.get_default_gateway",
+            return_value=MagicMock(),
+        ):
+            result = await supervisor_node(state)
+        assert result.get("intent") == "CREATE_HANDED_OVER_SR"
+        assert result.get("sub_category") == "HANDED_OVER"
+
+    @pytest.mark.asyncio
+    async def test_create_handed_over_sr_sets_sub_category_handed_over(self) -> None:
+        """Supervisor node must propagate sub_category=HANDED_OVER to state (B2 gap)."""
+        from app.agents.graph.nodes.supervisor_node import supervisor_node
+
+        decision = _make_decision(
+            intent="CREATE_HANDED_OVER_SR",
+            confidence=0.9,
+            service_category="FIT_OUT_AND_HANDOVER",
+            sub_category="HANDED_OVER",
+            target_agent="rdd_handover_agent",
+            reasoning="Path B flow",
+        )
+        state = _base_state(user_message="already handovered lease t0105712")
+        with patch(
+            "app.agents.graph.nodes.supervisor_node._call_supervisor_llm",
+            new_callable=AsyncMock,
+            return_value=(decision, 50, 40, 130),
+        ), patch(
+            "app.agents.graph.nodes.supervisor_node.get_default_gateway",
+            return_value=MagicMock(),
+        ):
+            result = await supervisor_node(state)
+        assert result.get("sub_category") == "HANDED_OVER", (
+            f"sub_category must be HANDED_OVER; got {result.get('sub_category')!r}"
+        )

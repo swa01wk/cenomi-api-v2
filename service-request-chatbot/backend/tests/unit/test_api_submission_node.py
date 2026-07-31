@@ -125,7 +125,9 @@ def _make_mock_service(
 
 class TestApiSubmissionNodeSuccess:
     @pytest.mark.asyncio
-    async def test_status_is_submitted(self) -> None:
+    async def test_status_is_waiting_for_user_after_submission(self) -> None:
+        """After successful SR creation, the node presents the optional upload offer
+        (WAITING_FOR_USER), not SUBMITTED — SR_CREATED stage is set in workflow_stage."""
         from app.agents.graph.nodes.handover.api_submission_node import api_submission_node
 
         mock_svc = MockServiceRequestAPIService()
@@ -134,7 +136,8 @@ class TestApiSubmissionNodeSuccess:
             return_value=mock_svc,
         ):
             result = await api_submission_node(_confirmed_state())
-        assert result["status"] == "SUBMITTED"
+        assert result["status"] == "WAITING_FOR_USER"
+        assert result["workflow_stage"] == "SR_CREATED"
 
     @pytest.mark.asyncio
     async def test_workflow_stage_is_sr_created(self) -> None:
@@ -225,7 +228,9 @@ class TestApiSubmissionNodeSuccess:
             return_value=mock_svc,
         ):
             result = await api_submission_node(state)
-        assert result["status"] == "SUBMITTED"
+        # Non-blocking errors allow submission; node shows the optional upload offer
+        assert result["status"] == "WAITING_FOR_USER"
+        assert result["workflow_stage"] == "SR_CREATED"
 
     @pytest.mark.asyncio
     async def test_mock_service_records_the_request(self) -> None:
@@ -317,7 +322,9 @@ class TestApiSubmissionNodeConfirmationGuard:
             return_value=mock_svc,
         ):
             result = await api_submission_node(_confirmed_state())
-        assert result["status"] == "SUBMITTED"
+        # CONFIRMED allows submission; node then shows optional upload offer
+        assert result["status"] == "WAITING_FOR_USER"
+        assert result["workflow_stage"] == "SR_CREATED"
 
 
 # ---------------------------------------------------------------------------
@@ -380,7 +387,9 @@ class TestApiSubmissionNodeValidationGuard:
             return_value=mock_svc,
         ):
             result = await api_submission_node(_confirmed_state(validation_errors=[]))
-        assert result["status"] == "SUBMITTED"
+        # No errors allow submission; node then shows optional upload offer
+        assert result["status"] == "WAITING_FOR_USER"
+        assert result["workflow_stage"] == "SR_CREATED"
 
 
 # ---------------------------------------------------------------------------
@@ -628,7 +637,8 @@ class TestApiSubmissionNodeTracing:
             return_value=mock_svc,
         ):
             result = await api_submission_node(_confirmed_state())
-        assert result["status"] == "SUBMITTED"
+        assert result["status"] == "WAITING_FOR_USER"
+        assert result["workflow_stage"] == "SR_CREATED"
 
     @pytest.mark.asyncio
     async def test_tool_call_records_status_code(self) -> None:
@@ -707,7 +717,8 @@ class TestApiSubmissionNodeAuditLog:
             MockRepo.return_value = mock_repo_instance
             result = await api_submission_node(state)
 
-        assert result["status"] == "SUBMITTED"
+        assert result["status"] == "WAITING_FOR_USER"
+        assert result["workflow_stage"] == "SR_CREATED"
         mock_repo_instance.create.assert_called_once()
 
     @pytest.mark.asyncio
@@ -747,7 +758,8 @@ class TestApiSubmissionNodeAuditLog:
             result = await api_submission_node(_confirmed_state())
 
         MockRepo.assert_not_called()
-        assert result["status"] == "SUBMITTED"
+        assert result["status"] == "WAITING_FOR_USER"
+        assert result["workflow_stage"] == "SR_CREATED"
 
     @pytest.mark.asyncio
     async def test_audit_log_failure_does_not_abort_submission(self) -> None:
@@ -771,7 +783,8 @@ class TestApiSubmissionNodeAuditLog:
             result = await api_submission_node(state)
 
         # Audit log failure must not abort the successful submission.
-        assert result["status"] == "SUBMITTED"
+        assert result["status"] == "WAITING_FOR_USER"
+        assert result["workflow_stage"] == "SR_CREATED"
 
 
 # ---------------------------------------------------------------------------
@@ -1045,7 +1058,10 @@ class TestGetServiceRequestApiServiceFactory:
     def test_returns_http_when_base_url_set(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(
             "app.agents.services.service_request_api_service.settings",
-            MagicMock(service_request_api_base_url="https://api.example.com"),
+            MagicMock(
+                service_request_api_base_url="https://api.example.com",
+                service_request_use_mock=False,
+            ),
         )
         svc = get_service_request_api_service()
         assert isinstance(svc, HttpServiceRequestAPIService)

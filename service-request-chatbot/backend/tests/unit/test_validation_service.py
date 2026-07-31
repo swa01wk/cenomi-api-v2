@@ -426,13 +426,15 @@ class TestValidateDocumentType:
         r = validate_document_type("SR_HANDOVER_SITE_SURVEY", "FM_REVIEW")
         assert r["status"] == "PASSED"
 
-    def test_sr_handover_other_in_fm_review_passes(self) -> None:
+    def test_sr_handover_other_in_fm_review_fails(self) -> None:
+        """Fix 2: SR_HANDOVER_OTHER belongs to RDD, not FM."""
         r = validate_document_type("SR_HANDOVER_OTHER", "FM_REVIEW")
-        assert r["status"] == "PASSED"
-
-    def test_sr_cop_checklist_in_fm_review_fails(self) -> None:
-        r = validate_document_type("SR_COP_CHECKLIST_OTHER", "FM_REVIEW")
         assert r["status"] == "FAILED"
+
+    def test_sr_cop_checklist_in_fm_review_passes(self) -> None:
+        """Fix 2: SR_COP_CHECKLIST_OTHER replaced SR_HANDOVER_OTHER in FM stage."""
+        r = validate_document_type("SR_COP_CHECKLIST_OTHER", "FM_REVIEW")
+        assert r["status"] == "PASSED"
 
     # ── RDD_REVIEW stage ───────────────────────────────────────────────────
 

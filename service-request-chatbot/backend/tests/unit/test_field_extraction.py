@@ -651,7 +651,7 @@ class TestFieldExtractionWorkflowConfig:
 
         state = _base_state(
             user_message="custom workflow message",
-            active_agent="rdd_agent",
+            active_agent="rdd_handover_agent",
         )
 
         captured_kwargs: list[dict] = []

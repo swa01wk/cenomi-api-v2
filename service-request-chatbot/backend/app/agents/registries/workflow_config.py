@@ -112,20 +112,25 @@ def _build_rdd_config() -> WorkflowConfig:
     from app.agents.services.missing_field_service import HANDOVER_FIELD_QUESTIONS
 
     return WorkflowConfig(
-        agent_name="rdd_agent",
+        agent_name="rdd_handover_agent",
         extraction_prompt=HANDOVER_EXTRACTION_SYSTEM_PROMPT,
         field_questions=HANDOVER_FIELD_QUESTIONS,
         stage_sync_nodes={
             "FM_REVIEW": "fm_review_entry",
             "RDD_REVIEW": "rdd_review_entry",
         },
-        collection_stages=frozenset({"CREATE_SR", "FM_REVIEW", "RDD_REVIEW"}),
+        collection_stages=frozenset(
+            {"CREATE_SR", "FM_REVIEW", "RDD_REVIEW", "CREATE_HANDED_OVER_SR"}
+        ),
         confirmation_nodes={
             "CREATE_SR": "confirmation",
             "FM_REVIEW": "fm_confirmation",
             "RDD_REVIEW": "rdd_confirmation",
+            "CREATE_HANDED_OVER_SR": "confirmation",  # reuses same confirmation node
         },
-        terminal_stages=frozenset({"SR_CREATED", "SR_COMPLETED"}),
+        terminal_stages=frozenset(
+            {"SR_CREATED", "SR_COMPLETED", "HANDED_OVER_COMPLETED"}
+        ),
         backend_fields=frozenset(
             {
                 "tenant_profile_id",
@@ -145,6 +150,7 @@ def _build_rdd_config() -> WorkflowConfig:
         ),
         # "expected_handover_date" is auto-computed from unit_readiness_date + 7 days
         # "trading_date" is auto-computed from fitout_end_date + 8 days
+        # "title" is auto-generated for both Path A and Path B
         auto_generated_fields=frozenset({"title", "expected_handover_date", "trading_date"}),
         lease_trigger_fields=("lease_code", "company", "lease_brand_mall"),
         action_intents=frozenset(
@@ -152,6 +158,7 @@ def _build_rdd_config() -> WorkflowConfig:
                 "CREATE_RDD_SERVICE_REQUEST",
                 "UPDATE_RDD_SERVICE_REQUEST",
                 "APPROVE_RDD_SERVICE_REQUEST",
+                "CREATE_HANDED_OVER_SR",
             }
         ),
     )
@@ -215,6 +222,202 @@ def _build_work_permit_config() -> WorkflowConfig:
     )
 
 
+def _fitout_confirm_extraction_prompt() -> str:
+    return (
+        "You are a field extraction assistant for the Fitout Confirmation workflow. "
+        "Extract only the fields listed below — never invent or guess values.\n\n"
+
+        "## Lease identification\n"
+        "lease_code: Short alphanumeric tenant lease identifier — typically 7-10 characters "
+        "such as 't0105712', 'T0208831', 'LC-1234'. "
+        "It may appear after 'lease', 'for lease', 'unit', or standalone. "
+        "Example: 'Confirm fitout for lease t0105712' → lease_code: 't0105712'. "
+        "Example: 'Confirm trading for t0105712' → lease_code: 't0105712'.\n"
+        "brand: Tenant brand name (e.g. 'Nike', 'Zara').\n"
+        "mall: Mall or property name (e.g. 'Riyadh Park').\n"
+        "company: Tenant company or legal entity name.\n\n"
+
+        "## Fitout Start fields\n"
+        "fitout_start_done: 'yes' or 'no' — whether the fitout has started.\n"
+        "actual_fitout_start_date: ISO 8601 date (YYYY-MM-DD) — actual date fitout started.\n"
+        "planned_fitout_start_date: ISO 8601 date (YYYY-MM-DD) — revised planned start.\n"
+        "planned_fitout_end_date: ISO 8601 date (YYYY-MM-DD) — revised planned end.\n"
+        "planned_trading_date: ISO 8601 date (YYYY-MM-DD) — revised planned trading date.\n"
+        "delay_reason: Brief text describing the reason for delay.\n\n"
+
+        "## Fitout End fields\n"
+        "fitout_complete_done: 'yes' or 'no' — whether the fitout is complete.\n"
+        "actual_fitout_complete_date: ISO 8601 date (YYYY-MM-DD) — actual date fitout completed.\n"
+        "planned_fitout_complete_date: ISO 8601 date (YYYY-MM-DD) — revised planned completion.\n\n"
+
+        "## Trading fields\n"
+        "trading_done: 'yes' or 'no' — whether the unit has started trading.\n"
+        "actual_trading_date: ISO 8601 date (YYYY-MM-DD) — actual date trading started.\n\n"
+
+        "## Shared\n"
+        "comments: Optional free-form remarks.\n\n"
+
+        "## Critical rules\n"
+        "- Convert ALL dates to ISO 8601 (YYYY-MM-DD). 'actual date 2026-07-24' → '2026-07-24'.\n"
+        "- Do NOT extract 'inspectionTime', 'startDate', 'endDate', 'description', "
+        "or any other handover-specific field — those belong to a different workflow.\n"
+        "- Return only fields from the lists above. Never include backend-derived or "
+        "system fields like lease_id, property_id, tenant_profile_id.\n"
+        "- Output format (JSON object): "
+        "{\"summary\": \"one sentence\", \"fields\": {\"<key>\": {\"value\": \"<val>\", \"confidence\": <0.0-1.0>}}}"
+    )
+
+
+def _fitout_confirm_field_questions() -> dict[str, str]:
+    return {
+        "lease_brand_mall": (
+            "Ask the user for the lease code, brand name, or mall name to identify the lease."
+        ),
+        "lease_code": "Ask the user for the lease code for this fitout confirmation.",
+        # FOS
+        "fitout_start_done": (
+            "Ask the user whether the fitout has started. "
+            "Reply 'yes' if fitout has started, or 'no' if it has not yet started."
+        ),
+        "actual_fitout_start_date": (
+            "Ask the user for the actual date when fitout started (YYYY-MM-DD)."
+        ),
+        "planned_fitout_start_date": (
+            "Ask the user for the revised planned fitout start date (YYYY-MM-DD)."
+        ),
+        "planned_fitout_end_date": (
+            "Ask the user for the revised planned fitout end date (YYYY-MM-DD)."
+        ),
+        # END
+        "fitout_complete_done": (
+            "Ask the user whether the fitout is complete. "
+            "Reply 'yes' if fitout is complete, or 'no' if it is not yet complete."
+        ),
+        "actual_fitout_complete_date": (
+            "Ask the user for the actual date when fitout was completed (YYYY-MM-DD)."
+        ),
+        "planned_fitout_complete_date": (
+            "Ask the user for the revised planned fitout completion date (YYYY-MM-DD)."
+        ),
+        # TRADING
+        "trading_done": (
+            "Ask the user whether the unit has started trading. "
+            "Reply 'yes' if trading has started, or 'no' if it has not."
+        ),
+        "actual_trading_date": (
+            "Ask the user for the actual trading start date (YYYY-MM-DD)."
+        ),
+        # Shared
+        "planned_trading_date": (
+            "Ask the user for the revised planned trading date (YYYY-MM-DD)."
+        ),
+        "delay_reason": (
+            "Ask the user to briefly describe the reason for the delay "
+            "(or say 'none' to skip if delay reason is optional)."
+        ),
+        "comments": (
+            "Ask the user if they have any additional comments (or say 'none' to skip)."
+        ),
+    }
+
+
+def _fitout_confirm_backend_fields() -> frozenset[str]:
+    return frozenset(
+        {
+            "lease_id",
+            "company_name",
+            "brand_name",
+            "mall_name",
+            "pms_tenant_code",
+            "lease_brand_mall",
+            "lease",
+            "actual_handover_date_readonly",
+            "actual_fitout_start_date_readonly",
+            "actual_fitout_end_date_readonly",
+            "base_fitout_start_date",
+            "base_fitout_end_date",
+            "base_trading_date",
+        }
+    )
+
+
+def _build_fitout_start_config() -> WorkflowConfig:
+    """Build the ``WorkflowConfig`` for the RDD Fitout Start Agent.
+
+    Handles FIT_OUT_CONFIRM_FOS (Fitout Start Confirmation — DD_ENGINEER).
+    Both Create (POST) and Approve (PATCH) paths share the same entry node
+    and confirmation node; dispatch on sub_category is handled inside those nodes.
+    """
+    return WorkflowConfig(
+        agent_name="rdd_fitout_start_agent",
+        extraction_prompt=_fitout_confirm_extraction_prompt(),
+        field_questions=_fitout_confirm_field_questions(),
+        stage_sync_nodes={"APPROVE_SR": "fitout_confirm_entry"},
+        collection_stages=frozenset({"CREATE_SR", "APPROVE_SR"}),
+        confirmation_nodes={
+            "CREATE_SR": "fitout_confirm_confirmation",
+            "APPROVE_SR": "fitout_confirm_confirmation",
+        },
+        terminal_stages=frozenset({"SR_CREATED", "SR_APPROVED", "CANCELLED"}),
+        backend_fields=_fitout_confirm_backend_fields(),
+        auto_generated_fields=frozenset({"title"}),
+        lease_trigger_fields=("lease_code", "company", "lease_brand_mall"),
+        action_intents=frozenset(
+            {"CREATE_FITOUT_CONFIRM_FOS", "APPROVE_FITOUT_CONFIRM_FOS"}
+        ),
+    )
+
+
+def _build_fitout_end_config() -> WorkflowConfig:
+    """Build the ``WorkflowConfig`` for the RDD Fitout End Agent.
+
+    Handles FIT_OUT_CONFIRM_END (Fitout End Confirmation — DD_ENGINEER).
+    """
+    return WorkflowConfig(
+        agent_name="rdd_fitout_end_agent",
+        extraction_prompt=_fitout_confirm_extraction_prompt(),
+        field_questions=_fitout_confirm_field_questions(),
+        stage_sync_nodes={"APPROVE_SR": "fitout_confirm_entry"},
+        collection_stages=frozenset({"CREATE_SR", "APPROVE_SR"}),
+        confirmation_nodes={
+            "CREATE_SR": "fitout_confirm_confirmation",
+            "APPROVE_SR": "fitout_confirm_confirmation",
+        },
+        terminal_stages=frozenset({"SR_CREATED", "SR_APPROVED", "CANCELLED"}),
+        backend_fields=_fitout_confirm_backend_fields(),
+        auto_generated_fields=frozenset({"title"}),
+        lease_trigger_fields=("lease_code", "company", "lease_brand_mall"),
+        action_intents=frozenset(
+            {"CREATE_FITOUT_CONFIRM_END", "APPROVE_FITOUT_CONFIRM_END"}
+        ),
+    )
+
+
+def _build_trading_confirm_config() -> WorkflowConfig:
+    """Build the ``WorkflowConfig`` for the RDD Trading Confirmation Agent.
+
+    Handles FIT_OUT_CONFIRM_TRADING (Trading Confirmation — MALL_MANAGER / OPERATIONS).
+    """
+    return WorkflowConfig(
+        agent_name="rdd_trading_confirmation_agent",
+        extraction_prompt=_fitout_confirm_extraction_prompt(),
+        field_questions=_fitout_confirm_field_questions(),
+        stage_sync_nodes={"APPROVE_SR": "fitout_confirm_entry"},
+        collection_stages=frozenset({"CREATE_SR", "APPROVE_SR"}),
+        confirmation_nodes={
+            "CREATE_SR": "fitout_confirm_confirmation",
+            "APPROVE_SR": "fitout_confirm_confirmation",
+        },
+        terminal_stages=frozenset({"SR_CREATED", "SR_APPROVED", "CANCELLED"}),
+        backend_fields=_fitout_confirm_backend_fields(),
+        auto_generated_fields=frozenset({"title"}),
+        lease_trigger_fields=("lease_code", "company", "lease_brand_mall"),
+        action_intents=frozenset(
+            {"CREATE_FITOUT_CONFIRM_TRADING", "APPROVE_FITOUT_CONFIRM_TRADING"}
+        ),
+    )
+
+
 def _init_registry() -> None:
     """Populate the registry with all built-in workflow configs."""
     rdd_cfg = _build_rdd_config()
@@ -222,6 +425,13 @@ def _init_registry() -> None:
 
     wp_cfg = _build_work_permit_config()
     WORKFLOW_CONFIG_REGISTRY[wp_cfg.agent_name] = wp_cfg
+
+    for cfg in (
+        _build_fitout_start_config(),
+        _build_fitout_end_config(),
+        _build_trading_confirm_config(),
+    ):
+        WORKFLOW_CONFIG_REGISTRY[cfg.agent_name] = cfg
 
 
 _init_registry()

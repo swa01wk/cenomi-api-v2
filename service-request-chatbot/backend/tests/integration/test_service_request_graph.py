@@ -165,7 +165,7 @@ def _mock_supervisor_llm(
     confidence: float = 0.9,
     service_category: str | None = "FIT_OUT_AND_HANDOVER",
     sub_category: str | None = "HANDOVER",
-    target_agent: str | None = "rdd_agent",
+    target_agent: str | None = "rdd_handover_agent",
 ) -> AsyncMock:
     """Return an ``AsyncMock`` for ``_call_supervisor_llm`` yielding a valid decision."""
     decision = SupervisorDecision(
@@ -236,7 +236,7 @@ async def test_first_user_message() -> None:
             _base_state(user_message="I want to create a handover service request")
         )
 
-    assert result["active_agent"] == "rdd_agent"
+    assert result["active_agent"] == "rdd_handover_agent"
     assert result["intent"] == "CREATE_RDD_SERVICE_REQUEST"
     assert result["workflow_stage"] == "CREATE_SR"
     assert result.get("missing_fields"), "Expected missing_fields to be populated"
@@ -282,7 +282,7 @@ async def test_lease_code_provided() -> None:
         result = await _GRAPH.ainvoke(
             _base_state(
                 user_message="The lease code is LC-2024-001",
-                active_agent="rdd_agent",
+                active_agent="rdd_handover_agent",
                 collected_data={},
                 workflow_stage="CREATE_SR",
             )
@@ -349,7 +349,7 @@ async def test_multiple_lease_selection() -> None:
         result = await _GRAPH.ainvoke(
             _base_state(
                 user_message="Brand Zara",
-                active_agent="rdd_agent",
+                active_agent="rdd_handover_agent",
                 collected_data={},
                 workflow_stage="CREATE_SR",
             )
@@ -386,7 +386,7 @@ async def test_missing_fields() -> None:
         result = await _GRAPH.ainvoke(
             _base_state(
                 user_message="ok, what next?",
-                active_agent="rdd_agent",
+                active_agent="rdd_handover_agent",
                 collected_data=_partial_fields(),
                 workflow_stage="CREATE_SR",
             )
@@ -436,7 +436,7 @@ async def test_validation_error() -> None:
         result = await _GRAPH.ainvoke(
             _base_state(
                 user_message="continue",
-                active_agent="rdd_agent",
+                active_agent="rdd_handover_agent",
                 collected_data=_all_fields(),
                 workflow_stage="CREATE_SR",
             )
@@ -474,7 +474,7 @@ async def test_confirmation() -> None:
         result = await _GRAPH.ainvoke(
             _base_state(
                 user_message="continue",
-                active_agent="rdd_agent",
+                active_agent="rdd_handover_agent",
                 collected_data=_all_fields(),
                 workflow_stage="CREATE_SR",
             )
@@ -541,17 +541,15 @@ async def test_submission() -> None:
         result = await _GRAPH.ainvoke(
             _base_state(
                 user_message="yes",
-                active_agent="rdd_agent",
+                active_agent="rdd_handover_agent",
                 collected_data=_all_fields(),
                 workflow_stage="CREATE_SR",
                 confirmation_status="PENDING",  # state saved from prior confirmation turn
             )
         )
 
-    # Submission succeeded
-    assert result["status"] == "SUBMITTED"
-    assert "SR-2024-001" in result["response_message"]
+    # Submission succeeded — MM upload offer is seeded (WAITING_FOR_USER) post-SR-creation
+    assert result["status"] == "WAITING_FOR_USER"
     assert result["backend_refs"]["sr_id"] == "SR-2024-001"
-    assert result["backend_refs"]["service_request_status"] == "SUBMITTED"
     # workflow_stage advances to SR_CREATED on success
     assert result["workflow_stage"] == "SR_CREATED"

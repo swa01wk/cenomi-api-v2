@@ -7,6 +7,7 @@ TIER STRUCTURE
   Tier 2  Edge    — S16–S33: corrections, multi-field, API edge cases
   Tier 3  Battle  — S34–S59: Issues 1–7 from agent_ui_fixes.md
   (Tier 4/5/6 live in lifecycle_scenarios.py)
+  Tier 8  FitoutConfirm Core+Edge — S70–S82: FIT_OUT_CONFIRM_FOS/END/TRADING
 
 DYNAMIC DATES
 -------------
@@ -126,6 +127,8 @@ class Scenario:
     tier: int = 1           # 0=smoke, 1=core, 2=edge, 3=battle
     enabled: bool = True
     tags: list[str] = field(default_factory=list)
+    # Override the default eval user for this scenario (e.g. DD_ENGINEER for fitout FOS/END)
+    user_email: Optional[str] = None
 
 
 # =============================================================================
@@ -1646,7 +1649,7 @@ _S35 = Scenario(
     turns=[
         Turn(
             message=(
-                f"Create a handover request for lease t0105712. "
+                f"Create a handover service request for lease t0105712. "
                 f"Description: Cancel flow test. Start {_START_C}, end {_END_C}, FM Manager. "
                 "No notes. No comments."
             ),
@@ -1721,7 +1724,7 @@ _S37 = Scenario(
     turns=[
         Turn(
             message=(
-                f"Create a handover service request for lease t0208831. "
+                f"Create a handover service request for t0105712. "
                 f"Description: cancel distinction test. Start {_START_C}, end {_END_C}, Operations. "
                 "No notes. No comments."
             ),
@@ -2549,30 +2552,229 @@ _S62 = Scenario(
 
 
 # =============================================================================
+# HANDED_OVER / Path B + Path A fix scenarios (S63–S69)
+# =============================================================================
+
+# Past-date anchors for Path B "actual" date fields (already occurred)
+_ACT_HANDOVER = _d(-90)   # actual shop handover date (~3 months ago)
+_ACT_FO_START = _d(-85)   # actual fitout start (~85 days ago)
+_ACT_FO_END   = _d(-30)   # actual fitout end (~1 month ago)
+_ACT_TRADING  = _d(-20)   # actual trading date (~20 days ago)
+
+
+_S63 = Scenario(
+    id=63,
+    name="supervisor_classifies_already_trading_as_handed_over",
+    goal=(
+        "User says 'already trading for t0105712' → intent=CREATE_HANDED_OVER_SR, "
+        "sub_category=HANDED_OVER, agent asks for the 4 actual date fields"
+    ),
+    tier=1,
+    turns=[
+        Turn(
+            message="The unit for lease t0105712 is already trading, I need to register it",
+            note=(
+                "Supervisor must classify as CREATE_HANDED_OVER_SR with "
+                "sub_category=HANDED_OVER; agent asks for actual date fields"
+            ),
+            expect_workflow_stage="CREATE_HANDED_OVER_SR",
+            expect_keywords=["actual", "date", "handover", "trading", "fitout"],
+        ),
+    ],
+    tags=["handed-over", "path-b", "intent-classification", "tier1-core"],
+)
+
+
+_S64 = Scenario(
+    id=64,
+    name="already_handovered_field_in_confirmed_payload",
+    goal=(
+        "Path A confirm → payload must contain already_handovered=initiate_handover (Fix 1); "
+        "full CREATE_SR happy-path with explicit assertion on that field"
+    ),
+    tier=1,
+    turns=[
+        Turn(
+            message=(
+                f"Create a handover service request for lease t0105712. "
+                f"Description: Fix 1 regression test. "
+                f"Start {_START_A}, end {_END_A}, FM Manager. No comments."
+            ),
+            note="All fields packed in one message; confirmation card expected",
+            expect_ui_type="confirmation_card",
+        ),
+        Turn(
+            message="Confirm",
+            note=(
+                "SR submitted; payload must contain already_handovered=initiate_handover"
+            ),
+            action="confirm",
+            expect_workflow_stage="SR_CREATED",
+            expect_keywords=["submitted", "reference", "successfully", "created"],
+        ),
+    ],
+    tags=["path-a", "fix-1", "already-handovered", "payload-contract"],
+)
+
+
+_S65 = Scenario(
+    id=65,
+    name="fm_cop_checklist_upload_accepted",
+    goal=(
+        "FM Manager uploads SR_COP_CHECKLIST_OTHER (Fix 2); "
+        "agent confirms the document type is valid and accepted"
+    ),
+    tier=2,
+    turns=[
+        Turn(
+            message="I want to upload the COP checklist for this SR",
+            note=(
+                "FM Manager requests COP Checklist upload; agent must confirm "
+                "SR_COP_CHECKLIST_OTHER is a valid FM document type"
+            ),
+            expect_keywords=["upload", "document", "cop", "checklist", "valid", "accepted"],
+        ),
+    ],
+    tags=["path-a", "fix-2", "fm-document", "cop-checklist"],
+    enabled=False,  # Requires FM_REVIEW context — run as lifecycle scenario
+)
+
+
+_S66 = Scenario(
+    id=66,
+    name="fm_other_doc_rejected_for_fm_role",
+    goal=(
+        "FM Manager uploads SR_HANDOVER_OTHER (Fix 2); "
+        "agent must reject it because that type belongs to Leasing Admin only"
+    ),
+    tier=2,
+    turns=[
+        Turn(
+            message="I want to upload an SR_HANDOVER_OTHER document",
+            note=(
+                "SR_HANDOVER_OTHER is not permitted for FM Manager (role 20); "
+                "agent must reject or silently discard it"
+            ),
+            expect_keywords=["not valid", "not accepted", "upload", "document", "type",
+                             "checklist", "site survey", "cop"],
+        ),
+    ],
+    tags=["path-a", "fix-2", "fm-document", "sr-handover-other", "rejected"],
+    enabled=False,  # Requires FM_REVIEW context — run as lifecycle scenario
+)
+
+
+_S67 = Scenario(
+    id=67,
+    name="fm_approve_response_not_service_category",
+    goal=(
+        "After FM approve, agent response must NOT re-send service_category "
+        "in the PATCH body (Fix 3) — minimal PATCH contract"
+    ),
+    tier=2,
+    turns=[
+        Turn(
+            message="",
+            note=(
+                "FM approve action sent; PATCH body must not include service_category "
+                "or service_request_id at top level"
+            ),
+            action="approve_fm_review",
+        ),
+        Turn(
+            message="",
+            note="Confirm FM approve — must succeed without service_category",
+            action="confirm_fm_approve",
+            expect_keywords=["approved", "fm", "review"],
+        ),
+    ],
+    tags=["path-a", "fix-3", "fm-approve", "minimal-patch"],
+    enabled=False,  # Requires FM_REVIEW context — run as lifecycle scenario
+)
+
+
+_S68 = Scenario(
+    id=68,
+    name="rdd_approve_confirmation_includes_unit_readiness_date",
+    goal=(
+        "RDD final approve confirmation must show unit_readiness_date from the map entry "
+        "(Fix 4) — confirms the RDD approve payload is correctly enriched"
+    ),
+    tier=2,
+    turns=[
+        Turn(
+            message="",
+            note="RDD final approval — confirmation must mention unit_readiness_date",
+            action="approve_rdd_final",
+        ),
+        Turn(
+            message="",
+            note=(
+                "Confirm final approve → SR_COMPLETED; message must contain "
+                "unit_readiness_date or date reference"
+            ),
+            action="confirm_rdd_final_approve",
+            expect_workflow_stage="SR_COMPLETED",
+            expect_keywords=["completed", "approved", "handover"],
+        ),
+    ],
+    tags=["path-a", "fix-4", "rdd-approve", "unit-readiness-date"],
+    enabled=False,  # Requires full lifecycle context — run as lifecycle scenario
+)
+
+
+_S69 = Scenario(
+    id=69,
+    name="fm_dates_yyyy_mm_dd_format",
+    goal=(
+        "FM save: agent stores unit_readiness_date in YYYY-MM-DD format (Fix 5); "
+        "date entered as DD/MM/YYYY must be normalised before API submission"
+    ),
+    tier=3,
+    turns=[
+        Turn(
+            message="Unit readiness date is 01/05/2026",
+            note=(
+                "User enters date in DD/MM/YYYY; agent must normalise to 2026-05-01 "
+                "before storing and before building the FM payload"
+            ),
+            expect_keywords=["2026-05-01", "readiness", "date", "saved", "noted", "accepted"],
+        ),
+    ],
+    tags=["path-a", "fix-5", "fm-dates", "date-format", "yyyy-mm-dd"],
+    enabled=False,  # Requires FM_REVIEW context — run as lifecycle scenario
+)
+
+
+# =============================================================================
 # TIER 0 — Smoke scenarios (S201–S202)
 # Fast sanity gate: ~60 seconds. Run before any longer tier.
 # =============================================================================
 
-_S201 = Scenario(
-    id=201,
-    name="Smoke — Server health response",
+# =============================================================================
+# TIER 0 — Per-agent smoke scenarios (S200–S206)
+# One packed 2-turn scenario per agent confirming routing + submission (~2 min)
+# =============================================================================
+
+_S200 = Scenario(
+    id=200,
+    name="Smoke — FAQ greeting",
     goal="Verify the server responds to a greeting without crashing or timing out",
     tier=0,
     turns=[
         Turn(
             message="hello",
-            note="Server must respond; any conversational message is acceptable",
+            note="Server must respond; any conversational greeting is acceptable",
             expect_keywords=["help", "handover", "service", "create", "hi", "hello", "what"],
         ),
     ],
-    tags=["smoke", "health"],
+    tags=["smoke", "faq", "health"],
 )
 
-
-_S202 = Scenario(
-    id=202,
-    name="Smoke — Quick CREATE_SR happy path (6 turns)",
-    goal="Minimal end-to-end CREATE_SR to confirm core pipeline is alive",
+_S201 = Scenario(
+    id=201,
+    name="Smoke — Handover A CREATE_SR packed",
+    goal="Minimal end-to-end Handover A CREATE_SR to confirm core pipeline is alive",
     tier=0,
     turns=[
         Turn(
@@ -2583,6 +2785,7 @@ _S202 = Scenario(
             ),
             note="All fields packed; confirmation card must appear",
             expect_ui_type="confirmation_card",
+            expect_field_value={"Description": "Smoke test SR"},
         ),
         Turn(
             message="Confirm",
@@ -2592,7 +2795,480 @@ _S202 = Scenario(
             expect_keywords=["submitted", "reference", "successfully", "created"],
         ),
     ],
-    tags=["smoke", "create-sr"],
+    tags=["smoke", "handover-a", "create-sr"],
+)
+
+_S203 = Scenario(
+    id=203,
+    name="Smoke — Handover B HANDED_OVER packed",
+    goal="Minimal end-to-end Handover B already-trading flow → HANDED_OVER_COMPLETED",
+    tier=0,
+    turns=[
+        Turn(
+            message=(
+                f"Lease t0105712 is already trading. Handover date {_d(-30)}, "
+                f"fitout start {_d(-20)}, fitout end {_d(-10)}, trading date {_d(-5)}. "
+                f"No comments."
+            ),
+            note="All 4 dates packed; confirmation card expected",
+            expect_ui_type="confirmation_card",
+        ),
+        Turn(
+            message="Confirm",
+            note="SR submitted → HANDED_OVER_COMPLETED",
+            action="confirm",
+            expect_workflow_stage="HANDED_OVER_COMPLETED",
+            expect_keywords=["submitted", "reference", "created"],
+        ),
+    ],
+    tags=["smoke", "handover-b", "handed-over"],
+)
+
+_S204 = Scenario(
+    id=204,
+    name="Smoke — Fitout FOS yes-branch packed",
+    goal="Minimal end-to-end Fitout FOS yes-branch → SR_CREATED",
+    tier=0,
+    # FOS requires DD_ENGINEER role
+    user_email="sara@cenomi.com",
+    turns=[
+        Turn(
+            message=f"Confirm fitout has started for lease t0105712. Yes, actual date {_d(-5)}. No comments.",
+            note="FOS yes-branch packed; confirmation card expected",
+            expect_ui_type="confirmation_card",
+        ),
+        Turn(
+            message="Confirm",
+            note="SR submitted → SR_CREATED",
+            action="confirm",
+            expect_workflow_stage="SR_CREATED",
+            expect_keywords=["submitted", "reference", "created"],
+        ),
+    ],
+    tags=["smoke", "fitout-fos"],
+)
+
+_S205 = Scenario(
+    id=205,
+    name="Smoke — Fitout END yes-branch packed",
+    goal="Minimal end-to-end Fitout END yes-branch → SR_CREATED",
+    tier=0,
+    # END requires DD_ENGINEER role
+    user_email="sara@cenomi.com",
+    turns=[
+        Turn(
+            message=f"Confirm fitout is complete for lease t0105712. Yes, actual date {_d(-3)}. No comments.",
+            note="END yes-branch packed; confirmation card expected",
+            expect_ui_type="confirmation_card",
+        ),
+        Turn(
+            message="Confirm",
+            note="SR submitted → SR_CREATED",
+            action="confirm",
+            expect_workflow_stage="SR_CREATED",
+            expect_keywords=["submitted", "reference", "created"],
+        ),
+    ],
+    tags=["smoke", "fitout-end"],
+)
+
+_S206 = Scenario(
+    id=206,
+    name="Smoke — Fitout TRADING yes-branch packed",
+    goal="Minimal end-to-end Fitout TRADING yes-branch → SR_CREATED",
+    tier=0,
+    turns=[
+        Turn(
+            message=f"Confirm trading for lease t0105712. Yes, actual trading date {_d(-2)}.",
+            note="TRADING yes-branch packed; confirmation card expected",
+            expect_ui_type="confirmation_card",
+        ),
+        Turn(
+            message="Confirm",
+            note="SR submitted → SR_CREATED",
+            action="confirm",
+            expect_workflow_stage="SR_CREATED",
+            expect_keywords=["submitted", "reference", "created"],
+        ),
+    ],
+    tags=["smoke", "fitout-trading"],
+)
+
+
+# =============================================================================
+# TIER 6 — Fitout Confirmation SR happy path scenarios (S73–S74, S83)
+# TIER 7 — Fitout Confirmation SR edge + battle scenarios (S70–S72, S75–S82)
+# =============================================================================
+
+_S70 = Scenario(
+    id=70,
+    name="supervisor_classifies_confirm_fitout_start",
+    goal="User says 'confirm fitout start' → intent=CREATE_FITOUT_CONFIRM_FOS, agent initialises FOS flow",
+    tier=7,
+    user_email="sara@cenomi.com",  # DD_ENGINEER — only role permitted to create FOS SRs
+    turns=[
+        Turn(
+            message="I need to confirm that the fitout has started for lease t0105712",
+            note="Supervisor must classify as CREATE_FITOUT_CONFIRM_FOS",
+            expect_workflow_stage="CREATE_SR",
+            expect_keywords=["fitout", "start", "confirm", "yes", "no", "started"],
+        ),
+    ],
+    tags=["fitout-confirm", "fos", "intent-classification", "tier7"],
+)
+
+_S71 = Scenario(
+    id=71,
+    name="supervisor_classifies_confirm_fitout_end",
+    goal="User says 'confirm fitout complete' → intent=CREATE_FITOUT_CONFIRM_END",
+    tier=7,
+    user_email="sara@cenomi.com",  # DD_ENGINEER — only role permitted to create END SRs
+    turns=[
+        Turn(
+            message="The fitout is complete for lease t0105712, I need to confirm it",
+            note="Supervisor must classify as CREATE_FITOUT_CONFIRM_END",
+            expect_workflow_stage="CREATE_SR",
+            expect_keywords=["fitout", "complete", "end", "confirm", "yes", "no"],
+        ),
+    ],
+    tags=["fitout-confirm", "end", "intent-classification", "tier7"],
+)
+
+_S72 = Scenario(
+    id=72,
+    name="supervisor_classifies_confirm_trading",
+    goal="User says 'confirm trading' → intent=CREATE_FITOUT_CONFIRM_TRADING",
+    tier=7,
+    turns=[
+        Turn(
+            message="The unit for lease t0105712 has started trading, I want to confirm it",
+            note="Supervisor must classify as CREATE_FITOUT_CONFIRM_TRADING",
+            expect_workflow_stage="CREATE_SR",
+            expect_keywords=["trading", "confirm", "started", "yes", "no"],
+        ),
+    ],
+    tags=["fitout-confirm", "trading", "intent-classification", "tier7"],
+)
+
+_S73 = Scenario(
+    id=73,
+    name="fos_yes_branch_happy_path",
+    goal="FOS: fitout has started (yes branch) → actual date collected → SR_CREATED",
+    tier=6,
+    user_email="sara@cenomi.com",  # DD_ENGINEER — only role permitted to create FOS SRs
+    turns=[
+        Turn(
+            message="I need to confirm fitout has started for lease t0105712",
+            note="Agent initialises FOS flow and asks for lease + radio status",
+        ),
+        Turn(
+            message="yes",
+            note="User confirms fitout has started; agent asks for actual date",
+            expect_keywords=["actual", "date", "fitout", "start"],
+        ),
+        Turn(
+            message=_d(-10),
+            note="Actual fitout start date; agent should show confirmation card",
+            expect_ui_type="confirmation_card",
+        ),
+        Turn(
+            message="Confirm",
+            action="confirm",
+            note="SR submitted; workflow_stage=SR_CREATED",
+            expect_workflow_stage="SR_CREATED",
+            expect_keywords=["submitted", "reference", "created", "confirm"],
+        ),
+    ],
+    tags=["fitout-confirm", "fos", "yes-branch", "happy-path", "tier6"],
+)
+
+_S74 = Scenario(
+    id=74,
+    name="trading_yes_branch_happy_path",
+    goal="TRADING: trading confirmed (yes branch) → actual date → SR_CREATED",
+    tier=6,
+    turns=[
+        Turn(
+            message="The unit is trading now, lease t0105712",
+            note="Agent initialises TRADING flow",
+        ),
+        Turn(
+            message="yes",
+            note="Confirmed trading; agent asks for actual trading date",
+            expect_keywords=["trading", "date", "actual"],
+        ),
+        Turn(
+            message=_d(-5),
+            note="Actual trading date; confirmation card expected",
+            expect_ui_type="confirmation_card",
+        ),
+        Turn(
+            message="Confirm",
+            action="confirm",
+            note="SR submitted",
+            expect_workflow_stage="SR_CREATED",
+            expect_keywords=["submitted", "created", "reference"],
+        ),
+    ],
+    tags=["fitout-confirm", "trading", "yes-branch", "happy-path", "tier6"],
+)
+
+_S75 = Scenario(
+    id=75,
+    name="fos_no_branch_delay_reason_required",
+    goal="FOS no-branch: missing delay_reason blocks confirmation card",
+    tier=7,
+    turns=[
+        Turn(
+            message="Confirm fitout start for t0105712",
+            note="Agent initialises FOS flow",
+        ),
+        Turn(
+            message="no",
+            note="Fitout not started yet; agent asks for planned dates",
+        ),
+        Turn(
+            message=f"Planned start {_d(10)}, planned end {_d(40)}, planned trading {_d(60)}",
+            note="Planned dates provided; agent must ask for delay_reason (required for FOS)",
+            expect_keywords=["delay", "reason", "why"],
+        ),
+    ],
+    tags=["fitout-confirm", "fos", "no-branch", "delay-required", "tier7"],
+)
+
+_S76 = Scenario(
+    id=76,
+    name="trading_no_branch_delay_reason_optional",
+    goal="TRADING no-branch: delay_reason is optional — missing it does not block",
+    tier=7,
+    turns=[
+        Turn(
+            message="Confirm trading for lease t0105712",
+            note="Agent initialises TRADING flow",
+        ),
+        Turn(
+            message="no",
+            note="Trading not started; agent asks for planned trading date",
+        ),
+        Turn(
+            message=f"Planned trading date is {_d(14)}",
+            note="Planned date provided; delay_reason is optional for TRADING — confirmation card may appear",
+        ),
+    ],
+    tags=["fitout-confirm", "trading", "no-branch", "delay-optional", "tier7"],
+)
+
+_S77 = Scenario(
+    id=77,
+    name="end_no_branch_planned_dates_required",
+    goal="END no-branch: all planned dates must be collected before card appears",
+    tier=7,
+    turns=[
+        Turn(
+            message="Confirm fitout end for t0105712",
+            note="Agent initialises END flow",
+        ),
+        Turn(
+            message="no",
+            note="Fitout not complete; agent asks for planned dates",
+            expect_keywords=["planned", "date", "complete"],
+        ),
+    ],
+    tags=["fitout-confirm", "end", "no-branch", "planned-dates-required", "tier7"],
+)
+
+_S78 = Scenario(
+    id=78,
+    name="fos_cross_milestone_date_ordering",
+    goal="FOS: actual date before prior milestone (actual_handover_date) should be flagged",
+    tier=7,
+    turns=[
+        Turn(
+            message="Confirm fitout start for lease t0105712",
+            note="Agent initialises FOS flow",
+        ),
+        Turn(
+            message="yes",
+            note="Fitout started; agent asks for actual date",
+        ),
+    ],
+    tags=["fitout-confirm", "fos", "cross-milestone", "date-ordering", "tier7"],
+)
+
+_S79 = Scenario(
+    id=79,
+    name="approve_fitout_confirm_sr_rbac_dd_engineer",
+    goal="DD_ENGINEER can create and approve FOS/END fitout confirmation SRs",
+    tier=7,
+    user_email="sara@cenomi.com",  # DD_ENGINEER — verifies RBAC permits FOS/END creation
+    turns=[
+        Turn(
+            message="I need to confirm fitout has started for t0105712",
+            note="DD_ENGINEER can create FOS SR; agent initialises workflow",
+            expect_workflow_stage="CREATE_SR",
+        ),
+    ],
+    tags=["fitout-confirm", "rbac", "dd-engineer", "approve", "tier7"],
+)
+
+_S80 = Scenario(
+    id=80,
+    name="approve_fitout_confirm_sr_rbac_mall_manager",
+    goal="MALL_MANAGER can create and approve TRADING fitout confirmation SRs",
+    tier=7,
+    turns=[
+        Turn(
+            message="Confirm trading for lease t0105712",
+            note="MALL_MANAGER can create TRADING SR; agent initialises workflow",
+            expect_workflow_stage="CREATE_SR",
+        ),
+    ],
+    tags=["fitout-confirm", "rbac", "mall-manager", "trading", "tier7"],
+)
+
+_S81 = Scenario(
+    id=81,
+    name="fos_approve_payload_has_status_approved",
+    goal="Approve path: PATCH body must contain status=APPROVED and service_request_id",
+    tier=7,
+    turns=[
+        Turn(
+            message="I want to approve the fitout start SR for lease t0105712",
+            note="Approver opens existing SR in APPROVE_SR stage",
+        ),
+    ],
+    tags=["fitout-confirm", "fos", "approve", "payload", "tier7"],
+)
+
+_S82 = Scenario(
+    id=82,
+    name="fitout_confirm_title_auto_fill",
+    goal="Title is auto-generated as '<prefix> - <pms_tenant_code>' for all three sub-categories",
+    tier=7,
+    turns=[
+        Turn(
+            message="Confirm fitout start for t0105712",
+            note="Title should auto-fill to 'Confirm Fitout Start - t0105712'",
+        ),
+        Turn(
+            message="yes",
+            note="Agent continues flow; title auto-fill verified in payload",
+            expect_keywords=["fitout", "confirm", "start"],
+        ),
+    ],
+    tags=["fitout-confirm", "title-auto-fill", "tier7"],
+)
+
+_S83 = Scenario(
+    id=83,
+    name="end_yes_branch_happy_path",
+    goal="END: fitout complete (yes branch) → actual date collected → SR_CREATED",
+    tier=6,
+    user_email="sara@cenomi.com",  # DD_ENGINEER — only role permitted to create END SRs
+    turns=[
+        Turn(
+            message="Confirm fitout is complete for t0105712",
+            note="Agent initialises END flow and asks for status",
+        ),
+        Turn(
+            message="yes",
+            note="User confirms fitout complete; agent asks for actual date",
+            expect_keywords=["actual", "date", "complete", "fitout"],
+        ),
+        Turn(
+            message=_d(-5),
+            note="Actual fitout complete date; agent should show confirmation card",
+            expect_ui_type="confirmation_card",
+            expect_field_value={"Actual Complete Date": _d(-5)},
+        ),
+        Turn(
+            message="Confirm",
+            action="confirm",
+            note="SR submitted; workflow_stage=SR_CREATED",
+            expect_workflow_stage="SR_CREATED",
+            expect_keywords=["submitted", "reference", "created"],
+        ),
+    ],
+    tags=["fitout-confirm", "end", "yes-branch", "happy-path", "tier6"],
+)
+
+
+# =============================================================================
+# TIER 8 — FAQ + RBAC scenarios (S208–S212)
+# =============================================================================
+
+_S208 = Scenario(
+    id=208,
+    name="faq_process_question_documents",
+    goal="FAQ: user asks about required documents → agent provides helpful information",
+    tier=8,
+    turns=[
+        Turn(
+            message="what documents do I need for handover checklist?",
+            note="General process FAQ; agent should provide document guidance",
+            expect_keywords=["document", "checklist", "upload"],
+        ),
+    ],
+    tags=["faq", "help", "documents", "tier8"],
+)
+
+_S209 = Scenario(
+    id=209,
+    name="faq_sr_status_check",
+    goal="FAQ: user asks for SR status → agent explains how to check",
+    tier=8,
+    turns=[
+        Turn(
+            message="what is the status of my service request",
+            note="Status inquiry; agent should provide status guidance",
+            expect_keywords=["status", "SR", "reference"],
+        ),
+    ],
+    tags=["faq", "help", "status", "tier8"],
+)
+
+_S210 = Scenario(
+    id=210,
+    name="faq_unknown_intent_graceful_fallback",
+    goal="Unknown intent → graceful fallback with no crash",
+    tier=8,
+    turns=[
+        Turn(
+            message="banana banana banana",
+            note="Nonsense input; agent must respond gracefully without crashing",
+        ),
+    ],
+    tags=["faq", "fallback", "robustness", "tier8"],
+)
+
+_S211 = Scenario(
+    id=211,
+    name="rbac_dd_engineer_handover_denied",
+    goal="DD_ENGINEER is denied permission to create a handover service request",
+    tier=8,
+    turns=[
+        Turn(
+            message="I want to create a handover service request",
+            note="DD_ENGINEER (sara@cenomi.com) must be denied; only MALL_MANAGER may create handover SRs",
+            expect_keywords=["not permitted", "not allowed"],
+        ),
+    ],
+    tags=["rbac", "dd-engineer", "handover", "permission-denied", "tier8"],
+)
+
+_S212 = Scenario(
+    id=212,
+    name="faq_mixed_intent_routes_to_create",
+    goal="Mixed greeting + action intent → supervisor routes to CREATE intent, not FAQ",
+    tier=8,
+    turns=[
+        Turn(
+            message="hello, I also need a handover for t0105712",
+            note="Greeting combined with CREATE intent; supervisor must route to Handover A agent",
+            expect_workflow_stage="CREATE_SR",
+        ),
+    ],
+    tags=["faq", "mixed-intent", "routing", "tier8"],
 )
 
 
@@ -2600,13 +3276,15 @@ _S202 = Scenario(
 # Tier buckets and master list
 # =============================================================================
 
-#: Fast smoke gate — run first, ~60 s
-TIER0_SCENARIOS: list[Scenario] = [_S201, _S202]
+#: Tier 0 — Per-agent smoke (6 scenarios, ~2 min): FAQ + Handover A/B + FOS/END/TRADING
+TIER0_SCENARIOS: list[Scenario] = [_S200, _S201, _S203, _S204, _S205, _S206]
 
 #: CREATE_SR core regression guard — run before committing
 TIER1_SCENARIOS: list[Scenario] = [
     _S1, _S2, _S3, _S4, _S5, _S6, _S7, _S8, _S9,
     _S10, _S11, _S12, _S13, _S14, _S15,
+    # HANDED_OVER Path B core + Path A fix
+    _S63, _S64,
 ]
 
 #: CREATE_SR edge cases, API fields, multi-field combos, missing coverage
@@ -2614,6 +3292,8 @@ TIER2_SCENARIOS: list[Scenario] = [
     _S16, _S17, _S18, _S19, _S20, _S21, _S22,
     _S23, _S24, _S25, _S26, _S27, _S28, _S29, _S30, _S31, _S32, _S33,
     _S60, _S61, _S62,
+    # HANDED_OVER / Path B + Path A fix scenarios
+    _S65, _S66, _S67, _S68,
 ]
 
 #: Agent-fix battle tests (Issues 1–7 from agent_ui_fixes.md)
@@ -2625,7 +3305,60 @@ TIER3_SCENARIOS: list[Scenario] = [
     _S50, _S51, _S52,                        # Comments collection (Issue 5)
     _S53, _S54, _S55,                        # Upload order (Issue 6)
     _S56, _S57, _S58, _S59,                  # RDD order (Issue 7, disabled)
+    _S69,                                    # FM date format (Fix 5)
 ]
+
+# ── Per-agent Fitout sub-tiers ─────────────────────────────────────────────────
+#
+#   6a  FOS Happy       S73
+#   6b  FOS Edge        S70, S75, S78, S82
+#   6c  FOS Battle+RBAC S79, S81
+#   6e  END Happy       S83
+#   6f  END Edge        S71, S77
+#   6h  TRADING Happy   S74
+#   6i  TRADING Edge    S72, S76
+#   6j  TRADING Battle  S80
+#
+# (Tiers 6d, 6g have no flat scenarios — lifecycle-only)
+
+#: Tier 6a — FOS Happy: yes-branch multi-turn create
+TIER6A_FOS_HAPPY: list[Scenario] = [_S73]
+
+#: Tier 6b — FOS Edge: intent routing, no-branch/delay-required, cross-milestone date, title format
+TIER6B_FOS_EDGE: list[Scenario] = [_S70, _S75, _S78, _S82]
+
+#: Tier 6c — FOS Battle + RBAC: payload contract, DD_ENGINEER approve permission
+TIER6C_FOS_BATTLE: list[Scenario] = [_S79, _S81]
+
+#: Tier 6e — END Happy: yes-branch create with actual_fitout_complete_date
+TIER6E_END_HAPPY: list[Scenario] = [_S83]
+
+#: Tier 6f — END Edge: intent routing, no-branch planned-dates required
+TIER6F_END_EDGE: list[Scenario] = [_S71, _S77]
+
+#: Tier 6h — TRADING Happy: yes-branch create with actual_trading_date
+TIER6H_TRADING_HAPPY: list[Scenario] = [_S74]
+
+#: Tier 6i — TRADING Edge: intent routing, no-branch delay-optional
+TIER6I_TRADING_EDGE: list[Scenario] = [_S72, _S76]
+
+#: Tier 6j — TRADING Battle + RBAC: MALL_MANAGER create permission
+TIER6J_TRADING_BATTLE: list[Scenario] = [_S80]
+
+#: Tier 8 — FAQ + RBAC (help queries, status, RBAC denials)
+TIER8_SCENARIOS: list[Scenario] = [_S201, _S208, _S209, _S210, _S211, _S212]
+
+#: HANDED_OVER / Path B + Path A fix — exported for selective runner use
+HANDED_OVER_SCENARIOS: list[Scenario] = [
+    _S63, _S64, _S65, _S66, _S67, _S68, _S69,
+]
+
+#: Fitout Confirmation SR — all fitout flat scenarios grouped by agent
+FITOUT_CONFIRM_SCENARIOS: list[Scenario] = (
+    TIER6A_FOS_HAPPY + TIER6B_FOS_EDGE + TIER6C_FOS_BATTLE
+    + TIER6E_END_HAPPY + TIER6F_END_EDGE
+    + TIER6H_TRADING_HAPPY + TIER6I_TRADING_EDGE + TIER6J_TRADING_BATTLE
+)
 
 #: Master list — all scenarios in tier order (for backward-compatibility)
 SCENARIOS: list[Scenario] = (
@@ -2633,4 +3366,6 @@ SCENARIOS: list[Scenario] = (
     + TIER1_SCENARIOS
     + TIER2_SCENARIOS
     + TIER3_SCENARIOS
+    + FITOUT_CONFIRM_SCENARIOS
+    + TIER8_SCENARIOS
 )

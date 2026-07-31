@@ -14,7 +14,7 @@ type DocTypeConfig = {
 const FM_DOC_TYPES: DocTypeConfig[] = [
   { id: "SR_HANDOVER_CHECKLIST", label: "Handover Checklist" },
   { id: "SR_HANDOVER_SITE_SURVEY", label: "Site Survey" },
-  { id: "SR_HANDOVER_OTHER", label: "Other" },
+  { id: "SR_COP_CHECKLIST_OTHER", label: "COP Checklist" },
 ];
 
 const RDD_DOC_TYPES: DocTypeConfig[] = [
@@ -27,10 +27,18 @@ const MM_DOC_TYPES: DocTypeConfig[] = [
   { id: "SR_HANDOVER_OTHER", label: "Other (optional)" },
 ];
 
+const MM_HANDED_OVER_DOC_TYPES: DocTypeConfig[] = [
+  { id: "SR_HANDED_OVER_OTHER", label: "Other (optional)" },
+];
+
 function getDocTypes(
   userRole: string | null | undefined,
   workflowStage: string | null | undefined,
+  subCategory?: string | null | undefined,
 ): DocTypeConfig[] {
+  if (workflowStage === "CREATE_HANDED_OVER_SR" || subCategory === "HANDED_OVER") {
+    return MM_HANDED_OVER_DOC_TYPES;
+  }
   if (workflowStage === "CREATE_SR") return MM_DOC_TYPES;
   if (userRole === "FM_MANAGER" || userRole === "OPERATIONS") return FM_DOC_TYPES;
   if (userRole === "DD_ENGINEER") return RDD_DOC_TYPES;
@@ -40,8 +48,9 @@ function getDocTypes(
 
 function getDocLabel(docTypeId: string): string {
   return (
-    [...FM_DOC_TYPES, ...RDD_DOC_TYPES, ...MM_DOC_TYPES].find((d) => d.id === docTypeId)
-      ?.label ?? docTypeId
+    [...FM_DOC_TYPES, ...RDD_DOC_TYPES, ...MM_DOC_TYPES, ...MM_HANDED_OVER_DOC_TYPES].find(
+      (d) => d.id === docTypeId,
+    )?.label ?? docTypeId
   );
 }
 
@@ -52,6 +61,8 @@ interface DocumentUploadPanelProps {
   srId: string | null;
   workflowStage: string | null | undefined;
   userRole: string | null | undefined;
+  /** "HANDED_OVER" for Path B (Already Trading); "HANDOVER" or null for Path A. */
+  subCategory?: string | null | undefined;
   uploadedDocuments: UploadedDoc[];
   onUploadComplete: (doc: UploadedDoc) => void;
   onDeleteComplete?: (documentId: string) => void;
@@ -68,6 +79,7 @@ export function DocumentUploadPanel({
   srId,
   workflowStage,
   userRole,
+  subCategory = null,
   uploadedDocuments,
   onUploadComplete,
   onDeleteComplete,
@@ -82,7 +94,8 @@ export function DocumentUploadPanel({
   const [uploadSuccess, setUploadSuccess] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const docTypes = getDocTypes(userRole, workflowStage);
+  const isPathB = subCategory === "HANDED_OVER" || workflowStage === "CREATE_HANDED_OVER_SR";
+  const docTypes = getDocTypes(userRole, workflowStage, subCategory);
   const rddDatesReady =
     Boolean(collectedData?.actual_handover_date) &&
     Boolean(collectedData?.fitout_start_date) &&
@@ -90,20 +103,22 @@ export function DocumentUploadPanel({
   const leaseReady = Boolean(collectedData?.lease_id || collectedData?.lease_code);
   const mmOptionalUploadReady =
     collectedData?.mm_optional_upload_status === "awaiting_upload";
+  const pathBUploadReady = isPathB && leaseReady;
   const shouldShow =
     !preferChatDocumentCard &&
     docTypes.length > 0 &&
     ((workflowStage === "FM_REVIEW" && srId !== null) ||
       (workflowStage === "RDD_REVIEW" && rddDatesReady && srId !== null) ||
-      (workflowStage === "CREATE_SR" && leaseReady && mmOptionalUploadReady));
+      (workflowStage === "CREATE_SR" && leaseReady && mmOptionalUploadReady) ||
+      (isPathB && pathBUploadReady));
 
   if (!shouldShow) return null;
 
   async function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (!file || !selectedDocType) return;
-    // CREATE_SR may upload without srId once lease is resolved.
-    if (workflowStage !== "CREATE_SR" && !srId) return;
+    // CREATE_SR and CREATE_HANDED_OVER_SR may upload without srId once lease is resolved.
+    if (workflowStage !== "CREATE_SR" && !isPathB && !srId) return;
 
     setIsUploading(true);
     setUploadError(null);
@@ -154,7 +169,7 @@ export function DocumentUploadPanel({
   return (
     <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-900">
       <h3 className="mb-3 text-sm font-semibold text-zinc-700 dark:text-zinc-300">
-        {workflowStage === "CREATE_SR" ? "Optional Documents" : "Upload Documents"}
+        {workflowStage === "CREATE_SR" || isPathB ? "Optional Documents" : "Upload Documents"}
       </h3>
 
       <div className="flex flex-col gap-2">

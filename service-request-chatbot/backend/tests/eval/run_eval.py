@@ -52,15 +52,36 @@ from tests.eval.scenarios import (
     TIER1_SCENARIOS,
     TIER2_SCENARIOS,
     TIER3_SCENARIOS,
+    TIER6A_FOS_HAPPY,
+    TIER6B_FOS_EDGE,
+    TIER6C_FOS_BATTLE,
+    TIER6E_END_HAPPY,
+    TIER6F_END_EDGE,
+    TIER6H_TRADING_HAPPY,
+    TIER6I_TRADING_EDGE,
+    TIER6J_TRADING_BATTLE,
+    TIER8_SCENARIOS,
     Scenario,
     Turn,
 )
 
-_TIER_MAP: dict[int, list[Scenario]] = {
+_TIER_MAP: dict[int | str, list[Scenario]] = {
     0: TIER0_SCENARIOS,
     1: TIER1_SCENARIOS,
     2: TIER2_SCENARIOS,
     3: TIER3_SCENARIOS,
+    # Fitout per-agent sub-tiers (flat scenarios only; lifecycle via run_lifecycle_eval.py)
+    "6a": TIER6A_FOS_HAPPY,
+    "6b": TIER6B_FOS_EDGE,
+    "6c": TIER6C_FOS_BATTLE,
+    # 6d = FOS Lifecycle — lifecycle-only, no flat scenarios
+    "6e": TIER6E_END_HAPPY,
+    "6f": TIER6F_END_EDGE,
+    # 6g = END Lifecycle — lifecycle-only, no flat scenarios
+    "6h": TIER6H_TRADING_HAPPY,
+    "6i": TIER6I_TRADING_EDGE,
+    "6j": TIER6J_TRADING_BATTLE,
+    8: TIER8_SCENARIOS,
 }
 
 # ── ANSI colours ─────────────────────────────────────────────────────────────
@@ -310,11 +331,10 @@ async def run_scenario(
     session_id: Optional[str] = None
 
     async with httpx.AsyncClient() as client:
-        # Authenticate as MALL_MANAGER so the supervisor RBAC check permits
-        # CREATE_RDD_SERVICE_REQUEST.  Without a token, anonymous callers only
-        # receive read-only intents (ASK_HELP / CHECK_STATUS / PREVIEW) and
-        # every packed CREATE_SR message returns a plain denial ``message``.
-        token, user_id = await _authenticate(client, base_url)
+        # Authenticate with scenario-specific or default credentials.
+        # Some scenarios require a specific role (e.g. DD_ENGINEER for FOS/END).
+        email = scenario.user_email or _EVAL_USER_EMAIL
+        token, user_id = await _authenticate(client, base_url, email=email)
 
         for idx, spec in enumerate(scenario.turns, start=1):
             # ── Send turn ─────────────────────────────────────────────────────
@@ -578,7 +598,7 @@ async def _main(
     tags: Optional[list[str]],
     verbose: bool,
     json_out: Optional[Path] = None,
-    tier: Optional[int] = None,
+    tier: Optional[str] = None,
 ) -> int:
     # Health check
     print(bold("Checking server..."), end=" ", flush=True)
@@ -591,10 +611,17 @@ async def _main(
 
     # Filter scenarios — tier takes precedence, then explicit IDs / tags
     if tier is not None:
-        if tier not in _TIER_MAP:
-            print(yellow(f"Unknown tier {tier}. Valid: 0, 1, 2, 3"))
+        # Normalise: "6" → 6 (int) so that integer-keyed tiers still work
+        tier_key: int | str = tier
+        try:
+            tier_key = int(tier)
+        except ValueError:
+            pass
+        if tier_key not in _TIER_MAP:
+            valid = ", ".join(str(k) for k in _TIER_MAP)
+            print(yellow(f"Unknown tier {tier!r}. Valid: {valid}"))
             return 1
-        scenarios = [s for s in _TIER_MAP[tier] if s.enabled]
+        scenarios = [s for s in _TIER_MAP[tier_key] if s.enabled]
         print(bold(f"Tier {tier}: {len(scenarios)} scenario(s) selected"))
     else:
         scenarios = [s for s in SCENARIOS if s.enabled]
@@ -698,12 +725,16 @@ def main() -> None:
         "--tier",
         dest="tier",
         default=None,
-        type=int,
-        choices=[0, 1, 2, 3],
+        type=str,
         metavar="N",
         help=(
             "Run only scenarios in tier N: "
-            "0=smoke, 1=core CREATE_SR, 2=edge cases, 3=battle tests. "
+            "0=smoke, 1=Handover A happy, 2=Handover A edge, 3=Handover A battle, "
+            "6=Fitout happy (all), 7=Fitout edge+battle (all), 8=FAQ+RBAC. "
+            "Fitout per-agent sub-tiers: "
+            "6a=FOS happy, 6b=FOS edge, 6c=FOS battle, "
+            "6e=END happy, 6f=END edge, "
+            "6h=TRADING happy, 6i=TRADING edge, 6j=TRADING battle. "
             "Overrides --scenarios; can still combine with --tags."
         ),
     )

@@ -15,6 +15,7 @@ import {
   injectAuth,
   mockChatAlways,
   mockNextChatResponse,
+  buildChatResponse,
   createSrResponse,
   fmReviewEntryResponse,
   fmApproveResponse,
@@ -187,5 +188,101 @@ test.describe("LifecycleStepper — SR_COMPLETED", () => {
     // All 4 steps (Create SR, FM Review, RDD Review, Complete) should be green
     const greenCircles = page.locator('[class*="bg-green-500"]');
     await expect(greenCircles).toHaveCount(4);
+  });
+});
+
+// ─── Path B (HANDED_OVER / Already Trading) stepper tests ─────────────────────
+
+test.describe("LifecycleStepper — HANDED_OVER (Path B)", () => {
+  const HANDED_OVER_SR_ID = "SR-HANDED-OVER-STEPPER-001";
+
+  function handedOverSrResponse(srId = HANDED_OVER_SR_ID) {
+    return buildChatResponse({
+      message: `Your Already Trading SR ${srId} has been created and automatically approved.`,
+      ui: {
+        type: "message",
+        message: `Your Already Trading SR ${srId} has been created and automatically approved.`,
+        workflow_complete: true,
+        workflow_stage: "HANDED_OVER_COMPLETED",
+      },
+      state: { workflow_stage: "HANDED_OVER_COMPLETED", sr_id: srId },
+      sr_id: srId,
+    });
+  }
+
+  test("stepper appears for HANDED_OVER_COMPLETED stage", async ({ page }) => {
+    await injectAuth(page, "MALL_MANAGER");
+    await mockChatAlways(page, handedOverSrResponse());
+
+    await page.goto(CHAT_URL);
+
+    await page
+      .getByPlaceholder(/describe your service request/i)
+      .fill("lease t0105712 already trading");
+    await page.getByRole("button", { name: /send/i }).click();
+    await page.waitForResponse("**/api/chat/service-request");
+
+    // Lifecycle stepper must appear for Path B
+    await expect(page.getByText("Lifecycle Progress")).toBeVisible();
+  });
+
+  test("Path B stepper does NOT show FM Review or RDD Review labels", async ({
+    page,
+  }) => {
+    await injectAuth(page, "MALL_MANAGER");
+    await mockChatAlways(page, handedOverSrResponse());
+
+    await page.goto(CHAT_URL);
+
+    await page
+      .getByPlaceholder(/describe your service request/i)
+      .fill("lease t0105712 already trading");
+    await page.getByRole("button", { name: /send/i }).click();
+    await page.waitForResponse("**/api/chat/service-request");
+
+    // HANDED_OVER has no FM or RDD review phases
+    await expect(page.getByText("FM Review")).not.toBeVisible();
+    await expect(page.getByText("RDD Review")).not.toBeVisible();
+  });
+
+  test("Path A stepper still shows FM Review and RDD Review (regression guard)", async ({
+    page,
+  }) => {
+    await injectAuth(page, "MALL_MANAGER");
+    // Standard Path A response
+    await mockChatAlways(page, createSrResponse("SR-PATH-A-REG-001"));
+
+    await page.goto(CHAT_URL);
+
+    await page
+      .getByPlaceholder(/describe your service request/i)
+      .fill("I want to initiate a handover for t0105712");
+    await page.getByRole("button", { name: /send/i }).click();
+    await page.waitForResponse("**/api/chat/service-request");
+
+    // Path A stepper MUST still have FM Review and RDD Review steps
+    await expect(page.getByText("Lifecycle Progress")).toBeVisible();
+    await expect(page.getByText("FM Review")).toBeVisible();
+    await expect(page.getByText("RDD Review")).toBeVisible();
+  });
+
+  test("debug panel shows HANDED_OVER_COMPLETED stage", async ({ page }) => {
+    await injectAuth(page, "MALL_MANAGER");
+    await mockChatAlways(page, handedOverSrResponse());
+
+    await page.goto(CHAT_URL);
+
+    // Enable debug mode
+    await page.getByRole("switch", { name: "Debug" }).click();
+
+    await page
+      .getByPlaceholder(/describe your service request/i)
+      .fill("Already trading for t0105712");
+    await page.getByRole("button", { name: /send/i }).click();
+    await page.waitForResponse("**/api/chat/service-request");
+
+    // Debug panel should show the HANDED_OVER_COMPLETED stage and the SR ID
+    await expect(page.getByText("HANDED_OVER_COMPLETED")).toBeVisible();
+    await expect(page.getByText(HANDED_OVER_SR_ID)).toBeVisible();
   });
 });

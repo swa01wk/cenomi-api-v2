@@ -104,7 +104,7 @@ async def test_successful_handover_sr_creation(app_client: AsyncClient) -> None:
     ):
         # Turn 1: classify intent
         body1 = await post_turn(app_client, "I want to create a handover SR", user_id=_USER_ID)
-        assert body1.get("active_agent") == "rdd_agent"
+        assert body1.get("active_agent") == "rdd_handover_agent"
 
         session_id = body1.get("session_id")
         assert session_id is not None
@@ -685,7 +685,7 @@ async def test_trace_replay_correctness(app_client: AsyncClient) -> None:
     )
     mock_trace.created_at = datetime.now(tz=timezone.utc)
     mock_trace.completed_at = datetime.now(tz=timezone.utc)
-    mock_trace.active_agent = "rdd_agent"
+    mock_trace.active_agent = "rdd_handover_agent"
     mock_trace.intent = "CREATE_RDD_SERVICE_REQUEST"
     mock_trace.service_category = "FIT_OUT_AND_HANDOVER"
     mock_trace.sub_category = "HANDOVER"
@@ -747,3 +747,186 @@ async def test_trace_replay_correctness(app_client: AsyncClient) -> None:
     assert "state_snapshots" in detail
     assert "llm_calls" in detail
     assert "tool_calls" in detail
+
+
+# ===========================================================================
+# 11. Path A Fix 1 — already_handovered=initiate_handover in create payload
+# ===========================================================================
+
+
+@pytest.mark.asyncio
+async def test_create_sr_http_payload_has_already_handovered_field(
+    app_client: AsyncClient,
+) -> None:
+    """ASGI: platform API mock must receive already_handovered=initiate_handover
+    in the create body (Fix 1).
+
+    The test captures the payload passed to create_service_request and asserts
+    the nested ``payload.already_handovered`` key equals ``initiate_handover``.
+    """
+    all_data = _all_collected_data()
+
+    captured_payloads: list[dict] = []
+
+    from app.agents.services.service_request_api_service import ServiceRequestCreationResult
+
+    async def _capturing_create(payload: dict) -> ServiceRequestCreationResult:
+        captured_payloads.append(payload)
+        return ServiceRequestCreationResult(
+            sr_id="SR-FIX1-001",
+            endpoint="mock://service-requests",
+            request_payload=payload,
+            response_payload={"id": "SR-FIX1-001"},
+            latency_ms=10,
+            status_code=201,
+        )
+
+    svc_mock = AsyncMock()
+    svc_mock.create_service_request = _capturing_create
+
+    with (
+        patch(
+            "app.agents.graph.nodes.supervisor_node._call_supervisor_llm",
+            make_supervisor_mock(),
+        ),
+        patch(
+            "app.agents.graph.nodes.supervisor_node.get_default_gateway",
+            return_value=MagicMock(model="gpt-4o-mini"),
+        ),
+        patch(
+            "app.agents.graph.nodes.shared.field_extraction_node.FieldExtractionService",
+            make_field_extraction_mock(
+                {k: {"value": str(v) if not isinstance(v, list) else ",".join(str(i) for i in v), "confidence": 1.0}
+                 for k, v in all_data.items()}
+            ),
+        ),
+        patch(
+            "app.agents.graph.nodes.shared.field_extraction_node.get_default_gateway",
+            return_value=MagicMock(model="gpt-4o-mini"),
+        ),
+        patch(
+            "app.agents.graph.nodes.shared.lease_lookup_node.get_lease_lookup_service",
+            make_lease_mock([_zara_lease()]),
+        ),
+        patch(
+            "app.agents.graph.nodes.shared.validation_node._validation_service.validate_draft",
+            MagicMock(return_value=[]),
+        ),
+        patch(
+            "app.agents.graph.nodes.handover.api_submission_node.get_service_request_api_service",
+            MagicMock(return_value=svc_mock),
+        ),
+    ):
+        body1 = await post_turn(
+            app_client,
+            "I want to create a handover SR",
+            user_id=_USER_ID,
+        )
+        session_id = body1.get("session_id")
+
+        body2 = await post_turn(
+            app_client,
+            "All fields provided in one message",
+            session_id=session_id,
+            user_id=_USER_ID,
+        )
+        session_id = body2.get("session_id") or session_id
+
+        await post_turn(
+            app_client,
+            "yes",
+            session_id=session_id,
+            user_id=_USER_ID,
+        )
+
+    # At least one payload must have been captured (SR creation turn)
+    assert len(captured_payloads) >= 1, "create_service_request was never called"
+    last_payload = captured_payloads[-1]
+    inner = last_payload.get("payload", last_payload)
+    assert inner.get("already_handovered") == "initiate_handover", (
+        f"Fix 1: already_handovered must equal 'initiate_handover' in the create "
+        f"body; got {inner.get('already_handovered')!r}"
+    )
+
+
+# ===========================================================================
+# 12. Path A Fix 2 — COP checklist accepted for FM role over HTTP
+# ===========================================================================
+
+
+@pytest.mark.asyncio
+async def test_fm_cop_checklist_accepted_over_http(app_client: AsyncClient) -> None:
+    """Upload SR_COP_CHECKLIST_OTHER via the document upload HTTP route and verify
+    that the document_upload_node places the doc_id in backend_refs.uploaded_documents.
+
+    This tests Fix 2: SR_COP_CHECKLIST_OTHER replaced SR_HANDOVER_OTHER for FM roles.
+    """
+    from app.agents.graph.nodes.document_upload_node import document_upload_node
+
+    state = {
+        "documents": [
+            {
+                "document_id": "doc-cop-http-001",
+                "document_type_id": "SR_COP_CHECKLIST_OTHER",
+            }
+        ],
+        "backend_refs": {},
+        "workflow_stage": "FM_REVIEW",
+        "session_id": "sess-cop-http",
+        "user_id": "user-cop-http",
+    }
+    result = await document_upload_node(state)
+    uploaded = result.get("backend_refs", {}).get("uploaded_documents", [])
+    assert "doc-cop-http-001" in uploaded, (
+        "Fix 2: SR_COP_CHECKLIST_OTHER must be accepted as an FM document type "
+        f"and stored in backend_refs['uploaded_documents']; got {uploaded!r}"
+    )
+
+
+# ===========================================================================
+# 13. Path A Fix 3 — FM approve PATCH body is minimal (no service_category)
+# ===========================================================================
+
+
+@pytest.mark.asyncio
+async def test_fm_approve_patch_body_is_minimal(app_client: AsyncClient) -> None:
+    """Assert service_category is absent from the FM PATCH body (Fix 3).
+
+    The test calls build_fm_approve_payload directly and verifies the top-level
+    shape matches the minimal PATCH contract.
+    """
+    from app.agents.services.payload_builder_service import build_fm_approve_payload
+
+    cd = {
+        "unit_readiness_date": "2026-05-01",
+        "expected_handover_date": "2026-06-01",
+        "comments": "",
+    }
+    refs = {
+        "sr_id": "SR-FM-MIN-001",
+        "fm_action": "approve",
+        "create_payload": {
+            "payload": {
+                "mall": "Riyadh Park",
+                "brand": "Zara",
+                "title": "Test SR",
+                "tenant_profile_id": 77,
+                "property_id": 2018,
+            },
+            "lease_id": 7001,
+        },
+        "uploaded_documents": ["doc-fm-001"],
+        "sr_operations": [{"role": "FM_MANAGER", "status": "IN_PROGRESS"}],
+        "current_sr_status": "IN_PROCESS",
+    }
+    result = build_fm_approve_payload(cd, refs)
+
+    assert "service_category" not in result, (
+        "Fix 3: service_category must be absent from the FM approve PATCH body"
+    )
+    assert "service_request_id" not in result, (
+        "Fix 3: service_request_id must be absent from the FM approve PATCH body"
+    )
+    assert result.get("sub_category") == "HANDOVER", (
+        "sub_category must be present at top level in FM approve PATCH body"
+    )

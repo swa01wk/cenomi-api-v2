@@ -26,6 +26,7 @@ from typing import Any
 from app.agents.schemas.handover_schema import (
     ALL_DOCUMENT_TYPES,
     FM_ALLOWED_DOCUMENTS,
+    HANDED_OVER_DATE_CHAIN,
     RDD_ALLOWED_DOCUMENTS,
     RDD_REQUIRED_DOCUMENTS,
     STAGE_REGISTRY,
@@ -249,6 +250,61 @@ def validate_start_end_date(start_date: Any, end_date: Any) -> ValidationResult:
         ),
         blocking=True,
     )
+
+
+def validate_handed_over_dates(data: dict[str, Any]) -> list[ValidationResult]:
+    """Validate the Path B (HANDED_OVER / Already Trading) date chain ordering.
+
+    Required ordering::
+
+        actual_shop_handover_date ≤ actual_fitout_start_date
+        ≤ actual_fitout_end_date ≤ actual_trading_date
+
+    Only pairs where **both** dates are present are checked.
+    """
+    results: list[ValidationResult] = []
+
+    for earlier_field, later_field in HANDED_OVER_DATE_CHAIN:
+        earlier_raw = data.get(earlier_field)
+        later_raw = data.get(later_field)
+        if earlier_raw in (None, "") or later_raw in (None, ""):
+            continue
+
+        earlier_val = _parse_date(earlier_raw, earlier_field)
+        later_val = _parse_date(later_raw, later_field)
+
+        if earlier_val is None or later_val is None:
+            bad_field = earlier_field if earlier_val is None else later_field
+            results.append(
+                _result(
+                    field=bad_field,
+                    validation_type="handed_over_date_order",
+                    passed=False,
+                    message=(
+                        f"Cannot validate date ordering: '{bad_field}' is unparseable."
+                    ),
+                    blocking=True,
+                )
+            )
+            continue
+
+        passed = earlier_val <= later_val
+        results.append(
+            _result(
+                field=earlier_field,
+                validation_type="handed_over_date_order",
+                passed=passed,
+                message=(
+                    f"'{earlier_field}' ({earlier_val}) must not be after "
+                    f"'{later_field}' ({later_val})."
+                    if not passed
+                    else f"'{earlier_field}' ({earlier_val}) ≤ '{later_field}' ({later_val})."
+                ),
+                blocking=True,
+            )
+        )
+
+    return results
 
 
 def validate_rdd_date_order(data: dict[str, Any]) -> list[ValidationResult]:
@@ -511,6 +567,12 @@ class ValidationService:
         # 4. RDD date ordering (RDD_REVIEW stage only)
         if workflow_stage == "RDD_REVIEW":
             for r in validate_rdd_date_order(data):
+                if r["status"] == "FAILED":
+                    errors.append(r)
+
+        # 4b. Path B (HANDED_OVER) date ordering
+        if workflow_stage == "CREATE_HANDED_OVER_SR":
+            for r in validate_handed_over_dates(data):
                 if r["status"] == "FAILED":
                     errors.append(r)
 

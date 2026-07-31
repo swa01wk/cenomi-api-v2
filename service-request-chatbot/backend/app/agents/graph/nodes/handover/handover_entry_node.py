@@ -102,6 +102,44 @@ _CANCEL_WORKFLOW_PHRASES: frozenset[str] = frozenset(
     }
 )
 
+# Signals that indicate the user wants to switch to the "already trading" path (CREATE_HANDED_OVER_SR).
+_ALREADY_TRADING_SIGNALS: tuple[str, ...] = (
+    "already trading",
+    "already traded",
+    "already handovered",
+    "already open",
+    "already handed over",
+)
+
+# Signals that indicate the user wants to switch to the standard inspection path (CREATE_SR).
+_STANDARD_HANDOVER_SIGNALS: tuple[str, ...] = (
+    "standard inspection",
+    "standard handover",
+    "regular handover",
+    "normal handover",
+    "initiate handover",
+    "new handover",
+)
+
+# Backend-derived lease fields preserved when switching paths mid-session.
+_LEASE_PRESERVE_KEYS: frozenset[str] = frozenset(
+    {
+        "tenant_profile_id",
+        "property_id",
+        "lease_code",
+        "lease_id",
+        "brand_id",
+        "mall",
+        "brand",
+        "lease",
+        "unit_codes",
+        "city",
+        "contracted_area",
+        "lease_brand_mall",
+        "contract_id",
+    }
+)
+
 _CANCEL_SR_PHRASES: frozenset[str] = frozenset(
     {
         "cancel",
@@ -189,6 +227,11 @@ def _handle_mm_optional_upload_gate(
     if stage != "SR_CREATED":
         return None
     if state.get("confirmation_status") == "PENDING":
+        return None
+    # When sr_id is already in backend_refs, an FM/DD Manager is opening an existing
+    # SR via the sr_id parameter.  The upload offer is irrelevant in that context.
+    backend_refs = state.get("backend_refs") or {}
+    if backend_refs.get("sr_id"):
         return None
 
     collected = dict(state.get("collected_data") or {})
@@ -408,7 +451,14 @@ async def handover_entry_node(state: ServiceRequestState) -> dict[str, Any]:
     # ── 2. Workflow cancel / restart ───────────────────────────────────────
     # _CANCEL_WORKFLOW_PHRASES are for full restart; _CANCEL_SR_PHRASES trigger
     # the SR-cancel confirmation flow same as the UI cancel_sr action.
-    if _contains_phrase(user_message, _CANCEL_SR_PHRASES):
+    # Guard: only treat text-based cancel as intentional when there is already
+    # some workflow state (collected_data non-empty or workflow_stage set).
+    # This prevents packed messages like "Description: Cancel flow test …" from
+    # accidentally triggering the cancel path on the very first turn.
+    _has_workflow_state = bool(
+        state.get("workflow_stage") or state.get("collected_data")
+    )
+    if _has_workflow_state and _contains_phrase(user_message, _CANCEL_SR_PHRASES):
         log.info(
             "handover_entry.text_cancel_sr",
             user_message=user_message[:120],
@@ -436,13 +486,52 @@ async def handover_entry_node(state: ServiceRequestState) -> dict[str, Any]:
             "handover_entry.workflow_cancel",
             user_message=user_message[:120],
         )
-        # Clear ALL workflow-specific state so the next turn starts with a
-        # completely clean slate.
+        lowered = user_message.lower()
+
+        # Preserve lease-resolution data so the new path doesn't re-ask for lease.
+        existing_collected = dict(state.get("collected_data") or {})
+        preserved_lease = {
+            k: v for k, v in existing_collected.items() if k in _LEASE_PRESERVE_KEYS
+        }
+
         patch = _clear_all_state()
-        patch["response_message"] = (
-            "Sure — I've cleared everything. What would you like to do next?"
-        )
         patch["response_ui"] = {}  # restart doesn't set cancelled=True
+
+        if any(sig in lowered for sig in _ALREADY_TRADING_SIGNALS):
+            # User is switching to Path B (Already Trading / CREATE_HANDED_OVER_SR).
+            log.info("handover_entry.switch_to_create_handed_over_sr")
+            patch["workflow_stage"] = "CREATE_HANDED_OVER_SR"
+            patch["active_agent"] = "rdd_handover_agent"
+            patch["sub_category"] = "HANDED_OVER"
+            if preserved_lease:
+                preserved_lease["already_handovered"] = "already_trading"
+                patch["collected_data"] = preserved_lease
+                patch["selected_lease"] = state.get("selected_lease")
+            patch["response_message"] = (
+                "Understood — I've cleared the previous request and switched to the "
+                "already trading flow. Please share the actual shop handover date, "
+                "actual fitout start date, actual fitout end date, and actual trading date."
+            )
+        elif any(sig in lowered for sig in _STANDARD_HANDOVER_SIGNALS):
+            # User is switching back to Path A (standard CREATE_SR).
+            log.info("handover_entry.switch_to_create_sr")
+            patch["workflow_stage"] = "CREATE_SR"
+            patch["active_agent"] = "rdd_handover_agent"
+            patch["sub_category"] = "HANDOVER"
+            if preserved_lease:
+                patch["collected_data"] = preserved_lease
+                patch["selected_lease"] = state.get("selected_lease")
+            patch["response_message"] = (
+                "Understood — I've cleared the already trading request. Starting a fresh "
+                "standard inspection handover. Please provide a description, inspection start "
+                "date, end date, and who will perform the inspection."
+            )
+        else:
+            # Generic restart with no path hint.
+            patch["response_message"] = (
+                "Sure — I've cleared everything. What would you like to do next?"
+            )
+
         return patch
 
     # ── 3. Confirmation response parsing ──────────────────────────────────
@@ -458,12 +547,18 @@ async def handover_entry_node(state: ServiceRequestState) -> dict[str, Any]:
                 "status": "IN_PROGRESS",
             }
 
-        # Ambiguous — re-show the confirmation card on the next response_generation pass.
+        # Ambiguous — re-show the confirmation card without running field extraction.
+        # Setting status=WAITING_FOR_USER routes _route_after_handover_entry to
+        # response_generation, which preserves the existing response_ui (confirmation
+        # card) and adds this clarification message.  NOT routing to field_extraction
+        # prevents misinterpretation of ambiguous text (e.g. "Please schedule before
+        # the public opening" being parsed as a date update and failing validation).
         log.info(
             "handover_entry.confirmation_ambiguous",
             user_message=user_message[:120],
         )
         return {
+            "status": "WAITING_FOR_USER",
             "response_message": (
                 "Please reply with 'yes' to confirm and submit, "
                 "or tell me what you'd like to change."
@@ -482,20 +577,63 @@ async def handover_entry_node(state: ServiceRequestState) -> dict[str, Any]:
         return mm_gate
 
     # ── 5. Clear stale state when starting a new SR after a terminal stage ────
-    # If a previous SR reached SR_CREATED / SR_COMPLETED / CANCELLED, a fresh
-    # CREATE_RDD_SERVICE_REQUEST intent must begin with a clean slate.  The
-    # stale sr_id in backend_refs would otherwise cause sr_status_sync_node to
-    # load the old SR and route directly into FM_REVIEW.
-    if state.get("intent") == "CREATE_RDD_SERVICE_REQUEST":
-        terminal_stages = {"SR_CREATED", "SR_COMPLETED", "CANCELLED"}
+    # If a previous SR reached a terminal stage, a fresh CREATE intent must begin
+    # with a clean slate.  The stale sr_id in backend_refs would otherwise cause
+    # sr_status_sync_node to load the old SR and misroute the new request.
+    #
+    # Partial clear (not _clear_all_state): we keep active_agent and pin
+    # workflow_stage so _route_after_handover_entry continues to field_extraction
+    # in the same turn, processes the user's message, and returns workflow_stage
+    # = CREATE_SR (or CREATE_HANDED_OVER_SR) as the test expects.
+    # Full _clear_all_state sets active_agent=None and status=WAITING_FOR_USER,
+    # which defers the new SR to the NEXT turn via supervisor, causing the current
+    # turn to return workflow_stage='' and break multi-SR session tests.
+    _CREATE_SR_INTENTS: frozenset[str] = frozenset(
+        {"CREATE_RDD_SERVICE_REQUEST", "CREATE_HANDED_OVER_SR"}
+    )
+    if state.get("intent") in _CREATE_SR_INTENTS:
+        terminal_stages = {"SR_CREATED", "SR_COMPLETED", "CANCELLED", "HANDED_OVER_COMPLETED"}
         if state.get("workflow_stage") in terminal_stages:
             log.info(
                 "handover_entry.stale_sr_cleared",
                 workflow_stage=state.get("workflow_stage"),
             )
-            return _clear_all_state()
+            new_stage = (
+                "CREATE_HANDED_OVER_SR"
+                if state.get("intent") == "CREATE_HANDED_OVER_SR"
+                else "CREATE_SR"
+            )
+            return {
+                "workflow_stage": new_stage,
+                "confirmation_status": None,
+                "confirmation_required": False,
+                "collected_data": {},
+                "extracted_fields": {},
+                "missing_fields": [],
+                "validation_errors": [],
+                "selected_lease": None,
+                "lease_matches": [],
+                "backend_refs": {},
+                "documents": [],
+                "response_ui": {},
+                "status": "IN_PROGRESS",
+                "active_field": None,
+            }
 
-    if state.get("active_agent") == "rdd_agent" and not state.get("workflow_stage"):
+    # ── 6. Stage-pin for rdd_handover_agent on first turn ─────────────────────
+    if state.get("active_agent") == "rdd_handover_agent" and not state.get("workflow_stage"):
+        # Primary signal: supervisor set sub_category from intent classification
+        if state.get("sub_category") == "HANDED_OVER":
+            log.info("handover_entry.routing_to_create_handed_over_sr")
+            return {"workflow_stage": "CREATE_HANDED_OVER_SR"}
+        # Secondary signal: mid-session switch via already_handovered field
+        already_handovered = (state.get("collected_data") or {}).get("already_handovered", "")
+        if already_handovered in ("already_trading", "already_handovered"):
+            log.info(
+                "handover_entry.routing_to_create_handed_over_sr_via_field",
+                already_handovered=already_handovered,
+            )
+            return {"workflow_stage": "CREATE_HANDED_OVER_SR"}
         return {"workflow_stage": "CREATE_SR"}
 
     return {}

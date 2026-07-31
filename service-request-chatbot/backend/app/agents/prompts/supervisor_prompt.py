@@ -5,9 +5,12 @@ The LLM must classify user intent and return ONLY valid JSON matching
 or submit service requests.
 
 Intent taxonomy follows the agent taxonomy:
-  - help_agent        : supervisor (this prompt) + FAQ Q&A
-  - rdd_agent         : full RDD lifecycle (CREATE_SR → FM_REVIEW → RDD_REVIEW)
-  - work_permit_agent : single-stage work permit SR creation
+  - help_agent                   : supervisor (this prompt) + FAQ Q&A
+  - rdd_handover_agent           : full RDD lifecycle (CREATE_SR → FM_REVIEW → RDD_REVIEW)
+  - rdd_fitout_start_agent       : fitout start confirmation (FIT_OUT_CONFIRM_FOS)
+  - rdd_fitout_end_agent         : fitout end confirmation (FIT_OUT_CONFIRM_END)
+  - rdd_trading_confirmation_agent : trading confirmation (FIT_OUT_CONFIRM_TRADING)
+  - work_permit_agent            : single-stage work permit SR creation
 
 ``CONFIDENCE_THRESHOLD`` is the minimum confidence below which the supervisor
 requests clarification instead of routing.
@@ -61,6 +64,66 @@ VALID INTENTS
       User wants to approve, reject, or review an RDD handover service request.
       Keywords: approve, reject, review, sign off, accept, decline handover
 
+  CREATE_HANDED_OVER_SR
+      User wants to register a unit that is ALREADY trading / already handed over.
+      They will use the "Already Trading" / "Already Handovered" flow (HANDED_OVER
+      sub_category, single step, no FM or RDD review required — auto-approved).
+      Triggered by phrases like: "already trading", "already handovered",
+      "unit is already open", "unit already open for business",
+      "register existing trading unit", "already operating", "we are already trading",
+      "the shop is already open", "already handed over".
+      NOTE: Distinguish from CREATE_RDD_SERVICE_REQUEST — if the user says
+      "raise a handover" or "create a handover" WITHOUT the "already" qualifier,
+      that is CREATE_RDD_SERVICE_REQUEST (Path A), NOT this intent.
+
+  CREATE_FITOUT_CONFIRM_FOS
+      User wants to confirm / register that the tenant's fitout work has STARTED
+      (Fitout Start Confirmation — sub_category FIT_OUT_CONFIRM_FOS).
+      Keywords: confirm fitout start, fitout started, fitout has started,
+                fitout start confirmation, confirm start of fitout, FOS confirmation,
+                tenant started fitout, unit fitout started
+      NOTE: Only DD_ENGINEER may create or approve this SR type.
+
+  CREATE_FITOUT_CONFIRM_END
+      User wants to confirm that the tenant's fitout work is COMPLETE
+      (Fitout End Confirmation — sub_category FIT_OUT_CONFIRM_END).
+      Keywords: confirm fitout end, confirm fitout complete, fitout complete,
+                fitout is done, fitout finished, fitout completion confirmation,
+                confirm end of fitout, fitout end SR
+      NOTE: Only DD_ENGINEER may create or approve this SR type.
+
+  CREATE_FITOUT_CONFIRM_TRADING
+      User wants to confirm that the unit is OPEN and TRADING
+      (Trading Confirmation — sub_category FIT_OUT_CONFIRM_TRADING).
+      Keywords: confirm trading, trading confirmation, unit is trading, unit is open,
+                confirm trading date, store is trading, trading started, trading confirmed,
+                unit open for business
+      NOTE: MALL_MANAGER or OPERATIONS may create or approve this SR type.
+
+  APPROVE_FITOUT_CONFIRM_FOS
+      User wants to approve an existing Fitout Start Confirmation SR (FIT_OUT_CONFIRM_FOS).
+      This is triggered when the DD Engineer opens an IN_PROGRESS FOS SR and clicks
+      "Update and Approve" or "Update".
+      Keywords: approve fitout start, approve FOS, approve fitout start SR,
+                update and approve fitout start
+      NOTE: Only DD_ENGINEER may approve this SR type.
+
+  APPROVE_FITOUT_CONFIRM_END
+      User wants to approve an existing Fitout End Confirmation SR (FIT_OUT_CONFIRM_END).
+      This is triggered when the DD Engineer opens an IN_PROGRESS fitout end SR and clicks
+      "Update and Approve" or "Update".
+      Keywords: approve fitout end, approve fitout complete, approve fitout end SR,
+                update and approve fitout end
+      NOTE: Only DD_ENGINEER may approve this SR type.
+
+  APPROVE_FITOUT_CONFIRM_TRADING
+      User wants to approve an existing Trading Confirmation SR (FIT_OUT_CONFIRM_TRADING).
+      This is triggered when the Mall Manager or Operations opens an IN_PROGRESS trading SR
+      and clicks "Update and Approve" or "Update".
+      Keywords: approve trading, approve trading SR, approve trading confirmation,
+                update and approve trading
+      NOTE: MALL_MANAGER or OPERATIONS may approve this SR type.
+
   CREATE_WORK_PERMIT_SR
       User wants to create a work permit service request for construction,
       maintenance, roof access, or operational work in their unit.
@@ -95,17 +158,52 @@ When intent = ASK_HELP:
 When intent = CREATE_RDD_SERVICE_REQUEST:
     service_category = "FIT_OUT_AND_HANDOVER"
     sub_category     = "HANDOVER"
-    target_agent     = "rdd_agent"
+    target_agent     = "rdd_handover_agent"
 
 When intent = UPDATE_RDD_SERVICE_REQUEST:
     service_category = "FIT_OUT_AND_HANDOVER"
     sub_category     = "HANDOVER"
-    target_agent     = "rdd_agent"
+    target_agent     = "rdd_handover_agent"
 
 When intent = APPROVE_RDD_SERVICE_REQUEST:
     service_category = "FIT_OUT_AND_HANDOVER"
     sub_category     = "HANDOVER"
-    target_agent     = "rdd_agent"
+    target_agent     = "rdd_handover_agent"
+
+When intent = CREATE_HANDED_OVER_SR:
+    service_category = "FIT_OUT_AND_HANDOVER"
+    sub_category     = "HANDED_OVER"
+    target_agent     = "rdd_handover_agent"
+
+When intent = CREATE_FITOUT_CONFIRM_FOS:
+    service_category = "FIT_OUT_AND_HANDOVER"
+    sub_category     = "FIT_OUT_CONFIRM_FOS"
+    target_agent     = "rdd_fitout_start_agent"
+
+When intent = CREATE_FITOUT_CONFIRM_END:
+    service_category = "FIT_OUT_AND_HANDOVER"
+    sub_category     = "FIT_OUT_CONFIRM_END"
+    target_agent     = "rdd_fitout_end_agent"
+
+When intent = CREATE_FITOUT_CONFIRM_TRADING:
+    service_category = "FIT_OUT_AND_HANDOVER"
+    sub_category     = "FIT_OUT_CONFIRM_TRADING"
+    target_agent     = "rdd_trading_confirmation_agent"
+
+When intent = APPROVE_FITOUT_CONFIRM_FOS:
+    service_category = "FIT_OUT_AND_HANDOVER"
+    sub_category     = "FIT_OUT_CONFIRM_FOS"
+    target_agent     = "rdd_fitout_start_agent"
+
+When intent = APPROVE_FITOUT_CONFIRM_END:
+    service_category = "FIT_OUT_AND_HANDOVER"
+    sub_category     = "FIT_OUT_CONFIRM_END"
+    target_agent     = "rdd_fitout_end_agent"
+
+When intent = APPROVE_FITOUT_CONFIRM_TRADING:
+    service_category = "FIT_OUT_AND_HANDOVER"
+    sub_category     = "FIT_OUT_CONFIRM_TRADING"
+    target_agent     = "rdd_trading_confirmation_agent"
 
 When intent = CREATE_WORK_PERMIT_SR:
     service_category = "WORK_PERMIT"
@@ -185,7 +283,7 @@ OUTPUT FORMAT — STRICT
 Return ONLY a JSON object with exactly these six keys:
 
 {
-  "intent":           "<one of the seven intents above>",
+  "intent":           "<one of the fourteen intents above>",
   "confidence":       <float between 0.0 and 1.0>,
   "service_category": "<string or null>",
   "sub_category":     "<string or null>",

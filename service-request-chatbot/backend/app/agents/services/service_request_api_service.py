@@ -369,18 +369,36 @@ class MockServiceRequestAPIService(AbstractServiceRequestAPIService):
         sr_id = str(uuid.uuid4())
         correlation_id = str(uuid.uuid4())
         self._created.append({"sr_id": sr_id, "payload": payload})
-        # seed GET state
-        self._sr_states[sr_id] = {
-            "service_request_id": sr_id,
-            "status": "SUBMITTED",
-            "service_request_operations": [
+
+        # Seed GET state — fitout confirm SRs use a single-approver workflow;
+        # standard handover SRs use the multi-step FM → DD_ENGINEER workflow.
+        sub_category: str = payload.get("sub_category") or ""
+        _FITOUT_FOS_END = frozenset({"FIT_OUT_CONFIRM_FOS", "FIT_OUT_CONFIRM_END"})
+        _FITOUT_TRADING = frozenset({"FIT_OUT_CONFIRM_TRADING"})
+        if sub_category in _FITOUT_FOS_END:
+            ops = [{"assigned_role": "DD_ENGINEER", "workflow_level": 1, "status": "IN_PROGRESS"}]
+        elif sub_category in _FITOUT_TRADING:
+            ops = [{"assigned_role": "MALL_MANAGER", "workflow_level": 1, "status": "IN_PROGRESS"}]
+        else:
+            ops = [
                 {"assigned_role": "MALL_MANAGER", "workflow_level": 1, "status": "FINISHED"},
                 # Only the selected inspector role is active (matches platform).
                 {"assigned_role": "FM_MANAGER", "workflow_level": 2, "status": "IN_PROGRESS"},
                 {"assigned_role": "DD_ENGINEER", "workflow_level": 3, "status": "YET_TO_START"},
-            ],
+            ]
+
+        # Persist the inner payload and sub_category so that GET /service-requests/{sr_id}
+        # can return them for status-sync and sub_category inference.
+        inner_payload: dict[str, Any] = dict(payload.get("payload") or {})
+        if sub_category:
+            inner_payload["sub_category"] = sub_category
+
+        self._sr_states[sr_id] = {
+            "service_request_id": sr_id,
+            "status": "SUBMITTED",
+            "service_request_operations": ops,
             "workflow_version": 1,
-            "payload": {},
+            "payload": inner_payload,
         }
         return ServiceRequestCreationResult(
             sr_id=sr_id,

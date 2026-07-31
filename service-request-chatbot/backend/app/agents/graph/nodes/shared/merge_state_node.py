@@ -95,6 +95,17 @@ _USER_DATE_FIELDS: frozenset[str] = frozenset({
     "actual_handover_date",
     "fitout_start_date",
     "fitout_end_date",
+    # Path B (HANDED_OVER / Already Trading) date fields
+    "actual_shop_handover_date",
+    "actual_fitout_start_date",
+    "actual_fitout_end_date",
+    "actual_trading_date",
+    # Fitout Confirmation workflow date fields
+    "actual_fitout_complete_date",
+    "planned_fitout_start_date",
+    "planned_fitout_end_date",
+    "planned_fitout_complete_date",
+    "planned_trading_date",
 })
 
 # Time-only fields — stored as HH:MM; must NOT pass through _to_date_only.
@@ -187,6 +198,18 @@ def _remap_extracted_to_active_field(
         return extracted
 
     wrong_key = candidate_keys[0]
+    # Do NOT remap when both keys are distinct "actual_*" date fields.  When the
+    # user explicitly names a specific historical date (e.g. "Corrected trading
+    # date: 2026-07-10") and the bot was asking for a different specific date
+    # (e.g. actual_fitout_end_date), silently remapping would corrupt state and
+    # loop the validation error.  Generic date fields (startDate, endDate) still
+    # remap normally — the user rarely names those explicitly.
+    if (
+        wrong_key.startswith("actual_")
+        and active_field.startswith("actual_")
+        and wrong_key != active_field
+    ):
+        return extracted
     remapped = dict(extracted)
     remapped[active_field] = remapped.pop(wrong_key)
     return remapped
@@ -228,6 +251,17 @@ async def merge_state_node(state: ServiceRequestState) -> dict[str, Any]:
 
     corrections: list[dict[str, Any]] = list(collected.get("_corrections") or [])
 
+    # On the CONFIRMED path (user confirmed the card), corrected_fields contain
+    # intentional user edits that were applied above.  load_session_node does not
+    # clear extracted_fields between turns when workflow_stage is active, so T1's
+    # extracted_fields can still be present in state on T2.  Guard every field
+    # that was already written by corrected_fields so stale extraction values
+    # from a previous turn cannot overwrite the deliberate correction.
+    _confirmed_correction_keys: frozenset[str] = frozenset(
+        k for k, v in corrected.items()
+        if k not in BACKEND_PROTECTED_FIELDS and v is not None
+    ) if state.get("confirmation_status") == "CONFIRMED" and corrected else frozenset()
+
     # Once the lease is resolved (lease_id present) the user-facing lease
     # identifiers are considered authoritative and must not be overwritten.
     lease_resolved = bool(collected.get("lease_id"))
@@ -235,6 +269,11 @@ async def merge_state_node(state: ServiceRequestState) -> dict[str, Any]:
     for field_name, extraction in extracted.items():
         # Never overwrite backend-derived fields from LLM extraction.
         if field_name in BACKEND_PROTECTED_FIELDS:
+            continue
+
+        # On the CONFIRMED path, do not let stale extracted_fields from a prior
+        # turn overwrite fields that were just set by corrected_fields.
+        if field_name in _confirmed_correction_keys:
             continue
 
         # After lease resolution, protect the confirmed identifiers.
@@ -300,41 +339,56 @@ async def merge_state_node(state: ServiceRequestState) -> dict[str, Any]:
     # mandatory on the form, the other optional). Do not mirror values between
     # them — that caused duplicate display of the same text in confirmation.
 
-    # ── Auto-generate title when lease_code + description are now available ──
-    # Title is system-generated in the format:
-    #   handover-{lease_code}-{description_slug}
-    # The bot never asks the user for the title; it is derived automatically
-    # once both source fields are present.
-    #
-    # Use `is not None` (not a falsy check) so that an empty-string description
-    # — written when the user explicitly says "no description" — still triggers
-    # title generation.  A falsy check would leave title unset indefinitely
-    # whenever the user declines to provide a description.
-    if not collected.get("title") and collected.get("lease_code") and collected.get("description") is not None:
-        collected["title"] = _generate_title(
-            str(collected["lease_code"]),
-            str(collected["description"]),
-        )
+    workflow_stage: str = state.get("workflow_stage") or ""
+
+    # For CREATE_SR, auto-set optional text fields to "" when the user has
+    # confirmed (confirmation_status == CONFIRMED) so that the payload builder
+    # never sends a null value to the API and so that _route_after_validation's
+    # optional_never_asked guard (now bypassed for already-confirmed turns) does
+    # not leave None in collected_data.
+    if (
+        workflow_stage == "CREATE_SR"
+        and state.get("confirmation_status") == "CONFIRMED"
+    ):
+        if collected.get("notes") is None:
+            collected["notes"] = ""
+        if collected.get("comments") is None:
+            collected["comments"] = ""
+
+    # ── Auto-generate title ────────────────────────────────────────────────────
+    # Title generation is branched by workflow stage:
+    #   CREATE_HANDED_OVER_SR → "Already Trading - {lease_code}"
+    #   CREATE_SR / others    → "handover-{lease_code}-{description_slug}"
+
+    if workflow_stage == "CREATE_HANDED_OVER_SR":
+        if not collected.get("title") and collected.get("lease_code"):
+            collected["title"] = f"Already Trading - {collected['lease_code']}"
+    else:
+        # Path A: auto-generate title when lease_code + description are available.
+        # Use `is not None` so that an explicit empty-string description still
+        # triggers title generation (user declined description via "no description").
+        if not collected.get("title") and collected.get("lease_code") and collected.get("description") is not None:
+            collected["title"] = _generate_title(
+                str(collected["lease_code"]),
+                str(collected["description"]),
+            )
 
     # ── Auto-compute expected_handover_date from unit_readiness_date ──────────
     # FM_REVIEW: expected_handover_date = unit_readiness_date + 7 days.
-    # Only computed when unit_readiness_date is present and the workflow is
-    # in the FM_REVIEW stage, and expected_handover_date has not already been set.
-    workflow_stage: str = state.get("workflow_stage") or ""
+    # Skipped for CREATE_HANDED_OVER_SR — expected_handover_date is not used
+    # in Path B and must not be auto-computed from stale state.
 
-    # Once either notes or comments has been answered (non-None, even empty-string)
-    # in CREATE_SR, auto-satisfy the sibling by setting it to "" so the bot stops
-    # asking for it.  Empty string is accepted as valid for OPTIONAL_FIELDS; this
-    # prevents an infinite loop of asking for the other optional field when the user
-    # has already addressed one of them.  We set "" (not a copy of the value) to
-    # avoid duplicate text in the confirmation card.
-    if workflow_stage == "CREATE_SR":
-        if collected.get("notes") is not None and collected.get("comments") is None:
+    # For FM_REVIEW, RDD_REVIEW, and CREATE_HANDED_OVER_SR the bot no longer
+    # proactively asks for optional comments before showing the confirmation card
+    # (see _route_after_validation).  Auto-satisfy comments to empty string so
+    # the backend API never receives a null value and rejects the submission.
+    if workflow_stage in ("FM_REVIEW", "RDD_REVIEW", "CREATE_HANDED_OVER_SR"):
+        if collected.get("comments") is None:
             collected["comments"] = ""
-        if collected.get("comments") is not None and collected.get("notes") is None:
-            collected["notes"] = ""
+
     if (
-        workflow_stage == "FM_REVIEW"
+        workflow_stage != "CREATE_HANDED_OVER_SR"
+        and workflow_stage == "FM_REVIEW"
         and collected.get("unit_readiness_date")
         and not collected.get("expected_handover_date")
     ):
@@ -344,14 +398,13 @@ async def merge_state_node(state: ServiceRequestState) -> dict[str, Any]:
 
     # ── Auto-compute trading_date from fitout_end_date ────────────────────────
     # RDD_REVIEW: trading_date = fitout_end_date + 8 days (per product spec).
-    # The user is never asked for this value; it is derived automatically from
-    # fitout_end_date and shown read-only on the confirmation card.
-    #
-    # Recompute every turn (not just when unset): trading_date is fully derived,
-    # so a stale value from an earlier fitout_end_date must be refreshed when the
-    # user corrects the fitout end date. Leaving a stale trading_date caused RDD
-    # date-order validation to fail in a loop.
-    if workflow_stage == "RDD_REVIEW" and collected.get("fitout_end_date"):
+    # Skipped for CREATE_HANDED_OVER_SR — trading_date is a user-supplied actual
+    # date in Path B (actual_trading_date), not an auto-computed field.
+    if (
+        workflow_stage != "CREATE_HANDED_OVER_SR"
+        and workflow_stage == "RDD_REVIEW"
+        and collected.get("fitout_end_date")
+    ):
         recomputed = _add_days(
             str(collected["fitout_end_date"]), _AUTO_COMPUTE_TRADING_DAYS
         )
@@ -359,11 +412,19 @@ async def merge_state_node(state: ServiceRequestState) -> dict[str, Any]:
             collected["trading_date"] = recomputed
 
     # ── Auto-default inspectionTime to current time (CREATE_SR) ─────────────
-    # When the user has not provided an inspection time, seed it with the
-    # current wall-clock time (HH:MM) rather than leaving it blank or using
-    # an arbitrary 9:00 AM sentinel.  Recompute only when absent so that an
-    # explicit user-supplied value is never overwritten.
-    if workflow_stage == "CREATE_SR" and not collected.get("inspectionTime"):
+    # Only applies to Path A (inspection-based handover).
+    # Fitout confirmation agents do not use inspectionTime — skip for them.
+    _FITOUT_AGENTS: frozenset[str] = frozenset({
+        "rdd_fitout_start_agent",
+        "rdd_fitout_end_agent",
+        "rdd_trading_confirmation_agent",
+    })
+    active_agent: str | None = state.get("active_agent")
+    if (
+        workflow_stage == "CREATE_SR"
+        and not collected.get("inspectionTime")
+        and active_agent not in _FITOUT_AGENTS
+    ):
         collected["inspectionTime"] = datetime.datetime.now().strftime("%H:%M")
 
     # Type-first RDD status: Rejected → DISAPPROVED; Other → no status.

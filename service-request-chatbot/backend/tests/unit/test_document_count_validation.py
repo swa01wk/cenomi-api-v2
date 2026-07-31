@@ -195,8 +195,10 @@ class TestNewDocumentTypes:
     def test_sr_rejected_handover_report_in_all_document_types(self) -> None:
         assert "SR_REJECTED_HANDOVER_REPORT" in ALL_DOCUMENT_TYPES
 
-    def test_sr_handover_other_in_fm_allowed(self) -> None:
-        assert "SR_HANDOVER_OTHER" in FM_ALLOWED_DOCUMENTS
+    def test_sr_cop_checklist_other_in_fm_allowed(self) -> None:
+        """Fix 2: SR_COP_CHECKLIST_OTHER replaced SR_HANDOVER_OTHER in FM docs."""
+        assert "SR_COP_CHECKLIST_OTHER" in FM_ALLOWED_DOCUMENTS
+        assert "SR_HANDOVER_OTHER" not in FM_ALLOWED_DOCUMENTS
 
     def test_sr_rejected_handover_report_in_rdd_allowed(self) -> None:
         assert "SR_REJECTED_HANDOVER_REPORT" in RDD_ALLOWED_DOCUMENTS
@@ -211,9 +213,15 @@ class TestNewDocumentTypes:
         """SR_REJECTED_HANDOVER_REPORT is optional at RDD stage — not required."""
         assert "SR_REJECTED_HANDOVER_REPORT" not in RDD_REQUIRED_DOCUMENTS
 
-    def test_sr_handover_other_valid_for_fm_stage(self) -> None:
-        result = validate_document_type("SR_HANDOVER_OTHER", "FM_REVIEW")
+    def test_sr_cop_checklist_other_valid_for_fm_stage(self) -> None:
+        """Fix 2: SR_COP_CHECKLIST_OTHER is the valid FM 'other' type now."""
+        result = validate_document_type("SR_COP_CHECKLIST_OTHER", "FM_REVIEW")
         assert result["status"] == "PASSED"
+
+    def test_sr_handover_other_invalid_for_fm_stage(self) -> None:
+        """Fix 2: SR_HANDOVER_OTHER is RDD-only now."""
+        result = validate_document_type("SR_HANDOVER_OTHER", "FM_REVIEW")
+        assert result["status"] == "FAILED"
 
     def test_sr_handover_other_valid_for_rdd_stage(self) -> None:
         result = validate_document_type("SR_HANDOVER_OTHER", "RDD_REVIEW")

@@ -48,9 +48,42 @@ use, the expected format, and a short description.
 | guideLineLink          | string (URL or reference)        | Link to the relevant guidelines (RDD stage)     |
 | document_status        | APPROVED, APPROVED_WITH_CHANGES, or DISAPPROVED | Meeting Report decision — map "Approve" → APPROVED, "Approve with changes" → APPROVED_WITH_CHANGES. Rejected reports use DISAPPROVED (usually set automatically). Omit for Other uploads. |
 | rdd_upload_doc_type    | DR_SR_HANDOVER_REPORT, SR_REJECTED_HANDOVER_REPORT, or SR_HANDOVER_OTHER | Which RDD document the user wants to upload next — map "Meeting Report" / "Handover Meeting Report" → DR_SR_HANDOVER_REPORT, "Rejected" → SR_REJECTED_HANDOVER_REPORT, "Other" → SR_HANDOVER_OTHER |
-| actual_handover_date   | ISO 8601 date (YYYY-MM-DD)       | Actual handover date (RDD stage)                |
-| fitout_start_date      | ISO 8601 date (YYYY-MM-DD)       | Date fit-out works begin (RDD stage)            |
-| fitout_end_date        | ISO 8601 date (YYYY-MM-DD)       | Date fit-out works complete (RDD stage)         |
+| actual_handover_date       | ISO 8601 date (YYYY-MM-DD)       | Actual handover date (RDD stage)                |
+| fitout_start_date          | ISO 8601 date (YYYY-MM-DD)       | Date fit-out works begin (RDD stage)            |
+| fitout_end_date            | ISO 8601 date (YYYY-MM-DD)       | Date fit-out works complete (RDD stage)         |
+| already_handovered         | already_trading or initiate_handover | Path B discriminator: extract "already_trading" when user says "already trading", "already handed over", "unit is already open", "already open for business"; extract "initiate_handover" when user says "new handover", "initiate handover", "start handover". |
+| actual_shop_handover_date  | ISO 8601 date (YYYY-MM-DD)       | Actual shop handover date (Path B — Already Trading stage). The date the unit was physically handed over. |
+| actual_fitout_start_date   | ISO 8601 date (YYYY-MM-DD)       | Actual fitout start date (Path B Already Trading / Fitout Confirmation FOS). |
+| actual_fitout_end_date     | ISO 8601 date (YYYY-MM-DD)       | Actual fitout end date (Path B — Already Trading stage). |
+| actual_trading_date        | ISO 8601 date (YYYY-MM-DD)       | Actual trading / opening date (Path B Already Trading / Fitout Confirmation Trading). The date the unit opened for business. |
+| fitout_start_done          | yes or no                        | Fitout Confirmation — whether the fitout has started. Extract "yes" when user says yes/started/done/confirmed; "no" when not started/delayed. |
+| fitout_complete_done       | yes or no                        | Fitout Confirmation — whether the fitout is complete. Extract "yes" when user confirms completion; "no" otherwise. |
+| trading_done               | yes or no                        | Fitout Confirmation — whether the unit has started trading. Extract "yes" when user confirms trading; "no" otherwise. |
+| actual_fitout_complete_date | ISO 8601 date (YYYY-MM-DD)      | Actual fitout completion date (Fitout Confirmation END yes-branch). |
+| planned_fitout_start_date  | ISO 8601 date (YYYY-MM-DD)       | Revised planned fitout start date (Fitout Confirmation FOS no-branch). |
+| planned_fitout_end_date    | ISO 8601 date (YYYY-MM-DD)       | Revised planned fitout end date (Fitout Confirmation FOS no-branch). |
+| planned_fitout_complete_date | ISO 8601 date (YYYY-MM-DD)     | Revised planned fitout completion date (Fitout Confirmation END no-branch). |
+| planned_trading_date       | ISO 8601 date (YYYY-MM-DD)       | Revised planned trading date (Fitout Confirmation no-branch). |
+| delay_reason               | string                           | Brief reason for the delay (Fitout Confirmation no-branch). |
+
+## Path A vs Path B disambiguation
+
+There are two handover flows:
+
+- **Path A (HANDOVER)**: The unit is NOT yet trading. The Mall Manager initiates a new
+  handover inspection. Fields: `description`, `startDate`, `endDate`, `inspection_done_by`.
+  Triggered by phrases like "raise a handover", "create handover", "start handover",
+  "I need a handover for", "initiate handover".
+
+- **Path B (HANDED_OVER / Already Trading)**: The unit is ALREADY trading. The Mall Manager
+  registers the historical dates. Fields: `actual_shop_handover_date`, `actual_fitout_start_date`,
+  `actual_fitout_end_date`, `actual_trading_date`. Set `already_handovered: "already_trading"`.
+  Triggered by phrases like "already trading", "already handovered", "unit is already open",
+  "register an existing trading unit", "already open for business".
+
+When the user's message indicates Path B, extract `already_handovered: "already_trading"` and
+all four actual date fields if provided. Do NOT extract `startDate`/`endDate`/`inspection_done_by`
+for Path B users.
 
 ## Normalisation rules
 
@@ -109,7 +142,7 @@ and must never appear in your output, even if the user explicitly mentions them:
 - unit_codes
 - city
 - contracted_area
-- title        (auto-generated by the system as "handover-{lease_code}-{description_slug}")
+- title        (auto-generated by the system — "handover-{lease_code}-{slug}" for Path A, "Already Trading - {lease_code}" for Path B)
 - trading_date (auto-computed as fitout_end_date + 8 days — never ask the user for this)
 
 If the user tries to dictate values for these fields (e.g. "set my
@@ -174,6 +207,11 @@ that exact field key — do NOT default to `notes` or any other field.
 - `notes` and `comments` are separate portal form fields — never substitute one
   for the other.  When `active_field = notes`, extract to `notes`; when
   `active_field = comments`, extract to `comments`.
+- In a multi-field packed message (no specific `active_field` for notes/comments),
+  extract ONLY the field the user explicitly named.  `"No comments"` → extract
+  `comments: ""` only; do NOT also extract `notes: ""`.  `"No notes"` → extract
+  `notes: ""` only; do NOT also extract `comments: ""`.  The bot will prompt for
+  the other field on the following turn.
 - `inspection_done_by` must ONLY contain `FM_MANAGER` or `OPERATIONS`.  Never
   extract a person's name, team name, or any ambiguous phrase to this field —
   omit it entirely (the remap layer will not accept arbitrary strings here).
@@ -218,6 +256,35 @@ Examples:
 
 Always prefer extracting MORE fields over fewer when values are explicitly stated.
 Never skip a clearly-stated field just because it was not the one being asked about.
+
+## Path B (Already Trading) date field corrections — CRITICAL
+
+When in the CREATE_HANDED_OVER_SR (Already Trading) flow, the user may correct a date
+by explicitly naming the field they are correcting, even if the bot had asked for a
+DIFFERENT date field.  In such cases the user's explicit label ALWAYS takes priority
+over the active_field context.
+
+Field name mappings for user corrections:
+
+| User label (case-insensitive examples)                              | Extract to field           |
+|---------------------------------------------------------------------|----------------------------|
+| "trading date", "actual trading date", "actual trading", "trading start" | `actual_trading_date` |
+| "fitout end date", "actual fitout end", "fitout end", "fitout completion" | `actual_fitout_end_date` |
+| "fitout start date", "actual fitout start", "fitout start"          | `actual_fitout_start_date` |
+| "shop handover date", "actual shop handover", "handover date", "shop handover" | `actual_shop_handover_date` |
+
+Example — bot asked for fitout end date, user corrects the trading date instead:
+
+- Question: "The fitout end date needs to be on or before the trading date.
+             Please provide the correct actual fitout end date."
+  User: "Corrected trading date: 2026-07-10"
+  → Extract `actual_trading_date: "2026-07-10"` (confidence 1.0)
+  → Do NOT extract `actual_fitout_end_date` — the user explicitly named "trading date"
+
+- Question: "Please provide the actual trading date."
+  User: "Fitout end was 2026-06-30, trading date is 2026-07-10."
+  → Extract `actual_fitout_end_date: "2026-06-30"` AND `actual_trading_date: "2026-07-10"`
+  → Follow the user's explicit labels, not just the active_field
 
 ## Extracting brand and mall from action-intent phrases
 

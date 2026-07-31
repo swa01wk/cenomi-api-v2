@@ -22,7 +22,7 @@ import logging
 from typing import Any
 
 from app.agents.graph.state import ServiceRequestState
-from app.agents.schemas.handover_schema import get_missing_fields
+from app.agents.schemas.handover_schema import OPTIONAL_FIELDS, get_missing_fields
 from app.agents.services.display_formatters import format_field_display_value
 from app.agents.services.review_decorations_service import (
     build_document_upload_ask_response,
@@ -309,13 +309,17 @@ async def confirmation_node(state: ServiceRequestState) -> dict[str, Any]:
     backend_refs: dict[str, Any] = dict(state.get("backend_refs") or {})
 
     missing = get_missing_fields(workflow_stage, collected_data)
+    # Only block on non-optional missing fields.  Optional fields (notes, comments,
+    # inspectionTime, description) may remain None after being asked once — the user
+    # chose not to provide them.  Mirroring fitout_confirm_confirmation_node behaviour.
+    non_optional_missing = [f for f in missing if f not in OPTIONAL_FIELDS]
 
-    if missing:
+    if non_optional_missing:
         logger.info(
             "confirmation_node: skipped — %d required field(s) still missing for stage=%s: %s",
-            len(missing),
+            len(non_optional_missing),
             workflow_stage,
-            missing,
+            non_optional_missing,
         )
         return {}
 
@@ -361,4 +365,8 @@ async def confirmation_node(state: ServiceRequestState) -> dict[str, Any]:
         "status": "READY_TO_SUBMIT",
         "response_ui": confirmation_card,
         "response_message": None,
+        # Clear missing_fields so response_generation does not generate a
+        # "I still need X" message alongside the confirmation card.
+        "missing_fields": [],
+        "active_field": None,
     }

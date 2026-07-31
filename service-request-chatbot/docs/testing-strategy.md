@@ -298,7 +298,7 @@ async def test_full_create_sr_happy_path(app_client, mock_llm, mock_lease_api, m
     })
     data = resp.json()
     session_id = data["session_id"]
-    assert data["active_agent"] == "rdd_agent"
+    assert data["active_agent"] == "rdd_handover_agent"
 
     # Turn 2: select lease
     resp = await app_client.post("/api/chat/service-request", json={
@@ -391,7 +391,7 @@ SAMPLE_LEASE_DICT = {
 
 **`MINIMAL_SESSION`** — a `ChatSession` model instance in `active_agent=None` state for testing supervisor routing.
 
-**`ACTIVE_SESSION`** — a `ChatSession` model instance with `active_agent="rdd_agent"` for testing handover-entry routing.
+**`ACTIVE_SESSION`** — a `ChatSession` model instance with `active_agent="rdd_handover_agent"` for testing handover-entry routing.
 
 ### pytest markers
 

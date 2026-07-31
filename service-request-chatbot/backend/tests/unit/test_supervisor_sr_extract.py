@@ -16,7 +16,7 @@ def _make_decision(**kwargs) -> SupervisorDecision:
         "confidence": 0.8,
         "service_category": "FIT_OUT_AND_HANDOVER",
         "sub_category": "HANDOVER",
-        "target_agent": "rdd_agent",
+        "target_agent": "rdd_handover_agent",
         "reasoning": "upload",
     }
     defaults.update(kwargs)

@@ -23,7 +23,8 @@ from app.agents.services.review_decorations_service import (
 
 _CHECKLIST_DOC = {"document_id": "d1", "document_type_id": "SR_HANDOVER_CHECKLIST"}
 _SITE_SURVEY_DOC = {"document_id": "d2", "document_type_id": "SR_HANDOVER_SITE_SURVEY"}
-_OTHER_DOC = {"document_id": "d3", "document_type_id": "SR_HANDOVER_OTHER"}
+_COP_CHECKLIST_DOC = {"document_id": "d3", "document_type_id": "SR_COP_CHECKLIST_OTHER"}  # Fix 2
+_OTHER_DOC = {"document_id": "d3-rdd", "document_type_id": "SR_HANDOVER_OTHER"}  # RDD-only after Fix 2
 _RDD_DOC = {"document_id": "d4", "document_type_id": "DR_SR_HANDOVER_REPORT"}
 
 
@@ -86,8 +87,13 @@ class TestIsFmReviewReady:
     def test_true_with_site_survey_and_date(self) -> None:
         assert is_fm_review_ready({"unit_readiness_date": "2026-08-10"}, [_SITE_SURVEY_DOC])
 
-    def test_true_with_other_doc_and_date(self) -> None:
-        assert is_fm_review_ready({"unit_readiness_date": "2026-08-10"}, [_OTHER_DOC])
+    def test_true_with_cop_checklist_doc_and_date(self) -> None:
+        """Fix 2: SR_COP_CHECKLIST_OTHER is the valid FM 'other' type."""
+        assert is_fm_review_ready({"unit_readiness_date": "2026-08-10"}, [_COP_CHECKLIST_DOC])
+
+    def test_false_with_rdd_other_doc_and_date(self) -> None:
+        """Fix 2: SR_HANDOVER_OTHER is RDD-only — must not count for FM readiness."""
+        assert not is_fm_review_ready({"unit_readiness_date": "2026-08-10"}, [_OTHER_DOC])
 
     def test_rdd_doc_alone_not_sufficient_for_fm_ready(self) -> None:
         """DR_SR_HANDOVER_REPORT is an RDD doc; it must not count for FM readiness."""
@@ -210,8 +216,9 @@ class TestBuildDocumentUploadAskResponseDecorations:
         assert keys == {
             "SR_HANDOVER_CHECKLIST",
             "SR_HANDOVER_SITE_SURVEY",
-            "SR_HANDOVER_OTHER",
+            "SR_COP_CHECKLIST_OTHER",  # Fix 2: SR_COP_CHECKLIST_OTHER replaced SR_HANDOVER_OTHER
         }
+        assert "SR_HANDOVER_OTHER" not in keys
         assert "DR_SR_HANDOVER_REPORT" not in keys
 
     def test_rdd_decorations_contain_document_requirement(self) -> None:

@@ -2,10 +2,11 @@
 
 Public functions
 ----------------
-- ``build_create_handover_payload``  — CREATE_SR (Mall Manager POST)
-- ``build_fm_review_payload``        — FM_REVIEW save-progress (PATCH IN_PROCESS)
-- ``build_fm_approve_payload``       — FM_REVIEW approval (PATCH APPROVED)
-- ``build_rdd_report_payload``       — RDD_REVIEW submit report (POST REPORT_SUBMITTED)
+- ``build_create_handover_payload``       — CREATE_SR (Mall Manager POST, Path A)
+- ``build_create_handed_over_payload``    — CREATE_HANDED_OVER_SR (Mall Manager POST, Path B)
+- ``build_fm_review_payload``             — FM_REVIEW save-progress (PATCH IN_PROCESS)
+- ``build_fm_approve_payload``            — FM_REVIEW approval (PATCH APPROVED)
+- ``build_rdd_report_payload``            — RDD_REVIEW submit report (POST REPORT_SUBMITTED)
 
 Design notes
 ------------
@@ -290,6 +291,7 @@ def build_create_handover_payload(
             "inspectionDoneBy": data["inspection_done_by"],
             "lease_brand_mall": data["lease_brand_mall"],
             "inspection_done_by": data["inspection_done_by"],
+            "already_handovered": "initiate_handover",
             "document_status_map": [],
             "unit_readiness_date": "",
             "expected_handover_date": "",
@@ -326,6 +328,128 @@ def build_create_handover_payload(
     return payload
 
 
+# ── Path B — Already Trading (HANDED_OVER) payload builder ───────────────────
+
+
+_REQUIRED_HANDED_OVER_KEYS: frozenset[str] = frozenset(
+    {
+        "mall",
+        "brand",
+        "lease_code",
+        "lease_id",
+        "brand_id",
+        "tenant_profile_id",
+        "property_id",
+        "unit_codes",
+        "contracted_area",
+        "city",
+        "actual_shop_handover_date",
+        "actual_fitout_start_date",
+        "actual_fitout_end_date",
+        "actual_trading_date",
+    }
+)
+
+
+def _validate_handed_over_keys(data: dict[str, Any]) -> None:
+    """Raise ``ValueError`` when any required HANDED_OVER key is absent or empty."""
+    missing: list[str] = [
+        key
+        for key in sorted(_REQUIRED_HANDED_OVER_KEYS)
+        if (lambda v: v is None or v == "" or v == [])(data.get(key))
+    ]
+    if missing:
+        raise ValueError(
+            f"build_create_handed_over_payload: missing required data keys: {missing}"
+        )
+
+
+def build_create_handed_over_payload(
+    data: dict[str, Any],
+    documents: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Build the CREATE_HANDED_OVER_SR submission payload (Path B — Already Trading).
+
+    This is the single-step Mall Manager flow for units that are already trading.
+    The platform auto-approves the SR immediately on creation.
+
+    Parameters
+    ----------
+    data:
+        Validated ``collected_data`` dict.  All keys in
+        ``_REQUIRED_HANDED_OVER_KEYS`` must be present and non-empty.
+    documents:
+        Optional uploaded documents (``SR_HANDED_OVER_OTHER`` type).
+        Their ``document_id`` values are included in ``payload.documents_ids``.
+
+    Returns
+    -------
+    dict
+        Complete payload ready for the Handover Service Request API with
+        ``sub_category: HANDED_OVER``.
+
+    Raises
+    ------
+    ValueError
+        If any required key is absent or empty in *data*.
+    """
+    _validate_handed_over_keys(data)
+
+    doc_ids: list[str] = []
+    for doc in documents or []:
+        doc_id = doc.get("document_id")
+        if doc_id and str(doc_id) not in doc_ids:
+            doc_ids.append(str(doc_id))
+
+    lease_code: str = data["lease_code"]
+    title: str = data.get("title") or f"Already Trading - {lease_code}"
+
+    payload: dict[str, Any] = {
+        "payload": {
+            "mall": data["mall"],
+            "brand": data["brand"],
+            "lease": lease_code,
+            "title": title,
+            "comments": data.get("comments", ""),
+            "attachments": "",
+            "documents_ids": doc_ids,
+            "already_handovered": "already_trading",
+            "document_status_map": [],
+            "actual_shop_handover_date": data["actual_shop_handover_date"],
+            "actual_fitout_start_date": data["actual_fitout_start_date"],
+            "actual_fitout_end_date": data["actual_fitout_end_date"],
+            "actual_trading_date": data["actual_trading_date"],
+            "company_name": str(data["tenant_profile_id"]),
+            "tenant_contact": "",
+            "user_action": None,
+            "unit_codes": data["unit_codes"],
+            "contracted_area": data["contracted_area"],
+            "city": data["city"],
+            "brand_id": data["brand_id"],
+            "tenant_profile_id": data["tenant_profile_id"],
+            "property_id": data["property_id"],
+            "lease_id": data["lease_id"],
+        },
+        "title": title,
+        "tenant_profile_id": data["tenant_profile_id"],
+        "property_id": data["property_id"],
+        "service_category": "FIT_OUT_AND_HANDOVER",
+        "sub_category": "HANDED_OVER",
+        "lease_code": lease_code,
+        "lease_id": data["lease_id"],
+        "service_request_id": "",
+    }
+
+    logger.debug(
+        "build_create_handed_over_payload: built for lease_code=%s tenant_profile_id=%s docs=%d",
+        lease_code,
+        data["tenant_profile_id"],
+        len(doc_ids),
+    )
+
+    return payload
+
+
 # ── FM / RDD payload builders ─────────────────────────────────────────────────
 
 
@@ -349,6 +473,26 @@ def _platform_date(value: Any) -> str:
     if value in (None, ""):
         return ""
     return _to_ddmmyyyy(str(value))
+
+
+def _iso_date(value: Any) -> str:
+    """Normalise a date to YYYY-MM-DD ISO format.
+
+    Used for fields that the platform writes directly to lease records
+    (``unit_readiness_date``, ``expected_handover_date``) where the contract
+    sample uses ISO format rather than the portal's DD/MM/YYYY display format.
+    """
+    if value in (None, ""):
+        return ""
+    s = str(value).strip()
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", s):
+        return s
+    for fmt in ("%d/%m/%Y", "%d-%m-%Y"):
+        try:
+            return datetime.strptime(s, fmt).strftime("%Y-%m-%d")
+        except ValueError:
+            continue
+    return s
 
 
 def _apply_comments(target: dict[str, Any], comments: str) -> None:
@@ -558,8 +702,8 @@ def build_fm_review_payload(
 
     fm_inner: dict[str, Any] = {
         **inner,
-        "unit_readiness_date": _platform_date(unit_ready),
-        "expected_handover_date": _platform_date(expected_ho),
+        "unit_readiness_date": _iso_date(unit_ready),
+        "expected_handover_date": _iso_date(expected_ho),
         "documents_ids": uploaded_docs,
         "document_status_map": document_status_map,
         "ref_no": ref_no or inner.get("ref_no", ""),
@@ -618,9 +762,7 @@ def build_fm_approve_payload(
         "title": base.get("title", ""),
         "tenant_profile_id": base.get("tenant_profile_id"),
         "property_id": base.get("property_id"),
-        "service_category": "FIT_OUT_AND_HANDOVER",
         "sub_category": "HANDOVER",
-        "service_request_id": sr_id,
         "status": "APPROVED",
         "comment": comment_text,
         "user_action": None,
@@ -710,6 +852,12 @@ def build_rdd_report_payload(
     comments = data.get("comments") or inner.get("comments") or inner.get("comment") or ""
     guide = data.get("guideLineLink") or inner.get("guideLineLink") or ""
 
+    sr_operations_val: list[dict[str, Any]] = (
+        backend_refs.get("sr_operations")
+        or inner.get("sr_operations")
+        or []
+    )
+
     rdd_inner: dict[str, Any] = {
         **inner,
         "guideLineLink": guide,
@@ -731,6 +879,8 @@ def build_rdd_report_payload(
         "document_status": data.get("document_status")
         or inner.get("document_status")
         or "APPROVED",
+        "current_sr_status": "IN_PROCESS",
+        "sr_operations": sr_operations_val,
         "sr_id": sr_id,
         "user_action": None,
     }
@@ -806,6 +956,16 @@ def build_rdd_approve_payload(
     ):
         if approved_inner.get(date_key) not in (None, ""):
             approved_inner[date_key] = _platform_date(approved_inner[date_key])
+
+    # Enrich each document_status_map entry with unit_readiness_date and
+    # expected_handover_date so the platform receives complete per-doc records.
+    unit_readiness = approved_inner.get("unit_readiness_date", "")
+    expected_ho = approved_inner.get("expected_handover_date", "")
+    for entry in approved_inner.get("document_status_map") or []:
+        if isinstance(entry, dict):
+            entry.setdefault("unit_readiness_date", unit_readiness)
+            entry.setdefault("expected_handover_date", expected_ho)
+
     _apply_comments(approved_inner, str(comment_text))
 
     payload: dict[str, Any] = {
@@ -813,13 +973,7 @@ def build_rdd_approve_payload(
         "title": inner.get("title", "") or create_payload.get("title", ""),
         "tenant_profile_id": tenant_profile_id,
         "property_id": property_id,
-        "service_category": "FIT_OUT_AND_HANDOVER",
         "sub_category": "HANDOVER",
-        "lease_code": inner.get("lease")
-        or inner.get("lease_code")
-        or create_payload.get("lease_code", ""),
-        "lease_id": create_payload.get("lease_id") or inner.get("lease_id"),
-        "service_request_id": sr_id,
         "status": "APPROVED",
         "comment": comment_text,
     }
@@ -845,6 +999,14 @@ class PayloadBuilderService:
     def build_create_handover_payload(self, data: dict[str, Any]) -> dict[str, Any]:
         """Delegate to the module-level ``build_create_handover_payload``."""
         return build_create_handover_payload(data)
+
+    def build_create_handed_over_payload(
+        self,
+        data: dict[str, Any],
+        documents: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        """Delegate to the module-level ``build_create_handed_over_payload``."""
+        return build_create_handed_over_payload(data, documents)
 
     def build_fm_review_payload(
         self, data: dict[str, Any], backend_refs: dict[str, Any]

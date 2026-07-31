@@ -12,23 +12,27 @@ START
   → fm_review_entry        (FM_REVIEW stage boundary)
   → rdd_review_entry       (RDD_REVIEW stage boundary)
   → work_permit_entry      (CREATE_WORK_PERMIT — HITL confirmation parser)
+  → fitout_confirm_entry   (FIT_OUT_CONFIRM_* — HITL confirmation parser)
   → field_extraction
   → merge_state
   → lease_lookup
   → validation
   → missing_field
-  → confirmation / fm_confirmation / rdd_confirmation / work_permit_confirmation
-  → payload_builder / fm_payload_builder / rdd_payload_builder / work_permit_payload_builder
-  → api_submission / fm_api_submission / rdd_api_submission / work_permit_api_submission
+  → confirmation / fm_confirmation / rdd_confirmation / work_permit_confirmation / fitout_confirm_confirmation
+  → payload_builder / fm_payload_builder / rdd_payload_builder / work_permit_payload_builder / fitout_confirm_payload_builder
+  → api_submission / fm_api_submission / rdd_api_submission / work_permit_api_submission / fitout_confirm_api_submission
   → response_generation
   → save_state
   → END
 
 Agent taxonomy
 --------------
-- help_agent        : this graph — supervisor (intent routing) + faq_node (Q&A)
-- rdd_agent         : handles the full RDD lifecycle (CREATE_SR → FM_REVIEW → RDD_REVIEW)
-- work_permit_agent : single-stage work permit SR creation (CREATE_WORK_PERMIT)
+- help_agent           : this graph — supervisor (intent routing) + faq_node (Q&A)
+- rdd_handover_agent           : handles the full RDD lifecycle (CREATE_SR → FM_REVIEW → RDD_REVIEW)
+- work_permit_agent            : single-stage work permit SR creation (CREATE_WORK_PERMIT)
+- rdd_fitout_start_agent       : fitout start confirmation (FIT_OUT_CONFIRM_FOS)
+- rdd_fitout_end_agent         : fitout end confirmation (FIT_OUT_CONFIRM_END)
+- rdd_trading_confirmation_agent : trading confirmation (FIT_OUT_CONFIRM_TRADING)
 
 RBAC enforcement
 ----------------
@@ -70,6 +74,12 @@ from app.agents.graph.nodes.work_permit.work_permit_api_submission_node import w
 # ── Document upload node (partitions state["documents"] into FM/RDD buckets) ──
 from app.agents.graph.nodes.document_upload_node import document_upload_node
 
+# ── Fitout Confirm agent nodes (FIT_OUT_CONFIRM_FOS / END / TRADING) ──────────
+from app.agents.graph.nodes.fitout_confirm.fitout_confirm_entry_node import fitout_confirm_entry_node
+from app.agents.graph.nodes.fitout_confirm.fitout_confirm_confirmation_node import fitout_confirm_confirmation_node
+from app.agents.graph.nodes.fitout_confirm.fitout_confirm_payload_builder_node import fitout_confirm_payload_builder_node
+from app.agents.graph.nodes.fitout_confirm.fitout_confirm_api_submission_node import fitout_confirm_api_submission_node
+
 # ── RDD agent nodes (CREATE_SR / FM_REVIEW / RDD_REVIEW workflow phases) ──────
 from app.agents.graph.nodes.handover.handover_entry_node import handover_entry_node
 from app.agents.graph.nodes.handover.fm_review_entry_node import fm_review_entry_node
@@ -94,8 +104,11 @@ from app.agents.graph.state import ServiceRequestGraphState
 # ---------------------------------------------------------------------------
 
 _AGENT_ENTRY_NODES: dict[str, str] = {
-    "rdd_agent": "handover_entry",
+    "rdd_handover_agent": "handover_entry",
     "work_permit_agent": "work_permit_entry",
+    "rdd_fitout_start_agent": "fitout_confirm_entry",
+    "rdd_fitout_end_agent": "fitout_confirm_entry",
+    "rdd_trading_confirmation_agent": "fitout_confirm_entry",
 }
 
 # Intents that route to the FAQ node (Q&A path — no SR workflow activation)
@@ -113,6 +126,9 @@ _CREATE_NEW_SR_INTENTS: frozenset[str] = frozenset(
     {
         "CREATE_RDD_SERVICE_REQUEST",
         "CREATE_WORK_PERMIT_SR",
+        "CREATE_FITOUT_CONFIRM_FOS",
+        "CREATE_FITOUT_CONFIRM_END",
+        "CREATE_FITOUT_CONFIRM_TRADING",
     }
 )
 
@@ -167,6 +183,17 @@ def _route_after_load(state: dict[str, Any]) -> str:
         return _AGENT_ENTRY_NODES.get(agent, "handover_entry")
 
     if sr_id:
+        # When the current stage is already terminal the tenant's SR lifecycle is
+        # complete.  Running sr_status_sync would advance the stage (e.g. mock
+        # backend auto-approves SR_CREATED → APPROVE_SR) before the supervisor has
+        # a chance to classify the new user intent.  Skip straight to supervisor so
+        # a fresh CREATE_SR intent starts with a clean slate.
+        workflow_stage = state.get("workflow_stage") or ""
+        all_terminal: frozenset[str] = frozenset(
+            s for c in WORKFLOW_CONFIG_REGISTRY.values() for s in c.terminal_stages
+        )
+        if workflow_stage in all_terminal:
+            return "supervisor"
         return "sr_status_sync"
 
     agent = state.get("active_agent")
@@ -271,10 +298,10 @@ def _route_after_registry(state: dict[str, Any]) -> str:
 def _route_after_merge(state: dict[str, Any]) -> str:
     if state.get("selected_lease"):
         return "lease_lookup"
-    # FM_REVIEW and RDD_REVIEW: lease was resolved during CREATE_SR.
+    # FM_REVIEW, RDD_REVIEW, and APPROVE_SR: lease was resolved during CREATE_SR.
     # Skip re-lookup; an sr_id in backend_refs confirms the SR exists.
     workflow_stage = state.get("workflow_stage") or ""
-    if workflow_stage in ("FM_REVIEW", "RDD_REVIEW"):
+    if workflow_stage in ("FM_REVIEW", "RDD_REVIEW", "APPROVE_SR"):
         return "validation"
     collected = state.get("collected_data") or {}
     if not collected.get("lease_id"):
@@ -294,7 +321,14 @@ def _route_after_validation(state: dict[str, Any]) -> str:
     Adding a new workflow with new collection stages and confirmation nodes
     requires only a registry entry plus a get_missing_fields dispatch below.
     """
-    from app.agents.schemas.handover_schema import OPTIONAL_FIELDS
+    active_agent_for_optional = state.get("active_agent") or ""
+    _FITOUT_AGENTS: frozenset[str] = frozenset(
+        {"rdd_fitout_start_agent", "rdd_fitout_end_agent", "rdd_trading_confirmation_agent"}
+    )
+    if active_agent_for_optional in _FITOUT_AGENTS:
+        from app.agents.schemas.fitout_confirm_schema import OPTIONAL_FIELDS
+    else:
+        from app.agents.schemas.handover_schema import OPTIONAL_FIELDS
 
     already_confirmed = state.get("confirmation_status") == "CONFIRMED"
 
@@ -302,12 +336,13 @@ def _route_after_validation(state: dict[str, Any]) -> str:
     # or confirm_rdd_submit), "required" type blocking errors for OPTIONAL fields
     # (e.g. comments=None) must not block the flow.  Non-optional and non-required
     # blocking errors (date_range, enum, document_count, …) still block as normal.
+    # Optional required fields never block — the user may leave them blank and they
+    # will appear on the confirmation card for optional editing.
     blocking = [
         e for e in (state.get("validation_errors") or [])
         if e.get("blocking", True)
         and not (
-            already_confirmed
-            and e.get("validation_type") == "required"
+            e.get("validation_type") == "required"
             and e.get("field") in OPTIONAL_FIELDS
         )
     ]
@@ -339,30 +374,55 @@ def _route_after_validation(state: dict[str, Any]) -> str:
     if active_agent == "work_permit_agent":
         from app.agents.schemas.work_permit_schema import get_missing_fields as wp_missing
         still_missing = wp_missing(original_stage, collected)
+    elif active_agent in _FITOUT_AGENTS:
+        from app.agents.schemas.fitout_confirm_schema import get_missing_fields as fc_missing
+        sub_cat = state.get("sub_category") or ""
+        still_missing = fc_missing(original_stage, sub_cat, collected)
     else:
         from app.agents.schemas.handover_schema import get_missing_fields as rdd_missing
         still_missing = rdd_missing(original_stage, collected)
 
     if still_missing:
-        # When the user has already explicitly confirmed (e.g. via confirm_fm_approve
-        # or confirm_rdd_submit), only non-optional fields should block submission.
-        # Optional fields that are still None at confirmation time are acceptable —
-        # bypassing them here allows the confirmation node (and payload builder) to
-        # proceed rather than asking for an optional field the user chose not to provide.
-        if already_confirmed:
-            non_optional_missing = [f for f in still_missing if f not in OPTIONAL_FIELDS]
-            if not non_optional_missing:
-                # Only optional fields remain missing — fall through to confirmation.
-                pass
-            else:
-                return "missing_field"
-        else:
+        # Non-optional missing fields always route to missing_field first.
+        non_optional_missing = [f for f in still_missing if f not in OPTIONAL_FIELDS]
+        if non_optional_missing:
             return "missing_field"
+
+        # CREATE_SR (handover agents only): proactively ask for optional fields
+        # (notes, comments, etc.) once before the confirmation card.
+        # Tier 1/2 test scripts supply these turn-by-turn, so we must ask.
+        # Fitout agents (FOS/END/TRADING) must NOT proactively ask for optional
+        # comments — their packed smoke tests expect the confirmation card directly.
+        # All other stages (CREATE_HANDED_OVER_SR, FM_REVIEW, RDD_REVIEW): skip
+        # proactive optional asking and route directly to the confirmation card.
+        #
+        # Guard: skip this proactive ask when the user has already confirmed
+        # (already_confirmed=True).  On the confirmed path the optional fields
+        # that were never supplied will be auto-set to "" by merge_state_node,
+        # so routing back to missing_field would ask for comments AFTER the user
+        # already clicked Confirm — which is incorrect.
+        if original_stage == "CREATE_SR" and active_agent not in _FITOUT_AGENTS and not already_confirmed:
+            optional_never_asked = [
+                f for f in still_missing
+                if f in OPTIONAL_FIELDS and collected.get(f) is None
+            ]
+            if optional_never_asked:
+                return "missing_field"
 
     return confirmation_nodes.get(original_stage, "confirmation")
 
 
 def _route_after_handover_entry(state: dict[str, Any]) -> str:
+    # Check confirmation_status BEFORE stale WAITING_FOR_USER so that a confirm
+    # action set this turn is never shadowed by a persisted WAITING_FOR_USER value
+    # from the previous save_state.  Mirrors the same guard in _route_after_fm_entry.
+    if state.get("confirmation_status") == "CONFIRMED":
+        return "merge_state"
+    # When REJECTED (e.g. after cancel+edit), always route through field_extraction
+    # to process the correction, bypassing a stale WAITING_FOR_USER saved from the
+    # prior turn's "what would you like to change?" message.
+    if state.get("confirmation_status") == "REJECTED":
+        return "field_extraction"
     # Optional MM upload offer/wait and other WAITING short-circuits.
     if state.get("status") == "WAITING_FOR_USER":
         return "response_generation"
@@ -434,6 +494,22 @@ def _route_after_work_permit_confirmation(state: dict[str, Any]) -> str:
     return "response_generation"
 
 
+def _route_after_fitout_confirm_entry(state: dict[str, Any]) -> str:
+    if state.get("status") == "WAITING_FOR_USER":
+        return "response_generation"
+    if state.get("action_override") == "cancel":
+        return "merge_state"
+    if state.get("confirmation_status") == "CONFIRMED":
+        return "merge_state"
+    return "field_extraction"
+
+
+def _route_after_fitout_confirm_confirmation(state: dict[str, Any]) -> str:
+    if state.get("confirmation_status") == "CONFIRMED":
+        return "fitout_confirm_payload_builder"
+    return "response_generation"
+
+
 # ---------------------------------------------------------------------------
 # Graph builder
 # ---------------------------------------------------------------------------
@@ -442,10 +518,11 @@ def _route_after_work_permit_confirmation(state: dict[str, Any]) -> str:
 def build_help_agent_graph():
     """Build and compile the full Help Agent LangGraph.
 
-    The Help Agent owns three concerns:
+    The Help Agent owns four concerns:
     - FAQ / Q&A path (``faq_node``) for ASK_HELP / UNKNOWN intents
-    - RDD lifecycle routing (``rdd_agent``) for handover SR action intents
+    - RDD handover lifecycle routing (``rdd_handover_agent``) for handover SR action intents
     - Work Permit routing (``work_permit_agent``) for work permit SR creation
+    - Fitout confirmation routing (``rdd_fitout_start/end_agent``, ``rdd_trading_confirmation_agent``)
     """
     graph = StateGraph(ServiceRequestGraphState)
 
@@ -479,6 +556,11 @@ def build_help_agent_graph():
     graph.add_node("work_permit_confirmation", work_permit_confirmation_node)
     graph.add_node("work_permit_payload_builder", work_permit_payload_builder_node)
     graph.add_node("work_permit_api_submission", work_permit_api_submission_node)
+    # ── Fitout Confirm agent nodes ────────────────────────────────────────────
+    graph.add_node("fitout_confirm_entry", fitout_confirm_entry_node)
+    graph.add_node("fitout_confirm_confirmation", fitout_confirm_confirmation_node)
+    graph.add_node("fitout_confirm_payload_builder", fitout_confirm_payload_builder_node)
+    graph.add_node("fitout_confirm_api_submission", fitout_confirm_api_submission_node)
     graph.add_node("response_generation", response_generation_node)
     graph.add_node("save_state", save_state_node)
 
@@ -498,6 +580,7 @@ def build_help_agent_graph():
             "supervisor": "supervisor",
             "handover_entry": "handover_entry",
             "work_permit_entry": "work_permit_entry",
+            "fitout_confirm_entry": "fitout_confirm_entry",
         },
     )
     graph.add_conditional_edges(
@@ -507,6 +590,7 @@ def build_help_agent_graph():
             "handover_entry": "handover_entry",
             "fm_review_entry": "fm_review_entry",
             "rdd_review_entry": "rdd_review_entry",
+            "fitout_confirm_entry": "fitout_confirm_entry",
             "preview": "preview",
             "supervisor": "supervisor",
             # Sync GET failure sets sync_error and returns response_generation
@@ -537,6 +621,7 @@ def build_help_agent_graph():
         {
             "handover_entry": "handover_entry",
             "work_permit_entry": "work_permit_entry",
+            "fitout_confirm_entry": "fitout_confirm_entry",
             "response_generation": "response_generation",
         },
     )
@@ -594,6 +679,17 @@ def build_help_agent_graph():
         },
     )
 
+    # ── Fitout Confirm entry ──────────────────────────────────────────────────
+    graph.add_conditional_edges(
+        "fitout_confirm_entry",
+        _route_after_fitout_confirm_entry,
+        {
+            "field_extraction": "field_extraction",
+            "merge_state": "merge_state",
+            "response_generation": "response_generation",
+        },
+    )
+
     # ── Validation → confirmation ─────────────────────────────────────────────
     graph.add_conditional_edges(
         "validation",
@@ -604,6 +700,7 @@ def build_help_agent_graph():
             "fm_confirmation": "fm_confirmation",
             "rdd_confirmation": "rdd_confirmation",
             "work_permit_confirmation": "work_permit_confirmation",
+            "fitout_confirm_confirmation": "fitout_confirm_confirmation",
             "response_generation": "response_generation",
         },
     )
@@ -636,6 +733,14 @@ def build_help_agent_graph():
             "response_generation": "response_generation",
         },
     )
+    graph.add_conditional_edges(
+        "fitout_confirm_confirmation",
+        _route_after_fitout_confirm_confirmation,
+        {
+            "fitout_confirm_payload_builder": "fitout_confirm_payload_builder",
+            "response_generation": "response_generation",
+        },
+    )
 
     # ── Submission pipelines ──────────────────────────────────────────────────
     graph.add_edge("payload_builder", "api_submission")
@@ -646,6 +751,8 @@ def build_help_agent_graph():
     graph.add_edge("rdd_api_submission", "response_generation")
     graph.add_edge("work_permit_payload_builder", "work_permit_api_submission")
     graph.add_edge("work_permit_api_submission", "response_generation")
+    graph.add_edge("fitout_confirm_payload_builder", "fitout_confirm_api_submission")
+    graph.add_edge("fitout_confirm_api_submission", "response_generation")
 
     # ── Turn finalisation — always runs ───────────────────────────────────────
     graph.add_edge("response_generation", "save_state")

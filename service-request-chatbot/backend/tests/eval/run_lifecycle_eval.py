@@ -54,19 +54,65 @@ import httpx
 from tests.eval.lifecycle_scenarios import (
     LIFECYCLE_SCENARIOS,
     TIER0_LIFECYCLE_SCENARIOS,
+    TIER0P_SCENARIOS,
+    TIER3_LIFECYCLE_SCENARIOS,
+    TIER3A_FM_HAPPY,
+    TIER3B_FM_EDGE,
+    TIER3C_FM_BATTLE,
+    TIER3D_RDD_HAPPY,
+    TIER3E_RDD_EDGE,
+    TIER3F_RDD_BATTLE,
+    TIER3G_LIFECYCLE_HAPPY,
+    TIER3H_LIFECYCLE_EDGE,
+    TIER3I_LIFECYCLE_BATTLE,
     TIER4_SCENARIOS,
     TIER5_SCENARIOS,
-    TIER6_SCENARIOS,
+    TIER6_LIFECYCLE_SCENARIOS,
+    TIER6A_FOS_HAPPY_LC,
+    TIER6B_FOS_EDGE_LC,
+    TIER6C_FOS_BATTLE_LC,
+    TIER6D_FOS_LIFECYCLE,
+    TIER6E_END_HAPPY_LC,
+    TIER6F_END_EDGE_LC,
+    TIER6G_END_LIFECYCLE,
+    TIER6H_TRADING_HAPPY_LC,
+    TIER6I_TRADING_EDGE_LC,
+    TIER6J_TRADING_BATTLE_LC,
+    TIER7_LIFECYCLE_SCENARIOS,
     LifecycleScenario,
     PhaseConfig,
 )
 from tests.eval.scenarios import Turn
 
-_TIER_MAP: dict[int, list[LifecycleScenario]] = {
-    0: TIER0_LIFECYCLE_SCENARIOS,
-    4: TIER4_SCENARIOS,
-    5: TIER5_SCENARIOS,
-    6: TIER6_SCENARIOS,
+_TIER_MAP: dict[int | str, list[LifecycleScenario]] = {
+    0:     TIER0_LIFECYCLE_SCENARIOS,
+    "0p":  TIER0P_SCENARIOS,
+    3:     TIER3_LIFECYCLE_SCENARIOS,
+    # Handover A individual-stage sub-tiers
+    "3a":  TIER3A_FM_HAPPY,
+    "3b":  TIER3B_FM_EDGE,
+    "3c":  TIER3C_FM_BATTLE,
+    "3d":  TIER3D_RDD_HAPPY,
+    "3e":  TIER3E_RDD_EDGE,
+    "3f":  TIER3F_RDD_BATTLE,
+    "3g":  TIER3G_LIFECYCLE_HAPPY,
+    "3h":  TIER3H_LIFECYCLE_EDGE,
+    "3i":  TIER3I_LIFECYCLE_BATTLE,
+    4:     TIER4_SCENARIOS,
+    5:     TIER5_SCENARIOS,
+    6:     TIER6_LIFECYCLE_SCENARIOS,
+    # Fitout per-agent sub-tiers
+    "6a":  TIER6A_FOS_HAPPY_LC,
+    "6b":  TIER6B_FOS_EDGE_LC,
+    "6c":  TIER6C_FOS_BATTLE_LC,
+    "6d":  TIER6D_FOS_LIFECYCLE,
+    "6e":  TIER6E_END_HAPPY_LC,
+    "6f":  TIER6F_END_EDGE_LC,
+    "6g":  TIER6G_END_LIFECYCLE,
+    "6h":  TIER6H_TRADING_HAPPY_LC,
+    "6i":  TIER6I_TRADING_EDGE_LC,
+    "6j":  TIER6J_TRADING_BATTLE_LC,
+    7:     TIER7_LIFECYCLE_SCENARIOS,
 }
 
 # ─── ANSI colours ─────────────────────────────────────────────────────────────
@@ -650,7 +696,7 @@ async def _main(
     tags: Optional[list[str]],
     verbose: bool,
     json_out: Optional[Path],
-    tier: Optional[int] = None,
+    tier: Optional[int | str] = None,
     sr_id_override: Optional[str] = None,
     phase_filter: Optional[str] = None,
 ) -> int:
@@ -664,7 +710,8 @@ async def _main(
     # Select scenario pool
     if tier is not None:
         if tier not in _TIER_MAP:
-            print(yellow(f"Unknown lifecycle tier {tier}. Valid: 0, 4, 5, 6"))
+            valid = ", ".join(repr(k) for k in _TIER_MAP)
+            print(yellow(f"Unknown lifecycle tier {tier!r}. Valid: {valid}"))
             return 1
         scenarios = [s for s in _TIER_MAP[tier] if s.enabled]
         print(bold(f"Lifecycle tier {tier}: {len(scenarios)} scenario(s)"))
@@ -767,11 +814,13 @@ def main() -> None:
     parser.add_argument("--verbose", "-v", action="store_true")
     parser.add_argument("--json", dest="json_out", default=None, type=Path, metavar="FILE")
     parser.add_argument(
-        "--tier", dest="tier", default=None, type=int,
-        choices=[0, 4, 5, 6], metavar="N",
+        "--tier", dest="tier", default=None,
+        metavar="N",
         help=(
             "Run only lifecycle tier N: "
-            "0=smoke FM, 4=FM_REVIEW, 5=RDD_REVIEW, 6=full lifecycle+battle. "
+            "0=smoke FM, 0p=pipeline smoke, 3=Handover A full lifecycle, "
+            "4=Handover B happy, 5=Handover B edge+battle, "
+            "6=Fitout happy, 7=Fitout edge+battle. "
             "Overrides --scenarios."
         ),
     )
@@ -803,9 +852,23 @@ def main() -> None:
     if args.tags:
         tags = [t.strip() for t in args.tags.split(",")]
 
+    # Parse tier — accept any key in _TIER_MAP (integers or strings like "0p", "3a"…"3i")
+    parsed_tier: Optional[int | str] = None
+    if args.tier is not None:
+        raw = args.tier.strip()
+        # Try integer first, then check known string keys
+        try:
+            candidate: int | str = int(raw)
+        except ValueError:
+            candidate = raw
+        if candidate not in _TIER_MAP:
+            valid = ", ".join(repr(k) for k in _TIER_MAP)
+            parser.error(f"--tier {raw!r} not recognised. Valid tiers: {valid}")
+        parsed_tier = candidate
+
     sys.exit(asyncio.run(_main(
         args.base_url, ids, tags, args.verbose, args.json_out,
-        tier=args.tier,
+        tier=parsed_tier,
         sr_id_override=args.sr_id,
         phase_filter=args.phase,
     )))
