@@ -185,6 +185,8 @@ alembic history --verbose
 | `001` | `alembic/versions/001_initial_schema.py` | `chat_sessions`, `chat_messages`, `service_request_drafts`, `service_request_chat_audit_logs`, legacy observability stubs |
 | `002` | `alembic/versions/002_agent_observability.py` | `agent_traces`, `agent_runs`, `agent_state_snapshots`, `agent_state_diffs`, `agent_llm_calls`, `agent_tool_calls`, `agent_feedback` |
 | `003` | `alembic/versions/003_users.py` | `users` table — `username`, `email`, `password_hash`, `role`, `unique_property_ids`, `mall_names`, `is_global_admin`, `is_active` |
+| `004` | `alembic/versions/004_rename_rdd_agent.py` | Data migration — renames `handover_service_request_agent` → `rdd_handover_agent` in `chat_sessions` and `agent_traces` |
+| `005` | `alembic/versions/005_rename_agents.py` | Data migration — renames `rdd_agent` → `rdd_handover_agent`; splits `fitout_confirm_agent` into three agents by `sub_category` |
 
 **Create a new migration** (after changing `app/db/models.py`):
 
@@ -238,18 +240,32 @@ source .venv/bin/activate
 
 # Make sure the backend is running on port 8000 first
 
-# Run all 12 manual test blocks (authenticates as aisha@cenomi.com)
-PYTHONPATH=$(pwd) python tests/eval/test_manual_blocks.py --verbose
+# Preferred: use the shell wrapper (handles tier selection + observability export)
+cd ..   # go to service-request-chatbot/ root
+./run_agent_eval.sh --no-start --tier 0          # smoke gate (~60 s)
+./run_agent_eval.sh --no-start --tier 1          # core CREATE_SR (~5 min)
+./run_agent_eval.sh --no-start --tier 1,2,3      # full CREATE_SR suite (~25 min)
+./run_agent_eval.sh --no-start --tier 4,5,6      # FM + RDD lifecycle (~47 min)
+./run_agent_eval.sh --no-start --tier 8          # fitout confirm scenarios (~15 min)
+./run_agent_eval.sh --no-start --tier all        # everything (~90 min)
 
-# Run 33 automated scenarios
-PYTHONPATH=$(pwd) python tests/eval/run_eval.py --verbose
+# Or run individual runners directly from backend/:
+cd backend
+# Handover scenarios (tiers 0–3)
+PYTHONPATH=$(pwd) python -m tests.eval.run_eval --tier 1 --verbose
+
+# Lifecycle scenarios (tiers 4–6)
+PYTHONPATH=$(pwd) python -m tests.eval.run_lifecycle_eval --tier 4
+
+# Fitout confirm scenarios (tier 8 / S70–S83)
+PYTHONPATH=$(pwd) python -m tests.eval.run_eval --scenarios 70,71,72,73,74,75,76,77,78,79,80,81,82,83 --verbose
 
 # Score a specific session from the observability replay
 PYTHONPATH=$(pwd) python tests/eval/eval_session.py --session-id <uuid>
 
 # Compile all results into a markdown report
 PYTHONPATH=$(pwd) python tests/eval/report_writer.py
-# → results/manual-test-eval-report-YYYY-MM-DD.md
+# → results/eval_YYYYMMDD_HHMMSS/REPORT.md
 ```
 
 > **Note:** Use `PYTHONPATH=$(pwd)` when running scripts from `backend/` — the `tests` package import requires the backend root to be on the path.

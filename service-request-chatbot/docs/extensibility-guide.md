@@ -26,7 +26,7 @@ This document captures the extensibility analysis of the current architecture fo
 
 ### 1. Agent Registry
 
-**File:** `app/agents/registries/service_request_registry.py`
+**File:** `app/agents/registry.py`
 
 The registry maps `(service_category, sub_category)` pairs to an `AgentConfig`. Adding a new agent is a single dict entry:
 
@@ -35,15 +35,32 @@ SERVICE_REQUEST_AGENT_REGISTRY = {
     "FIT_OUT_AND_HANDOVER": {
         "HANDOVER": {
             "agent_name": "rdd_handover_agent",
-            "display_name": "RDD Agent",
+            "display_name": "RDD Handover Agent",
             "schema_key": "handover_service_request_schema",
         },
-        # Add new entries here, e.g.:
-        # "FM_REVIEW": {
-        #     "agent_name": "fm_review_agent",
-        #     "display_name": "FM Review Agent",
-        #     "schema_key": "fm_review_schema",
-        # },
+        "FIT_OUT_CONFIRM_FOS": {
+            "agent_name": "rdd_fitout_start_agent",
+            "display_name": "RDD Fitout Start Agent",
+            "schema_key": "fitout_confirm_schema",
+        },
+        "FIT_OUT_CONFIRM_END": {
+            "agent_name": "rdd_fitout_end_agent",
+            "display_name": "RDD Fitout End Agent",
+            "schema_key": "fitout_confirm_schema",
+        },
+        "FIT_OUT_CONFIRM_TRADING": {
+            "agent_name": "rdd_trading_confirmation_agent",
+            "display_name": "RDD Trading Confirmation Agent",
+            "schema_key": "fitout_confirm_schema",
+        },
+        # Add new entries here for additional sub-categories
+    },
+    "WORK_PERMIT": {
+        "WORK_PERMIT": {
+            "agent_name": "work_permit_agent",
+            "display_name": "Work Permit Agent",
+            "schema_key": "work_permit_service_request_schema",
+        },
     },
 }
 ```
@@ -99,13 +116,17 @@ intent: Literal[
 
 ### 2. Graph Routing — `_AGENT_ENTRY_NODES` dispatch table ✅ Already implemented
 
-**File:** `app/agents/graph/service_request_graph.py`
+**File:** `app/agents/graph/help_agent_graph.py`
 
 The dispatch dict exists in the codebase:
 
 ```python
 _AGENT_ENTRY_NODES: dict[str, str] = {
-    "rdd_handover_agent": "handover_entry",
+    "rdd_handover_agent":             "handover_entry",
+    "work_permit_agent":              "work_permit_entry",
+    "rdd_fitout_start_agent":         "fitout_confirm_entry",
+    "rdd_fitout_end_agent":           "fitout_confirm_entry",
+    "rdd_trading_confirmation_agent": "fitout_confirm_entry",
     # FM/RDD are stage-routed by workflow_stage after sr_status_sync
 }
 ```
@@ -206,7 +227,7 @@ Deviating from this boundary — for example, letting the LLM make routing decis
 
 | File | Change |
 |---|---|
-| `app/agents/registries/service_request_registry.py` | Add registry entry |
+| `app/agents/registry.py` | Add registry entry |
 | `app/agents/schemas/supervisor_schema.py` | Add intent to `Literal` |
 | `app/agents/prompts/supervisor_prompt.py` | Document new intent for LLM |
 | `app/agents/schemas/{new_agent}_schema.py` | **New file** — StageDefinition, ExtractedFields |
@@ -214,6 +235,6 @@ Deviating from this boundary — for example, letting the LLM make routing decis
 | `app/agents/graph/nodes/{new_agent}_entry_node.py` | **New file** — entry / confirmation node |
 | `app/agents/services/payload_builder_service.py` | Add new payload builder function |
 | `app/agents/services/validation_service.py` | Add domain-specific validation rules |
-| `app/agents/graph/service_request_graph.py` | Add nodes, edges, routing dispatch |
+| `app/agents/graph/help_agent_graph.py` | Add nodes, edges, routing dispatch |
 
 Files that do **not** need changes: `state.py`, all observability/trace files, `ChatOrchestrationService`, `ConversationStateService`, `injection_guard`, all DB repositories, all frontend observability components.

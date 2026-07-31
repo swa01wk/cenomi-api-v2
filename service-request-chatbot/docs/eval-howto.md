@@ -16,7 +16,8 @@ No Docker orchestration needed for the two-terminal dev workflow.
 | **4** | `run_lifecycle_eval.py` | L134–L139 | FM\_REVIEW — date, save, approve, RBAC | ~10 min |
 | **5** | `run_lifecycle_eval.py` | L140–L145 | RDD\_REVIEW — field order, dates, RBAC | ~12 min |
 | **6** | `run_lifecycle_eval.py` | L146–L172 | Full lifecycle + state/payload battle | ~25 min |
-| **all** | both runners | all tiers | Equivalent to running 0→6 in sequence | ~75 min |
+| **8** | `run_eval.py` | S70–S83 | Fitout Confirm — FOS, END, TRADING (create + approve, yes/no branch) | ~15 min |
+| **all** | both runners | all tiers | Equivalent to running 0→6 + 8 in sequence | ~90 min |
 
 ---
 
@@ -70,7 +71,10 @@ cd "/Users/swa/Desktop/cenomi 3/cenomi-api-v2/service-request-chatbot"
 # --- Full lifecycle (~47 min) ---
 ./run_agent_eval.sh --no-start --tier 4,5,6
 
-# --- Everything (~75 min) ---
+# --- Fitout confirm only (~15 min) ---
+./run_agent_eval.sh --no-start --tier 8
+
+# --- Everything (~90 min) ---
 ./run_agent_eval.sh --no-start --tier all
 
 # --- Verbose turn-by-turn output ---
@@ -134,6 +138,7 @@ python -m tests.eval.run_lifecycle_eval --scenarios 134 --verbose
 | S16–S33 | `run_eval.py` | Correction & API edge cases (Tier 2) |
 | S34–S59 | `run_eval.py` | Agent fix battle tests (Tier 3) |
 | S60–S62 | `run_eval.py` | Additional coverage (Tier 2) |
+| S70–S83 | `run_eval.py` | Fitout Confirm — FOS/END/TRADING yes/no branch (Tier 8) |
 | S201–S202 | `run_eval.py` | Smoke scenarios (Tier 0) |
 | L134–L139 | `run_lifecycle_eval.py` | FM\_REVIEW phase (Tier 4) |
 | L140–L145 | `run_lifecycle_eval.py` | RDD\_REVIEW phase (Tier 5) |

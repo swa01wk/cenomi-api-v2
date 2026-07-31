@@ -7,7 +7,7 @@
 > **Related docs:**
 > - [`rdd-handover-agent.md`](rdd-handover-agent.md) — RDD Agent lifecycle, phases, fields, and extension guide
 > - [`production-readiness.md`](production-readiness.md) — Production gap assessment and hardening plan
-> - [`test-failures-analysis.md`](test-failures-analysis.md) — Open test issues
+> - [`agent-testing-guide.md`](agent-testing-guide.md) — Complete test guide — unit through eval
 
 ---
 

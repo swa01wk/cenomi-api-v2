@@ -496,6 +496,7 @@ The `env.py` uses an **async engine** (`async_engine_from_config` + `asyncio.run
 | `002` | Agent observability tables — `agent_traces`, `agent_runs`, `agent_state_snapshots`, `agent_state_diffs`, `agent_tool_calls`, `agent_llm_calls`, `agent_feedback` | 2026-05-13 |
 | `003` | `users` table — platform users with roles and mall property scoping | 2026-06-27 |
 | `004` | Data migration — renames `active_agent` value `handover_service_request_agent` → `rdd_handover_agent` in `chat_sessions` and `agent_traces` | 2026-07-01 |
+| `005` | Data migration — renames `active_agent` values: `rdd_agent` → `rdd_handover_agent`; `fitout_confirm_agent` split into `rdd_fitout_start_agent`, `rdd_fitout_end_agent`, `rdd_trading_confirmation_agent` (join on `sub_category` for the split) | 2026-07-29 |
 
 ### 9.3 Running migrations
 
@@ -675,7 +676,7 @@ The URL is consumed by:
 # Inside the container or locally with DATABASE_URL set:
 alembic current
 # Expected output on a healthy deployment:
-# 004 (head)
+# 005 (head)
 ```
 
 ### Apply missed migrations manually

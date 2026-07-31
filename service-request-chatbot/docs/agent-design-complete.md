@@ -33,18 +33,37 @@ The Service Request Chatbot is a conversational agent that allows Cenomi mall te
 
 **Core design principle:** _LLM proposes; code decides._
 
+The system hosts **three named agents** within a single LangGraph graph:
+
+| Agent | Identifier | Responsibilities |
+|---|---|---|
+| **Help Agent** | *(supervisor)* | Intent classification · FAQ Q&A with hybrid RAG (Azure AI Search) · Routes SR intents to registered agents · RBAC enforcement |
+| **RDD Agent** | `rdd_handover_agent` | Full RDD Handover SR lifecycle — Path A (CREATE_SR → FM_REVIEW → RDD_REVIEW) + Path B (Already Trading fast-path) + FOS / END / TRADING sub-categories |
+| **Work Permit Agent** | `work_permit_agent` | Single-stage Work Permit SR creation |
+
 | Focused doc | What it covers |
 |---|---|
-| [`agent-design.md`](agent-design.md) | Node descriptions, routing flowchart, state schema, Handover Agent |
 | [`architecture.md`](architecture.md) | High-level system architecture, Frontend/Backend contract, DB schema |
+| [`help-agent-pipeline.md`](help-agent-pipeline.md) | Help Agent design — all workflows, RBAC, lifecycle, FAQ RAG, API reference |
+| [`rdd-handover-agent.md`](rdd-handover-agent.md) | RDD agent lifecycle — Path A (3-phase) and Path B (Already Trading fast-path) |
 | [`handover-workflow.md`](handover-workflow.md) | CREATE_SR / FM_REVIEW / RDD_REVIEW stage definitions, payload shapes, validation rules |
 | [`observability.md`](observability.md) | TraceManager, trace hierarchy, state diffs, redaction, Admin UI |
 | [`security-guardrails.md`](security-guardrails.md) | Injection guard, field protection, confirmation enforcement, permission checks |
-| [`api-reference.md`](api-reference.md) | REST endpoint contracts, request/response schemas |
+| [`api-reference.md`](api-reference.md) | REST endpoint contracts, request/response schemas (v1 + v2) |
 | [`extensibility-guide.md`](extensibility-guide.md) | Adding new agents, pending items for FM/RDD completion |
 | [`testing-strategy.md`](testing-strategy.md) | Full test pyramid, fixture conventions, running tests |
+| [`agent-testing-guide.md`](agent-testing-guide.md) | Complete test guide — unit through eval |
+| [`eval-howto.md`](eval-howto.md) | Running the eval suite locally — tiers, REPORT.md interpretation |
+| [`eval-setup-guide.md`](eval-setup-guide.md) | Full eval infrastructure setup — all 27 tiers, scenario authoring, CI integration |
+| [`test-automation-lifecycle.md`](test-automation-lifecycle.md) | Full lifecycle test automation (pytest + Playwright + eval) |
 | [`local-development.md`](local-development.md) | Quick-start, docker-compose, environment setup |
 | [`debugging-guide.md`](debugging-guide.md) | SQL inspection queries, common failure modes |
+| [`database.md`](database.md) | Database schema, models, migrations |
+| [`production-readiness.md`](production-readiness.md) | Production readiness assessment |
+| [`uat-readiness.md`](uat-readiness.md) | UAT readiness assessment |
+| [`help-agent-validation.md`](help-agent-validation.md) | Help Agent / MSP integration contract and gap table |
+| [`faq-rag-integration.md`](faq-rag-integration.md) | FAQ RAG setup — Azure AI Search index, embedded knowledge, fallback |
+| [`azure-deployment.md`](azure-deployment.md) | Azure deployment guide |
 
 ---
 
@@ -56,15 +75,22 @@ graph TB
         FE["Next.js 15 Chat UI\nGeneric Conversational Shell"]
     end
 
+    subgraph MSPPlatform["MSP Platform Frontend"]
+        MSP_FE["cenomi-ai-backend\nMSP Chat Client"]
+    end
+
     subgraph BackendFastAPI["Backend (FastAPI + Python 3.11)"]
-        API["POST /api/chat/service-request\nchat.py router"]
+        API["POST /api/v2/chat/service-request\nchat.py router"]
+        MSP_API["POST /api/v1/chat\nPOST /api/v1/chat/stream\nmsp_chat.py adapter"]
         GUARD["Injection Guard\ninjection_guard.scan_message()"]
         ORCH["ChatOrchestrationService\nchat_orchestration_service.py"]
 
-        subgraph AgentRuntime["Agent Runtime (LangGraph)"]
+        subgraph AgentRuntime["Agent Runtime (LangGraph — 26 nodes)"]
             LOAD["load_session\nConversationStateService.load()"]
+            DOC_UP["document_upload\nPartition FM/RDD docs"]
             SYNC["sr_status_sync\nPlatform status check"]
-            SUPER["supervisor\nLLM intent classification"]
+            SUPER["supervisor (Help Agent)\nLLM intent classification + RBAC"]
+            FAQ["faq_node\nHybrid RAG Q&A\nAzure AI Search"]
             REG["registry\nDeterministic agent lookup"]
             ENTRY["Stage Entry Nodes\nhandover_entry / fm_review_entry / rdd_review_entry"]
             PIPE["Data Pipeline\nfield_extraction → merge_state → lease_lookup → validation"]
@@ -79,24 +105,29 @@ graph TB
     end
 
     subgraph Infra
-        PG[("PostgreSQL 16\nConversation + Draft + Traces")]
-        REDIS[("Redis 7\nCache (future)")]
+        PG[("PostgreSQL 16\nConversation + Draft + Traces + Users")]
+        REDIS[("Redis 7\nReadiness probe · reserved for cache")]
     end
 
     subgraph ExternalAPIs["External APIs (Cenomi Platform)"]
-        LLM["OpenAI API\ngpt-4o-mini"]
+        LLM["OpenAI API\ngpt-4o-mini (configurable)"]
+        AZURE["Azure AI Search\ncentomi-help-index (FAQ RAG)"]
         LEASE["Lease-Tenant API\nLEASE_TENANT_API_BASE_URL"]
         SR_API["Service Request API\nSERVICE_REQUEST_API_BASE_URL"]
         FILE["File Upload API\nFILE_UPLOAD_API_BASE_URL"]
     end
 
     FE -->|"session_id, message, action, corrected_fields, selected_lease_id"| API
+    MSP_FE -->|"message, conversation_id, language, context\nx-internal-api-token"| MSP_API
+    MSP_API --> ORCH
     API --> GUARD
     GUARD -->|"clean"| ORCH
     GUARD -->|"HIGH_RISK ≥ 0.7"| FE
     ORCH --> LOAD
     LOAD --> SUPER
     SUPER -->|"LLM classification"| LLM
+    FAQ -->|"RAG + LLM"| AZURE
+    FAQ -->|"LLM answer"| LLM
     ENTRY -->|"field extraction"| LLM
     RESP -->|"response composition"| LLM
     ENTRY --> PIPE
@@ -120,6 +151,8 @@ graph TB
 | **LLM proposes; code decides** | LLM extracts field values and generates text. Code validates, routes, confirms, builds payloads, and submits. |
 | **Pre-graph injection guard** | Prompt injection scanning happens before the user message is persisted or the graph is invoked. |
 | **Fail-safe observability** | Tracing exceptions are swallowed — they never crash the chat flow. |
+| **MSP Platform adapter** | `POST /api/v1/chat` and `/api/v1/chat/stream` are contractually fixed MSP endpoints. They map `conversation_id` ↔ `session_id` and add `faq_sources` and `language` to the response. |
+| **Dual API versioning** | All v1 routes remain active for backward compatibility. New callers should use `/api/v2/*`. MSP endpoints are v1-only (contract). |
 
 ---
 
@@ -133,7 +166,7 @@ sequenceDiagram
     participant Orch as "ChatOrchestrationService"
     participant DB as "PostgreSQL"
     participant Trace as "TraceManager"
-    participant Graph as "LangGraph (service_request_graph)"
+    participant Graph as "LangGraph (help_agent_graph)"
     participant LLM as "OpenAI API"
     participant Ext as "Cenomi Platform APIs"
 
@@ -201,9 +234,9 @@ sequenceDiagram
 
 ## 4. LangGraph Agent Graph
 
-**File:** `app/agents/graph/service_request_graph.py`
+**File:** `app/agents/graph/help_agent_graph.py`  (`service_request_graph.py` is a backward-compat re-export stub that delegates here.)
 
-The graph is compiled once at application startup as a singleton via `get_compiled_graph()`. Each HTTP turn calls `ainvoke(initial_state)` on this compiled graph from scratch — there is **no LangGraph interrupt/resume mechanism**. Conversation continuity is achieved by loading state from PostgreSQL at `load_session_node`.
+The graph is compiled once at application startup as a singleton via `get_compiled_help_graph()`. Each HTTP turn calls `ainvoke(initial_state)` on this compiled graph from scratch — there is **no LangGraph interrupt/resume mechanism**. Conversation continuity is achieved by loading state from PostgreSQL at `load_session_node`. The graph currently contains **26 nodes** spanning session management, routing (Help Agent + FAQ), stage entry, data pipeline, confirmation gates, payload builders, submission, and finalization.
 
 ### Complete Graph Flowchart
 
@@ -211,10 +244,12 @@ The graph is compiled once at application startup as a singleton via `get_compil
 flowchart TD
     START([START]) --> load_session
 
-    load_session -->|"_user_wants_preview(msg)"| supervisor
-    load_session -->|"backend_refs.sr_id exists"| sr_status_sync
-    load_session -->|"active_agent set, no sr_id"| handover_entry
-    load_session -->|"no active_agent"| supervisor
+    load_session --> document_upload
+
+    document_upload -->|"_user_wants_preview(msg)"| supervisor
+    document_upload -->|"backend_refs.sr_id exists"| sr_status_sync
+    document_upload -->|"active_agent set, no sr_id"| handover_entry
+    document_upload -->|"no active_agent"| supervisor
 
     sr_status_sync -->|"workflow_stage = FM_REVIEW"| fm_review_entry
     sr_status_sync -->|"workflow_stage = RDD_REVIEW"| rdd_review_entry
@@ -222,9 +257,11 @@ flowchart TD
     sr_status_sync -->|"CREATE_SR + active_agent"| handover_entry
 
     supervisor -->|"PREVIEW_SERVICE_REQUEST"| preview
-    supervisor -->|"WAITING_FOR_USER"| response_generation
+    supervisor -->|"ASK_HELP / UNKNOWN"| faq_node
+    supervisor -->|"WAITING_FOR_USER (RBAC denied)"| response_generation
     supervisor -->|"intent classified"| registry
 
+    faq_node --> response_generation
     preview --> response_generation
 
     registry -->|"WAITING_FOR_USER"| response_generation
@@ -232,6 +269,7 @@ flowchart TD
 
     handover_entry -->|"workflow cleared"| response_generation
     handover_entry -->|"action_override = cancel"| merge_state
+    handover_entry -->|"cancel_sr confirmed → platform CANCELLED"| response_generation
     handover_entry -->|"normal turn"| field_extraction
 
     fm_review_entry -->|"WAITING_FOR_USER"| response_generation
@@ -244,21 +282,23 @@ flowchart TD
 
     field_extraction --> merge_state
 
-    merge_state -->|"selected_lease set or lease_id missing"| lease_lookup
-    merge_state -->|"lease_id present in collected_data"| validation
+    merge_state -->|"selected_lease set or lease_id missing\n(CREATE_SR / HANDED_OVER only)"| lease_lookup
+    merge_state -->|"lease_id present or FM/RDD stage"| validation
 
     lease_lookup -->|"WAITING_FOR_USER"| response_generation
     lease_lookup -->|"lease resolved"| validation
 
     validation -->|"blocking errors or missing fields"| missing_field
     validation -->|"CREATE_SR all valid"| confirmation
+    validation -->|"HANDED_OVER all valid"| confirmation
     validation -->|"FM_REVIEW all valid"| fm_confirmation
     validation -->|"RDD_REVIEW all valid"| rdd_confirmation
     validation -->|"terminal stage"| response_generation
 
     missing_field --> response_generation
 
-    confirmation -->|"CONFIRMED"| payload_builder
+    confirmation -->|"CONFIRMED (CREATE_SR)"| payload_builder
+    confirmation -->|"CONFIRMED (HANDED_OVER)"| payload_builder
     confirmation -->|"not CONFIRMED"| response_generation
 
     fm_confirmation -->|"CONFIRMED"| fm_payload_builder
@@ -268,7 +308,8 @@ flowchart TD
     rdd_confirmation -->|"not CONFIRMED"| response_generation
 
     payload_builder --> api_submission
-    api_submission --> response_generation
+    api_submission -->|"CREATE_SR → SR_CREATED"| response_generation
+    api_submission -->|"HANDED_OVER → HANDED_OVER_COMPLETED (auto-approved)"| response_generation
 
     fm_payload_builder --> fm_api_submission
     fm_api_submission --> response_generation
@@ -315,8 +356,11 @@ The state is a `TypedDict` with `total=False` — all keys are optional because 
 | `backend_refs` | `dict[str, Any]` | ✓ (draft) | API references: `sr_id`, payloads, actions, platform status (see sub-keys below) |
 | `validation_errors` | `list[dict]` | — | `[{field, validation_type, status, message, blocking}]` |
 | `response_message` | `str` | ✓ (chat_messages) | Text to display to user |
-| `response_ui` | `dict[str, Any]` | — | Structured UI: `confirmation_card`, `lease_selection`, `text_question`, `sr_preview_card` |
-| `action_override` | `str \| None` | **NOT persisted** | UI interaction: `"confirm"` \| `"cancel"` — injected from request, stripped before checkpoint |
+| `response_ui` | `dict[str, Any]` | — | Structured UI: `confirmation_card`, `lease_selection`, `text_question`, `sr_preview_card`, `document_requirement`. Also carries `cancelled`, `stage_complete`, `workflow_complete` boolean signals. |
+| `faq_sources` | `list[dict]` | — | RAG citations from `faq_node` `[{"source_type": "help_content", "title": "..."}]` — reset each turn by `load_session_node` |
+| `language` | `str \| None` | — | `"en"` or `"ar"` — injected by MSP adapter when set in request |
+| `msp_context` | `dict \| None` | — | `{current_url_pattern?, help_category?, help_subcategory?}` — injected by MSP adapter |
+| `action_override` | `str \| None` | **NOT persisted** | UI interaction: `"confirm"` \| `"cancel"` \| `"save_fm_progress"` \| `"approve_fm_review"` \| `"submit_rdd_report"` etc. — injected from request, stripped before checkpoint |
 | `corrected_fields` | `dict \| None` | **NOT persisted** | Inline edits from confirmation card — turn-only |
 | `conversation_state_service` | `Any` | **NOT persisted** | Runtime-injected `ConversationStateService` instance |
 | `trace_manager` | `Any` | **NOT persisted** | Runtime-injected `TraceManager` instance |
@@ -331,16 +375,18 @@ The state is a `TypedDict` with `total=False` — all keys are optional because 
 | `rdd_payload` | `rdd_payload_builder_node` | RDD POST body |
 | `fm_action` | `fm_review_entry_node` | `"save_fm_progress"` \| `"approve_fm_review"` \| `"reject_fm_review"` |
 | `rdd_action` | `rdd_review_entry_node` | `"submit_rdd_report"` |
+| `already_handovered` | `payload_builder_node` | `"initiate_handover"` (Path A) \| `"already_trading"` (Path B) |
 | `platform_sr_status` | `sr_status_sync_node` | Raw status string from platform |
 | `sr_operations` | `sr_status_sync_node` | Platform `service_request_operations` list |
 | `user_role` | `fm/rdd_review_entry_node` | Role validated by entry node |
-| `uploaded_documents` | `fm/rdd_review_entry_node` | List of document UUIDs |
+| `uploaded_documents` | `fm/rdd_review_entry_node` | List of document UUIDs partitioned by phase |
 | `correlation_id` | `api_submission_node` | Platform-returned correlation ID |
 | `service_request_status` | `sr_status_sync_node` | Mapped internal status |
 | `fm_status` | `fm_api_submission_node` | Status after FM submission |
 | `rdd_status` | `rdd_api_submission_node` | Status after RDD submission |
 | `rdd_submitted_sr_id` | `rdd_api_submission_node` | SR ID returned by RDD POST |
 | `rdd_document_id` | `rdd_review_entry_node` | RDD report document UUID |
+| `cancel_reason` | `handover_entry_node` | Reason provided by user when cancelling SR |
 
 ### Key State Invariants
 
@@ -349,6 +395,9 @@ The state is a `TypedDict` with `total=False` — all keys are optional because 
 - `action_override` and `corrected_fields` are never saved to the database by `save_state_node`.
 - `confirmation_status` uses `"REJECTED"` (not `"DENIED"`) for declined confirmations.
 - Runtime service objects (`trace_manager`, `conversation_state_service`) are injected by `ChatOrchestrationService` and stripped by `sanitize_state_for_trace` before any persistence.
+- `faq_sources`, `language`, and `msp_context` are turn-only injection points from the MSP adapter — they are reset by `load_session_node` each turn.
+- `notes` and `comments` are kept in sync by `merge_state_node` — writing to either field propagates to the other.
+- `trading_date` (RDD_REVIEW) is auto-computed as `fitout_end_date + 8 days` when not explicitly provided.
 
 ---
 
@@ -365,7 +414,18 @@ The state is a `TypedDict` with `total=False` — all keys are optional because 
 | **Inputs consumed** | `session_id`, `conversation_state_service` |
 | **Outputs produced** | `collected_data`, `missing_fields`, `documents`, `backend_refs`, `workflow_stage`, `active_agent` |
 
-Calls `ConversationStateService.load(session_id)` to hydrate the graph state from the `ServiceRequestDraft` record. Clears stale `missing_fields` from the prior turn (they are recomputed by `validation_node` each turn). If no draft exists, returns empty defaults. Does not run any LLM.
+Calls `ConversationStateService.load(session_id)` to hydrate the graph state from the `ServiceRequestDraft` record. Clears stale `missing_fields` from the prior turn (they are recomputed by `validation_node` each turn). Resets `faq_sources` to `[]` so RAG citations never bleed across turns. If no draft exists, returns empty defaults. Does not run any LLM.
+
+#### `document_upload_node`
+
+| | |
+|---|---|
+| **File** | `app/agents/graph/nodes/document_upload_node.py` |
+| **Trace run_type** | `TOOL` |
+| **Inputs consumed** | `attachments`, `workflow_stage`, `backend_refs` |
+| **Outputs produced** | `backend_refs.uploaded_documents` (partitioned by phase) |
+
+Runs immediately after `load_session_node` on every turn. When `attachments` are present in the request, partitions them into FM or RDD document buckets in `backend_refs.uploaded_documents`. Ensures that documents uploaded during FM_REVIEW are not mixed with RDD_REVIEW documents. If no attachments are present, passes through with no side effects.
 
 #### `sr_status_sync_node`
 
@@ -395,11 +455,11 @@ Runs only when `backend_refs.sr_id` is present. Calls `ServiceRequestPlatformCli
 |---|---|
 | **File** | `app/agents/graph/nodes/supervisor_node.py` |
 | **Trace run_type** | `SUPERVISOR` |
-| **Inputs consumed** | `user_message`, `active_agent`, `intent`, `conversation_history` (last 4 turns) |
-| **Outputs produced** | `intent`, `service_category`, `sub_category`, `status` |
+| **Inputs consumed** | `user_message`, `active_agent`, `intent`, `conversation_history` (last 4 turns), `user_role` |
+| **Outputs produced** | `intent`, `service_category`, `sub_category`, `status`, `response_message` |
 | **LLM call** | Yes — `LLMGateway.complete_json(SUPERVISOR_SYSTEM_PROMPT, user_content)` |
 
-The entry point for intent classification. Skipped when `active_agent` is already set (workflow continuation) unless the user message triggers `_user_wants_preview()`. If confidence < 0.6 (`CONFIDENCE_THRESHOLD`), sets `intent = "UNKNOWN"` and routes to `response_generation` with a clarification prompt.
+The entry point for intent classification and RBAC enforcement (the "Help Agent"). Skipped when `active_agent` is already set (workflow continuation) unless the user message triggers `_user_wants_preview()`. If confidence < 0.6 (`CONFIDENCE_THRESHOLD`), sets `intent = "UNKNOWN"` which routes to `faq_node`. RBAC is checked inside the node (not the routing function) — unauthorized intent returns `status = "WAITING_FOR_USER"` with a denial message directly.
 
 **`SupervisorDecision` schema:**
 
@@ -407,11 +467,14 @@ The entry point for intent classification. Skipped when `active_agent` is alread
 class SupervisorDecision(BaseModel):
     intent: Literal[
         "CREATE_RDD_SERVICE_REQUEST",
+        "CREATE_HANDED_OVER_SR",          # Path B — Already Trading fast-path
         "UPDATE_RDD_SERVICE_REQUEST",
         "APPROVE_RDD_SERVICE_REQUEST",
         "CHECK_SERVICE_REQUEST_STATUS",
         "PREVIEW_SERVICE_REQUEST",
-        "UNKNOWN",
+        "CANCEL_SR",                       # Cancel a submitted SR
+        "ASK_HELP",                        # Route to faq_node
+        "UNKNOWN",                         # Low confidence — route to faq_node
     ]
     service_category: str | None
     sub_category: str | None
@@ -421,6 +484,23 @@ class SupervisorDecision(BaseModel):
 ```
 
 Tracing: opens a nested `LLM` child run, calls `TraceManager.capture_llm_call(prompt_name="supervisor_prompt")`.
+
+#### `faq_node`
+
+| | |
+|---|---|
+| **File** | `app/agents/graph/nodes/faq_node.py` |
+| **Trace run_type** | `AGENT` |
+| **Inputs consumed** | `user_message`, `conversation_history`, `language`, `msp_context` |
+| **Outputs produced** | `response_message`, `faq_sources`, `status = "WAITING_FOR_USER"` |
+| **LLM call** | Yes — hybrid RAG: Azure AI Search (`cenomi-help-index`) → LLM answer |
+
+Handles `ASK_HELP` and `UNKNOWN` intents. Executes a two-step pipeline:
+1. **Retrieval:** `GET cenomi-help-index` — fetches top-K relevant help chunks from Azure AI Search based on the user message and optional `msp_context` (page URL, help category).
+2. **Answer:** `LLMGateway.complete_json(FAQ_SYSTEM_PROMPT + retrieved_chunks, user_content)` — generates a natural-language answer with inline `[Source: ...]` citations.
+3. **Fallback:** If Azure Search is unavailable, answers from `FAQ_SYSTEM_PROMPT` embedded knowledge only.
+
+Returns `faq_sources` as a list of `{"source_type": "help_content", "title": "..."}` items — surfaced in the MSP Platform API response as `sources[]`.
 
 #### `registry_node`
 
@@ -436,12 +516,15 @@ Calls `lookup_agent(service_category, sub_category)` against `SERVICE_REQUEST_AG
 ```python
 SERVICE_REQUEST_AGENT_REGISTRY = {
     "FIT_OUT_AND_HANDOVER": {
-        "HANDOVER": {
-            "agent_name": "rdd_handover_agent",
-            "display_name": "RDD Agent",
-            "schema_key": "handover_service_request_schema",
-        }
-    }
+        "HANDOVER":              {"agent_name": "rdd_handover_agent",             ...},  # Path A
+        "HANDED_OVER":           {"agent_name": "rdd_handover_agent",             ...},  # Path B — Already Trading
+        "FIT_OUT_CONFIRM_FOS":   {"agent_name": "rdd_fitout_start_agent",         ...},  # Fitout Start Confirmation
+        "FIT_OUT_CONFIRM_END":   {"agent_name": "rdd_fitout_end_agent",           ...},  # Fitout End Confirmation
+        "FIT_OUT_CONFIRM_TRADING": {"agent_name": "rdd_trading_confirmation_agent", ...},  # Trading Confirmation
+    },
+    "WORK_PERMIT": {
+        "WORK_PERMIT":           {"agent_name": "work_permit_agent",              ...},  # Single-stage WP SR
+    },
 }
 ```
 
@@ -473,9 +556,10 @@ These nodes parse structured UI actions and keyword-based user input before any 
 Logic priority (evaluated in order):
 
 1. **UI action override (Priority 0):** `action_override == "confirm"` → `confirmation_status = "CONFIRMED"`. `action_override == "cancel"` → `confirmation_status = "REJECTED"`, route to `merge_state`.
-2. **Workflow cancel/restart:** Message matches `_CANCEL_WORKFLOW_PHRASES` (e.g. `"start over"`, `"restart"`, `"new request"`) → clears all workflow state and routes to `response_generation`.
-3. **Confirmation text parsing:** If `confirmation_status == "PENDING"`, matches `_CONFIRM_PHRASES` / `_REJECT_PHRASES` using word-boundary regex. Ambiguous input → clarification prompt, no status change.
-4. **Normal turn:** Routes to `field_extraction`.
+2. **Cancel SR path:** If intent is `CANCEL_SR` — prompts user to confirm cancellation. On confirmation, calls platform `PATCH /service-requests/{sr_id}` with `status: CANCELLED`, clears workflow state, emits `response_ui.cancelled = true`. Uses `cancel_sr` → `CANCEL_PENDING` → `confirm_cancel_sr` sub-flow.
+3. **Workflow cancel/restart:** Message matches `_CANCEL_WORKFLOW_PHRASES` (e.g. `"start over"`, `"restart"`, `"new request"`) → clears all workflow state and routes to `response_generation`.
+4. **Confirmation text parsing:** If `confirmation_status == "PENDING"`, matches `_CONFIRM_PHRASES` / `_REJECT_PHRASES` using word-boundary regex. Ambiguous input → clarification prompt, no status change.
+5. **Normal turn:** Routes to `field_extraction`.
 
 #### `fm_review_entry_node`
 
@@ -532,9 +616,12 @@ Calls `FieldExtractionService.extract(message, missing_fields, history)`. Return
 The authoritative field accumulator. Merge logic:
 
 1. For each `extracted_fields` entry: skip if field is in `BACKEND_PROTECTED_FIELDS`; skip if lease is resolved and field is in `_LEASE_CONFIRMED_FIELDS` (`lease_code`, `mall`, `brand`); skip if `confidence < 0.6`; otherwise merge into `collected_data`.
-2. Apply `corrected_fields` (inline edits from confirmation card) with the same backend-field protection.
-3. Track `_corrections` audit trail.
-4. Auto-generate `title = "handover-{lease_code}-{description_slug}"` once both `lease_code` and `description` are available. Never ask user for `title`.
+2. **Field intent disambiguation** — `_remap_extracted_to_active_field()` remaps an extracted value to the field the bot is currently asking for (e.g. a bare answer of "9:00 AM" maps to `inspectionTime`, not to `notes`). Applied to all user-supplied fields.
+3. Apply `corrected_fields` (inline edits from confirmation card) with the same backend-field protection.
+4. **`notes ↔ comments` sync** — writing to `notes` propagates to `comments` and vice versa so both fields stay in sync across the lifecycle.
+5. Track `_corrections` audit trail.
+6. Auto-generate `title = "handover-{lease_code}-{description_slug}"` once both `lease_code` and `description` are available. Never ask user for `title`.
+7. Skips `lease_lookup` routing when `workflow_stage` is `FM_REVIEW` or `RDD_REVIEW`.
 
 #### `lease_lookup_node`
 
@@ -568,9 +655,11 @@ Calls `ValidationService.validate_draft(stage, collected_data, documents)`. Retu
 | Rule | Stage | Blocking |
 |---|---|---|
 | Required field present and non-empty | All | Yes |
-| `inspection_done_by` ∈ `{"FM_MANAGER", "OPERATIONS"}` | CREATE_SR | Yes |
-| `startDate < endDate` | CREATE_SR | Yes |
-| RDD date chain order | RDD_REVIEW | Yes |
+| `inspection_done_by` ∈ `{"FM_MANAGER", "OPERATIONS"}` | CREATE_SR / HANDED_OVER | Yes |
+| `startDate < endDate` | CREATE_SR / HANDED_OVER | Yes |
+| RDD date chain order: `actual_handover ≤ fitout_start ≤ fitout_end ≤ trading_date` | RDD_REVIEW | Yes |
+| `trading_date` auto-set to `fitout_end_date + 8 days` if not provided | RDD_REVIEW | — |
+| `inspectionTime` required and combined into ISO 8601 timestamp with `startDate` | CREATE_SR | Yes |
 | Document type in `ALL_DOCUMENT_TYPES` | FM/RDD | Yes |
 | Role authorised for stage | All | Yes |
 
@@ -603,7 +692,7 @@ All three confirmation nodes share the same `confirmation_node.py` implementatio
 | **Inputs consumed** | `collected_data`, `confirmation_status`, `documents`, `workflow_stage` |
 | **Outputs produced** | `response_ui.confirmation_card`, `confirmation_status = "PENDING"`, `response_message` |
 
-When all required fields are present and no blocking validation errors exist: builds `confirmation_card` UI showing user-visible fields (title, description, dates, mall, brand, unit codes, `inspection_done_by`, comments). Sets `confirmation_status = "PENDING"`. Respects existing `CONFIRMED`/`REJECTED` states — does not re-ask if already decided. Internal IDs (`tenant_profile_id`, `lease_id`, etc.) are not shown to the user.
+When all required fields are present and no blocking validation errors exist: builds `confirmation_card` UI showing user-visible fields (title, description, dates, mall, brand, unit codes, `inspection_done_by`, `inspectionTime`, comments). Sets `confirmation_status = "PENDING"`. Respects existing `CONFIRMED`/`REJECTED` states — does not re-ask if already decided. Internal IDs (`tenant_profile_id`, `lease_id`, etc.) are not shown to the user.
 
 ---
 
@@ -621,13 +710,17 @@ All builders are **pure deterministic functions** — no LLM, no I/O. They valid
 
 #### API Submission Nodes
 
-| Node | File | Method | Endpoint | Guards |
-|---|---|---|---|---|
-| `api_submission_node` | `nodes/api_submission_node.py` | POST | `/service-requests` | `confirmation_status == "CONFIRMED"` + no blocking errors + `create_payload` present |
-| `fm_api_submission_node` | `nodes/fm_api_submission_node.py` | PATCH | `/service-requests/{sr_id}` | Permission check + `fm_payload` present |
-| `rdd_api_submission_node` | `nodes/rdd_api_submission_node.py` | POST | `/service-requests` (with `status=REPORT_SUBMITTED`) | Permission check + `rdd_payload` present |
+| Node | File | Method | Endpoint | Guards | UI Signal |
+|---|---|---|---|---|---|
+| `api_submission_node` | `nodes/api_submission_node.py` | POST | `/service-requests` | `confirmation_status == "CONFIRMED"` + no blocking errors + `create_payload` present | Clears `confirmation_status` (prevents CONFIRMED leaking into FM) |
+| `fm_api_submission_node` | `nodes/fm_api_submission_node.py` | PATCH | `/service-requests/{sr_id}` | Permission check + `fm_payload` present | On approve: `response_ui.stage_complete = true` |
+| `rdd_api_submission_node` | `nodes/rdd_api_submission_node.py` | POST | `/service-requests` (with `status=REPORT_SUBMITTED`) | Permission check + `rdd_payload` present | On final approve: `response_ui.workflow_complete = true` |
 
-On success, `api_submission_node` sets `workflow_stage = "SR_CREATED"`, `status = "SUBMITTED"`, and stores `sr_id` in `backend_refs`. On `rdd_api_submission_node` success, sets `workflow_stage = "SR_COMPLETED"`.
+**Path A:** `api_submission_node` (CREATE_SR) → sets `workflow_stage = "SR_CREATED"`, `status = "SUBMITTED"`, stores `sr_id` in `backend_refs`.
+
+**Path B:** `api_submission_node` (HANDED_OVER) → posts with `sub_category=HANDED_OVER` and `already_handovered=already_trading`. SR is **auto-approved** by the platform in a single transaction. Sets `workflow_stage = "HANDED_OVER_COMPLETED"`, `response_ui.workflow_complete = true`.
+
+On `rdd_api_submission_node` (Phase 3b final approve) success, sets `workflow_stage = "SR_COMPLETED"`.
 
 ---
 
@@ -658,13 +751,14 @@ Calls `ConversationStateService.save_checkpoint(state)` which upserts the `Servi
 
 ## 7. Conditional Routing
 
-All routing is implemented as pure Python functions in `app/agents/graph/service_request_graph.py`. No LLM is involved in any routing decision.
+All routing is implemented as pure Python functions in `app/agents/graph/help_agent_graph.py`. No LLM is involved in any routing decision.
 
 ### `_AGENT_ENTRY_NODES` Dispatch Table
 
 ```python
 _AGENT_ENTRY_NODES = {
-    "rdd_handover_agent": "handover_entry",
+    "rdd_handover_agent":  "handover_entry",
+    "work_permit_agent":   "handover_entry",   # WP uses same entry node pattern
     # FM/RDD are routed by workflow_stage after sr_status_sync, not by active_agent
 }
 ```
@@ -673,16 +767,18 @@ _AGENT_ENTRY_NODES = {
 
 | Router | Key logic |
 |---|---|
-| `_route_after_load` | Preview phrase → `supervisor`; `sr_id` present → `sr_status_sync`; `active_agent` set → `handover_entry` (via `_AGENT_ENTRY_NODES`); else → `supervisor` |
+| `_route_after_load` | Preview phrase → `supervisor`; `sr_id` present → `sr_status_sync`; `active_agent` set → entry node (via `_AGENT_ENTRY_NODES`); else → `supervisor` |
+| `_route_after_document_upload` | Transparent pass-through — same logic as `_route_after_load` (runs after doc partitioning) |
 | `_route_after_sync` | `FM_REVIEW` → `fm_review_entry`; `RDD_REVIEW` → `rdd_review_entry`; `SR_CREATED` / `SR_COMPLETED` → `supervisor`; `CREATE_SR` + `active_agent` → `handover_entry` |
-| `_route_after_supervisor` | `PREVIEW_SERVICE_REQUEST` → `preview`; `WAITING_FOR_USER` → `response_generation`; else → `registry` |
-| `_route_after_registry` | `WAITING_FOR_USER` → `response_generation`; else → `handover_entry` |
-| `_route_after_handover_entry` | `active_agent` cleared → `response_generation`; `action_override == "cancel"` → `merge_state`; else → `field_extraction` |
+| `_route_after_supervisor` | `PREVIEW_SERVICE_REQUEST` → `preview`; `ASK_HELP` / `UNKNOWN` → `faq_node`; `WAITING_FOR_USER` (RBAC denied) → `response_generation`; else → `registry` |
+| `_route_after_faq` | Always → `response_generation` |
+| `_route_after_registry` | `WAITING_FOR_USER` → `response_generation`; else → entry node (via `_AGENT_ENTRY_NODES`) |
+| `_route_after_handover_entry` | `active_agent` cleared → `response_generation`; cancel SR confirmed → `response_generation`; `action_override == "cancel"` → `merge_state`; else → `field_extraction` |
 | `_route_after_fm_entry` | `WAITING_FOR_USER` → `response_generation`; `fm_action` set → `merge_state`; else → `field_extraction` |
 | `_route_after_rdd_entry` | `WAITING_FOR_USER` → `response_generation`; `rdd_action` set → `merge_state`; else → `field_extraction` |
-| `_route_after_merge` | `selected_lease` set or `lease_id` absent from `collected_data` → `lease_lookup`; else → `validation` |
+| `_route_after_merge` | `selected_lease` set or `lease_id` absent + stage is `CREATE_SR` / `HANDED_OVER` → `lease_lookup`; FM_REVIEW / RDD_REVIEW stages → skip lease, go to `validation`; else → `validation` |
 | `_route_after_lease` | `WAITING_FOR_USER` → `response_generation`; else → `validation` |
-| `_route_after_validation` | Blocking errors or missing fields → `missing_field`; `CREATE_SR` complete → `confirmation`; `FM_REVIEW` complete → `fm_confirmation`; `RDD_REVIEW` complete → `rdd_confirmation`; terminal stage → `response_generation` |
+| `_route_after_validation` | Blocking errors or missing fields → `missing_field`; `CREATE_SR` complete → `confirmation`; `HANDED_OVER` complete → `confirmation`; `FM_REVIEW` complete → `fm_confirmation`; `RDD_REVIEW` complete → `rdd_confirmation`; terminal stage → `response_generation` |
 | `_route_after_confirmation` | `CONFIRMED` → `payload_builder`; else → `response_generation` |
 | `_route_after_fm_confirmation` | `CONFIRMED` → `fm_payload_builder`; else → `response_generation` |
 | `_route_after_rdd_confirmation` | `CONFIRMED` → `rdd_payload_builder`; else → `response_generation` |
@@ -691,56 +787,82 @@ _AGENT_ENTRY_NODES = {
 
 ## 8. Workflow Stages
 
-**Source of truth:** `app/agents/schemas/handover_schema.py` — `STAGE_REGISTRY`
+**Source of truth:** `app/agents/schemas/handover_schema.py` — `STAGE_REGISTRY` and `WorkflowConfig`
 
 ```mermaid
 flowchart LR
-    CREATE["CREATE_SR\nMall Manager\nCollect fields + lease\nSubmit SR"]
-    FM["FM_REVIEW\nFM Manager\nDates + 3 documents\nSave / Approve"]
-    RDD["RDD_REVIEW\nDD Engineer\n4 dates + guideline + report\nSubmit"]
-    DONE["SR_COMPLETED"]
+    subgraph PathB["Path B — Already Trading (HANDED_OVER)"]
+        B_CREATE["CREATE_HANDED_OVER_SR\nMall Manager\n4 actual dates + lease\nAuto-approved"]
+        B_DONE["HANDED_OVER_COMPLETED\nworkflow_complete=true"]
+        B_CREATE -->|"POST sub_category=HANDED_OVER\nalready_handovered=already_trading"| B_DONE
+    end
 
-    CREATE -->|"POST /service-requests\n→ sr_id"| SR_CREATED["SR_CREATED"]
-    SR_CREATED -->|"Platform: FM_MANAGER IN_PROGRESS"| FM
-    FM -->|"PATCH APPROVED"| RDD_GATE["Platform: DD_ENGINEER IN_PROGRESS"]
-    RDD_GATE --> RDD
-    RDD -->|"POST REPORT_SUBMITTED"| DONE
+    subgraph PathA["Path A — Standard (HANDOVER / FOS / END / TRADING)"]
+        CREATE["CREATE_SR\nMall Manager\nCollect fields + lease\nSubmit SR"]
+        FM["FM_REVIEW\nFM Manager / Operations\nDates + 3 documents\nSave / Approve"]
+        RDD["RDD_REVIEW\nDD Engineer\n5 dates + guideline + report\nSubmit → Final Approve"]
+        DONE["SR_COMPLETED"]
+
+        CREATE -->|"POST /service-requests\n→ sr_id"| SR_CREATED["SR_CREATED"]
+        SR_CREATED -->|"Platform: FM_MANAGER IN_PROGRESS"| FM
+        FM -->|"PATCH APPROVED"| RDD_GATE["Platform: DD_ENGINEER IN_PROGRESS"]
+        RDD_GATE --> RDD
+        RDD -->|"Phase 3a: POST REPORT_SUBMITTED\nPhase 3b: PATCH APPROVED"| DONE
+    end
 ```
 
 ### Stage Definitions
 
-#### CREATE_SR
+#### CREATE_SR (Path A)
 
 | Property | Value |
 |---|---|
 | `stage` | `"CREATE_SR"` |
 | `role` | `"MALL_MANAGER"` |
-| `required_fields` | `tenant_profile_id`, `property_id`, `lease_code`, `lease_id`, `brand_id`, `mall`, `brand`, `unit_codes`, `city`, `contracted_area`, `title`, `description`, `startDate`, `endDate`, `inspection_done_by`, `comments` |
-| `required_documents` | *(none)* |
+| `required_fields` | `tenant_profile_id`, `property_id`, `lease_code`, `lease_id`, `brand_id`, `mall`, `brand`, `unit_codes`, `city`, `contracted_area`, `title`, `description`, `startDate`, `endDate`, `inspectionTime`, `inspection_done_by`, `comments` |
+| `required_documents` | *(none — MM document upload offered only after SR creation)* |
 | Backend-derived fields | `tenant_profile_id`, `property_id`, `lease_code`, `lease_id`, `brand_id`, `mall`, `brand`, `unit_codes`, `city`, `contracted_area` (all from lease lookup) |
 | Auto-generated fields | `title = "handover-{lease_code}-{description_slug}"` |
-| User-supplied fields | `description`, `startDate`, `endDate`, `inspection_done_by`, `comments` |
+| User-supplied fields | `description`, `startDate`, `endDate`, `inspectionTime`, `inspection_done_by`, `comments` |
+| Sub-categories | `HANDOVER`, `FOS` (Fit-Out Start), `END` (End of lease), `TRADING` |
 
-#### FM_REVIEW
+#### CREATE_HANDED_OVER_SR (Path B — Already Trading fast-path)
+
+| Property | Value |
+|---|---|
+| `stage` | `"CREATE_SR"` (shared stage, differentiated by `sub_category`) |
+| `sub_category` | `"HANDED_OVER"` |
+| `role` | `"MALL_MANAGER"` |
+| `required_fields` | `lease_id`, `actual_handover_date`, `fitout_start_date`, `fitout_end_date`, `trading_date` (minimal set vs Path A) |
+| Platform payload | `already_handovered = "already_trading"`, `sub_category = "HANDED_OVER"` |
+| Outcome | SR **auto-approved** in a single POST — no FM or RDD review |
+| UI signal | `response_ui.workflow_complete = true` |
+
+#### FM_REVIEW (Path A)
 
 | Property | Value |
 |---|---|
 | `stage` | `"FM_REVIEW"` |
-| `role` | `"FM_MANAGER"` |
-| `required_fields` | `unit_readiness_date`, `expected_handover_date` |
+| `role` | `"FM_MANAGER"` or `"OPERATIONS"` |
+| `required_fields` | `unit_readiness_date`, `expected_handover_date`, `comments` |
 | `required_documents` | `SR_HANDOVER_CHECKLIST`, `SR_HANDOVER_SITE_SURVEY`, `SR_COP_CHECKLIST_OTHER` |
 | Actions | `save_fm_progress` (PATCH `IN_PROCESS`), `approve_fm_review` (PATCH `APPROVED`), `reject_fm_review` |
+| UI signal on approve | `response_ui.stage_complete = true` |
 
-#### RDD_REVIEW
+#### RDD_REVIEW (Path A)
 
 | Property | Value |
 |---|---|
 | `stage` | `"RDD_REVIEW"` |
 | `role` | `"DD_ENGINEER"` |
-| `required_fields` | `guideLineLink`, `actual_handover_date`, `fitout_start_date`, `fitout_end_date`, `trading_date` |
+| `required_fields` | `guideLineLink`, `actual_handover_date`, `fitout_start_date`, `fitout_end_date`, `trading_date`, `comments` |
 | `required_documents` | `DR_SR_HANDOVER_REPORT` |
 | Date constraint | `actual_handover_date ≤ fitout_start_date ≤ fitout_end_date ≤ trading_date` |
-| Action | `submit_rdd_report` (POST `REPORT_SUBMITTED`) |
+| Auto-compute | `trading_date = fitout_end_date + 8 days` if not explicitly provided |
+| Date wire format | `DD/MM/YYYY` (converted from ISO 8601 by `PayloadBuilderService`) |
+| Phase 3a | `submit_rdd_report` → POST `REPORT_SUBMITTED` |
+| Phase 3b | Final approve → PATCH `APPROVED` → `SR_COMPLETED` |
+| UI signal on complete | `response_ui.workflow_complete = true` |
 
 ### Stage Helpers
 
@@ -776,35 +898,41 @@ class LLMGateway:
 - **Temperature:** `0.0`
 - **Singleton:** `get_default_gateway()` / `set_default_gateway()` (for test injection)
 
-### Three LLM Call Sites
+### Four LLM Call Sites
 
 ```mermaid
 graph TD
     S1["1. supervisor_node\nsupervisor_prompt.py"]
     S2["2. field_extraction_node\nFieldExtractionService\nhandover_extraction_prompt.py"]
-    S3["3. response_generation_node\nresponse_generation_prompt.py"]
+    S3["3. faq_node\nFAQ_SYSTEM_PROMPT\n+ Azure AI Search RAG chunks"]
+    S4["4. response_generation_node\nresponse_generation_prompt.py"]
 
-    S1 -->|"→ SupervisorDecision\n(intent, service_category, confidence)"| R1["Intent classification"]
+    S1 -->|"→ SupervisorDecision\n(intent, service_category, confidence)"| R1["Intent classification + RBAC"]
     S2 -->|"→ HandoverExtractedFields\n{field: {value, confidence}}\nUp to 2 retries"| R2["Field extraction"]
-    S3 -->|"→ {message: str}\nFalls back to raw hint on failure"| R3["Natural language reply"]
+    S3 -->|"→ {message: str, sources: [...]}\nFallback: embedded FAQ_SYSTEM_PROMPT only"| R3["Platform Q&A with RAG"]
+    S4 -->|"→ {message: str}\nFalls back to raw hint on failure"| R4["Natural language reply"]
 ```
 
 | Call site | Prompt file | Output schema | Retry / Fallback |
 |---|---|---|---|
-| `supervisor_node` | `prompts/supervisor_prompt.py` → `SUPERVISOR_SYSTEM_PROMPT` | `SupervisorDecision` (Pydantic) | No retry; low confidence → `UNKNOWN` intent |
+| `supervisor_node` | `prompts/supervisor_prompt.py` → `SUPERVISOR_SYSTEM_PROMPT` | `SupervisorDecision` (Pydantic) | No retry; low confidence → `UNKNOWN` → routes to `faq_node` |
 | `field_extraction_node` | `prompts/handover_extraction_prompt.py` → `HANDOVER_EXTRACTION_SYSTEM_PROMPT` | `HandoverExtractedFields` (Pydantic) | Up to 2 retries on JSON/validation failure; returns empty on total failure |
+| `faq_node` | `prompts/faq_prompt.py` → `FAQ_SYSTEM_PROMPT` + retrieved RAG chunks | `{"message": "...", "sources": [...]}` | Falls back to embedded FAQ_SYSTEM_PROMPT if Azure Search unavailable |
 | `response_generation_node` | `prompts/response_generation_prompt.py` → `RESPONSE_GENERATION_SYSTEM_PROMPT` | `{"message": "..."}` | Falls back to raw `response_message` hint on failure |
 
 ### Prompt Design
 
-**Supervisor prompt** (`SUPERVISOR_SYSTEM_PROMPT`): Intent classification only. No field collection. Outputs one of the 6 intent literals with confidence and optional `service_category` / `sub_category`. Chain-of-thought via `reasoning` field (stripped before storage).
+**Supervisor prompt** (`SUPERVISOR_SYSTEM_PROMPT`): Intent classification and RBAC gating. Outputs one of the 8 intent literals with confidence and optional `service_category` / `sub_category`. Includes role-aware intent allowlist. Chain-of-thought via `reasoning` field (stripped before storage).
 
 **Extraction prompt** (`HANDOVER_EXTRACTION_SYSTEM_PROMPT`): Extract only explicitly stated or strongly implied field values. Per-field confidence score. Rules enforced:
 - Date normalization to ISO 8601
+- `inspectionTime` extracted and preserved (combined into ISO 8601 timestamp with `startDate` by payload builder)
 - `inspection_done_by` mapped to `FM_MANAGER` / `OPERATIONS` enum
+- Active-field context applied — bare answers resolved against the field currently being asked
 - Forbidden backend fields never extracted
-- Question-context rules (bare answers like "yes" resolved against last question)
 - Declinations (user says "no description") → empty string `""`
+
+**FAQ prompt** (`FAQ_SYSTEM_PROMPT`): Answers platform Q&A in conversational style. Retrieved Azure AI Search chunks are prepended as context. Includes inline `[Source: ...]` citation markers that map to `faq_sources[]` in the API response. Language-aware when `language == "ar"`.
 
 **Response generation prompt** (`RESPONSE_GENERATION_SYSTEM_PROMPT`): Compose natural reply from structured context. User-context built by `build_response_generation_context()` including: response intent hint, workflow stage, collected data, missing fields, validation errors, confirmation status, UI type, conversation history (last 8 turns). Output `{"message": "..."}`.
 
@@ -1161,6 +1289,8 @@ All repositories are async-first via SQLAlchemy + asyncpg.
 |---|---|
 | `001_initial_schema.py` | `chat_sessions`, `chat_messages`, `service_request_drafts`, `service_request_chat_audit_logs`, legacy `observability_*` stubs |
 | `002_agent_observability.py` | `agent_traces`, `agent_runs`, `agent_state_snapshots`, `agent_state_diffs`, `agent_llm_calls`, `agent_tool_calls`, `agent_feedback` |
+| `003_users.py` | `users` table — `id`, `email`, `hashed_password`, `role`, `permissions`, `unique_property_ids`, `is_active`, timestamps |
+| `004_*` | Any additional schema updates — check `alembic/versions/` |
 
 Run migrations: `alembic upgrade head`
 
@@ -1287,10 +1417,14 @@ Sensitive fields replaced with `"[REDACTED]"` before any persistence or API resp
 | `PLATFORM_AUTH_BASE_URL` | *(empty)* | Yes (prod) | Platform auth — defaults to SR API base |
 | `PLATFORM_INTERNAL_API_TOKEN` | *(empty)* | Yes (prod) | `x-internal-api-token` for service-to-service login |
 | `PLATFORM_LOGIN_EMAIL` | *(empty)* | Yes (prod) | Service-to-service login email |
-| `JWT_SECRET_KEY` | `change-me-in-production` | **Must change** | JWT signing secret (scaffolding) |
+| `JWT_SECRET_KEY` | `change-me-in-production` | **Must change** | JWT signing secret |
 | `JWT_ALGORITHM` | `HS256` | — | JWT algorithm |
+| `MSP_SERVICE_TOKEN` | *(empty)* | Yes (MSP integration) | Service token validated by `POST /api/v1/chat` and `/api/v1/chat/stream` — shadow mode when unset |
+| `AZURE_SEARCH_ENDPOINT` | *(empty)* | Yes (FAQ RAG) | Azure AI Search endpoint for `cenomi-help-index` |
+| `AZURE_SEARCH_KEY` | *(empty)* | Yes (FAQ RAG) | Azure AI Search API key |
+| `AZURE_SEARCH_INDEX_NAME` | `cenomi-help-index` | — | FAQ search index name |
 
-**Mock mode:** When `LEASE_TENANT_API_BASE_URL` or `SERVICE_REQUEST_API_BASE_URL` are unset, factory functions return mock adapters, enabling full local development without Cenomi platform access.
+**Mock mode:** When `LEASE_TENANT_API_BASE_URL` or `SERVICE_REQUEST_API_BASE_URL` are unset, factory functions return mock adapters, enabling full local development without Cenomi platform access. When `AZURE_SEARCH_ENDPOINT` is unset, `faq_node` falls back to embedded `FAQ_SYSTEM_PROMPT` knowledge only.
 
 ---
 
@@ -1302,21 +1436,31 @@ Sensitive fields replaced with `"[REDACTED]"` before any persistence or API resp
 
 ```
 backend/tests/
-├── unit/           # ~40 modules  — mocked AsyncSession; no DB, no network
-├── integration/    # 8 modules   — full graph/HTTP; mocked DB + external I/O
-├── e2e/            # 1 module    — full HTTP stack via ASGITransport
-└── eval/           # non-pytest  — live backend scenario runner
+├── unit/           # ~46+ files, ~1,400+ tests — mocked AsyncSession; no DB, no network
+├── integration/    # 8 files    — full graph/HTTP; mocked DB + external I/O
+├── e2e/            # 3 files    — full HTTP stack via ASGITransport
+└── eval/           # non-pytest — live backend scenario runner (27 tiers)
+
+frontend/tests/e2e/
+├── auth.spec.ts                  # login, redirect, role badge
+├── lifecycle-stepper.spec.ts     # stage UI component tests
+├── stage-actions.spec.ts         # FM/RDD action button RBAC
+├── handover-lifecycle.spec.ts    # full CREATE→FM→RDD UI flow (mocked)
+└── live/                         # live stack tests (real LLM + DB)
+    ├── lifecycle-live.spec.ts    # 3-phase lifecycle in real browser
+    ├── agent-eval.spec.ts        # 33 CREATE_SR eval scenarios
+    └── lifecycle-eval.spec.ts    # 14 FM/RDD + full-lifecycle eval scenarios
 ```
 
-**No Docker required for tests.** DB is always an `AsyncMock`; LLM, lease API, and SR API are patched. The graph and orchestration layer run for real.
+**No Docker required for backend tests.** DB is always an `AsyncMock`; LLM, lease API, and SR API are patched. The graph and orchestration layer run for real.
 
 ### Unit Tests
 
 **File:** `backend/tests/unit/`
 
-Target: individual repository methods, observability components (`TraceManager`, state diff logic, redaction). All use `mock_session` fixture from `tests/unit/conftest.py`.
+Target: individual repository methods, observability components (`TraceManager`, state diff logic, redaction), graph nodes, services, and RBAC.
 
-Key test files: `test_agent_run_repo.py`, `test_agent_llm_call_repo.py`, `test_agent_state_diff_repo.py`, `test_agent_state_snapshot_repo.py`, `test_agent_feedback_repo.py`.
+Notable test files: `test_agent_run_repo.py`, `test_validation_service.py` (100 tests), `test_payload_builder_service.py`, `test_fm_nodes.py`, `test_rdd_nodes.py`, `test_help_agent_graph.py` (76 tests), `test_msp_chat_endpoints.py` (18 tests), `test_security_guardrails.py`, `test_injection_guard.py`.
 
 ### Integration Tests
 
@@ -1327,36 +1471,78 @@ Target: full LangGraph `ainvoke` + `ChatOrchestrationService` with mocked extern
 | Test file | Coverage |
 |---|---|
 | `test_chat_endpoint.py` | HTTP layer for `POST /api/chat/service-request` |
-| `test_service_request_graph.py` | Full graph: intent → lease → validation → confirmation → submission |
+| `test_help_agent_graph.py` | Full graph: intent → lease → validation → confirmation → submission |
 | `test_handover_lifecycle.py` | CREATE_SR → FM_REVIEW → RDD_REVIEW lifecycle |
 | `test_trace_lifecycle.py` | Observability side-effects during graph execution |
 | `test_observability_endpoints.py` | Observability REST API |
-| `test_fm_review_e2e.py` | FM_REVIEW: doc upload → merge → payload → API submission |
-| `test_rdd_review_e2e.py` | RDD_REVIEW Phase 3a/3b |
-| `test_role_stage_access.py` | Role × stage permission matrix |
+| `test_fm_review_e2e.py` | FM_REVIEW: doc upload → merge → payload → API submission (14 tests) |
+| `test_rdd_review_e2e.py` | RDD_REVIEW Phase 3a/3b (16 tests) |
+| `test_role_stage_access.py` | Role × stage permission matrix (21 tests) |
 
 **Key fixtures** (`tests/integration/conftest.py`): `mock_db`, `mock_llm_gateway`, `sample_lease`, `all_fields_data`, `mock_lease_service`, `mock_sr_api_service`.
 
 ### E2E Tests
 
-**File:** `backend/tests/e2e/test_handover_sr_e2e.py`
+**Files:** `backend/tests/e2e/`
 
-10 scenarios through the full HTTP stack via `httpx.AsyncClient + ASGITransport`. Only external APIs (OpenAI, Lease-Tenant, SR API) are mocked. Scenarios: creation, field edits, lease disambiguation, validation, API failure, permissions, injection detection, trace replay.
+| File | Coverage |
+|---|---|
+| `test_handover_sr_e2e.py` | 10 scenarios: creation, field edits, lease disambiguation, validation, API failure, permissions, injection detection |
+| `test_handover_full_lifecycle_http.py` | 7 tests — 9-step CREATE_SR → FM_REVIEW → RDD_REVIEW sequence via ASGI |
 
 ### Eval (Non-pytest)
 
-**File:** `backend/tests/eval/`
+**File:** `backend/tests/eval/` · **Script:** `./run_agent_eval.sh`
 
-`run_eval.py` drives 9 predefined scenarios against a live backend URL. Not part of the CI test suite — requires a running backend with valid platform credentials.
+Drives all 27 eval tiers against a live backend URL. Not part of the CI test suite — requires a running backend with valid platform credentials.
+
+| Tier group | Tiers | Description |
+|---|---|---|
+| Smoke | `0`, `0fm`, `0p` | Basic agent + FM lifecycle + pipeline smoke tests |
+| CREATE_SR | `1`, `2`, `3` | Happy path, edge cases, adversarial (CREATE_SR) |
+| FM/RDD | `3a`, `3b`, `3c`, `3d`, `3e`, `3f` | FM/RDD happy, edge, battle+RBAC |
+| Full lifecycle | `3g`, `3h`, `3i` | End-to-end CREATE → FM → RDD lifecycle |
+| Path B | `4`, `5` | Already Trading fast-path happy + edge |
+| Extended sub-types | `6a`–`6j` (+ `lc` variants) | FOS, END, TRADING sub-categories |
+| FAQ + RBAC | `8` | Help agent FAQ + role-based access |
+
+**Latest eval result (July 31, 2026):** ~98% overall across all tiers. 6 known LLM-variability scenarios (S4, S8, S23, S32, S37, S64) are not bugs.
 
 ### Running Tests
 
 ```bash
 cd service-request-chatbot/backend
-pytest                      # all tests
-pytest tests/unit/          # unit only
-pytest tests/integration/   # integration only
-pytest -k test_handover     # by name filter
+
+# Priority lifecycle suite (68 tests, ~52s)
+./run_lifecycle_tests.sh
+./run_lifecycle_tests.sh --coverage   # + HTML coverage report
+
+# Full pytest suite (1,387+ tests, ~85s)
+pytest tests/ -v --tb=short
+
+# Agent evaluation — all 27 tiers via shell script
+./run_agent_eval.sh                    # all tiers
+./run_agent_eval.sh --tier 1           # single tier
+./run_agent_eval.sh --tier 3a,3b,3c    # multiple tiers
+```
+
+```bash
+cd service-request-chatbot/frontend
+
+# Playwright mocked UI (42 tests, no backend required)
+npm run test:e2e
+
+# Playwright live stack (50 tests, real LLM + Postgres + Redis)
+npm run test:live
+```
+
+```bash
+# One-command full stack + all 5 test tiers
+cd service-request-chatbot
+./run-live-tests.sh
+./run-live-tests.sh --tier unit    # pytest only
+./run-live-tests.sh --tier eval    # eval scenarios
+./run-live-tests.sh --no-start     # stack already running
 ```
 
 ---
@@ -1371,7 +1557,7 @@ The architecture supports new agent domains with minimal changes — no frontend
 
 **Steps:**
 
-1. **Agent Registry** (`app/agents/registries/service_request_registry.py`) — add one entry:
+1. **Agent Registry** (`app/agents/registry.py`) — add one entry:
 
 ```python
 SERVICE_REQUEST_AGENT_REGISTRY = {
@@ -1383,30 +1569,34 @@ SERVICE_REQUEST_AGENT_REGISTRY = {
             "schema_key": "new_schema",
         },
     },
+    "WORK_PERMIT": {"WORK_PERMIT": {...}},  # existing
 }
 ```
 
-2. **Stage schema** (`app/agents/schemas/`) — create a new `StageDefinition` with `required_fields`, `required_documents`, `role`.
+2. **Stage schema / WorkflowConfig** (`app/agents/schemas/`) — create a new `StageDefinition` with `required_fields`, `required_documents`, `role`, and `backend_fields`.
 
 3. **Agent entry node** (`app/agents/graph/nodes/`) — create a new entry node (like `handover_entry_node.py`) that handles HITL parsing for the new workflow.
 
-4. **Wire the graph** (`service_request_graph.py`) — add the entry node and `_AGENT_ENTRY_NODES` dispatch entry.
+4. **Wire the graph** (`help_agent_graph.py`) — add the entry node and `_AGENT_ENTRY_NODES` dispatch entry.
 
 5. **Payload builders + submission nodes** — follow the existing 4-builder pattern.
 
 6. **Supervisor prompt** — add new intent literals to `SupervisorDecision` + update `SUPERVISOR_SYSTEM_PROMPT`.
+
+7. **FAQ knowledge** (optional) — add help content to the Azure AI Search index or update `FAQ_SYSTEM_PROMPT` with static knowledge for the new SR type.
 
 ### Extensibility Ratings
 
 | Layer | Extensibility | Notes |
 |---|---|---|
 | Agent Registry | Excellent | One dict entry per new agent |
-| Stage schema | Excellent | Stage-aware helpers auto-apply to new stages |
+| Stage schema / WorkflowConfig | Excellent | Stage-aware helpers auto-apply to new stages |
 | Database | Excellent | `collected_data` is JSONB — no new migrations needed |
 | Observability | Excellent | `@trace_node` is generic; zero extra code for new nodes |
 | Graph topology | Good | `_AGENT_ENTRY_NODES` dispatch exists; add entry + wire nodes |
 | Validation | Good | Stage-driven; rules auto-apply by stage key |
 | Payload builders | Good | Pattern established; add new function + node |
+| FAQ knowledge | Good | Azure AI Search index can be extended independently |
 | Field extraction | Moderate | Currently tied to `HandoverExtractedFields`; needs parameterisation for new agent schema |
 | Supervisor | Moderate | Requires enum + prompt change for new intent |
 
@@ -1417,7 +1607,8 @@ SERVICE_REQUEST_AGENT_REGISTRY = {
 - **Orchestration layer** — `ChatOrchestrationService.process_turn()` is generic.
 - **Observability** — `@trace_node` instruments any new node automatically.
 - **Session/state infrastructure** — `ServiceRequestGraphState`, `ConversationStateService`, `save_state_node` are all generic.
+- **MSP adapter** — `msp_chat.py` wraps the same orchestration layer; new agent types are exposed automatically.
 
 ---
 
-*Document generated from codebase inspection on 2026-06-26. For individual deep-dives, refer to the companion docs listed in [Section 1](#1-introduction--companion-docs).*
+*Document last updated: 2026-07-31 (v1.5.0). For individual deep-dives, refer to the companion docs listed in [Section 1](#1-introduction--companion-docs).*
