@@ -117,6 +117,11 @@ class Settings(BaseSettings):
     )
 
     # ── LLM / AI ──────────────────────────────────────────────────────────────
+    llm_provider: str = Field(
+        default="openai",
+        validation_alias="LLM_PROVIDER",
+        description="LLM backend: 'openai' (default), 'azure_openai', or 'vertex_ai'.",
+    )
     openai_api_key: str | None = Field(
         default=None,
         validation_alias="OPENAI_API_KEY",
@@ -136,6 +141,30 @@ class Settings(BaseSettings):
         default=0.6,
         validation_alias="LLM_CONFIDENCE_THRESHOLD",
         description="Minimum supervisor confidence before routing; below this asks clarification.",
+    )
+
+    # ── LLM — Azure OpenAI (when LLM_PROVIDER=azure_openai) ───────────────────
+    azure_openai_llm_deployment: str | None = Field(
+        default=None,
+        validation_alias="AZURE_OPENAI_LLM_DEPLOYMENT",
+        description="Azure OpenAI deployment name for chat completions (defaults to LLM_MODEL when absent).",
+    )
+
+    # ── LLM — Google Cloud Vertex AI (when LLM_PROVIDER=vertex_ai) ────────────
+    vertex_ai_project: str | None = Field(
+        default=None,
+        validation_alias="VERTEX_AI_PROJECT",
+        description="Google Cloud project ID for Vertex AI.",
+    )
+    vertex_ai_location: str = Field(
+        default="us-central1",
+        validation_alias="VERTEX_AI_LOCATION",
+        description="Google Cloud region for Vertex AI endpoints.",
+    )
+    vertex_ai_credentials_path: str | None = Field(
+        default=None,
+        validation_alias="VERTEX_AI_CREDENTIALS_PATH",
+        description="Optional path to GCP service account JSON key file (defaults to ADC).",
     )
 
     # ── RAG provider selection ────────────────────────────────────────────────

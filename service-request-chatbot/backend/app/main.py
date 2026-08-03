@@ -61,6 +61,7 @@ def create_app() -> FastAPI:
     application.include_router(obs_traces.router, prefix="/api", tags=["observability"])
     application.include_router(obs_feedback.router, prefix="/api", tags=["observability"])
     application.include_router(obs_sessions.router, prefix="/api", tags=["observability"])
+    application.include_router(obs_metrics.router, prefix="/api", tags=["observability"])
     application.include_router(obs_metrics.router, prefix=settings.api_v1_prefix, tags=["observability-v1"])
 
     # ── v2 routes (current — new callers should use these) ────────────────────
