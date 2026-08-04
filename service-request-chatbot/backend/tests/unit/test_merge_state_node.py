@@ -517,7 +517,7 @@ class TestNonDateActiveFieldRemap:
 
     @pytest.mark.asyncio
     async def test_inspection_done_by_remapped_when_llm_maps_to_notes(self) -> None:
-        """LLM extracted 'Operations' to notes; active_field=inspection_done_by → remap."""
+        """LLM extracted 'Operations' to notes; active_field=inspection_done_by → remap + enum."""
         state = _state(
             active_field="inspection_done_by",
             user_message="Operations",
@@ -526,7 +526,7 @@ class TestNonDateActiveFieldRemap:
         )
         result = await merge_state_node(state)
         cd = result["collected_data"]
-        assert cd.get("inspection_done_by") == "Operations"
+        assert cd.get("inspection_done_by") == "OPERATIONS"
         assert "notes" not in cd
 
     @pytest.mark.asyncio
@@ -706,3 +706,145 @@ class TestNotesCommentsIndependence:
         result = await merge_state_node(state)
         assert result["collected_data"]["notes"] == "Note A"
         assert result["collected_data"]["comments"] == "Comment B"
+
+
+class TestLeaseRevalidation:
+    """Intentional lease-code changes must clear resolved IDs for re-lookup."""
+
+    @pytest.mark.asyncio
+    async def test_resolved_lease_code_locked_against_hallucination(self) -> None:
+        state = _state(
+            extracted_fields={"lease_code": _ext("t9999999")},
+            collected_data={
+                "lease_code": "t0033829",
+                "lease_id": "9001",
+                "brand": "Brand River",
+                "mall": "Yasmeen Mall",
+            },
+            user_message="thanks",
+        )
+        result = await merge_state_node(state)
+        assert result["collected_data"]["lease_code"] == "t0033829"
+        assert result["collected_data"]["lease_id"] == "9001"
+
+    @pytest.mark.asyncio
+    async def test_explicit_change_phrase_clears_lease_resolution(self) -> None:
+        state = _state(
+            extracted_fields={"lease_code": _ext("t0108240")},
+            collected_data={
+                "lease_code": "t0033829",
+                "lease_id": "9001",
+                "brand": "Brand River",
+                "mall": "Yasmeen Mall",
+                "unit_codes": ["GF116"],
+            },
+            user_message="change lease to t0108240",
+        )
+        result = await merge_state_node(state)
+        cd = result["collected_data"]
+        assert cd["lease_code"] == "t0108240"
+        assert "lease_id" not in cd
+        assert "brand" not in cd
+        assert "mall" not in cd
+        assert "unit_codes" not in cd
+
+    @pytest.mark.asyncio
+    async def test_confirmation_card_lease_edit_clears_resolution(self) -> None:
+        state = _state(
+            extracted_fields={},
+            corrected_fields={"lease_code": "t0108240"},
+            collected_data={
+                "lease_code": "t0033829",
+                "lease_id": "9001",
+                "brand": "Brand River",
+            },
+        )
+        result = await merge_state_node(state)
+        cd = result["collected_data"]
+        assert cd["lease_code"] == "t0108240"
+        assert "lease_id" not in cd
+        assert "brand" not in cd
+
+
+class TestInspectionAssigneeMerge:
+    """Invalid inspection assignees must not be stored; aliases normalize."""
+
+    @pytest.mark.asyncio
+    async def test_invalid_assignee_rejected(self) -> None:
+        state = _state(
+            extracted_fields={"inspection_done_by": _ext("mall manager", 0.95)},
+            collected_data={},
+            active_field="inspection_done_by",
+        )
+        result = await merge_state_node(state)
+        assert "inspection_done_by" not in result["collected_data"]
+
+    @pytest.mark.asyncio
+    async def test_alias_normalized_to_enum(self) -> None:
+        state = _state(
+            extracted_fields={"inspection_done_by": _ext("ops", 0.9)},
+            collected_data={},
+            active_field="inspection_done_by",
+        )
+        result = await merge_state_node(state)
+        assert result["collected_data"]["inspection_done_by"] == "OPERATIONS"
+
+    @pytest.mark.asyncio
+    async def test_low_confidence_enum_rejected(self) -> None:
+        state = _state(
+            extracted_fields={"inspection_done_by": _ext("FM_MANAGER", 0.5)},
+            collected_data={},
+            active_field="inspection_done_by",
+        )
+        result = await merge_state_node(state)
+        assert "inspection_done_by" not in result["collected_data"]
+
+    @pytest.mark.asyncio
+    async def test_active_field_lease_code_clears_resolution(self) -> None:
+        state = _state(
+            active_field="lease_code",
+            extracted_fields={"lease_code": _ext("t0108240")},
+            collected_data={
+                "lease_code": "t0033829",
+                "lease_id": "9001",
+                "brand": "Brand River",
+            },
+            user_message="t0108240",
+        )
+        result = await merge_state_node(state)
+        cd = result["collected_data"]
+        assert cd["lease_code"] == "t0108240"
+        assert "lease_id" not in cd
+
+
+class TestRouteAfterMergeLeaseRevalidation:
+    """Cleared lease_id must send the graph back through lease_lookup."""
+
+    def test_route_after_merge_looks_up_when_lease_id_cleared(self) -> None:
+        from app.agents.graph.help_agent_graph import _route_after_merge
+
+        assert (
+            _route_after_merge(
+                {
+                    "workflow_stage": "CREATE_SR",
+                    "collected_data": {"lease_code": "t0108240"},
+                }
+            )
+            == "lease_lookup"
+        )
+
+    def test_route_after_merge_skips_lookup_when_resolved(self) -> None:
+        from app.agents.graph.help_agent_graph import _route_after_merge
+
+        assert (
+            _route_after_merge(
+                {
+                    "workflow_stage": "CREATE_SR",
+                    "collected_data": {
+                        "lease_code": "t0108240",
+                        "lease_id": "9001",
+                    },
+                }
+            )
+            == "validation"
+        )

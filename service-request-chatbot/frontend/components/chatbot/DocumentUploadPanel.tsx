@@ -153,7 +153,12 @@ export function DocumentUploadPanel({
     setDeletingId(doc.documentId);
     setUploadError(null);
     try {
-      await deleteDocument(doc.documentId, sessionId, srId);
+      await deleteDocument(
+        doc.documentId,
+        sessionId,
+        srId,
+        collectedData?.lease_id || collectedData?.contract_id || null,
+      );
       onDeleteComplete?.(doc.documentId);
       setUploadSuccess(`${doc.filename} removed.`);
     } catch (err) {
