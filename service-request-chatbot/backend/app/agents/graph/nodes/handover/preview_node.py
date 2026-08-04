@@ -127,13 +127,21 @@ def _fields_from_platform(payload: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _ops_field(ops: list[dict[str, Any]]) -> dict[str, Any] | None:
-    """Summarise workflow operations as a single display field."""
+    """Summarise workflow operations as a single display field.
+
+    Renders role + status as human-readable labels via ``format_enum_label``
+    (falls through to the raw code when unmapped) — e.g. `MALL_MANAGER:
+    FINISHED` becomes `Mall Manager: Completed`.
+    """
     if not ops:
         return None
+    from app.agents.services.display_formatters import format_enum_label
     lines = []
     for op in ops:
-        role = op.get("assigned_role") or op.get("role", "Unknown")
-        status = op.get("status", "—")
+        role_raw = op.get("assigned_role") or op.get("role") or "Unknown"
+        status_raw = op.get("status") or "—"
+        role = format_enum_label(role_raw)
+        status = format_enum_label(status_raw)
         lines.append(f"{role}: {status}")
     return {"key": "workflow_operations", "label": "Workflow Stages", "value": " | ".join(lines)}
 

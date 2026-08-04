@@ -23,6 +23,23 @@ ENUM_DISPLAY_LABELS: dict[str, str] = {
     "ALREADY_TRADING": "Already Trading",
     "initiate_handover": "Initiate Handover",
     "INITIATE_HANDOVER": "Initiate Handover",
+    # SR workflow-operation statuses (platform-returned enum codes rendered
+    # in the "Workflow Stages" preview row).
+    "FINISHED": "Completed",
+    "PENDING": "Pending",
+    "IN_PROCESS": "In Progress",
+    "IN_PROGRESS": "In Progress",
+    "APPROVED_STATUS": "Approved",
+    "REJECTED": "Rejected",
+    "CANCELLED": "Cancelled",
+    "SUBMITTED": "Submitted",
+    "REPORT_SUBMITTED": "Report Submitted",
+    "COMPLETED": "Completed",
+    "SKIPPED": "Skipped",
+    "SR_CREATED": "SR Created",
+    "SR_APPROVED": "SR Approved",
+    "SR_COMPLETED": "SR Completed",
+    "HANDED_OVER_COMPLETED": "Handed Over — Completed",
 }
 
 _DATE_FIELD_KEYS: frozenset[str] = frozenset(

@@ -161,6 +161,34 @@ it into Formik, and the `ServiceReqForms` observer compares
 
 ---
 
+## 2026-08-04 · Humanize Workflow Stages row on the SR preview
+
+**Repo:** `cenomi-api-v2` (chatbot backend)
+
+**Why:** The submitted-SR preview card was rendering raw platform enums:
+
+```
+Workflow Stages
+MALL_MANAGER: FINISHED
+```
+
+**Fix:**
+
+- `app/agents/services/display_formatters.py::ENUM_DISPLAY_LABELS` —
+  added the SR workflow-operation statuses (`FINISHED → Completed`,
+  `PENDING → Pending`, `IN_PROCESS/IN_PROGRESS → In Progress`,
+  `SUBMITTED`, `REPORT_SUBMITTED`, `CANCELLED`, `SKIPPED`,
+  `SR_CREATED`, `SR_APPROVED`, `SR_COMPLETED`,
+  `HANDED_OVER_COMPLETED`).
+- `app/agents/graph/nodes/handover/preview_node.py::_ops_field` —
+  each `role` and `status` now runs through `format_enum_label` before
+  the `role: status` line is assembled. Unknown codes fall through
+  unchanged (safe default).
+
+Result: `Mall Manager: Completed` instead of `MALL_MANAGER: FINISHED`.
+
+---
+
 ## 2026-08-04 · Open-existing-SR on a terminal stage routes to `preview`
 
 **Repo:** `cenomi-api-v2` (chatbot backend)
