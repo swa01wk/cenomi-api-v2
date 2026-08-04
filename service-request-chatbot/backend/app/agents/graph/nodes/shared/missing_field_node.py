@@ -283,6 +283,24 @@ async def missing_field_node(state: ServiceRequestState) -> dict[str, Any]:
                     ],
                 }
             }
+        elif next_field == "already_handovered":
+            updates["response_decorations"] = {
+                "suggestions": {
+                    "kind": "labeled_options",
+                    "options": [
+                        {
+                            "label": "Already Trading",
+                            "value": "already_trading",
+                            "action": "select_handover_type_already_trading",
+                        },
+                        {
+                            "label": "Initiate Handover",
+                            "value": "initiate_handover",
+                            "action": "select_handover_type_initiate_handover",
+                        },
+                    ],
+                }
+            }
         elif next_field == "document_status":
             updates["response_decorations"] = {
                 "suggestions": {

@@ -38,6 +38,10 @@ _PREVIEW_FIELD_ORDER: list[tuple[str, str]] = [
     ("city",                   "City"),
     ("unit_codes",             "Units"),
     ("contracted_area",        "Contracted Area"),
+    # Discriminator — FE bridge reads this to switch HANDOVER ↔ HANDED_OVER
+    # skeletons and pre-select the radio. Must be published on every turn
+    # once the user picks a handover type.
+    ("already_handovered",     "Handover Type"),
     ("description",            "Description"),
     ("startDate",              "Inspection Start Date"),
     ("endDate",                "Inspection End Date"),
@@ -48,6 +52,12 @@ _PREVIEW_FIELD_ORDER: list[tuple[str, str]] = [
     ("fitout_start_date",      "Fitout Start Date"),
     ("fitout_end_date",        "Fitout End Date"),
     ("trading_date",           "Trading Date"),
+    # Path B (Already Trading / HANDED_OVER) actual dates — must reach the FE
+    # so HandoverAgenticBridge can hydrate the HANDED_OVER Formik skeleton.
+    ("actual_shop_handover_date", "Actual Shop Handover Date"),
+    ("actual_fitout_start_date",  "Actual Fitout Start Date"),
+    ("actual_fitout_end_date",    "Actual Fitout End Date"),
+    ("actual_trading_date",       "Actual Trading Date"),
     ("comments",               "Comments"),
     ("guideLineLink",          "Guideline Link"),
 ]
@@ -65,6 +75,10 @@ _PLATFORM_FIELD_ORDER: list[tuple[str, str]] = [
     ("fitout_start_date",      "Fitout Start Date"),
     ("fitout_end_date",        "Fitout End Date"),
     ("trading_date",           "Trading Date"),
+    ("actual_shop_handover_date", "Actual Shop Handover Date"),
+    ("actual_fitout_start_date",  "Actual Fitout Start Date"),
+    ("actual_fitout_end_date",    "Actual Fitout End Date"),
+    ("actual_trading_date",       "Actual Trading Date"),
     ("comments",               "Comments"),
     ("guideLineLink",          "Guideline Link"),
 ]

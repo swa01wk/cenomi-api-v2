@@ -289,14 +289,17 @@ def validate_handed_over_dates(data: dict[str, Any]) -> list[ValidationResult]:
             continue
 
         passed = earlier_val <= later_val
+        # Attach the error to the *later* field so the missing-field flow re-asks
+        # the value that violates the chain (which is almost always the one the
+        # user just typed) rather than the older, already-accepted earlier date.
         results.append(
             _result(
-                field=earlier_field,
+                field=later_field,
                 validation_type="handed_over_date_order",
                 passed=passed,
                 message=(
-                    f"'{earlier_field}' ({earlier_val}) must not be after "
-                    f"'{later_field}' ({later_val})."
+                    f"'{later_field}' ({later_val}) must be on or after "
+                    f"'{earlier_field}' ({earlier_val})."
                     if not passed
                     else f"'{earlier_field}' ({earlier_val}) ≤ '{later_field}' ({later_val})."
                 ),

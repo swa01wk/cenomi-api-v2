@@ -589,6 +589,8 @@ class ServiceRequestPlatformClient:
             return True
         if m == "PUT" and path.endswith("/files"):
             return True
+        if m == "DELETE" and path.endswith("/documents"):
+            return True
         if m == "GET" and cls._is_service_request_by_id_path(path):
             return True
         if m == "PATCH" and cls._is_service_request_by_id_path(path):

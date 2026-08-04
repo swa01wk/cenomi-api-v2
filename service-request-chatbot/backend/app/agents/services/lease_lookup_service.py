@@ -147,6 +147,13 @@ class HttpLeaseLookupService(AbstractLeaseLookupService):
                 endpoint=endpoint,
                 hint="cenomi-api GET /leases requires Authorization: Bearer <ai_token>",
             )
+        # Bearer-only auth: cenomi-api-2's ValidateAccessToken now accepts
+        # AI-session HS256 tokens (PR 4472 cherry-pick), so the earlier
+        # x-internal-api-token workaround / NewLeaseInternalHandler wiring
+        # has been removed on the platform side. The canonical
+        # SearchHandoverLeases route inside the private group runs the
+        # per-user RBAC scope via GetPermittedItems — the audit trail
+        # correctly attributes the lookup to the caller.
         request_payload: dict[str, Any] = {
             "endpoint": endpoint,
             "params": params,

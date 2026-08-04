@@ -92,6 +92,7 @@ class TestCreateSRStage:
         "unit_codes",
         "city",
         "contracted_area",
+        "already_handovered",  # Handover Type* — asked first after lease resolution
         "title",
         "description",
         "startDate",
