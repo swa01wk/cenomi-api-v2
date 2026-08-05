@@ -161,6 +161,42 @@ it into Formik, and the `ServiceReqForms` observer compares
 
 ---
 
+## 2026-08-04 · Eval suite — 8 new scenarios (S220–S227) for session changes
+
+**Repo:** `cenomi-api-v2` (chatbot backend)
+
+**Why:** Everything landed this session needs a regression guard so
+future rewrites don't silently break the Handover Type prompt, chip
+handlers, Path B UX, and the humanization we just added.
+
+**Fix:** `service-request-chatbot/backend/tests/eval/scenarios.py`
+
+- Added 8 scenarios (S220–S227) covering:
+
+| ID  | Tier | Guard |
+|-----|------|-------|
+| S220 | 1 | Handover Type prompt appears after lease resolution (Path A). |
+| S221 | 1 | `select_handover_type_already_trading` chip flips stage → CREATE_HANDED_OVER_SR + sub_category HANDED_OVER + asks first actual date. |
+| S222 | 2 | `select_handover_type_initiate_handover` chip stays on CREATE_SR (Path A). |
+| S223 | 2 | Path B date-chain violation re-asks the LATER field (trading), not the earlier one (fitout end). |
+| S224 | 1 | Path B review card renders Handover Type as "Already Trading" (humanized) + all 4 actual dates. |
+| S225 | 2 | Path B proactively asks for `comments` once before the review card. |
+| S226 | 2 | Pre-submission upload gate emits `document_requirement` with SR_HANDOVER_OTHER + Continue chip; Continue advances to review. |
+| S227 | 2 | Submitted-SR preview shows Workflow Stages humanized (`Mall Manager: Completed`, not `MALL_MANAGER: FINISHED`). |
+
+- Registered:
+  - `TIER1_SCENARIOS` gets `S220, S221, S224` (core create-flow guards).
+  - `TIER2_SCENARIOS` gets `S222, S223, S225, S226, S227` (edge / UX).
+  - `HANDED_OVER_SCENARIOS` extended with all 8 for the selective
+    runner.
+- Docstring tier table updated to reflect the new IDs.
+
+**Verified:** `SCENARIOS` total = 103 (was 95); all 8 IDs registered
+with correct tier + enabled=True; parses cleanly under the backend
+venv.
+
+---
+
 ## 2026-08-04 · Humanize Workflow Stages row on the SR preview
 
 **Repo:** `cenomi-api-v2` (chatbot backend)
