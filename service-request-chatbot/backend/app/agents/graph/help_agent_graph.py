@@ -222,11 +222,18 @@ def _route_after_sync(state: dict[str, Any]) -> str:
         if workflow_stage in registered_cfg.stage_sync_nodes:
             return registered_cfg.stage_sync_nodes[workflow_stage]
 
-    # 3. Terminal stages → supervisor for next intent
+    # 3. Terminal stages → preview when the user is opening an existing SR
+    # (sr_id present in backend_refs — set from the request body when the FE
+    # calls openExistingSr). Falling through to supervisor here would classify
+    # the "Open SR X" bubble as ASK_HELP and return FAQ content instead of the
+    # SR card. Only route to supervisor when there is no sr_id (stale state).
     all_terminal: frozenset[str] = frozenset(
         s for c in WORKFLOW_CONFIG_REGISTRY.values() for s in c.terminal_stages
     )
     if workflow_stage in all_terminal:
+        backend_refs_terminal = state.get("backend_refs") or {}
+        if backend_refs_terminal.get("sr_id"):
+            return "preview"
         return "supervisor"
 
     # 4. Fallback: status preview, agent entry, or supervisor (never re-sync)
@@ -401,7 +408,14 @@ def _route_after_validation(state: dict[str, Any]) -> str:
         # that were never supplied will be auto-set to "" by merge_state_node,
         # so routing back to missing_field would ask for comments AFTER the user
         # already clicked Confirm — which is incorrect.
-        if original_stage == "CREATE_SR" and active_agent not in _FITOUT_AGENTS and not already_confirmed:
+        # Extend proactive optional asking to CREATE_HANDED_OVER_SR (Path B) so
+        # comments (and any other optional-only fields) are asked once before the
+        # review card, matching the CREATE_SR (Path A) behavior.
+        if (
+            original_stage in ("CREATE_SR", "CREATE_HANDED_OVER_SR")
+            and active_agent not in _FITOUT_AGENTS
+            and not already_confirmed
+        ):
             optional_never_asked = [
                 f for f in still_missing
                 if f in OPTIONAL_FIELDS and collected.get(f) is None

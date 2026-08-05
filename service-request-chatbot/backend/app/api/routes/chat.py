@@ -190,12 +190,15 @@ async def post_service_request_chat(
     auth: AuthContext = Depends(get_auth_context),
 ) -> ServiceRequestChatResponse:
     """Process one chat turn for the service-request workflow."""
-    # Validate: empty message is only allowed when sr_id is present (FM/DD opening an existing SR)
-    # or when an explicit action is provided (FM/DD clicking a button without typing a message).
-    if not body.message and not body.sr_id and not body.action:
+    # Validate: empty message is allowed when sr_id is present (FM/DD opening an
+    # existing SR), an explicit action is provided (chip click without typing),
+    # OR a session_id is present (silent refresh — e.g. after a document upload
+    # the FE calls refreshAfterUpload with an empty message so the graph re-emits
+    # the current stage's UI with the new document row).
+    if not body.message and not body.sr_id and not body.action and not body.session_id:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="Either 'message' or 'sr_id' must be provided.",
+            detail="Either 'message', 'sr_id', 'action', or 'session_id' must be provided.",
         )
 
     # Resolve user_id: JWT subject_id takes precedence over request body user_id

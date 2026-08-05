@@ -224,14 +224,19 @@ def _handle_mm_optional_upload_gate(
 ) -> dict[str, Any] | None:
     """CREATE_SR / SR_CREATED optional MM upload offer/upload wait. Returns patch or None."""
     stage = state.get("workflow_stage") or "CREATE_SR"
-    if stage != "SR_CREATED":
+    # Path A: post-submission (SR_CREATED). Path B (Already Trading):
+    # pre-submission — the confirmation node emits the upload UI and marks
+    # `mm_optional_upload_status = AWAITING_UPLOAD` on first entry, so
+    # Continue/skip actions land here and mark DONE.
+    if stage not in ("SR_CREATED", "CREATE_HANDED_OVER_SR"):
         return None
     if state.get("confirmation_status") == "PENDING":
         return None
     # When sr_id is already in backend_refs, an FM/DD Manager is opening an existing
     # SR via the sr_id parameter.  The upload offer is irrelevant in that context.
+    # (Path B has no sr_id yet at this point — it is created on Confirm & Submit.)
     backend_refs = state.get("backend_refs") or {}
-    if backend_refs.get("sr_id"):
+    if stage == "SR_CREATED" and backend_refs.get("sr_id"):
         return None
 
     collected = dict(state.get("collected_data") or {})
@@ -391,6 +396,21 @@ async def handover_entry_node(state: ServiceRequestState) -> dict[str, Any]:
                 "What would you like to do next?"
             ),
         }
+
+    _HANDOVER_TYPE_ACTIONS: dict[str, str] = {
+        "select_handover_type_already_trading": "already_trading",
+        "select_handover_type_initiate_handover": "initiate_handover",
+    }
+    if action_override in _HANDOVER_TYPE_ACTIONS:
+        value = _HANDOVER_TYPE_ACTIONS[action_override]
+        log.info("handover_entry.action_select_handover_type", value=value)
+        collected = dict(state.get("collected_data") or {})
+        collected["already_handovered"] = value
+        patch: dict[str, Any] = {"collected_data": collected}
+        if value == "already_trading":
+            patch["workflow_stage"] = "CREATE_HANDED_OVER_SR"
+            patch["sub_category"] = "HANDED_OVER"
+        return patch
 
     if action_override == "upload_document":
         log.info("handover_entry.action_override_upload_document")

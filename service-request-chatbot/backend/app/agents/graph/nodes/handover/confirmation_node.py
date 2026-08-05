@@ -23,10 +23,17 @@ from typing import Any
 
 from app.agents.graph.state import ServiceRequestState
 from app.agents.schemas.handover_schema import OPTIONAL_FIELDS, get_missing_fields
-from app.agents.services.display_formatters import format_field_display_value
+from app.agents.services.display_formatters import (
+    format_enum_label,
+    format_field_display_value,
+)
 from app.agents.services.review_decorations_service import (
     build_document_upload_ask_response,
+    build_mm_optional_upload_continue_suggestions,
     is_fm_review_ready,
+    MM_OPTIONAL_AWAITING_UPLOAD,
+    MM_OPTIONAL_DONE,
+    MM_OPTIONAL_UPLOAD_STATUS_KEY,
 )
 from app.observability.decorators import trace_node
 
@@ -59,6 +66,12 @@ _FIELD_LABELS: dict[str, str] = {
     "fitout_start_date": "Fitout Start Date",
     "fitout_end_date": "Fitout End Date",
     "trading_date": "Trading Start Date (Auto)",
+    # CREATE_HANDED_OVER_SR (Path B — Already Trading)
+    "already_handovered": "Handover Type",
+    "actual_shop_handover_date": "Actual Shop Handover Date",
+    "actual_fitout_start_date": "Actual Fitout Start Date",
+    "actual_fitout_end_date": "Actual Fitout End Date",
+    "actual_trading_date": "Actual Trading Date",
 }
 
 # Fields the user may inline-edit on the CREATE_SR card.
@@ -103,6 +116,24 @@ _FM_REVIEW_DISPLAY_FIELDS: tuple[str, ...] = (
     "comments",
 )
 
+_HANDED_OVER_EDITABLE: frozenset[str] = frozenset({"title", "comments"})
+
+_HANDED_OVER_DISPLAY_FIELDS: tuple[str, ...] = (
+    "lease_code",
+    "brand",
+    "mall",
+    "unit_codes",
+    "city",
+    "contracted_area",
+    "already_handovered",
+    "title",
+    "actual_shop_handover_date",
+    "actual_fitout_start_date",
+    "actual_fitout_end_date",
+    "actual_trading_date",
+    "comments",
+)
+
 _RDD_REVIEW_DISPLAY_FIELDS: tuple[str, ...] = (
     "lease_code",
     "brand",
@@ -139,12 +170,22 @@ _STAGE_DISPLAY_CONFIG: dict[str, tuple[tuple[str, ...], frozenset[str], str]] = 
         "guidelines link, and ensure the handover report is uploaded. "
         "Trading start date has been auto-calculated as fitout end + 8 days.",
     ),
+    "CREATE_HANDED_OVER_SR": (
+        _HANDED_OVER_DISPLAY_FIELDS,
+        _HANDED_OVER_EDITABLE,
+        "All required details have been collected for the Already Trading handover. "
+        "Please review and confirm the Handed Over Service Request, or let me know "
+        "if you want to change anything. "
+        "You can also attach optional supporting documents (paperclip icon) before "
+        "confirming — any files you upload will be submitted with the request.",
+    ),
 }
 
 _REQUEST_TYPE_LABELS: dict[str, str] = {
     "CREATE_SR": "Handover Service Request",
     "FM_REVIEW": "FM Review — Save / Approve",
     "RDD_REVIEW": "RDD Report Submission",
+    "CREATE_HANDED_OVER_SR": "Handed Over Service Request",
 }
 
 # ── Internal helpers ───────────────────────────────────────────────────────────
@@ -231,6 +272,12 @@ def _build_confirmation_card(
             if is_editable
             else format_field_display_value(field_key, raw_value)
         )
+        # `already_handovered` is humanized only here (review card). Do NOT
+        # humanize in `format_field_display_value`, or the FE bridge will
+        # write the label into Formik and the HANDOVER↔HANDED_OVER swap
+        # observer (which matches literal codes) will silently break.
+        if field_key == "already_handovered" and not is_editable:
+            display_value = format_enum_label(display_value)
         row: dict[str, Any] = {
             "key": field_key,
             "label": _FIELD_LABELS.get(field_key, field_key),
@@ -352,6 +399,66 @@ async def confirmation_node(state: ServiceRequestState) -> dict[str, Any]:
                 )
                 return build_document_upload_ask_response(state)
 
+    # Path B (CREATE_HANDED_OVER_SR) — pre-submission optional upload gate.
+    # Mirrors Path A's post-submission MM_OPTIONAL upload gate but runs
+    # BEFORE the confirmation card (Path B has no post-submission window —
+    # HANDED_OVER_COMPLETED terminates the flow immediately). Emit a
+    # document_requirement UI limited to SR_HANDOVER_OTHER + a Continue
+    # chip. Upload writes into collected_data.documents[] which
+    # build_create_handed_over_payload passes as documents_ids. Continue
+    # chip / "continue" / "skip" marks the gate DONE and next turn falls
+    # through to the confirmation card.
+    if (
+        workflow_stage == "CREATE_HANDED_OVER_SR"
+        and collected_data.get(MM_OPTIONAL_UPLOAD_STATUS_KEY) != MM_OPTIONAL_DONE
+    ):
+        documents = list(state.get("documents") or [])
+        uploaded_ids = {
+            str(d.get("document_type_id") or d.get("document_type") or "")
+            for d in documents
+            if d.get("document_type_id") or d.get("document_type")
+        }
+        already_uploaded = "SR_HANDOVER_OTHER" in uploaded_ids
+        session_id_val = str(state.get("session_id") or "")
+        sr_id_val = str(backend_refs.get("sr_id") or "")
+        doc_requirement_ui: dict[str, Any] = {
+            "type": "document_requirement",
+            "message": (
+                "You can attach an optional supporting document (Other) for "
+                "this Already Trading handover, or tap Continue to review "
+                "and submit without uploading."
+            ),
+            "documents": [
+                {
+                    "key": "SR_HANDOVER_OTHER",
+                    "label": "Other (Already Trading)",
+                    "required": False,
+                    "status": "uploaded" if already_uploaded else "missing",
+                }
+            ],
+            "uploadContext": {
+                "session_id": session_id_val,
+                "sr_id": sr_id_val,
+                # Path B only accepts the SR_HANDOVER_OTHER type. The FE
+                # uploader should pre-select this type and lock the dropdown.
+                "allowedDocumentTypes": ["SR_HANDOVER_OTHER"],
+                "defaultDocumentType": "SR_HANDOVER_OTHER",
+            },
+        }
+        collected_with_status = dict(collected_data)
+        collected_with_status[MM_OPTIONAL_UPLOAD_STATUS_KEY] = MM_OPTIONAL_AWAITING_UPLOAD
+        return {
+            "status": "WAITING_FOR_USER",
+            "collected_data": collected_with_status,
+            "response_ui": doc_requirement_ui,
+            "response_decorations": {
+                "suggestions": build_mm_optional_upload_continue_suggestions(),
+            },
+            "response_message": None,
+            "missing_fields": [],
+            "active_field": None,
+        }
+
     logger.info(
         "confirmation_node: all required fields present for stage=%s — generating confirmation card",
         workflow_stage,
@@ -359,7 +466,7 @@ async def confirmation_node(state: ServiceRequestState) -> dict[str, Any]:
 
     confirmation_card = _build_confirmation_card(collected_data, workflow_stage, backend_refs)
 
-    return {
+    result: dict[str, Any] = {
         "confirmation_required": True,
         "confirmation_status": "PENDING",
         "status": "READY_TO_SUBMIT",
@@ -370,3 +477,5 @@ async def confirmation_node(state: ServiceRequestState) -> dict[str, Any]:
         "missing_fields": [],
         "active_field": None,
     }
+
+    return result

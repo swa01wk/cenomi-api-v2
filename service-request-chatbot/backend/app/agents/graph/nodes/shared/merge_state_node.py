@@ -452,7 +452,22 @@ async def merge_state_node(state: ServiceRequestState) -> dict[str, Any]:
         elif doc_type == _RDD_DOC_TYPE_OTHER:
             collected.pop("document_status", None)
 
-    return {"collected_data": collected}
+    # ── Handover Type* switch — Path A (CREATE_SR) → Path B (CREATE_HANDED_OVER_SR) ──
+    # Once the user picks "already_trading" for already_handovered, flip the
+    # workflow_stage + sub_category so the remaining fields align with Path B
+    # (four actual dates instead of description/dates/inspector).
+    patch: dict[str, Any] = {"collected_data": collected}
+    active_agent = state.get("active_agent") or ""
+    current_stage = state.get("workflow_stage") or ""
+    already_handovered = str(collected.get("already_handovered") or "").strip().lower()
+    if (
+        active_agent == "rdd_handover_agent"
+        and current_stage == "CREATE_SR"
+        and already_handovered == "already_trading"
+    ):
+        patch["workflow_stage"] = "CREATE_HANDED_OVER_SR"
+        patch["sub_category"] = "HANDED_OVER"
+    return patch
 
 
 def _generate_title(lease_code: str, description: str) -> str:

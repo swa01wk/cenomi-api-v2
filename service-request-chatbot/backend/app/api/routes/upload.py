@@ -59,6 +59,10 @@ _ALLOWED_CONTENT_TYPES: frozenset[str] = frozenset(
 _RDD_DOC_TYPES: frozenset[str] = frozenset(RDD_ALLOWED_DOCUMENTS)
 _FM_DOC_TYPES: frozenset[str] = frozenset(FM_ALLOWED_DOCUMENTS)
 # Optional "Other" is allowed for MM create, FM review, and RDD review.
+# Path B (HANDED_OVER / Already Trading) reuses the same SR_HANDOVER_OTHER type
+# — the platform's HANDED_OVER form skeleton seeds documents with that same
+# document_type_id, so keeping one name across both paths avoids duplicate
+# rows in the manual form.
 _SHARED_OPTIONAL_DOC_TYPES: frozenset[str] = frozenset({"SR_HANDOVER_OTHER"})
 
 _permission_service = PermissionService()

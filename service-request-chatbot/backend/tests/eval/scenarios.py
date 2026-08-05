@@ -2,10 +2,20 @@
 
 TIER STRUCTURE
 --------------
-  Tier 0  Smoke   — S201–S202: 2 quick sanity scenarios (~1 min)
+  Tier 0  Smoke   — S200–S206: per-agent smoke scenarios (~2 min)
   Tier 1  Core    — S1–S15:  CREATE_SR happy path, basic flows
+                    + S63, S64  HANDED_OVER Path B core / Path A fix
+                    + S220, S221, S224  Handover Type prompt / chip /
+                                        Path B review-card humanization
   Tier 2  Edge    — S16–S33: corrections, multi-field, API edge cases
+                    + S65–S68  HANDED_OVER / Path A fix scenarios
+                    + S222, S223, S225–S227  Handover Type chip Path A,
+                                             date-chain later-field,
+                                             comments proactive ask,
+                                             upload gate, workflow-stage
+                                             humanization
   Tier 3  Battle  — S34–S59: Issues 1–7 from agent_ui_fixes.md
+                    + S69  FM date format (Fix 5)
   (Tier 4/5/6 live in lifecycle_scenarios.py)
   Tier 8  FitoutConfirm Core+Edge — S70–S82: FIT_OUT_CONFIRM_FOS/END/TRADING
 
@@ -2747,6 +2757,306 @@ _S69 = Scenario(
 
 
 # =============================================================================
+# Session 2026-08-04 — Handover Type prompt + Path B refinements (S220–S227)
+# Guards for behaviours added / fixed this session. Kept in tier-1/2 so the
+# core create-handover paths are protected against regressions.
+# =============================================================================
+
+_S220 = Scenario(
+    id=220,
+    name="handover_type_prompt_after_lease_resolution",
+    goal=(
+        "After the lease is resolved, the agent MUST ask for Handover Type "
+        "(Already Trading vs Initiate Handover) BEFORE any other field. "
+        "Guards the new prompt insertion in handover_schema CREATE_SR."
+    ),
+    tier=1,
+    turns=[
+        Turn(
+            message="I want to create a Handover service request",
+            note="Agent asks for the lease code first",
+            expect_keywords=["lease", "code", "brand", "company", "mall"],
+        ),
+        Turn(
+            message="t0105712",
+            note=(
+                "Lease resolved → next question MUST be the Handover Type "
+                "choice, not description. UI carries labeled_options chips."
+            ),
+            expect_ui_type="text_question",
+            expect_workflow_stage="CREATE_SR",
+            expect_keywords=[
+                "handover type", "already trading", "initiate handover"
+            ],
+        ),
+    ],
+    tags=["handover-type", "prompt", "labeled-options", "tier1-core"],
+)
+
+
+_S221 = Scenario(
+    id=221,
+    name="handover_type_chip_already_trading_flips_to_path_b",
+    goal=(
+        "Clicking the 'Already Trading' chip (action="
+        "select_handover_type_already_trading) must write "
+        "collected_data.already_handovered='already_trading' AND flip "
+        "workflow_stage → CREATE_HANDED_OVER_SR + sub_category → HANDED_OVER. "
+        "Guards handover_entry_node._HANDOVER_TYPE_ACTIONS."
+    ),
+    tier=1,
+    turns=[
+        Turn(
+            message="I want to create a Handover service request",
+            expect_keywords=["lease", "code"],
+        ),
+        Turn(
+            message="t0105712",
+            expect_keywords=["handover type", "already trading", "initiate"],
+        ),
+        Turn(
+            message=" ",
+            note=(
+                "Simulates chip click — empty message + explicit action. "
+                "Stage must flip to Path B; agent asks for the first "
+                "actual date field (shop handover)."
+            ),
+            action="select_handover_type_already_trading",
+            expect_workflow_stage="CREATE_HANDED_OVER_SR",
+            expect_keywords=["actual", "shop", "handover", "date", "dd/mm/yyyy"],
+        ),
+    ],
+    tags=["handover-type", "chip", "path-b", "stage-flip", "tier1-core"],
+)
+
+
+_S222 = Scenario(
+    id=222,
+    name="handover_type_chip_initiate_handover_stays_on_path_a",
+    goal=(
+        "Clicking the 'Initiate Handover' chip writes "
+        "already_handovered='initiate_handover' and stays on CREATE_SR "
+        "(Path A). Guards the Path A branch of _HANDOVER_TYPE_ACTIONS."
+    ),
+    tier=2,
+    turns=[
+        Turn(
+            message="I want to create a Handover service request",
+            expect_keywords=["lease", "code"],
+        ),
+        Turn(
+            message="t0105712",
+            expect_keywords=["handover type", "already trading", "initiate"],
+        ),
+        Turn(
+            message=" ",
+            note=(
+                "Initiate chip → stage stays CREATE_SR, agent asks the next "
+                "Path A field (description or title)."
+            ),
+            action="select_handover_type_initiate_handover",
+            expect_workflow_stage="CREATE_SR",
+            expect_keywords=[
+                "description", "title", "start", "end",
+                "inspection", "notes"
+            ],
+        ),
+    ],
+    tags=["handover-type", "chip", "path-a", "tier2-edge"],
+)
+
+
+_S223 = Scenario(
+    id=223,
+    name="path_b_date_chain_error_reasks_later_field",
+    goal=(
+        "When user enters actual_trading_date BEFORE actual_fitout_end_date, "
+        "the validator must re-ask the LATER field (trading) — not the "
+        "earlier, already-accepted end date. Guards the field=later_field "
+        "swap in validation_service.validate_handed_over_dates."
+    ),
+    tier=2,
+    turns=[
+        Turn(
+            message=(
+                f"Lease t0105712 is already trading. "
+                f"Handover date {_ACT_HANDOVER}, fitout start {_ACT_FO_START}, "
+                f"fitout end {_ACT_FO_END}."
+            ),
+            note="First 3 dates accepted; agent asks for actual trading date",
+            expect_keywords=["actual", "trading", "date"],
+        ),
+        Turn(
+            message=_d(-100),  # WAY before fitout end (-30)
+            note=(
+                "Invalid: trading before fitout end. Agent must re-ask for "
+                "'actual_trading_date' with a message mentioning the ordering "
+                "constraint (on or after)."
+            ),
+            expect_keywords=[
+                "trading", "on or after", "fitout end",
+            ],
+        ),
+    ],
+    tags=["path-b", "validation", "date-chain", "later-field", "tier2-edge"],
+)
+
+
+_S224 = Scenario(
+    id=224,
+    name="path_b_review_card_has_all_actual_dates_and_humanized_type",
+    goal=(
+        "The CREATE_HANDED_OVER_SR review card must include all four actual "
+        "date fields (formatted DD/MM/YYYY) AND humanize already_handovered "
+        "to 'Already Trading'. Guards confirmation_node._HANDED_OVER_* "
+        "and the format_enum_label wrapper."
+    ),
+    tier=1,
+    turns=[
+        Turn(
+            message=(
+                f"Lease t0105712 is already trading. "
+                f"Handover date {_ACT_HANDOVER}, fitout start {_ACT_FO_START}, "
+                f"fitout end {_ACT_FO_END}, trading date {_ACT_TRADING}. "
+                f"No comments."
+            ),
+            note=(
+                "All fields packed; review card must render Handover Type + "
+                "4 actual dates (formatted). Handover Type shown as "
+                "'Already Trading' (not 'already_trading')."
+            ),
+            expect_ui_type="confirmation_card",
+            expect_workflow_stage="CREATE_HANDED_OVER_SR",
+            expect_field_value={
+                "Handover Type": "Already Trading",
+            },
+        ),
+    ],
+    tags=[
+        "path-b", "review-card", "humanization", "actual-dates", "tier1-core",
+    ],
+)
+
+
+_S225 = Scenario(
+    id=225,
+    name="path_b_proactively_asks_for_comments",
+    goal=(
+        "Once the 4 Path B actual dates are collected, the agent must ask "
+        "for comments once before showing the review card (matches Path A "
+        "behaviour). Guards the CREATE_HANDED_OVER_SR branch added to "
+        "_route_after_validation."
+    ),
+    tier=2,
+    turns=[
+        Turn(
+            message=(
+                f"Lease t0105712 is already trading. "
+                f"Handover date {_ACT_HANDOVER}, fitout start {_ACT_FO_START}, "
+                f"fitout end {_ACT_FO_END}, trading date {_ACT_TRADING}."
+            ),
+            note=(
+                "All 4 dates provided but comments intentionally omitted; "
+                "agent must proactively ask for comments before confirmation."
+            ),
+            expect_workflow_stage="CREATE_HANDED_OVER_SR",
+            expect_keywords=["comment"],
+        ),
+    ],
+    tags=["path-b", "optional-fields", "comments", "proactive-ask", "tier2-edge"],
+)
+
+
+_S226 = Scenario(
+    id=226,
+    name="path_b_upload_gate_before_confirmation",
+    goal=(
+        "After Path B fields + comments are collected, the agent must first "
+        "emit a document_requirement UI (SR_HANDOVER_OTHER, optional) with "
+        "a Continue chip, THEN show the confirmation card on Continue. "
+        "Guards confirmation_node's pre-submission upload gate."
+    ),
+    tier=2,
+    turns=[
+        Turn(
+            message=(
+                f"Lease t0105712 is already trading. "
+                f"Handover date {_ACT_HANDOVER}, fitout start {_ACT_FO_START}, "
+                f"fitout end {_ACT_FO_END}, trading date {_ACT_TRADING}. "
+                f"No comments."
+            ),
+            note=(
+                "All fields + comments provided; next turn is the upload "
+                "offer, not the review card yet."
+            ),
+            expect_ui_type="document_requirement",
+            expect_keywords=[
+                "upload", "supporting", "other", "continue",
+            ],
+        ),
+        Turn(
+            message=" ",
+            note=(
+                "Continue chip → mm_optional_upload_status flips to done → "
+                "next turn shows the confirmation card."
+            ),
+            action="continue_optional_upload",
+            expect_ui_type="confirmation_card",
+            expect_workflow_stage="CREATE_HANDED_OVER_SR",
+        ),
+    ],
+    tags=[
+        "path-b", "upload-gate", "sr-handover-other", "continue-chip",
+        "tier2-edge",
+    ],
+)
+
+
+_S227 = Scenario(
+    id=227,
+    name="workflow_stages_humanized_on_preview",
+    goal=(
+        "The submitted-SR preview card 'Workflow Stages' row must show "
+        "human-readable labels (e.g. 'Mall Manager: Completed'), not raw "
+        "platform enums like 'MALL_MANAGER: FINISHED'. Guards the "
+        "format_enum_label call in preview_node._ops_field."
+    ),
+    tier=2,
+    turns=[
+        Turn(
+            message=(
+                f"Lease t0105712 is already trading. "
+                f"Handover date {_ACT_HANDOVER}, fitout start {_ACT_FO_START}, "
+                f"fitout end {_ACT_FO_END}, trading date {_ACT_TRADING}. "
+                f"No comments."
+            ),
+            note="Get to review card (via upload gate)",
+            expect_ui_type="document_requirement",
+        ),
+        Turn(
+            message=" ",
+            action="continue_optional_upload",
+            expect_ui_type="confirmation_card",
+        ),
+        Turn(
+            message="Confirm",
+            note=(
+                "SR submitted; preview card must render Workflow Stages "
+                "with human-readable labels. Raw enum codes "
+                "('FINISHED', 'MALL_MANAGER') must NOT appear."
+            ),
+            action="confirm",
+            expect_workflow_stage="HANDED_OVER_COMPLETED",
+            expect_keywords=[
+                "mall manager", "completed",
+            ],
+        ),
+    ],
+    tags=["path-b", "preview", "workflow-stages", "humanization", "tier2-edge"],
+)
+
+
+# =============================================================================
 # TIER 0 — Smoke scenarios (S201–S202)
 # Fast sanity gate: ~60 seconds. Run before any longer tier.
 # =============================================================================
@@ -3285,6 +3595,9 @@ TIER1_SCENARIOS: list[Scenario] = [
     _S10, _S11, _S12, _S13, _S14, _S15,
     # HANDED_OVER Path B core + Path A fix
     _S63, _S64,
+    # 2026-08-04 session — Handover Type prompt + chip → Path B stage flip +
+    # Path B review-card humanization (core: guards the primary create flow).
+    _S220, _S221, _S224,
 ]
 
 #: CREATE_SR edge cases, API fields, multi-field combos, missing coverage
@@ -3294,6 +3607,9 @@ TIER2_SCENARIOS: list[Scenario] = [
     _S60, _S61, _S62,
     # HANDED_OVER / Path B + Path A fix scenarios
     _S65, _S66, _S67, _S68,
+    # 2026-08-04 session — chip Initiate Handover, date-chain later-field,
+    # proactive comments ask, upload gate, workflow-stage humanization.
+    _S222, _S223, _S225, _S226, _S227,
 ]
 
 #: Agent-fix battle tests (Issues 1–7 from agent_ui_fixes.md)
@@ -3351,6 +3667,9 @@ TIER8_SCENARIOS: list[Scenario] = [_S201, _S208, _S209, _S210, _S211, _S212]
 #: HANDED_OVER / Path B + Path A fix — exported for selective runner use
 HANDED_OVER_SCENARIOS: list[Scenario] = [
     _S63, _S64, _S65, _S66, _S67, _S68, _S69,
+    # 2026-08-04 session additions (Handover Type prompt/chip, Path B
+    # date-chain, review card, upload gate, workflow-stage humanization).
+    _S220, _S221, _S222, _S223, _S224, _S225, _S226, _S227,
 ]
 
 #: Fitout Confirmation SR — all fitout flat scenarios grouped by agent

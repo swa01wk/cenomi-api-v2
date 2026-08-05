@@ -49,7 +49,7 @@ RDDDocumentType = Literal[
     "SR_HANDOVER_OTHER",
 ]
 
-HandedOverDocumentType = Literal["SR_HANDED_OVER_OTHER"]
+HandedOverDocumentType = Literal["SR_HANDOVER_OTHER"]
 
 # ── Stage definition dataclass ────────────────────────────────────────────────
 
@@ -81,6 +81,9 @@ CREATE_SR_STAGE = StageDefinition(
         "unit_codes",
         "city",
         "contracted_area",
+        # Handover Type* — asked first after lease resolution. Value "already_trading"
+        # triggers Path B (CREATE_HANDED_OVER_SR); "initiate_handover" continues Path A.
+        "already_handovered",
         "title",
         "description",
         "startDate",
@@ -163,7 +166,7 @@ CREATE_HANDED_OVER_SR_STAGE = StageDefinition(
         # Must appear here so _route_after_validation can detect it and ask once.
         "comments",
     ),
-    required_documents=(),  # SR_HANDED_OVER_OTHER is optional
+    required_documents=(),  # SR_HANDOVER_OTHER is optional on Path B (matches platform skeleton)
 )
 
 # Ordered date chain for Path B validation (earlier → later).
@@ -244,7 +247,7 @@ RDD_ALLOWED_DOCUMENTS: tuple[str, ...] = RDD_REVIEW_STAGE.required_documents
 RDD_REQUIRED_DOCUMENTS: tuple[str, ...] = ("DR_SR_HANDOVER_REPORT",)
 
 # All document types accepted at the CREATE_HANDED_OVER_SR stage (all optional).
-HANDED_OVER_ALLOWED_DOCUMENTS: tuple[str, ...] = ("SR_HANDED_OVER_OTHER",)
+HANDED_OVER_ALLOWED_DOCUMENTS: tuple[str, ...] = ("SR_HANDOVER_OTHER",)
 
 # RDD upload type codes (collected_data.rdd_upload_doc_type).
 RDD_DOC_TYPE_MEETING = "DR_SR_HANDOVER_REPORT"

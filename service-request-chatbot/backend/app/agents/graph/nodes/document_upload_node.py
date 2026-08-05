@@ -40,7 +40,7 @@ _FM_DOCUMENT_TYPES: frozenset[str] = frozenset({
 })
 
 # Path B (HANDED_OVER / Already Trading) optional document type.
-_HANDED_OVER_DOCUMENT_TYPES: frozenset[str] = frozenset({"SR_HANDED_OVER_OTHER"})
+_HANDED_OVER_DOCUMENT_TYPES: frozenset[str] = frozenset({"SR_HANDOVER_OTHER"})
 
 _RDD_MEETING_REPORT = "DR_SR_HANDOVER_REPORT"
 _RDD_REJECTED_REPORT = "SR_REJECTED_HANDOVER_REPORT"

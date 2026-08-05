@@ -19,6 +19,27 @@ ENUM_DISPLAY_LABELS: dict[str, str] = {
     "APPROVED": "Approved",
     "APPROVED_WITH_CHANGES": "Approved with changes",
     "DISAPPROVED": "Disapproved",
+    "already_trading": "Already Trading",
+    "ALREADY_TRADING": "Already Trading",
+    "initiate_handover": "Initiate Handover",
+    "INITIATE_HANDOVER": "Initiate Handover",
+    # SR workflow-operation statuses (platform-returned enum codes rendered
+    # in the "Workflow Stages" preview row).
+    "FINISHED": "Completed",
+    "PENDING": "Pending",
+    "IN_PROCESS": "In Progress",
+    "IN_PROGRESS": "In Progress",
+    "APPROVED_STATUS": "Approved",
+    "REJECTED": "Rejected",
+    "CANCELLED": "Cancelled",
+    "SUBMITTED": "Submitted",
+    "REPORT_SUBMITTED": "Report Submitted",
+    "COMPLETED": "Completed",
+    "SKIPPED": "Skipped",
+    "SR_CREATED": "SR Created",
+    "SR_APPROVED": "SR Approved",
+    "SR_COMPLETED": "SR Completed",
+    "HANDED_OVER_COMPLETED": "Handed Over — Completed",
 }
 
 _DATE_FIELD_KEYS: frozenset[str] = frozenset(
@@ -31,6 +52,10 @@ _DATE_FIELD_KEYS: frozenset[str] = frozenset(
         "fitout_start_date",
         "fitout_end_date",
         "trading_date",
+        "actual_shop_handover_date",
+        "actual_fitout_start_date",
+        "actual_fitout_end_date",
+        "actual_trading_date",
     }
 )
 
@@ -72,6 +97,13 @@ def format_field_display_value(field_key: str, value: Any) -> Any:
         return format_date_ddmmyyyy(value)
     if field_key in ("inspection_done_by", "document_status"):
         return format_enum_label(value)
+    # NOTE: `already_handovered` is intentionally NOT humanized here.
+    # It flows through `draft_preview.fields` into the FE bridge, which
+    # writes it into Formik. The ServiceReqForms observer swaps HANDOVER ↔
+    # HANDED_OVER by matching the literal codes `already_trading` /
+    # `initiate_handover`. If we return "Already Trading" here the swap
+    # silently breaks. Humanization for the confirmation card happens in
+    # `confirmation_node._build_confirmation_card`.
     if isinstance(value, list):
         return ", ".join(str(v) for v in value)
     return value
