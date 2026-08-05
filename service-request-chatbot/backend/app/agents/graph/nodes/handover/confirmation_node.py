@@ -253,11 +253,24 @@ def _build_confirmation_card(
     }
 
     display_keys = list(display_fields)
-    # Hide document_status on the card unless Meeting Report path (or already set).
+    # Hide document_status on the card unless Meeting Report was uploaded (or
+    # a value is already set from a prior turn). Detect via the uploaded doc
+    # types on state.documents rather than the removed rdd_upload_doc_type
+    # chip field.
     if workflow_stage == "RDD_REVIEW":
-        doc_type = collected_data.get("rdd_upload_doc_type")
-        if doc_type != "DR_SR_HANDOVER_REPORT" and not collected_data.get(
-            "document_status"
+        uploaded_types = {
+            str(d.get("document_type_id") or d.get("document_type") or "")
+            for d in (backend_refs.get("documents") or [])
+            if d.get("document_type_id") or d.get("document_type")
+        }
+        # `backend_refs.documents` isn't always populated; also inspect the
+        # legacy chip field for backward compat during rollout.
+        legacy_chip = collected_data.get("rdd_upload_doc_type")
+        meeting_uploaded = "DR_SR_HANDOVER_REPORT" in uploaded_types
+        if (
+            not meeting_uploaded
+            and legacy_chip != "DR_SR_HANDOVER_REPORT"
+            and not collected_data.get("document_status")
         ):
             display_keys = [k for k in display_keys if k != "document_status"]
 
@@ -298,12 +311,15 @@ def _build_confirmation_card(
 
     # Embed the stage-specific confirmAction so the frontend knows which action
     # string to send back instead of the generic "confirm".
-    # FM_REVIEW defaults to approve when fm_action was never set (e.g. user
-    # reached the card via field collection rather than an Approve chip).
-    # RDD_REVIEW defaults to submit for the same reason (PM report path).
+    # The primary "Confirm & Submit" button on the review card always means
+    # APPROVE/SUBMIT — Save Progress is a separate explicit chip. Always emit
+    # the approve/submit confirmAction here so a stale ``fm_action = "save_progress"``
+    # left over from a prior session cannot downgrade the primary button into
+    # a Save call. If the user actually wants Save Progress, they click the
+    # dedicated Save Progress chip which sets the action explicitly upstream.
     stage_action: str = ""
     if workflow_stage == "FM_REVIEW":
-        stage_action = (backend_refs or {}).get("fm_action") or "approve"
+        stage_action = "approve"
     elif workflow_stage == "RDD_REVIEW":
         stage_action = (backend_refs or {}).get("rdd_action") or "submit"
     confirm_action = _CONFIRM_ACTION_MAP.get((workflow_stage, stage_action))
@@ -399,17 +415,15 @@ async def confirmation_node(state: ServiceRequestState) -> dict[str, Any]:
                 )
                 return build_document_upload_ask_response(state)
 
-    # Path B (CREATE_HANDED_OVER_SR) — pre-submission optional upload gate.
-    # Mirrors Path A's post-submission MM_OPTIONAL upload gate but runs
-    # BEFORE the confirmation card (Path B has no post-submission window —
-    # HANDED_OVER_COMPLETED terminates the flow immediately). Emit a
-    # document_requirement UI limited to SR_HANDOVER_OTHER + a Continue
-    # chip. Upload writes into collected_data.documents[] which
-    # build_create_handed_over_payload passes as documents_ids. Continue
-    # chip / "continue" / "skip" marks the gate DONE and next turn falls
-    # through to the confirmation card.
+    # Pre-submission optional upload gate — Path A CREATE_SR and Path B
+    # CREATE_HANDED_OVER_SR both offer the MM one supporting-document
+    # upload (SR_HANDOVER_OTHER) before the review card. Emits a
+    # document_requirement UI with a single row + a Continue chip. Upload
+    # writes into collected_data.documents[] which the payload builder
+    # picks up. Continue / "continue" / "skip" flips mm_optional_upload_status
+    # to done and the next turn falls through to the confirmation card.
     if (
-        workflow_stage == "CREATE_HANDED_OVER_SR"
+        workflow_stage in ("CREATE_SR", "CREATE_HANDED_OVER_SR")
         and collected_data.get(MM_OPTIONAL_UPLOAD_STATUS_KEY) != MM_OPTIONAL_DONE
     ):
         documents = list(state.get("documents") or [])
@@ -421,17 +435,20 @@ async def confirmation_node(state: ServiceRequestState) -> dict[str, Any]:
         already_uploaded = "SR_HANDOVER_OTHER" in uploaded_ids
         session_id_val = str(state.get("session_id") or "")
         sr_id_val = str(backend_refs.get("sr_id") or "")
+        is_path_b = workflow_stage == "CREATE_HANDED_OVER_SR"
+        gate_message = (
+            "You can attach an optional supporting document (Other) for "
+            + ("this Already Trading handover" if is_path_b else "this handover request")
+            + ", or tap Continue to review and submit without uploading."
+        )
+        gate_label = "Other (Already Trading)" if is_path_b else "Other"
         doc_requirement_ui: dict[str, Any] = {
             "type": "document_requirement",
-            "message": (
-                "You can attach an optional supporting document (Other) for "
-                "this Already Trading handover, or tap Continue to review "
-                "and submit without uploading."
-            ),
+            "message": gate_message,
             "documents": [
                 {
                     "key": "SR_HANDOVER_OTHER",
-                    "label": "Other (Already Trading)",
+                    "label": gate_label,
                     "required": False,
                     "status": "uploaded" if already_uploaded else "missing",
                 }
@@ -439,8 +456,9 @@ async def confirmation_node(state: ServiceRequestState) -> dict[str, Any]:
             "uploadContext": {
                 "session_id": session_id_val,
                 "sr_id": sr_id_val,
-                # Path B only accepts the SR_HANDOVER_OTHER type. The FE
-                # uploader should pre-select this type and lock the dropdown.
+                # Only SR_HANDOVER_OTHER is accepted for the MM pre-submission
+                # supporting doc. The FE uploader pre-selects this type and
+                # locks the dropdown.
                 "allowedDocumentTypes": ["SR_HANDOVER_OTHER"],
                 "defaultDocumentType": "SR_HANDOVER_OTHER",
             },

@@ -161,6 +161,188 @@ it into Formik, and the `ServiceReqForms` observer compares
 
 ---
 
+## 2026-08-05 · Title auto-gen only when user explicitly skips (Path A)
+
+**Repo:** `cenomi-api-v2` (chatbot backend)
+
+**Why:** After making title an OPTIONAL asked field the bot STILL
+wasn't asking — it jumped straight from description → start date.
+Root cause: `merge_state_node` auto-generated the title as soon as
+`description` had any value, treating `title=None` (untouched, not
+yet asked) the same as `title=""` (user explicitly skipped). By the
+time `missing_field_node` ran, title already had a fabricated value
+and was skipped from the ask list.
+
+**Fix:** `app/agents/graph/nodes/shared/merge_state_node.py` — Path A
+title auto-gen now fires only when `title == ""` (empty string
+explicitly set by the extractor for skip/none/n/a). `title is None`
+is left alone so the missing-field loop can prompt. Path B keeps the
+existing behaviour (fills on None too) because Path B never asks for
+title. LLM extractor's existing declination handling maps
+"skip"/"none"/… → `""` for any field, so the flow becomes:
+
+1. missing_field asks title → user types one OR replies "skip"
+2. If user typed one → merge leaves it alone, moves on to description
+3. If user skipped → title="", merge waits for description
+4. Once description arrives → merge fires the auto-gen
+   ("handover-{lease}-{slug}") because title is `""`, not `None`
+
+---
+
+## 2026-08-05 · Title asked as optional + Path A pre-submission upload gate
+
+**Repo:** `cenomi-api-v2` (chatbot backend)
+
+**Two asks, one commit:**
+
+1. Title was being auto-generated silently. User wants it asked as
+   optional (like description) — bot prompts, user can accept a value
+   or reply "skip"/"none" and the default is generated on submit.
+2. Path A CREATE_SR stopped after `notes`/`comments` with no upload
+   opportunity. User wanted the same optional supporting-doc upload
+   Path B already has before the review card.
+
+**Fix 1 — title:**
+
+- `missing_field_node.py::_AUTO_GENERATED_FIELDS` → now empty (title
+  removed).
+- `handover_schema.py::OPTIONAL_FIELDS` → `title` added.
+  `merge_state_node` still fabricates `handover-{lease}-{slug}` (Path A)
+  or `Already Trading - {lease}` (Path B) when the resolved title is
+  empty.
+- `missing_field_service.py::HANDOVER_FIELD_QUESTIONS["title"]` —
+  reworded to signal it's OPTIONAL and that "skip" / "none" is
+  accepted.
+
+**Fix 2 — Path A pre-submission upload gate:**
+
+- `confirmation_node.py` — the upload gate condition broadened from
+  `stage == "CREATE_HANDED_OVER_SR"` to
+  `stage in ("CREATE_SR", "CREATE_HANDED_OVER_SR")`. Label / message
+  branch on stage: Path B says "Other (Already Trading)", Path A says
+  "Other". Same single-type SR_HANDOVER_OTHER + Continue chip contract.
+- `handover_entry_node.py::_handle_mm_optional_upload_gate` — accepts
+  all three stages: `CREATE_SR`, `CREATE_HANDED_OVER_SR`, `SR_CREATED`.
+  So the Continue chip / skip / upload actions land here and mark
+  `mm_optional_upload_status = done` regardless of which path emitted
+  the gate.
+
+Result: after `notes`/`comments`, the bot emits the document upload
+card. User can attach a doc (writes to `collected_data.documents[]`
+→ payload builder → `documents_ids`) or tap Continue. On Continue the
+next turn shows the review card. Same UX Path B already ships.
+
+---
+
+## 2026-08-04 · Propagate date-format clears to the form (backend → FE bridge)
+
+**Repos:** `cenomi-api-v2` (chatbot backend), `cenomi-frontend-2` (`feature/rdd-agents-integration`)
+
+**Why:** The AI now rejects unparseable date input (my earlier
+`validate_date_formats` fix), but the form preview kept showing the
+invalid value (e.g. a lease code sitting in the Start Date field).
+And when the user typed a valid replacement the field didn't update.
+
+**Trace:**
+
+- `validation_node` cleared the invalid value from `collected_data`,
+  so on the same turn `draft_preview.fields` simply _omitted_ the
+  field. FE's `mergeFromDraftPreview` skipped nulls, so `draftFields`
+  kept the stale value. `HandoverAgenticBridge` had no diff to write.
+  Formik never got told to clear.
+- Both `buildFormikUpdatesFromDraft` and `applyDraftFieldsToFormik`
+  had a `if (isEmpty(value)) continue` guard, so even if we did send
+  an explicit `''` the bridge would drop it before writing.
+
+**Fix — backend:**
+
+- `app/agents/graph/nodes/shared/validation_node.py` — on `date_format`
+  failures, remove the offending field from `collected_data` and
+  return the mutated snapshot alongside `validation_errors` (already
+  in place).
+- `app/services/chat_orchestration_service.py` — compute a
+  `cleared_fields: list[str]` from `date_format` errors and attach it
+  to `draft_preview.cleared_fields`. Only emitted when non-empty.
+
+**Fix — frontend (`feature/rdd-agents-integration`):**
+
+- `libs/ui-web/src/lib/components/serviceRequestChatbot/useServiceRequestChat.ts::mergeFromDraftPreview`
+  — read `draft_preview.cleared_fields`, set each listed key (and its
+  `<key>LT` companion) to `''` in `draftFields`. Emitted before the
+  normal field-merge loop so a valid new value from the same response
+  can overwrite the clear.
+- `libs/ui-web/src/lib/components/serviceRequestChatbot/handoverDraftFieldSync.ts`
+  — added `CLEARABLE_DATE_FIELDS` / `CLEARABLE_DATE_KEYS` sets. Both
+  `buildFormikUpdatesFromDraft` and `applyDraftFieldsToFormik` now
+  allow `''` through for those keys (bypassing the "skip empty" guard
+  and applying via `setFieldValue`) so the form input visibly clears.
+
+Result: the second the AI rejects a bogus date entry, the
+corresponding form field wipes. The user's next valid value then
+updates the field via the normal draft-preview → bridge path.
+
+---
+
+## 2026-08-04 · Validate date-field format (per single field)
+
+**Repo:** `cenomi-api-v2` (chatbot backend)
+
+**Why:** Agent accepted a lease code (`t0111595`) as a value for
+`startDate` because the extractor routed the token into the field
+slot and no per-field date-format check ran. `validate_start_end_date`
+only fires when both dates are present, so a solo bogus value
+sneaks through until the ordering check happens (or never).
+
+**Fix — date format validation:**
+
+- `app/agents/services/validation_service.py`:
+  - New `_SINGLE_DATE_FIELDS` tuple listing every known date slot
+    (startDate, endDate, unit_readiness_date, expected_handover_date,
+    RDD chain, Path B actuals).
+  - New `validate_date_formats(data)` — for each populated single
+    date field, parse via `_parse_date`; on failure emit a blocking
+    `date_format` result with `field=<field_name>` and message
+    `"…value '<raw>' is not a valid date. Please enter it as
+    DD/MM/YYYY (e.g. 25/07/2026)."`.
+  - Wired into `validate_draft` step 2c, right before the pair-wise
+    ordering checks. `missing_field_node` picks the blocking error
+    and re-asks the exact field with its normal question hint.
+
+Result: typing a lease code (or any non-date) into a date slot now
+triggers an immediate re-ask on that specific field, and the "title"
+question shows up in the create flow with a suggested value.
+
+---
+
+## 2026-08-04 · `inspection_done_by` chips (FM Manager / Operations)
+
+**Repo:** `cenomi-api-v2` (chatbot backend)
+
+**Why:** The Path A CREATE_SR flow asked "Who will perform the
+inspection: FM Manager or Operations?" as free text — same friction
+we removed for the Handover Type prompt. Two fixed choices → chips.
+
+**Fix:**
+
+- `app/agents/graph/nodes/shared/missing_field_node.py` — added an
+  `elif next_field == "inspection_done_by"` branch alongside the
+  existing `already_handovered` / `document_status` chips. Emits
+  `response_decorations.suggestions` with two `labeled_options` whose
+  values (`FM_MANAGER`, `OPERATIONS`) match the enum codes the
+  extractor and payload builder already accept — no schema change.
+- `app/agents/graph/nodes/handover/handover_entry_node.py` — added
+  `_INSPECTION_DONE_BY_ACTIONS` map so the chip's action string
+  (`select_inspection_done_by_fm_manager` /
+  `select_inspection_done_by_operations`) writes
+  `collected_data.inspection_done_by` directly on click, mirroring the
+  Handover Type chip handler.
+
+Result: chat now shows two tap-to-select chips ("FM Manager" /
+"Operations") for that turn. Typing still works — extraction path
+untouched.
+
+---
+
 ## 2026-08-04 · Eval suite — 8 new scenarios (S220–S227) for session changes
 
 **Repo:** `cenomi-api-v2` (chatbot backend)

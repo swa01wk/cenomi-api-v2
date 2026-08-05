@@ -31,9 +31,9 @@ HANDOVER_FIELD_QUESTIONS: dict[str, str] = {
         "Do NOT accept free-form answers; the user must pick one of these two options."
     ),
     "title": (
-        "Ask the user if they have a specific title for this handover request. "
-        "Let them know the system will auto-generate one from the lease code and description "
-        "if they do not provide one."
+        "Ask the user for a short title for this handover request. "
+        "It is OPTIONAL — they can reply 'skip' or 'none' and the system "
+        "will auto-generate one from the lease code and description."
     ),
     "description": (
         "Ask the user for a short description of this handover request "

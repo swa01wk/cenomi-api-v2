@@ -150,8 +150,9 @@ def _build_rdd_config() -> WorkflowConfig:
         ),
         # "expected_handover_date" is auto-computed from unit_readiness_date + 7 days
         # "trading_date" is auto-computed from fitout_end_date + 8 days
-        # "title" is auto-generated for both Path A and Path B
-        auto_generated_fields=frozenset({"title", "expected_handover_date", "trading_date"}),
+        # "title" is asked as optional (like description); removed from auto_generated
+        # so missing_field_node prompts the user before auto-generating a fallback.
+        auto_generated_fields=frozenset({"expected_handover_date", "trading_date"}),
         lease_trigger_fields=("lease_code", "company", "lease_brand_mall"),
         action_intents=frozenset(
             {

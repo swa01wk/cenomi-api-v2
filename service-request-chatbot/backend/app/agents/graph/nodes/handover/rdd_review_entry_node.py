@@ -112,6 +112,14 @@ async def rdd_review_entry_node(state: ServiceRequestState) -> dict[str, Any]:
         }
 
     # ── 1. Explicit UI actions ─────────────────────────────────────────────
+    # Continue chip after the mandatory RDD upload (Meeting Report or
+    # Rejected) is present — advance to date collection. Just clears the
+    # WAITING_FOR_USER status so the next turn routes through
+    # field_extraction → missing_field and asks for actual_handover_date.
+    if action_override == "continue_rdd_upload":
+        log.info("rdd_review_entry.action_continue_upload")
+        return {"status": "IN_PROGRESS"}
+
     if action_override == "submit_rdd_report":
         log.info("rdd_review_entry.action_submit")
         backend_refs["rdd_action"] = "submit"

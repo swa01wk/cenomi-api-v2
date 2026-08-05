@@ -133,20 +133,32 @@ def _map_operations_to_stage(
 
 
 def _attachments_to_documents(attachments: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Map platform ``service_request_attachments`` into chat ``documents`` rows."""
+    """Map platform ``service_request_attachments`` into chat ``documents`` rows.
+
+    Preserves ``role`` and ``attached_by`` from the platform attachment so
+    stage-specific upload UIs (FM / RDD document_requirement) can filter
+    ownership. Without ``role``, an SR_HANDOVER_OTHER attached by MM during
+    CREATE_SR shows up as "Uploaded" on RDD's own upload card even though the
+    RDD reviewer never uploaded it (the type ID is shared across roles).
+    """
     docs: list[dict[str, Any]] = []
     for att in attachments:
         doc_id = att.get("document_id") or att.get("id")
         doc_type = att.get("document_type_id") or att.get("document_type")
         if not doc_id and not doc_type:
             continue
-        docs.append(
-            {
-                "document_id": str(doc_id) if doc_id else "",
-                "document_type_id": str(doc_type) if doc_type else "",
-                "file_name": att.get("file_name") or att.get("filename") or "",
-            }
-        )
+        role = str(att.get("role") or att.get("assigned_role") or "").strip()
+        attached_by = str(att.get("attached_by") or "").strip()
+        row: dict[str, Any] = {
+            "document_id": str(doc_id) if doc_id else "",
+            "document_type_id": str(doc_type) if doc_type else "",
+            "file_name": att.get("file_name") or att.get("filename") or "",
+        }
+        if role:
+            row["role"] = role
+        if attached_by:
+            row["attached_by"] = attached_by
+        docs.append(row)
     return docs
 
 

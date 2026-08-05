@@ -42,6 +42,7 @@ _PREVIEW_FIELD_ORDER: list[tuple[str, str]] = [
     # skeletons and pre-select the radio. Must be published on every turn
     # once the user picks a handover type.
     ("already_handovered",     "Handover Type"),
+    ("title",                  "Title"),
     ("description",            "Description"),
     ("startDate",              "Inspection Start Date"),
     ("endDate",                "Inspection End Date"),
@@ -58,6 +59,7 @@ _PREVIEW_FIELD_ORDER: list[tuple[str, str]] = [
     ("actual_fitout_start_date",  "Actual Fitout Start Date"),
     ("actual_fitout_end_date",    "Actual Fitout End Date"),
     ("actual_trading_date",       "Actual Trading Date"),
+    ("notes",                  "Notes"),
     ("comments",               "Comments"),
     ("guideLineLink",          "Guideline Link"),
 ]
@@ -103,10 +105,9 @@ def _fields_from_collected(collected_data: dict[str, Any]) -> list[dict[str, Any
     """Build ordered field rows from draft collected_data.
 
     Only fields explicitly listed in ``_PREVIEW_FIELD_ORDER`` are included.
-    Internal/system fields such as ``title``, ``brand_id``, ``lease_id``,
-    ``contract_id``, ``property_id``, ``tenant_profile_id``, etc. that live in
-    ``collected_data`` but are not meaningful to the user are intentionally
-    excluded.
+    Internal/system fields such as ``brand_id``, ``lease_id``, ``contract_id``,
+    ``property_id``, ``tenant_profile_id``, etc. that live in ``collected_data``
+    but are not meaningful to the user are intentionally excluded.
     """
     rows: list[dict[str, Any]] = []
     for key, label in _PREVIEW_FIELD_ORDER:

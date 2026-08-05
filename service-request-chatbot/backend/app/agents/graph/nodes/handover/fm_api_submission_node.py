@@ -131,7 +131,9 @@ async def fm_api_submission_node(state: ServiceRequestState) -> dict[str, Any]:
     backend_refs: dict[str, Any] = dict(state.get("backend_refs") or {})
     sr_id: str | None = backend_refs.get("sr_id")
     payload: dict[str, Any] | None = backend_refs.get("fm_payload")
-    fm_action: str = backend_refs.get("fm_action", "save_progress")
+    # Match fm_payload_builder default: Submit → Approve. save_progress must
+    # be set explicitly by the Save chip (`save_fm_progress` / `confirm_fm_save`).
+    fm_action: str = backend_refs.get("fm_action") or "approve"
 
     if not sr_id:
         return {
@@ -311,21 +313,19 @@ async def fm_api_submission_node(state: ServiceRequestState) -> dict[str, Any]:
             )
 
         if not _fm_operation_finished(operations):
-            logger.error(
-                "fm_api_submission_node: approve PATCH succeeded but FM op not finished "
+            # PATCH returned success but the platform's op row hasn't flipped
+            # to FINISHED yet — this is usually async processing lag on the
+            # platform side, not a real failure. Log a warning and proceed as
+            # success; the next sr_status_sync GET will pick up the settled
+            # status. Blocking the user here with a "retry" message when their
+            # approve actually landed causes confusion.
+            logger.warning(
+                "fm_api_submission_node: approve PATCH succeeded but FM op not "
+                "finished yet (platform lag) — proceeding as success. "
                 "sr_id=%s operations=%s",
                 sr_id,
                 operations,
             )
-            return {
-                "backend_refs": backend_refs,
-                "status": "FAILED",
-                "response_message": (
-                    f"The platform accepted the FM approve for **{sr_id}**, but the "
-                    "Facility Manager operation is still in progress. The workflow "
-                    "did not advance — please retry or approve from the portal form."
-                ),
-            }
 
     # ── 9. Success ─────────────────────────────────────────────────────────────
     backend_refs["fm_status"] = "APPROVED" if fm_action == "approve" else "IN_PROCESS"

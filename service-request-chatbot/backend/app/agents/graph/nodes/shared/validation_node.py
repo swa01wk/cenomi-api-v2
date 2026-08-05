@@ -113,9 +113,32 @@ async def validation_node(state: ServiceRequestState) -> dict[str, Any]:
         len(blocking_errors),
     )
 
+    # Drop unparseable date-slot values so they don't linger in
+    # draft_preview / Formik after the bot re-asks. Without this, a bogus
+    # entry (e.g. lease code typed into startDate) stays visible in the
+    # form even though the AI rejected it, and the next valid answer looks
+    # to the bridge like "no change" for the field it re-asked. Only clear
+    # date_format failures — required / ordering / enum errors are handled
+    # by the normal collection flow.
+    cleared_fields: list[str] = []
+    for err in blocking_errors:
+        if err.get("validation_type") == "date_format":
+            field_name = err.get("field")
+            if field_name and field_name in collected_data:
+                collected_data.pop(field_name, None)
+                cleared_fields.append(field_name)
+    if cleared_fields:
+        logger.info(
+            "validation_node: cleared invalid date fields %s (re-ask on next turn)",
+            cleared_fields,
+        )
+
     new_status: str = "IN_PROGRESS" if has_blocking else "READY_TO_SUBMIT"
 
-    return {
+    result: dict[str, Any] = {
         "validation_errors": validation_errors,
         "status": new_status,
     }
+    if cleared_fields:
+        result["collected_data"] = collected_data
+    return result

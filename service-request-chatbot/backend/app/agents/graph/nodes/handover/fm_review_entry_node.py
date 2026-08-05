@@ -199,7 +199,12 @@ async def fm_review_entry_node(state: ServiceRequestState) -> dict[str, Any]:
                 log.info("fm_review_entry.pending_confirm_blocked_missing_docs")
                 return build_document_upload_ask_response(state)
             log.info("fm_review_entry.confirmation_accepted_text")
-            backend_refs["fm_action"] = backend_refs.get("fm_action") or "approve"
+            # User confirmed the review card via the primary Submit button /
+            # "yes" text — this always means Approve. Save Progress is a
+            # separate explicit chip (`save_fm_progress` / `confirm_fm_save`).
+            # Overwrite any stale fm_action from a prior turn so the payload
+            # builder + api_submission take the approve branch.
+            backend_refs["fm_action"] = "approve"
             return {
                 "backend_refs": backend_refs,
                 "confirmation_status": "CONFIRMED",

@@ -123,12 +123,39 @@ def build_inbox_decorations(auth: AuthContext | None) -> dict[str, Any]:
     return build_handover_inbox_picker()
 
 
-def _uploaded_type_ids(documents: list[dict[str, Any]]) -> set[str]:
+def _uploaded_type_ids(
+    documents: list[dict[str, Any]],
+    role_filter: str | tuple[str, ...] | None = None,
+) -> set[str]:
+    """Return the set of ``document_type_id`` values present in ``documents``.
+
+    ``role_filter``: when set (e.g. ``"DD_ENGINEER"`` or a tuple), only count
+    docs whose ``role``/``assigned_role`` matches — OR whose role is empty
+    (session-uploaded via chat, not yet stamped with a role). Used by the RDD
+    upload card so an SR_HANDOVER_OTHER uploaded by MM during CREATE_SR
+    doesn't get shown as "Uploaded" in RDD's own upload gate.
+    """
+    if role_filter is None:
+        allowed: tuple[str, ...] | None = None
+    elif isinstance(role_filter, str):
+        allowed = (role_filter.upper(),)
+    else:
+        allowed = tuple(r.upper() for r in role_filter)
+
     ids: set[str] = set()
     for doc in documents:
         dt = doc.get("document_type_id") or doc.get("document_type")
-        if dt:
-            ids.add(str(dt))
+        if not dt:
+            continue
+        if allowed is not None:
+            role_val = str(
+                doc.get("role") or doc.get("assigned_role") or ""
+            ).strip().upper()
+            # Session-uploaded rows carry no role field; treat them as belonging
+            # to whichever stage is currently active (the user just uploaded).
+            if role_val and role_val not in allowed:
+                continue
+        ids.add(str(dt))
     return ids
 
 
@@ -144,27 +171,44 @@ def _document_requirement_block(
     if not stage_def or not stage_def.required_documents:
         return None
 
-    uploaded = _uploaded_type_ids(documents)
+    # RDD's card must only reflect DD_ENGINEER's own uploads. SR_HANDOVER_OTHER
+    # is also allowed for MALL_MANAGER (uploaded during CREATE_SR) and shares
+    # the same document_type_id — without a role filter, MM's Other would
+    # show up as "Uploaded" in RDD's gate even though RDD never uploaded it.
+    if stage == "RDD_REVIEW":
+        uploaded = _uploaded_type_ids(documents, role_filter=("DD_ENGINEER",))
+    elif stage == "FM_REVIEW":
+        uploaded = _uploaded_type_ids(
+            documents, role_filter=("FM_MANAGER", "OPERATIONS")
+        )
+    else:
+        uploaded = _uploaded_type_ids(documents)
     collected = collected or {}
     doc_types = _FM_DOC_TYPES if stage == "FM_REVIEW" else _RDD_DOC_TYPES
     relevant = [d for d in stage_def.required_documents if d in doc_types]
     if not relevant:
         relevant = list(stage_def.required_documents)
 
-    # Type-first RDD: only show the chosen document type's upload row.
+    # RDD: show all three types in one card (matches FM UX). Meeting Report
+    # and Rejected are marked required-pair (either one satisfies); Other is
+    # optional. Keep the card visible even after the mandatory pair is uploaded
+    # so the user can see the ✓ status and click the Continue chip to advance
+    # to date collection (dates come AFTER the upload per the payload shape).
     if stage == "RDD_REVIEW":
-        chosen = collected.get("rdd_upload_doc_type")
-        if chosen in _RDD_DOC_TYPES:
-            relevant = [chosen]
-        else:
-            return None
+        relevant = [
+            RDD_DOC_TYPE_MEETING,
+            RDD_DOC_TYPE_REJECTED,
+            RDD_DOC_TYPE_OTHER,
+        ]
 
     doc_rows = [
         {
             "key": doc_type,
             "label": _DOC_LABELS.get(doc_type, doc_type),
             "required": (
-                doc_type == RDD_DOC_TYPE_MEETING
+                # RDD: mark the two mandatory-pair types as required so the
+                # FE badge shows the red asterisk. Other stays optional.
+                doc_type in (RDD_DOC_TYPE_MEETING, RDD_DOC_TYPE_REJECTED)
                 if stage == "RDD_REVIEW"
                 else False  # FM needs any one of the three — none individually mandatory
             ),
@@ -173,30 +217,22 @@ def _document_requirement_block(
         for doc_type in relevant
     ]
 
-    # Keep the card visible while any required type is still missing so the
-    # user can see which documents are attached. Hide only when every listed
-    # type is uploaded (or, for FM, when at least one is uploaded *and* the
-    # caller is past the upload step — we still show statuses after the first
-    # attach so the UI clearly reflects success).
-    if stage == "RDD_REVIEW" and RDD_DOC_TYPE_MEETING in uploaded:
-        # Report is the only mandatory RDD doc; hide once it is present.
-        return None
-    # After optional Rejected/Other upload, hide the single-type card so the
-    # flow can re-ask for the next type (Meeting Report still required).
-    if (
-        stage == "RDD_REVIEW"
-        and len(relevant) == 1
-        and relevant[0] in uploaded
-        and relevant[0] != RDD_DOC_TYPE_MEETING
-    ):
-        return None
+    upload_context: dict[str, Any] = {
+        "session_id": session_id or "",
+        "sr_id": sr_id or "",
+    }
+    # For RDD, list every allowed type so the FE dropdown lets the user pick
+    # which of the three they're attaching (matches FM's multi-type upload).
+    if stage == "RDD_REVIEW":
+        upload_context["allowedDocumentTypes"] = [
+            RDD_DOC_TYPE_MEETING,
+            RDD_DOC_TYPE_REJECTED,
+            RDD_DOC_TYPE_OTHER,
+        ]
 
     return {
         "documents": doc_rows,
-        "uploadContext": {
-            "session_id": session_id or "",
-            "sr_id": sr_id or "",
-        },
+        "uploadContext": upload_context,
     }
 
 
@@ -264,8 +300,9 @@ _FM_UPLOAD_REVIEW_MESSAGE = (
     "Site Survey, or Other), then choose an action."
 )
 _RDD_UPLOAD_ASK_MESSAGE = (
-    "Please upload the selected document to continue with the review. "
-    "A Handover Meeting Report is required before you can submit."
+    "Please upload either the Handover Meeting Report or the Rejected Fitout and "
+    "Handover Report to continue with the review. You can also attach an Other "
+    "supporting document."
 )
 
 _RDD_UPLOAD_ASK_BY_TYPE: dict[str, str] = {
@@ -298,8 +335,16 @@ def build_document_upload_ask_response(state: dict[str, Any]) -> dict[str, Any]:
             else _FM_UPLOAD_ASK_MESSAGE
         )
     elif stage == "RDD_REVIEW":
+        # New multi-type UI shows all three RDD doc rows at once; use the
+        # generic ask message. The per-type messages (_RDD_UPLOAD_ASK_BY_TYPE)
+        # are kept for backward compat but only fire if the legacy chip field
+        # is still set on old sessions.
         chosen = collected.get("rdd_upload_doc_type")
-        message = _RDD_UPLOAD_ASK_BY_TYPE.get(str(chosen or ""), _RDD_UPLOAD_ASK_MESSAGE)
+        message = (
+            _RDD_UPLOAD_ASK_BY_TYPE.get(str(chosen), _RDD_UPLOAD_ASK_MESSAGE)
+            if chosen
+            else _RDD_UPLOAD_ASK_MESSAGE
+        )
     else:
         return {}
 
@@ -466,18 +511,13 @@ def build_review_decorations(state: dict[str, Any]) -> dict[str, Any]:
 
     # After report submit, the mandatory RDD doc is already on the platform —
     # don't re-prompt uploads while offering Final Approve.
-    # For RDD, wait until guideLineLink + rdd_upload_doc_type are collected
-    # (and document_status for Meeting Report) before showing the upload card.
-    # Dates are collected AFTER doc type per the updated RDD field order.
+    # For RDD, show the doc upload card as soon as guideLineLink is captured;
+    # dates come AFTER upload (their values are nested on the uploaded row).
+    # No longer gated on the removed rdd_upload_doc_type chip.
     show_docs = not (stage == "RDD_REVIEW" and (rdd_status or "").upper() == "REPORT_SUBMITTED")
-    if stage == "RDD_REVIEW" and not _rdd_required_dates_complete(collected):
+    if stage == "RDD_REVIEW" and not collected.get("guideLineLink"):
+        # Wait until the guideline link is provided before offering uploads.
         show_docs = False
-    if stage == "RDD_REVIEW":
-        chosen = collected.get("rdd_upload_doc_type")
-        if not chosen:
-            show_docs = False
-        elif chosen == RDD_DOC_TYPE_MEETING and not collected.get("document_status"):
-            show_docs = False
     if show_docs:
         doc_req = _document_requirement_block(
             stage=stage,
@@ -488,6 +528,16 @@ def build_review_decorations(state: dict[str, Any]) -> dict[str, Any]:
         )
         if doc_req:
             decorations["document_requirement"] = doc_req
+            # RDD: once DD_ENGINEER's mandatory pair is satisfied, surface a
+            # Continue chip so the user can advance to date collection (dates
+            # come after the doc uploads per the platform's nested-doc payload
+            # shape). Filter by role so MM's SR_HANDOVER_OTHER doesn't count.
+            if stage == "RDD_REVIEW":
+                rdd_uploaded = _uploaded_type_ids(
+                    documents, role_filter=("DD_ENGINEER",)
+                )
+                if rdd_uploaded & {RDD_DOC_TYPE_MEETING, RDD_DOC_TYPE_REJECTED}:
+                    decorations["suggestions"] = build_rdd_upload_continue_suggestions()
 
     if len(decorations) <= 1 and not suggestions and not decorations.get("document_requirement"):
         decorations["promote_preview"] = True
@@ -539,6 +589,25 @@ def build_mm_optional_upload_continue_suggestions() -> dict[str, Any]:
                 "label": "Continue",
                 "value": "continue",
                 "action": "continue_optional_upload",
+            },
+        ],
+    }
+
+
+def build_rdd_upload_continue_suggestions() -> dict[str, Any]:
+    """Continue chip shown after RDD's Meeting Report or Rejected Report is uploaded.
+
+    Lets the user optionally attach Other and then click Continue to advance to
+    the date-collection step. Without this chip the flow stalls at the upload
+    card because no missing field triggers the next question.
+    """
+    return {
+        "kind": "labeled_options",
+        "options": [
+            {
+                "label": "Continue",
+                "value": "continue",
+                "action": "continue_rdd_upload",
             },
         ],
     }

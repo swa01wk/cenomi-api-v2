@@ -162,6 +162,37 @@ _LEASE_CONFIRMED_FIELDS: frozenset[str] = frozenset({"lease_code", "mall", "bran
 # Minimum confidence score required to accept an LLM-extracted value.
 _CONFIDENCE_THRESHOLD: float = 0.6
 
+# Optional fields that legitimately accept "" (user declined). If the LLM
+# fills these with "" but the bot was NOT actually asking for them, discard —
+# see the empty-string bleed guard in the merge loop.
+_OPTIONAL_SKIPPABLE_FIELDS: frozenset[str] = frozenset(
+    {"title", "description", "notes", "comments", "inspectionTime", "delay_reason"}
+)
+
+# Required fields for which an empty-string correction from the FE must NOT
+# wipe an existing value. Formik's dropdown selects sometimes report "" during
+# hydration; without this guard those blanks would clobber values collected
+# via chip clicks earlier in the flow.
+_REQUIRED_NON_OPTIONAL_FIELDS: frozenset[str] = frozenset(
+    {
+        "inspection_done_by",
+        "already_handovered",
+        "startDate",
+        "endDate",
+        "unit_readiness_date",
+        "expected_handover_date",
+        "actual_handover_date",
+        "fitout_start_date",
+        "fitout_end_date",
+        "actual_shop_handover_date",
+        "actual_fitout_start_date",
+        "actual_fitout_end_date",
+        "actual_trading_date",
+        "guideLineLink",
+        "lease_code",
+    }
+)
+
 
 def _remap_extracted_to_active_field(
     extracted: dict[str, Any],
@@ -245,6 +276,20 @@ async def merge_state_node(state: ServiceRequestState) -> dict[str, Any]:
         if field_name in BACKEND_PROTECTED_FIELDS:
             continue
         if value is not None:
+            # Don't let an empty-string correction wipe a required field's
+            # already-collected value. Formik's dropdown / select occasionally
+            # reports "" while the FE is still hydrating (e.g. inspection_done_by
+            # loses its selection when the ConfirmationCard mounts before the
+            # bridge writes it back), and that empty overrides the real value
+            # collected via chip clicks — breaking payload_builder.
+            existing = collected.get(field_name)
+            if (
+                isinstance(value, str)
+                and value == ""
+                and existing not in (None, "", [])
+                and field_name in _REQUIRED_NON_OPTIONAL_FIELDS
+            ):
+                continue
             if field_name in _USER_DATE_FIELDS and field_name not in _USER_TIME_FIELDS:
                 value = _to_date_only(value)
             collected[field_name] = value
@@ -303,6 +348,22 @@ async def merge_state_node(state: ServiceRequestState) -> dict[str, Any]:
         if new_value is None:
             continue
 
+        # Defense-in-depth: when the user answers "none"/"skip" to a specific
+        # question, the LLM sometimes leaks that empty-string value to OTHER
+        # optional fields the user did not intend to skip. Reject empty-string
+        # values for fields OTHER than the one the bot just asked about
+        # (active_field). Non-empty extractions still pass through — the user
+        # explicitly typed something for that field.
+        active_field: str = str(state.get("active_field") or "")
+        if (
+            isinstance(new_value, str)
+            and new_value == ""
+            and active_field
+            and field_name != active_field
+            and field_name in _OPTIONAL_SKIPPABLE_FIELDS
+        ):
+            continue
+
         # Time fields: keep raw HH:MM, never strip via _to_date_only.
         if field_name in _USER_TIME_FIELDS:
             pass  # preserve value as-is
@@ -359,19 +420,36 @@ async def merge_state_node(state: ServiceRequestState) -> dict[str, Any]:
     # Title generation is branched by workflow stage:
     #   CREATE_HANDED_OVER_SR → "Already Trading - {lease_code}"
     #   CREATE_SR / others    → "handover-{lease_code}-{description_slug}"
+    #
+    # NOTE: title is asked as an OPTIONAL field. Only auto-generate when the
+    # user has EXPLICITLY skipped (title == "") — never when title is `None`
+    # (untouched), because merge_state runs BEFORE missing_field_node and
+    # filling `None` here would silently rob the bot of its chance to prompt.
+
+    def _title_was_skipped(value: object) -> bool:
+        return isinstance(value, str) and value.strip() == ""
+
+    title_value = collected.get("title")
+    title_needs_default = title_value is None or _title_was_skipped(title_value)
 
     if workflow_stage == "CREATE_HANDED_OVER_SR":
+        # Path B does not ask for title (auto-generated); safe to fill on None too.
         if not collected.get("title") and collected.get("lease_code"):
             collected["title"] = f"Already Trading - {collected['lease_code']}"
     else:
-        # Path A: auto-generate title when lease_code + description are available.
-        # Use `is not None` so that an explicit empty-string description still
-        # triggers title generation (user declined description via "no description").
-        if not collected.get("title") and collected.get("lease_code") and collected.get("description") is not None:
+        # Path A: only auto-generate when the user explicitly skipped it,
+        # so missing_field_node still gets to ask when title is None.
+        if (
+            _title_was_skipped(title_value)
+            and collected.get("lease_code")
+            and collected.get("description") is not None
+        ):
             collected["title"] = _generate_title(
                 str(collected["lease_code"]),
                 str(collected["description"]),
             )
+    # Silence unused-var warning when the CREATE_HANDED_OVER_SR branch runs.
+    _ = title_needs_default
 
     # ── Auto-compute expected_handover_date from unit_readiness_date ──────────
     # FM_REVIEW: expected_handover_date = unit_readiness_date + 7 days.
@@ -427,30 +505,22 @@ async def merge_state_node(state: ServiceRequestState) -> dict[str, Any]:
     ):
         collected["inspectionTime"] = datetime.datetime.now().strftime("%H:%M")
 
-    # Type-first RDD status: Rejected → DISAPPROVED; Other → no status.
+    # RDD status: derive from the actually-uploaded document types now that we
+    # show all three types in one document_requirement UI (no chip selection).
+    # Rejected upload → auto-set document_status = DISAPPROVED.
+    # Meeting Report upload → leave document_status alone so user picks
+    #   APPROVED / APPROVED_WITH_CHANGES via the confirmation-card <select>.
     if workflow_stage == "RDD_REVIEW":
-        doc_type = collected.get("rdd_upload_doc_type")
-        # Normalise friendly labels from free-text answers.
-        _DOC_TYPE_ALIASES = {
-            "meeting report": _RDD_DOC_TYPE_MEETING,
-            "handover meeting report": _RDD_DOC_TYPE_MEETING,
-            "rejected": _RDD_DOC_TYPE_REJECTED,
-            "rejected fitout and handover report": _RDD_DOC_TYPE_REJECTED,
-            "other": _RDD_DOC_TYPE_OTHER,
+        uploaded_types = {
+            str(d.get("document_type_id") or d.get("document_type") or "")
+            for d in (state.get("documents") or [])
+            if d.get("document_type_id") or d.get("document_type")
         }
-        if isinstance(doc_type, str) and doc_type not in (
-            _RDD_DOC_TYPE_MEETING,
-            _RDD_DOC_TYPE_REJECTED,
-            _RDD_DOC_TYPE_OTHER,
-        ):
-            aliased = _DOC_TYPE_ALIASES.get(doc_type.strip().lower())
-            if aliased:
-                collected["rdd_upload_doc_type"] = aliased
-                doc_type = aliased
-        if doc_type == _RDD_DOC_TYPE_REJECTED:
+        if _RDD_DOC_TYPE_REJECTED in uploaded_types:
             collected["document_status"] = _RDD_REJECTED_STATUS
-        elif doc_type == _RDD_DOC_TYPE_OTHER:
-            collected.pop("document_status", None)
+        elif _RDD_DOC_TYPE_MEETING in uploaded_types:
+            # Preserve any status the user has already picked; do not overwrite.
+            pass
 
     # ── Handover Type* switch — Path A (CREATE_SR) → Path B (CREATE_HANDED_OVER_SR) ──
     # Once the user picks "already_trading" for already_handovered, flip the
