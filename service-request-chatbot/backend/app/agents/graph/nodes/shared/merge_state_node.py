@@ -146,10 +146,132 @@ def _to_date_only(value: Any) -> Any:
 # they are backend-authoritative and must not be overwritten by subsequent LLM
 # extractions (e.g. the model hallucinating "the current lease code i have
 # shared" as a lease_code value).
+#
+# Exception: an *intentional* lease-code change (active_field=lease_code,
+# confirmation-card edit, or explicit "change/switch lease" phrasing) clears
+# the resolved IDs so lease_lookup re-runs and revalidates the new code.
 _LEASE_CONFIRMED_FIELDS: frozenset[str] = frozenset({"lease_code", "mall", "brand"})
+
+# Backend enrichment wiped when the user intentionally changes lease_code so
+# stale brand/mall/unit data from the previous lease cannot leak into the draft.
+_LEASE_DERIVED_CLEAR_FIELDS: tuple[str, ...] = (
+    "lease_id",
+    "contract_id",
+    "brand_id",
+    "property_id",
+    "tenant_profile_id",
+    "unit_codes",
+    "city",
+    "contracted_area",
+    "mall",
+    "brand",
+    "lease",
+    "lease_brand_mall",
+)
+
+_LEASE_CHANGE_PHRASES: tuple[str, ...] = (
+    "change lease",
+    "update lease",
+    "switch lease",
+    "different lease",
+    "wrong lease",
+    "new lease",
+    "instead of",
+    "change the lease",
+    "update the lease",
+    "change to",
+    "update to",
+)
+
+# Valid inspection assignees — reject non-enum LLM guesses at merge time.
+_INSPECTION_DONE_BY_VALUES: frozenset[str] = frozenset({"FM_MANAGER", "OPERATIONS"})
+_INSPECTION_DONE_BY_ALIASES: dict[str, str] = {
+    "fm": "FM_MANAGER",
+    "fm manager": "FM_MANAGER",
+    "fm_manager": "FM_MANAGER",
+    "facilities": "FM_MANAGER",
+    "facilities manager": "FM_MANAGER",
+    "operations": "OPERATIONS",
+    "ops": "OPERATIONS",
+    "operation": "OPERATIONS",
+}
 
 # Minimum confidence score required to accept an LLM-extracted value.
 _CONFIDENCE_THRESHOLD: float = 0.6
+# Enum fields need a higher bar — ambiguous free-text ("mall manager") must not stick.
+_ENUM_CONFIDENCE_THRESHOLD: float = 0.75
+
+
+def _normalize_lease_code(value: Any) -> str:
+    return str(value or "").strip().lower()
+
+
+def _extraction_value_and_confidence(extraction: Any) -> tuple[Any, float]:
+    if isinstance(extraction, dict):
+        return extraction.get("value"), float(extraction.get("confidence", 1.0))
+    return extraction, 1.0
+
+
+def _clear_lease_resolution(collected: dict[str, Any]) -> None:
+    for key in _LEASE_DERIVED_CLEAR_FIELDS:
+        collected.pop(key, None)
+
+
+def _intentional_lease_code_change(
+    state: ServiceRequestState,
+    extracted: dict[str, Any],
+    corrected: dict[str, Any],
+    collected: dict[str, Any],
+) -> str | None:
+    """Return the new lease_code when the user is intentionally changing it.
+
+    Returns ``None`` when there is no change intent (protects against LLM
+    hallucinations overwriting a resolved lease).
+    """
+    current = _normalize_lease_code(collected.get("lease_code"))
+
+    corrected_code = corrected.get("lease_code")
+    if corrected_code not in (None, ""):
+        new_code = str(corrected_code).strip()
+        if _normalize_lease_code(new_code) and _normalize_lease_code(new_code) != current:
+            return new_code
+
+    lease_ext = extracted.get("lease_code")
+    if lease_ext is None:
+        return None
+    new_value, confidence = _extraction_value_and_confidence(lease_ext)
+    if new_value in (None, "") or confidence < _CONFIDENCE_THRESHOLD:
+        return None
+    new_code = str(new_value).strip()
+    if not new_code or _normalize_lease_code(new_code) == current:
+        return None
+
+    # Unresolved yet — always accept a new code so lookup can run.
+    if not collected.get("lease_id"):
+        return new_code
+
+    active_field = state.get("active_field")
+    message = (state.get("user_message") or "").lower()
+    change_intent = any(phrase in message for phrase in _LEASE_CHANGE_PHRASES)
+    if active_field == "lease_code" or change_intent:
+        return new_code
+    return None
+
+
+def _normalize_inspection_done_by(value: Any) -> Any:
+    """Map aliases to enum codes; return None when the value is not a valid assignee."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return ""
+    upper = text.upper().replace(" ", "_")
+    if upper in _INSPECTION_DONE_BY_VALUES:
+        return upper
+    aliased = _INSPECTION_DONE_BY_ALIASES.get(text.lower())
+    if aliased:
+        return aliased
+    return None
 
 
 def _remap_extracted_to_active_field(
@@ -218,10 +340,41 @@ async def merge_state_node(state: ServiceRequestState) -> dict[str, Any]:
     # are treated as maximum-confidence updates and bypass the normal threshold.
     # Backend-protected fields are still guarded.
     corrected: dict[str, Any] = state.get("corrected_fields") or {}  # type: ignore[assignment]
+
+    # Intentional lease-code change → wipe resolved IDs so lease_lookup revalidates.
+    lease_code_change = _intentional_lease_code_change(
+        state, extracted, corrected, collected
+    )
+    if lease_code_change is not None:
+        old_code = collected.get("lease_code")
+        _clear_lease_resolution(collected)
+        collected["lease_code"] = lease_code_change
+        if old_code is not None and _normalize_lease_code(old_code) != _normalize_lease_code(
+            lease_code_change
+        ):
+            corrections_boot: list[dict[str, Any]] = list(collected.get("_corrections") or [])
+            corrections_boot.append(
+                {
+                    "field": "lease_code",
+                    "old_value": old_code,
+                    "new_value": lease_code_change,
+                    "corrected_at": datetime.datetime.utcnow().isoformat(),
+                }
+            )
+            collected["_corrections"] = corrections_boot
+
     for field_name, value in corrected.items():
         if field_name in BACKEND_PROTECTED_FIELDS:
             continue
+        # lease_code already applied above when it triggers revalidation.
+        if field_name == "lease_code" and lease_code_change is not None:
+            continue
         if value is not None:
+            if field_name == "inspection_done_by":
+                normalized = _normalize_inspection_done_by(value)
+                if normalized is None:
+                    continue
+                value = normalized
             if field_name in _USER_DATE_FIELDS and field_name not in _USER_TIME_FIELDS:
                 value = _to_date_only(value)
             collected[field_name] = value
@@ -237,20 +390,25 @@ async def merge_state_node(state: ServiceRequestState) -> dict[str, Any]:
         if field_name in BACKEND_PROTECTED_FIELDS:
             continue
 
-        # After lease resolution, protect the confirmed identifiers.
-        if lease_resolved and field_name in _LEASE_CONFIRMED_FIELDS:
+        # After lease resolution, protect the confirmed identifiers — unless
+        # this turn intentionally changed lease_code (IDs already cleared).
+        if (
+            lease_resolved
+            and field_name in _LEASE_CONFIRMED_FIELDS
+            and not (field_name == "lease_code" and lease_code_change is not None)
+        ):
             continue
 
         # Support both rich extraction shape {value, confidence} and plain values.
-        if isinstance(extraction, dict):
-            new_value = extraction.get("value")
-            confidence = float(extraction.get("confidence", 1.0))
-        else:
-            new_value = extraction
-            confidence = 1.0
+        new_value, confidence = _extraction_value_and_confidence(extraction)
 
-        # Skip low-confidence proposals.
-        if confidence < _CONFIDENCE_THRESHOLD:
+        # Skip low-confidence proposals (stricter for enums).
+        min_confidence = (
+            _ENUM_CONFIDENCE_THRESHOLD
+            if field_name == "inspection_done_by"
+            else _CONFIDENCE_THRESHOLD
+        )
+        if confidence < min_confidence:
             continue
 
         # Normalise the "None" sentinel that the extraction prompt emits when
@@ -262,6 +420,18 @@ async def merge_state_node(state: ServiceRequestState) -> dict[str, Any]:
 
         # Skip explicitly null proposals.
         if new_value is None:
+            continue
+
+        if field_name == "inspection_done_by":
+            normalized = _normalize_inspection_done_by(new_value)
+            if normalized is None:
+                # Invalid assignee (e.g. "mall manager") — do not store; validation
+                # / missing-field will re-ask with the allowed options.
+                continue
+            new_value = normalized
+
+        # lease_code already applied when intentional change detected.
+        if field_name == "lease_code" and lease_code_change is not None:
             continue
 
         # Time fields: keep raw HH:MM, never strip via _to_date_only.
