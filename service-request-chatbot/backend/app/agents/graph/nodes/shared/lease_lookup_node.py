@@ -62,6 +62,11 @@ _LEASE_ENRICHMENT_FIELDS: frozenset[str] = frozenset(
         "contracted_area",
         "city",
         "lease_brand_mall",
+        # Base milestone dates — FOS/FOE/Trading agents use these to suggest
+        # pre-filled actual dates and ask the user to confirm or correct them.
+        "base_fitout_start_date",
+        "base_fitout_end_date",
+        "base_trading_date",
     }
 )
 
@@ -72,6 +77,12 @@ _NO_LEASE_FIELDS_MESSAGE = (
 _NO_MATCH_MESSAGE = (
     "The lease lookup returned zero matches. Apologise and ask the user to "
     "double-check the lease code, brand name, company name, or mall name they provided."
+)
+_NO_MATCH_ACCESS_MESSAGE = (
+    "No matching lease was found in the malls you manage. Apologise and ask the "
+    "user to double-check the lease code, or try a lease at one of their malls. "
+    "Trading Confirmation is available to Mall Managers and Operations for leases "
+    "in their property scope."
 )
 _MULTI_MATCH_MESSAGE = (
     "Multiple leases matched the search. Ask the user to select the correct one "
@@ -88,6 +99,15 @@ def _extract_uuid(value: Any) -> UUID | None:
         return None
 
 
+_BASE_DATE_ENRICHMENT_FIELDS: frozenset[str] = frozenset(
+    {
+        "base_fitout_start_date",
+        "base_fitout_end_date",
+        "base_trading_date",
+    }
+)
+
+
 def _enrich_collected_data(
     collected: dict[str, Any],
     record: LeaseRecord,
@@ -95,12 +115,25 @@ def _enrich_collected_data(
     """Return a new dict with backend-derived fields merged from *record*."""
     updated = dict(collected)
     for field_name in _LEASE_ENRICHMENT_FIELDS:
-        updated[field_name] = getattr(record, field_name)
+        new_val = getattr(record, field_name)
+        # Form/bridge may already have hydrated base milestone dates from the
+        # contracts lease row.  Do not wipe those with empty strings when the
+        # chatbot GET /leases payload omits a date (null / omitempty).
+        if (
+            field_name in _BASE_DATE_ENRICHMENT_FIELDS
+            and (new_val is None or str(new_val).strip() == "")
+            and str(updated.get(field_name) or "").strip()
+        ):
+            continue
+        updated[field_name] = new_val
     # 'lease' is required by the validation schema as a display label for the
     # selected lease.  It is not a standalone LeaseRecord attribute — it maps
     # to lease_code so confirmation and submission flows can reference it by
     # that key without any further user input.
     updated["lease"] = record.lease_code
+    # New lease selection → user must re-confirm yes/no in chat even if the
+    # form already has a radio value synced from a previous pick.
+    updated["_approve_radio_confirmed"] = False
     return updated
 
 
@@ -203,12 +236,24 @@ async def lease_lookup_node(
         if raw_ids:
             property_ids = [int(pid) for pid in raw_ids if pid is not None]
 
+    # Fitout Start / End / Trading confirmation need leases that already have a
+    # handover SR.  Pass an agent-specific purpose so the platform skips the
+    # "no existing handover SR" eligibility gate used for Initiate Handover.
+    _LEASE_LOOKUP_PURPOSE_BY_AGENT: dict[str, str] = {
+        "rdd_fitout_start_agent": "fitout_confirm",
+        "rdd_fitout_end_agent": "fitout_end",
+        "rdd_trading_confirmation_agent": "trading_confirm",
+    }
+    active_agent: str | None = state.get("active_agent")
+    purpose: str | None = _LEASE_LOOKUP_PURPOSE_BY_AGENT.get(active_agent or "")
+
     query = LeaseLookupQuery(
         lease_code=normalised_lease_code,
         brand=collected.get("brand"),
         mall=collected.get("mall"),
         company=collected.get("company") or collected.get("company_name"),
         property_ids=property_ids,
+        purpose=purpose,
     )
 
     if not query.has_identifiers():
@@ -299,17 +344,37 @@ async def lease_lookup_node(
         }
 
     match_count = len(result.matches)
-    log.info("lease_lookup.result", match_count=match_count)
+    log.info(
+        "lease_lookup.result",
+        match_count=match_count,
+        reason=result.reason,
+        purpose=purpose,
+        active_agent=active_agent,
+    )
 
     # ── 0 matches: ask for more details ──────────────────────────────────────
     if match_count == 0:
+        # Trading / FOS / FOE with purpose set should never see handover_exists.
+        # If we do, the platform likely ignored purpose — log loudly.
+        if purpose and result.reason == "handover_exists":
+            log.warning(
+                "lease_lookup.purpose_ignored",
+                purpose=purpose,
+                reason=result.reason,
+                active_agent=active_agent,
+            )
+        no_match_msg = (
+            _NO_MATCH_ACCESS_MESSAGE
+            if purpose == "trading_confirm"
+            else _NO_MATCH_MESSAGE
+        )
         return {
             "status": "WAITING_FOR_USER",
-            "response_message": _NO_MATCH_MESSAGE,
+            "response_message": no_match_msg,
             "response_ui": {
                 "type": "text_question",
                 "field": "lease_code",
-                "message": _NO_MATCH_MESSAGE,
+                "message": no_match_msg,
             },
         }
 

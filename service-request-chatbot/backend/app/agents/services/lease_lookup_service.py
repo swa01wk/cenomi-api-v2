@@ -28,7 +28,7 @@ from typing import Any
 
 import httpx
 import structlog
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
 from app.core.config import settings
 from app.core.request_context import get_current_bearer_token
@@ -57,6 +57,64 @@ class LeaseRecord(BaseModel):
     lease_brand_mall: str
     # Optional — present when platform returns tenant company name
     company_name: str = ""
+    # Base milestone dates from the lease contract (YYYY-MM-DD ISO strings,
+    # empty when the platform returns null).  Used by FOS/FOE/Trading agents
+    # to offer a pre-filled "original date" so the user can confirm or correct it.
+    base_fitout_start_date: str = ""
+    base_fitout_end_date: str = ""
+    base_trading_date: str = ""
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalise_base_dates(cls, values: dict) -> dict:
+        """Map common platform field name variants to the canonical base_* names.
+
+        The platform API may return these milestone dates under different key
+        names (e.g. ``fitout_start_date``, ``planned_fitout_start_date``).
+        This validator captures them before field assignment so they are not
+        silently dropped by Pydantic's extra-field policy.
+        """
+        def _pick(primary: str, *fallbacks: str) -> str:
+            for key in (primary, *fallbacks):
+                val = values.get(key)
+                if val and str(val).strip():
+                    return str(val).strip()
+            return ""
+
+        if not values.get("base_fitout_start_date"):
+            v = _pick(
+                "base_fitout_start_date",
+                "fitout_start_date",
+                "planned_fitout_start_date",
+                "fitoutStartDate",
+                "plannedFitoutStartDate",
+            )
+            if v:
+                values["base_fitout_start_date"] = v
+
+        if not values.get("base_fitout_end_date"):
+            v = _pick(
+                "base_fitout_end_date",
+                "fitout_end_date",
+                "planned_fitout_end_date",
+                "fitoutEndDate",
+                "plannedFitoutEndDate",
+            )
+            if v:
+                values["base_fitout_end_date"] = v
+
+        if not values.get("base_trading_date"):
+            v = _pick(
+                "base_trading_date",
+                "trading_date",
+                "planned_trading_date",
+                "tradingDate",
+                "plannedTradingDate",
+            )
+            if v:
+                values["base_trading_date"] = v
+
+        return values
 
 
 class LeaseLookupQuery(BaseModel):
@@ -73,6 +131,10 @@ class LeaseLookupQuery(BaseModel):
     # a Mall Manager at Jawharat Jeddah cannot see leases from other malls.
     # Ignored by MockLeaseLookupService (mock data is already scoped).
     property_ids: list[int] | None = None
+    # purpose=fitout_confirm | fitout_end | trading_confirm tells the platform
+    # to skip the "no existing handover SR" eligibility check.  Required for
+    # FOS/FOE/trading agents whose leases always have an existing handover SR.
+    purpose: str | None = None
 
     def has_identifiers(self) -> bool:
         """Return True when at least one search field is non-empty."""
@@ -90,6 +152,8 @@ class LeaseLookupResult:
     latency_ms: int
     status_code: int | None
     error: str | None = None
+    # Platform reason when matches are empty, e.g. not_found / handover_exists.
+    reason: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -189,9 +253,12 @@ class HttpLeaseLookupService(AbstractLeaseLookupService):
                 )
 
             matches = self._parse_matches(body)
+            reason = self._parse_reason(body)
             log.info(
                 "lease_lookup.http.success",
                 match_count=len(matches),
+                reason=reason,
+                purpose=query.purpose,
                 latency_ms=latency_ms,
             )
             return LeaseLookupResult(
@@ -201,6 +268,7 @@ class HttpLeaseLookupService(AbstractLeaseLookupService):
                 response_payload=body,
                 latency_ms=latency_ms,
                 status_code=response.status_code,
+                reason=reason,
             )
 
         except httpx.RequestError as exc:
@@ -236,7 +304,26 @@ class HttpLeaseLookupService(AbstractLeaseLookupService):
         # pre-filtered to leases the user is authorised to manage.
         if query.property_ids:
             params["property_id"] = query.property_ids  # httpx repeats list params
+        # purpose=fitout_confirm|fitout_end|trading_confirm bypasses the
+        # handover-exists eligibility check on the platform side.
+        if query.purpose:
+            params["purpose"] = query.purpose
         return params
+
+    @staticmethod
+    def _parse_reason(body: dict[str, Any] | list[Any] | None) -> str | None:
+        """Extract platform ``reason`` from the GET /leases response envelope."""
+        if not isinstance(body, dict):
+            return None
+        reason = body.get("reason")
+        if isinstance(reason, str) and reason.strip():
+            return reason.strip()
+        data = body.get("data")
+        if isinstance(data, dict):
+            nested = data.get("reason")
+            if isinstance(nested, str) and nested.strip():
+                return nested.strip()
+        return None
 
     @staticmethod
     def _parse_matches(body: dict[str, Any] | list[Any] | None) -> list[LeaseRecord]:

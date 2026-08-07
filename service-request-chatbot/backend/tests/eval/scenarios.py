@@ -7,6 +7,7 @@ TIER STRUCTURE
                     + S63, S64  HANDED_OVER Path B core / Path A fix
                     + S220, S221, S224  Handover Type prompt / chip /
                                         Path B review-card humanization
+                    + S228  Fitout confirm submit-loop fix
   Tier 2  Edge    — S16–S33: corrections, multi-field, API edge cases
                     + S65–S68  HANDED_OVER / Path A fix scenarios
                     + S222, S223, S225–S227  Handover Type chip Path A,
@@ -14,6 +15,9 @@ TIER STRUCTURE
                                              comments proactive ask,
                                              upload gate, workflow-stage
                                              humanization
+                    + S229–S233  Year-coercion guard, description/notes/
+                                 comments auto-gen, fitout radio gate,
+                                 APPROVE_SR session-wins merge
   Tier 3  Battle  — S34–S59: Issues 1–7 from agent_ui_fixes.md
                     + S69  FM date format (Fix 5)
   (Tier 4/5/6 live in lifecycle_scenarios.py)
@@ -3057,6 +3061,216 @@ _S227 = Scenario(
 
 
 # =============================================================================
+# Session 2026-08-07 — Fitout APPROVE_SR + MM auto-generate (S228–S233)
+# Guards for the routing fix, radio gate, session-wins merge, base-date display,
+# year-coercion guard, and description/notes/comments auto-generation.
+# =============================================================================
+
+_S228 = Scenario(
+    id=228,
+    name="fitout_confirm_submit_not_loop",
+    goal=(
+        "After the FOS confirmation card is shown and the user clicks Confirm, "
+        "the router must transition through merge_state → payload_builder → "
+        "api_submission and return a success message, NOT loop back to the "
+        "previous date question. Guards _route_after_fitout_confirm_entry "
+        "checking CONFIRMED before WAITING_FOR_USER."
+    ),
+    tier=1,
+    turns=[
+        Turn(
+            message=(
+                f"Create a Fitout Start Confirmation for lease t0105712. "
+                f"Fitout has started. Actual start date {_d(5)}."
+            ),
+            note="Pack all required FOS fields to reach confirmation card quickly",
+            expect_ui_type="confirmation_card",
+        ),
+        Turn(
+            message="Confirm",
+            note=(
+                "Must submit and show success/SR_CREATED — MUST NOT re-ask "
+                "for the actual fitout start date or any other field."
+            ),
+            action="confirm_create_fitout_confirm",
+            expect_workflow_stage="SR_CREATED",
+            expect_keywords=["submitted", "created", "reference", "successfully"],
+        ),
+    ],
+    tags=["fitout-fos", "submit-loop-fix", "routing", "tier1-core"],
+)
+
+
+_S229 = Scenario(
+    id=229,
+    name="year_coercion_guard_on_confirm_answer",
+    goal=(
+        "When the user answers a yes/no confirmation ('yes', 'confirm') and the "
+        "agent had shown a base date from the platform (e.g. 2025-10-31), "
+        "merge_state must NOT coerce that year to the current year. "
+        "Guards _DATE_TOKEN_RE: can_coerce_year requires a digit in the message."
+    ),
+    tier=2,
+    turns=[
+        Turn(
+            message=(
+                "I want to create a Handover service request for lease t0105712. "
+                f"Start {_START_A}, end {_END_A}, FM Manager. No notes. No comments."
+            ),
+            note="Populate all fields to reach confirmation card",
+            expect_ui_type="confirmation_card",
+        ),
+        Turn(
+            message="yes",
+            note=(
+                "User answers 'yes' (no digit in message). "
+                "Backend-supplied dates must not have their year rewritten. "
+                "Expect SR_CREATED, not a date-validation error."
+            ),
+            action="confirm",
+            expect_workflow_stage="SR_CREATED",
+            expect_keywords=["submitted", "created", "reference"],
+        ),
+    ],
+    tags=["year-coercion", "merge-state", "handover-a", "tier2-edge"],
+)
+
+
+_S230 = Scenario(
+    id=230,
+    name="handover_description_auto_generated_when_skipped",
+    goal=(
+        "When the Mall Manager skips Description ('none'), merge_state must "
+        "auto-generate a readable default (contains 'handover' + lease code). "
+        "The title must NOT embed the generated sentence — it stays as "
+        "'handover-{lease_code}'. Guards _generate_description + "
+        "_description_was_generated flag."
+    ),
+    tier=2,
+    turns=[
+        Turn(
+            message=(
+                "Create a handover for lease t0105712. "
+                f"Start {_START_A}, end {_END_A}, FM Manager. "
+                "Description: none. Notes: none. Comments: none."
+            ),
+            note=(
+                "All fields packed; description/notes/comments skipped. "
+                "Confirmation card must show an auto-generated description "
+                "that contains 'handover' and 't0105712', NOT an empty string."
+            ),
+            expect_ui_type="confirmation_card",
+            expect_keywords=["handover", "t0105712"],
+        ),
+        Turn(
+            message="Confirm",
+            action="confirm",
+            expect_workflow_stage="SR_CREATED",
+            note="SR submitted with auto-generated description; no KeyError or blank field.",
+        ),
+    ],
+    tags=["auto-generate", "description", "notes", "comments", "handover-a", "tier2-edge"],
+)
+
+
+_S231 = Scenario(
+    id=231,
+    name="handover_auto_generate_fires_at_confirm_time_for_unanswered_fields",
+    goal=(
+        "If the user reaches the confirmation step without ever being asked "
+        "for description/notes/comments (None, not ''), the confirm-time "
+        "fallback in merge_state must promote them to '' and then auto-generate "
+        "defaults. The SR must not land with blank platform fields."
+    ),
+    tier=2,
+    turns=[
+        Turn(
+            message=(
+                "Handover for lease t0208831. "
+                f"Start {_START_B}, end {_END_B}, inspection by FM Manager. "
+                "No notes. No comments."
+            ),
+            note="Pack all non-optional fields; description deliberately omitted.",
+            expect_ui_type="confirmation_card",
+            expect_keywords=["description", "t0208831"],
+        ),
+        Turn(
+            message="yes",
+            action="confirm",
+            expect_workflow_stage="SR_CREATED",
+            note="SR created; description auto-filled from lease code.",
+        ),
+    ],
+    tags=["auto-generate", "confirm-time-fallback", "description", "tier2-edge"],
+)
+
+
+_S232 = Scenario(
+    id=232,
+    name="fitout_fos_radio_gate_must_ask_in_chat",
+    goal=(
+        "Even if the form pre-fills fitout_start_done='yes', the agent must "
+        "still ask the yes/no question in chat before moving to actual/planned "
+        "dates. _approve_radio_confirmed must be False until the user answers "
+        "in the current session. Guards the radio-gate in missing_field_node "
+        "and schema.get_missing_fields."
+    ),
+    tier=2,
+    turns=[
+        Turn(
+            message="Create a Fitout Start Confirmation for lease t0105712",
+            note="Lease resolution; agent must ask for the radio next.",
+            expect_keywords=["lease", "code", "t0105712"],
+        ),
+        Turn(
+            message="t0105712",
+            note=(
+                "Even if form has fitout_start_done pre-filled, "
+                "agent must still ask: Has fitout started? yes/no."
+            ),
+            expect_keywords=["fitout", "started", "yes", "no"],
+        ),
+        Turn(
+            message="yes",
+            note="User answers yes in chat; _approve_radio_confirmed set; agent asks for actual date.",
+            expect_keywords=["actual", "date", "fitout"],
+        ),
+    ],
+    tags=["fitout-fos", "radio-gate", "approve-radio-confirmed", "tier2-edge"],
+)
+
+
+_S233 = Scenario(
+    id=233,
+    name="fitout_approve_sr_session_answers_win_over_hydration",
+    goal=(
+        "On APPROVE_SR for a FOS SR, if the user changes trading_done from "
+        "'yes' (hydrated from platform) to 'no' in the chat session, the next "
+        "turn must NOT revert trading_done back to 'yes'. "
+        "Guards APPROVE_SR merge order: {**hydrated, **existing_collected}."
+    ),
+    tier=2,
+    turns=[
+        Turn(
+            message="Open Fitout Start Confirmation SR 99999 for approval",
+            note="APPROVE_SR flow; sr_status_sync hydrates with trading_done='yes'.",
+            expect_workflow_stage="APPROVE_SR",
+        ),
+        Turn(
+            message="no",
+            note=(
+                "User answers no to the radio — existing_collected trading_done "
+                "must remain 'no' on the NEXT turn, not be overwritten back to "
+                "'yes' by re-hydration."
+            ),
+            expect_keywords=["planned", "date", "delay"],
+        ),
+    ],
+    tags=["fitout-fos", "approve-sr", "session-wins-merge", "tier2-edge"],
+)
+
+
+# =============================================================================
 # TIER 0 — Smoke scenarios (S201–S202)
 # Fast sanity gate: ~60 seconds. Run before any longer tier.
 # =============================================================================
@@ -3598,6 +3812,8 @@ TIER1_SCENARIOS: list[Scenario] = [
     # 2026-08-04 session — Handover Type prompt + chip → Path B stage flip +
     # Path B review-card humanization (core: guards the primary create flow).
     _S220, _S221, _S224,
+    # 2026-08-07 session — fitout submit-loop fix (must not re-ask after Confirm).
+    _S228,
 ]
 
 #: CREATE_SR edge cases, API fields, multi-field combos, missing coverage
@@ -3610,6 +3826,9 @@ TIER2_SCENARIOS: list[Scenario] = [
     # 2026-08-04 session — chip Initiate Handover, date-chain later-field,
     # proactive comments ask, upload gate, workflow-stage humanization.
     _S222, _S223, _S225, _S226, _S227,
+    # 2026-08-07 session — year-coercion guard, description/notes/comments
+    # auto-generation, fitout radio gate, APPROVE_SR session-wins merge.
+    _S229, _S230, _S231, _S232, _S233,
 ]
 
 #: Agent-fix battle tests (Issues 1–7 from agent_ui_fixes.md)
@@ -3670,13 +3889,20 @@ HANDED_OVER_SCENARIOS: list[Scenario] = [
     # 2026-08-04 session additions (Handover Type prompt/chip, Path B
     # date-chain, review card, upload gate, workflow-stage humanization).
     _S220, _S221, _S222, _S223, _S224, _S225, _S226, _S227,
+    # 2026-08-07 session additions (year-coercion guard, description/notes/
+    # comments auto-gen, confirm-time fallback).
+    _S229, _S230, _S231,
 ]
+
+#: 2026-08-07 — Fitout APPROVE_SR flow + submit-loop fix
+FITOUT_APPROVE_SCENARIOS: list[Scenario] = [_S228, _S232, _S233]
 
 #: Fitout Confirmation SR — all fitout flat scenarios grouped by agent
 FITOUT_CONFIRM_SCENARIOS: list[Scenario] = (
     TIER6A_FOS_HAPPY + TIER6B_FOS_EDGE + TIER6C_FOS_BATTLE
     + TIER6E_END_HAPPY + TIER6F_END_EDGE
     + TIER6H_TRADING_HAPPY + TIER6I_TRADING_EDGE + TIER6J_TRADING_BATTLE
+    + FITOUT_APPROVE_SCENARIOS
 )
 
 #: Master list — all scenarios in tier order (for backward-compatibility)

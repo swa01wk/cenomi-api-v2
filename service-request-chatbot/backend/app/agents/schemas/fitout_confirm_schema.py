@@ -121,8 +121,8 @@ SUBCAT_CONFIG: dict[str, dict[str, Any]] = {
         "base_date_fields": [
             "base_trading_date",
         ],
-        # delay_reason is optional for TRADING
-        "delay_reason_required": False,
+        # delay_reason is mandatory on the NO branch (same as FOS/END)
+        "delay_reason_required": True,
         # TRADING does NOT have documents or comments sections
         "has_documents": False,
         "has_comments": False,
@@ -235,7 +235,7 @@ BACKEND_DERIVED_FIELDS: frozenset[str] = frozenset(
 USER_SUPPLIED_FIELDS: frozenset[str] = ALLOWED_EXTRACTED_FIELDS - BACKEND_DERIVED_FIELDS
 
 # Optional fields — an empty-string value is acceptable (user may skip).
-OPTIONAL_FIELDS: frozenset[str] = frozenset({"comments", "delay_reason"})
+OPTIONAL_FIELDS: frozenset[str] = frozenset({"comments"})
 
 # Fields that must only ever come from backend lookups.
 BACKEND_ONLY_FIELDS: frozenset[str] = frozenset(
@@ -329,16 +329,35 @@ def get_missing_fields(stage_name: str, sub_category: str, collected: dict) -> l
     radio_value = collected.get(radio_field, "")
     missing: list[str] = []
 
-    # lease_brand_mall is the trigger for lease lookup; lease_code/lease_id are
-    # populated by the lease_lookup_node from it.
-    for f in ("lease_brand_mall",):
-        if _is_missing(collected.get(f)):
-            missing.append(f)
+    # CREATE: lease_brand_mall triggers lease lookup.
+    # APPROVE: open-SR hydration may only have lease_code / lease_id — treat
+    # either as sufficient so we do not re-ask for the lease on approve.
+    if stage_name == "APPROVE_SR":
+        has_lease = (
+            not _is_missing(collected.get("lease_brand_mall"))
+            or not _is_missing(collected.get("lease_code"))
+            or not _is_missing(collected.get("lease_id"))
+        )
+        if not has_lease:
+            missing.append("lease_brand_mall")
+    else:
+        if _is_missing(collected.get("lease_brand_mall")):
+            missing.append("lease_brand_mall")
 
     # Radio field itself
     if _is_missing(radio_value):
         missing.append(radio_field)
         return missing  # cannot determine branch until radio is answered
+
+    # CREATE + APPROVE: form/bridge may pre-fill yes/no (and planned dates), but
+    # the user must still explicitly answer the radio in this chat session.
+    # ``_approve_radio_confirmed`` is set by merge_state when they answer.
+    if (
+        stage_name in ("CREATE_SR", "APPROVE_SR")
+        and not collected.get("_approve_radio_confirmed")
+    ):
+        missing.append(radio_field)
+        return missing
 
     # YES branch
     if radio_value == "yes":
@@ -356,7 +375,7 @@ def get_missing_fields(stage_name: str, sub_category: str, collected: dict) -> l
         for pf in cfg.get("planned_date_fields", []):
             if _is_missing(collected.get(pf)):
                 missing.append(pf)
-        # delay_reason: required for FOS/END, optional for TRADING
+        # delay_reason: required on NO when SUBCAT_CONFIG.delay_reason_required
         if cfg.get("delay_reason_required"):
             if _is_missing(collected.get("delay_reason")):
                 missing.append("delay_reason")

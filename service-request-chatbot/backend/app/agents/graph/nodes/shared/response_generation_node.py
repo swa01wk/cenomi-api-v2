@@ -56,6 +56,17 @@ async def response_generation_node(state: ServiceRequestState) -> dict[str, Any]
     # still attempt LLM rewrite for a warmer tone.
     is_terminal = current_status in _TERMINAL_STATUSES
 
+    # Fitout original-date confirm questions must keep the concrete date.
+    # An LLM rewrite was dropping it and falling back to a generic ask.
+    if current_ui and current_ui.get("verbatim") and current_message:
+        updates: dict[str, Any] = {
+            "response_message": current_message,
+            "response_ui": {**current_ui, "message": current_message},
+        }
+        if not is_terminal:
+            updates["status"] = "WAITING_FOR_USER"
+        return updates
+
     # ── Build context for the LLM ───────────────────────────────────────────
     collected_data: dict[str, Any] = state.get("collected_data") or {}
     missing_fields: list[str] = state.get("missing_fields") or []

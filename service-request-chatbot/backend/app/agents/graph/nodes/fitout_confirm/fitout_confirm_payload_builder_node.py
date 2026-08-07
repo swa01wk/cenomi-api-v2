@@ -115,6 +115,7 @@ def build_create_fitout_confirm_payload(
 
     title = collected.get("title") or build_title(sub_category, pms_tenant_code)
     lease_id = collected.get("lease_id")
+    tenant_profile_id = collected.get("tenant_profile_id")
 
     return {
         "payload": payload_inner,
@@ -123,6 +124,7 @@ def build_create_fitout_confirm_payload(
         "sub_category": sub_category,
         "lease_code": lease_code,
         "lease_id": lease_id,
+        "tenant_profile_id": tenant_profile_id,
         "service_request_id": "",
     }
 

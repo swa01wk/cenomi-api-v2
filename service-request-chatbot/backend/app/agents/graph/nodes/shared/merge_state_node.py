@@ -113,6 +113,10 @@ _USER_TIME_FIELDS: frozenset[str] = frozenset({"inspectionTime"})
 
 _EXPLICIT_YEAR_RE = re.compile(r"\b(?:19|20)\d{2}\b")
 
+# Any digit in the user's message means they may have typed a date. Used to gate
+# year coercion so a bare "yes"/"confirm" never rewrites a backend-supplied date.
+_DATE_TOKEN_RE = re.compile(r"\d")
+
 
 def _coerce_year_if_absent(value: str, message_has_year: bool) -> str:
     """Force *value*'s year to the current year when the user gave no explicit year.
@@ -261,10 +265,21 @@ async def merge_state_node(state: ServiceRequestState) -> dict[str, Any]:
     )
 
     # Whether the user's raw message contained an explicit 4-digit year. Used to
-    # decide if extracted date years may be coerced to the current year. Only
-    # attempt coercion when a message is actually present to inspect.
+    # decide if extracted date years may be coerced to the current year.
+    #
+    # Year coercion exists to repair *bare* dates the user typed ("30 August"),
+    # which gpt-4o-mini sometimes stamps with a stale year. It must NOT touch a
+    # date the user merely CONFIRMED. Answering "yes" / "confirm" to a
+    # backend-supplied planned date (e.g. base_fitout_end_date = 2025-10-31)
+    # carries no date token at all, so there is no bare year to repair — yet the
+    # old `bool(user_message.strip())` guard let coercion run and silently
+    # rewrote 2025-10-31 to 2026-10-31.
+    #
+    # Only coerce when the message actually contains a date-like token (any
+    # digit). Confirmations, chip clicks, and yes/no answers are excluded.
     user_message: str = state.get("user_message") or ""
-    can_coerce_year: bool = bool(user_message.strip())
+    message_has_date_token: bool = bool(_DATE_TOKEN_RE.search(user_message))
+    can_coerce_year: bool = bool(user_message.strip()) and message_has_date_token
     message_has_year: bool = bool(_EXPLICIT_YEAR_RE.search(user_message))
 
     # ── Apply inline edits from the confirmation card first ────────────────
@@ -411,10 +426,50 @@ async def merge_state_node(state: ServiceRequestState) -> dict[str, Any]:
         workflow_stage == "CREATE_SR"
         and state.get("confirmation_status") == "CONFIRMED"
     ):
-        if collected.get("notes") is None:
-            collected["notes"] = ""
-        if collected.get("comments") is None:
-            collected["comments"] = ""
+        # Mark still-unanswered optionals as skipped ("") rather than leaving
+        # None. The auto-generation block below then turns each "" into a
+        # readable default, so a confirmed SR never reaches the platform with a
+        # blank Description / Notes / Comments.
+        for _optional_key in ("description", "notes", "comments"):
+            if collected.get(_optional_key) is None:
+                collected[_optional_key] = ""
+
+    # ── Auto-generate description / notes / comments ──────────────────────────
+    # These are OPTIONAL in the chat flow, but the portal form shows description
+    # on the SR card and marks `comments` as required. Previously a skipped
+    # answer submitted an empty string, so the Mall Manager's SR landed on the
+    # platform with blank Description / Notes / Comments.
+    #
+    # Fill a deterministic default ONLY when the user explicitly skipped
+    # (value == "", written when they answer "none"/"skip"). `None` means the
+    # field has not been asked yet and must stay untouched so missing_field_node
+    # still prompts for it.
+    #
+    # Tracks whether we synthesised the description, so the title block below
+    # does not fold a generated sentence into its slug (which would produce the
+    # redundant "handover-t0112136-handover-inspection-for-lease-t0112136").
+    _description_was_generated = False
+
+    if workflow_stage in ("CREATE_SR", "CREATE_HANDED_OVER_SR"):
+        _lease_for_text = str(collected.get("lease_code") or "").strip()
+        if _lease_for_text:
+            _is_already_trading = (
+                workflow_stage == "CREATE_HANDED_OVER_SR"
+                or str(collected.get("already_handovered") or "").strip().lower()
+                == "already_trading"
+            )
+            if _was_skipped(collected.get("description")):
+                collected["description"] = _generate_description(
+                    _lease_for_text,
+                    str(collected.get("brand") or ""),
+                    str(collected.get("mall") or ""),
+                    already_trading=_is_already_trading,
+                )
+                _description_was_generated = True
+            if _was_skipped(collected.get("notes")):
+                collected["notes"] = _generate_notes(_lease_for_text)
+            if _was_skipped(collected.get("comments")):
+                collected["comments"] = _generate_comments(_lease_for_text)
 
     # ── Auto-generate title ────────────────────────────────────────────────────
     # Title generation is branched by workflow stage:
@@ -446,7 +501,9 @@ async def merge_state_node(state: ServiceRequestState) -> dict[str, Any]:
         ):
             collected["title"] = _generate_title(
                 str(collected["lease_code"]),
-                str(collected["description"]),
+                # Only slug a description the USER wrote. A synthesised one just
+                # restates the lease code, yielding a redundant title.
+                "" if _description_was_generated else str(collected["description"]),
             )
     # Silence unused-var warning when the CREATE_HANDED_OVER_SR branch runs.
     _ = title_needs_default
@@ -462,7 +519,17 @@ async def merge_state_node(state: ServiceRequestState) -> dict[str, Any]:
     # the backend API never receives a null value and rejects the submission.
     if workflow_stage in ("FM_REVIEW", "RDD_REVIEW", "CREATE_HANDED_OVER_SR"):
         if collected.get("comments") is None:
-            collected["comments"] = ""
+            # Path B is a Mall Manager create flow, so give it the same
+            # generated default as CREATE_SR instead of a blank required field.
+            # This block runs after the auto-generation section above, so it has
+            # to generate here rather than fall through to "".
+            # FM_REVIEW / RDD_REVIEW comments are reviewer remarks — an empty
+            # string is the correct neutral value for those.
+            _lease_for_comments = str(collected.get("lease_code") or "").strip()
+            if workflow_stage == "CREATE_HANDED_OVER_SR" and _lease_for_comments:
+                collected["comments"] = _generate_comments(_lease_for_comments)
+            else:
+                collected["comments"] = ""
 
     if (
         workflow_stage != "CREATE_HANDED_OVER_SR"
@@ -497,6 +564,28 @@ async def merge_state_node(state: ServiceRequestState) -> dict[str, Any]:
         "rdd_fitout_end_agent",
         "rdd_trading_confirmation_agent",
     })
+    _FITOUT_RADIO_FIELDS: frozenset[str] = frozenset({
+        "fitout_start_done",
+        "fitout_complete_done",
+        "trading_done",
+    })
+    _FITOUT_RADIO_TO_ACTUAL: dict[str, str] = {
+        "fitout_start_done": "actual_fitout_start_date",
+        "fitout_complete_done": "actual_fitout_complete_date",
+        "trading_done": "actual_trading_date",
+    }
+    _FITOUT_RADIO_TO_PLANNED: dict[str, tuple[str, ...]] = {
+        "fitout_start_done": (
+            "planned_fitout_start_date",
+            "planned_fitout_end_date",
+            "planned_trading_date",
+        ),
+        "fitout_complete_done": (
+            "planned_fitout_complete_date",
+            "planned_trading_date",
+        ),
+        "trading_done": ("planned_trading_date",),
+    }
     active_agent: str | None = state.get("active_agent")
     if (
         workflow_stage == "CREATE_SR"
@@ -504,6 +593,39 @@ async def merge_state_node(state: ServiceRequestState) -> dict[str, Any]:
         and active_agent not in _FITOUT_AGENTS
     ):
         collected["inspectionTime"] = datetime.datetime.now().strftime("%H:%M")
+
+    # CREATE_SR / APPROVE_SR: when the user answers the yes/no radio in this
+    # session (via extracted_fields — not silent form corrected_fields), mark
+    # confirmed and clear the opposite branch so planned/actual dates are
+    # re-collected.  Form pre-fill alone must not skip the chat yes/no step.
+    #
+    # Only confirm when the bot was asking for the radio (active_field).  Lease
+    # turns often re-extract a form-synced trading_done/fitout_*_done value and
+    # must NOT flip ``_approve_radio_confirmed`` or we skip straight to planned
+    # dates.
+    if (
+        workflow_stage in ("CREATE_SR", "APPROVE_SR")
+        and active_agent in _FITOUT_AGENTS
+    ):
+        active_field_now = str(state.get("active_field") or "").strip()
+        extracted_keys = set((state.get("extracted_fields") or {}).keys())
+        radio_answered = extracted_keys & _FITOUT_RADIO_FIELDS
+        if radio_answered and active_field_now in _FITOUT_RADIO_FIELDS:
+            collected["_approve_radio_confirmed"] = True
+            for radio_key in radio_answered:
+                new_radio = str(collected.get(radio_key) or "").strip().lower()
+                actual_key = _FITOUT_RADIO_TO_ACTUAL.get(radio_key)
+                planned_keys = _FITOUT_RADIO_TO_PLANNED.get(radio_key, ())
+                if new_radio == "no" and actual_key:
+                    collected[actual_key] = ""
+                elif new_radio == "yes":
+                    for pk in planned_keys:
+                        collected[pk] = ""
+                    collected["delay_reason"] = ""
+                    # Clear the actual date so the bot re-asks to confirm or
+                    # replace it (missing_field_node shows the original/base date).
+                    if actual_key:
+                        collected[actual_key] = ""
 
     # RDD status: derive from the actually-uploaded document types now that we
     # show all three types in one document_requirement UI (no chip selection).
@@ -538,6 +660,44 @@ async def merge_state_node(state: ServiceRequestState) -> dict[str, Any]:
         patch["workflow_stage"] = "CREATE_HANDED_OVER_SR"
         patch["sub_category"] = "HANDED_OVER"
     return patch
+
+
+def _was_skipped(value: object) -> bool:
+    """True when the user explicitly declined a field (answered "none"/"skip").
+
+    ``merge_state`` normalises those answers to ``""``. ``None`` means the field
+    has not been asked yet, so it must be left alone for ``missing_field_node``.
+    """
+    return isinstance(value, str) and value.strip() == ""
+
+
+def _generate_description(
+    lease_code: str,
+    brand: str = "",
+    mall: str = "",
+    already_trading: bool = False,
+) -> str:
+    """Human-readable default description when the Mall Manager skips it."""
+    kind = "Already Trading handover" if already_trading else "Handover inspection"
+    where = " at ".join(p for p in (brand.strip(), mall.strip()) if p.strip())
+    if where:
+        return f"{kind} for lease {lease_code} - {where}."
+    return f"{kind} for lease {lease_code}."
+
+
+def _generate_notes(lease_code: str) -> str:
+    """Default notes when the Mall Manager skips the notes question."""
+    return f"No additional notes provided for lease {lease_code}."
+
+
+def _generate_comments(lease_code: str) -> str:
+    """Default comments when the Mall Manager skips the comments question.
+
+    ``comments`` is ``required: true`` on the platform HANDOVER form skeleton,
+    so an empty string here shows as a blank mandatory field on the SR detail
+    page. A deterministic sentence keeps the record readable.
+    """
+    return f"No additional comments provided for lease {lease_code}."
 
 
 def _generate_title(lease_code: str, description: str) -> str:

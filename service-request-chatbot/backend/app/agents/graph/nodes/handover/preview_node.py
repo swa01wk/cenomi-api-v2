@@ -62,6 +62,26 @@ _PREVIEW_FIELD_ORDER: list[tuple[str, str]] = [
     ("notes",                  "Notes"),
     ("comments",               "Comments"),
     ("guideLineLink",          "Guideline Link"),
+    # ── Fitout Confirmation (FOS / FOE / Trading) fields ─────────────────
+    # These must be published in draft_preview.fields so the FE bridge can
+    # apply them to Formik.  format_field_display_value returns the raw
+    # string values ("yes"/"no", dates) unchanged so the radio/date fields
+    # bind correctly.
+    ("fitout_start_done",            "Fitout Started"),
+    ("fitout_complete_done",         "Fitout Complete"),
+    ("trading_done",                 "Trading Started"),
+    ("actual_fitout_complete_date",  "Actual Fitout Complete Date"),
+    ("planned_fitout_start_date",    "Planned Fitout Start Date"),
+    ("planned_fitout_end_date",      "Planned Fitout End Date"),
+    ("planned_fitout_complete_date", "Planned Fitout Complete Date"),
+    ("planned_trading_date",         "Planned Trading Date"),
+    ("delay_reason",                 "Delay Reason"),
+    # Base dates from lease contract — sent to FE so the bridge can populate
+    # the read-only "Base Dates" section of the FOS/FOE/Trading form and the
+    # ServiceReqForms auto-fill logic can seed actual dates from them.
+    ("base_fitout_start_date",       "Base Fitout Start Date"),
+    ("base_fitout_end_date",         "Base Fitout End Date"),
+    ("base_trading_date",            "Base Trading Date"),
 ]
 
 # Same keys from the platform API payload blob.

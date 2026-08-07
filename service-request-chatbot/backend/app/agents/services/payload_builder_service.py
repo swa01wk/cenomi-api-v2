@@ -275,18 +275,30 @@ def build_create_handover_payload(
         if doc_id and str(doc_id) not in doc_ids:
             doc_ids.append(str(doc_id))
 
+    # title/description are OPTIONAL — user may skip both. merge_state
+    # auto-generates title from lease_code + description when the user typed
+    # "none" (title becomes "" first, then gets replaced). If BOTH remain
+    # untouched (None) at payload-build time, fall back to safe defaults so
+    # the platform payload is well-formed instead of KeyError'ing here or
+    # sending a JSON ``null``.
+    _title = data.get("title")
+    if not _title:
+        lease_slug = str(data.get("lease_code") or "").strip()
+        _title = f"handover-{lease_slug}" if lease_slug else "handover"
+    _description = data.get("description") or ""
+
     payload: dict[str, Any] = {
         "payload": {
             "mall": data["mall"],
             "brand": data["brand"],
             "lease": data["lease_code"],
             "notes": data.get("notes", ""),
-            "title": data["title"],
+            "title": _title,
             "endDate": end_iso,
             "comments": data.get("comments", ""),
             "startDate": start_iso,
             "attachments": "",
-            "description": data["description"],
+            "description": _description,
             "documents_ids": doc_ids,
             "guideLineLink": "",
             "inspectionDoneBy": data["inspection_done_by"],
@@ -309,7 +321,7 @@ def build_create_handover_payload(
             "startDateLT": start_lt,
             "endDateLT": end_lt,
         },
-        "title": data["title"],
+        "title": _title,
         "tenant_profile_id": data["tenant_profile_id"],
         "property_id": data["property_id"],
         "service_category": "FIT_OUT_AND_HANDOVER",
@@ -944,7 +956,12 @@ def build_rdd_approve_payload(
         **inner,
         "sr_id": sr_id,
         "current_sr_status": "REPORT_SUBMITTED",
-        "user_action": None,
+        # user_action drives the platform's `operationsRelatedToApprove…` branch.
+        # Without it, the platform updates only the operation row but skips the
+        # SR-level status promotion (SR stays REPORT_SUBMITTED even though the
+        # RDD operation flips to FINISHED). "APPROVE" is what the manual portal
+        # form sends for the DDPM final approve click.
+        "user_action": "APPROVE",
     }
     # Keep dates in platform form format if present.
     for date_key in (
@@ -977,6 +994,9 @@ def build_rdd_approve_payload(
         "sub_category": "HANDOVER",
         "status": "APPROVED",
         "comment": comment_text,
+        # Some platform handlers read user_action from the outer envelope;
+        # mirror the inner value so both places agree.
+        "user_action": "APPROVE",
     }
 
     logger.debug("build_rdd_approve_payload: built for sr_id=%s", sr_id)

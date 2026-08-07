@@ -225,7 +225,8 @@ def _build_work_permit_config() -> WorkflowConfig:
 
 def _fitout_confirm_extraction_prompt() -> str:
     return (
-        "You are a field extraction assistant for the Fitout Confirmation workflow. "
+        "You are a field extraction assistant for Fitout Start, Fitout End, and "
+        "Trading Confirmation workflows. "
         "Extract only the fields listed below — never invent or guess values.\n\n"
 
         "## Lease identification\n"
@@ -259,7 +260,15 @@ def _fitout_confirm_extraction_prompt() -> str:
         "comments: Optional free-form remarks.\n\n"
 
         "## Critical rules\n"
-        "- Convert ALL dates to ISO 8601 (YYYY-MM-DD). 'actual date 2026-07-24' → '2026-07-24'.\n"
+        "- Convert ALL dates to ISO 8601 (YYYY-MM-DD). Users enter DD/MM/YYYY — convert to YYYY-MM-DD. "
+        "e.g. '21/07/2026' → '2026-07-21', '2026-07-21' → '2026-07-21'.\n"
+        "- Confirm shortcut: when the assistant's previous question showed a base date "
+        "(e.g. 'The base date from the contract is 01/07/2026') and the user replies "
+        "'confirm', 'ok', 'yes', 'same', or equivalent agreement, "
+        "extract that base date (converted to YYYY-MM-DD) as the value for the actual "
+        "date field being asked. "
+        "Example: assistant asks about actual_fitout_start_date with base 01/07/2026, "
+        "user says 'confirm' → extract actual_fitout_start_date: '2026-07-01'.\n"
         "- Do NOT extract 'inspectionTime', 'startDate', 'endDate', 'description', "
         "or any other handover-specific field — those belong to a different workflow.\n"
         "- Return only fields from the lists above. Never include backend-derived or "
@@ -269,25 +278,26 @@ def _fitout_confirm_extraction_prompt() -> str:
     )
 
 
-def _fitout_confirm_field_questions() -> dict[str, str]:
+def _fitout_confirm_field_questions(*, lease_prompt: str) -> dict[str, str]:
+    """Shared FOS / END / Trading field questions with an agent-specific lease prompt."""
     return {
         "lease_brand_mall": (
             "Ask the user for the lease code, brand name, or mall name to identify the lease."
         ),
-        "lease_code": "Ask the user for the lease code for this fitout confirmation.",
+        "lease_code": lease_prompt,
         # FOS
         "fitout_start_done": (
             "Ask the user whether the fitout has started. "
             "Reply 'yes' if fitout has started, or 'no' if it has not yet started."
         ),
         "actual_fitout_start_date": (
-            "Ask the user for the actual date when fitout started (YYYY-MM-DD)."
+            "Ask the user for the actual date when fitout started (DD/MM/YYYY)."
         ),
         "planned_fitout_start_date": (
-            "Ask the user for the revised planned fitout start date (YYYY-MM-DD)."
+            "Ask the user for the revised planned fitout start date (DD/MM/YYYY)."
         ),
         "planned_fitout_end_date": (
-            "Ask the user for the revised planned fitout end date (YYYY-MM-DD)."
+            "Ask the user for the revised planned fitout end date (DD/MM/YYYY)."
         ),
         # END
         "fitout_complete_done": (
@@ -295,10 +305,10 @@ def _fitout_confirm_field_questions() -> dict[str, str]:
             "Reply 'yes' if fitout is complete, or 'no' if it is not yet complete."
         ),
         "actual_fitout_complete_date": (
-            "Ask the user for the actual date when fitout was completed (YYYY-MM-DD)."
+            "Ask the user for the actual date when fitout was completed (DD/MM/YYYY)."
         ),
         "planned_fitout_complete_date": (
-            "Ask the user for the revised planned fitout completion date (YYYY-MM-DD)."
+            "Ask the user for the revised planned fitout completion date (DD/MM/YYYY)."
         ),
         # TRADING
         "trading_done": (
@@ -306,15 +316,15 @@ def _fitout_confirm_field_questions() -> dict[str, str]:
             "Reply 'yes' if trading has started, or 'no' if it has not."
         ),
         "actual_trading_date": (
-            "Ask the user for the actual trading start date (YYYY-MM-DD)."
+            "Ask the user for the actual trading start date (DD/MM/YYYY)."
         ),
         # Shared
         "planned_trading_date": (
-            "Ask the user for the revised planned trading date (YYYY-MM-DD)."
+            "Ask the user for the revised planned trading date (DD/MM/YYYY)."
         ),
         "delay_reason": (
-            "Ask the user to briefly describe the reason for the delay "
-            "(or say 'none' to skip if delay reason is optional)."
+            "Ask the user to briefly describe the reason for the delay. "
+            "This is mandatory — do not allow skipping."
         ),
         "comments": (
             "Ask the user if they have any additional comments (or say 'none' to skip)."
@@ -338,6 +348,8 @@ def _fitout_confirm_backend_fields() -> frozenset[str]:
             "base_fitout_start_date",
             "base_fitout_end_date",
             "base_trading_date",
+            # Session-only flag — never ask the user for this.
+            "_approve_radio_confirmed",
         }
     )
 
@@ -352,7 +364,11 @@ def _build_fitout_start_config() -> WorkflowConfig:
     return WorkflowConfig(
         agent_name="rdd_fitout_start_agent",
         extraction_prompt=_fitout_confirm_extraction_prompt(),
-        field_questions=_fitout_confirm_field_questions(),
+        field_questions=_fitout_confirm_field_questions(
+            lease_prompt=(
+                "Ask the user for the lease code for this Fitout Start Confirmation."
+            ),
+        ),
         stage_sync_nodes={"APPROVE_SR": "fitout_confirm_entry"},
         collection_stages=frozenset({"CREATE_SR", "APPROVE_SR"}),
         confirmation_nodes={
@@ -377,7 +393,11 @@ def _build_fitout_end_config() -> WorkflowConfig:
     return WorkflowConfig(
         agent_name="rdd_fitout_end_agent",
         extraction_prompt=_fitout_confirm_extraction_prompt(),
-        field_questions=_fitout_confirm_field_questions(),
+        field_questions=_fitout_confirm_field_questions(
+            lease_prompt=(
+                "Ask the user for the lease code for this Fitout End Confirmation."
+            ),
+        ),
         stage_sync_nodes={"APPROVE_SR": "fitout_confirm_entry"},
         collection_stages=frozenset({"CREATE_SR", "APPROVE_SR"}),
         confirmation_nodes={
@@ -402,7 +422,11 @@ def _build_trading_confirm_config() -> WorkflowConfig:
     return WorkflowConfig(
         agent_name="rdd_trading_confirmation_agent",
         extraction_prompt=_fitout_confirm_extraction_prompt(),
-        field_questions=_fitout_confirm_field_questions(),
+        field_questions=_fitout_confirm_field_questions(
+            lease_prompt=(
+                "Ask the user for the lease code for this Trading Confirmation."
+            ),
+        ),
         stage_sync_nodes={"APPROVE_SR": "fitout_confirm_entry"},
         collection_stages=frozenset({"CREATE_SR", "APPROVE_SR"}),
         confirmation_nodes={

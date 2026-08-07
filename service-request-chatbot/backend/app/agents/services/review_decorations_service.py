@@ -99,6 +99,9 @@ def payload_to_collected_data(payload: dict[str, Any]) -> dict[str, Any]:
         "fitout_complete_done", "actual_fitout_complete_date", "planned_fitout_complete_date",
         "trading_done", "actual_trading_date",
         "delay_reason",
+        # Base milestone dates from the lease contract — needed so that
+        # missing_field_node can show "original date" on APPROVE_SR.
+        "base_fitout_start_date", "base_fitout_end_date", "base_trading_date",
     ):
         if key in payload and payload[key] not in (None, ""):
             mapped[key] = payload[key]

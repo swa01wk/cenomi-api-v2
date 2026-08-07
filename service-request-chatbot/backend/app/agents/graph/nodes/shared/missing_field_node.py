@@ -18,6 +18,7 @@ Strategy
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 from app.agents.graph.state import ServiceRequestState
@@ -116,6 +117,56 @@ _FITOUT_CONFIRM_AGENTS: frozenset[str] = frozenset({
 _RDD_MANDATORY_UPLOAD_TYPES: frozenset[str] = frozenset(
     {"DR_SR_HANDOVER_REPORT", "SR_REJECTED_HANDOVER_REPORT"}
 )
+
+# Maps each FOS/FOE/Trading actual-date field to candidate "original date"
+# sources (first non-empty wins).  Mirrors the form: prefer lease base date,
+# then planned milestone date when the form has already hydrated it.
+_ACTUAL_TO_ORIGINAL_DATE_CANDIDATES: dict[str, tuple[str, ...]] = {
+    "actual_fitout_start_date": (
+        "base_fitout_start_date",
+        "planned_fitout_start_date",
+    ),
+    "actual_fitout_complete_date": (
+        "base_fitout_end_date",
+        "planned_fitout_complete_date",
+        "planned_fitout_end_date",
+    ),
+    "actual_trading_date": (
+        "base_trading_date",
+        "planned_trading_date",
+    ),
+}
+
+# Back-compat alias used by older call sites / tests.
+_ACTUAL_TO_BASE_DATE: dict[str, str] = {
+    actual: candidates[0]
+    for actual, candidates in _ACTUAL_TO_ORIGINAL_DATE_CANDIDATES.items()
+}
+
+
+def _format_base_date_for_display(raw: str) -> str:
+    """Convert common date formats to DD/MM/YYYY for display in a prompt."""
+    s = str(raw or "").strip()
+    if not s:
+        return s
+    # ISO timestamps from the form/API → date-only first.
+    if "T" in s:
+        s = s.split("T", 1)[0]
+    for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%Y/%m/%d"):
+        try:
+            return datetime.strptime(s, fmt).strftime("%d/%m/%Y")
+        except ValueError:
+            continue
+    return str(raw).strip()
+
+
+def _resolve_original_date(collected: dict[str, Any], actual_field: str) -> str:
+    """Return the first non-empty original/base date for *actual_field*."""
+    for key in _ACTUAL_TO_ORIGINAL_DATE_CANDIDATES.get(actual_field, ()):
+        raw = str(collected.get(key) or "").strip()
+        if raw and raw.lower() not in ("none", "null", "—", "-"):
+            return raw
+    return ""
 _RDD_UPLOAD_ROLES: frozenset[str] = frozenset({"DD_ENGINEER"})
 
 
@@ -212,6 +263,9 @@ async def missing_field_node(state: ServiceRequestState) -> dict[str, Any]:
 
     next_field: str | None = None
     next_question: str | None = None
+    # When True, response_generation must not LLM-rewrite the question (keeps
+    # the concrete original date in the user-facing message).
+    verbatim_question = False
 
     # ── Priority 0: non-required blocking validation errors ───────────────
     # "required" failures mean a field is simply absent — those are handled by
@@ -289,6 +343,77 @@ async def missing_field_node(state: ServiceRequestState) -> dict[str, Any]:
             f"Please provide: {next_field}",
         )
 
+        # CREATE/APPROVE: form may pre-fill yes/no — still ask the user to
+        # confirm in chat before collecting planned/actual dates.
+        if (
+            active_agent in _FITOUT_CONFIRM_AGENTS
+            and workflow_stage in ("CREATE_SR", "APPROVE_SR")
+            and next_field in (
+                "fitout_start_done",
+                "fitout_complete_done",
+                "trading_done",
+            )
+            and not collected.get("_approve_radio_confirmed")
+        ):
+            radio_val = str(collected.get(next_field) or "").strip().lower()
+            _RADIO_TO_ACTUAL = {
+                "fitout_start_done": "actual_fitout_start_date",
+                "fitout_complete_done": "actual_fitout_complete_date",
+                "trading_done": "actual_trading_date",
+            }
+            _RADIO_LABEL = {
+                "fitout_start_done": "fitout start",
+                "fitout_complete_done": "fitout complete",
+                "trading_done": "trading",
+            }
+            label = _RADIO_LABEL.get(next_field, "this milestone")
+            actual_key = _RADIO_TO_ACTUAL.get(next_field, "")
+            actual_raw = str(collected.get(actual_key) or "").strip()
+            actual_display = (
+                _format_base_date_for_display(actual_raw) if actual_raw else ""
+            )
+            if radio_val == "yes" and actual_display:
+                next_question = (
+                    f"{label.capitalize()} is currently marked as **done** "
+                    f"(actual date {actual_display}). "
+                    f"Reply **yes** to confirm, or **no** if it has not started "
+                    f"and you need to add revised planned dates."
+                )
+            elif radio_val == "yes":
+                next_question = (
+                    f"{label.capitalize()} is currently marked as **done**. "
+                    f"Reply **yes** to confirm, or **no** if it has not started "
+                    f"and you need to add revised planned dates."
+                )
+            elif radio_val == "no":
+                next_question = (
+                    f"{label.capitalize()} is currently marked as **not done**. "
+                    f"Reply **no** to keep that and review/update planned dates, "
+                    f"or **yes** if it has now started and you have an actual date."
+                )
+            else:
+                next_question = (
+                    f"Has {label} started? Reply **yes** or **no**. "
+                    f"If no, you can add revised planned dates."
+                )
+
+        # For FOS/FOE/Trading actual-date fields, if an original/base date is
+        # already in collected_data (or form-synced planned fallback), ask the
+        # user to confirm it or enter a different one.
+        elif (
+            active_agent in _FITOUT_CONFIRM_AGENTS
+            and next_field in _ACTUAL_TO_ORIGINAL_DATE_CANDIDATES
+        ):
+            original_raw = _resolve_original_date(collected, next_field)
+            if original_raw:
+                display_base = _format_base_date_for_display(original_raw)
+                next_question = (
+                    f"The original date is **{display_base}**. "
+                    f"Would you like to confirm this date, or provide a new one? "
+                    f"Reply **confirm** to use it, or enter a different date in DD/MM/YYYY format."
+                )
+                verbatim_question = True
+
     # When the next question is driven by a non-required validation error (e.g.
     # date_range), the correction target field may already be in collected_data
     # (it's just invalid).  Prepend it to missing_fields so that
@@ -308,6 +433,7 @@ async def missing_field_node(state: ServiceRequestState) -> dict[str, Any]:
             "type": "text_question",
             "field": next_field,
             "message": next_question,
+            **({"verbatim": True} if verbatim_question else {}),
         }
         updates["status"] = "WAITING_FOR_USER"
         # Persist so the next turn's extraction can bind a bare answer to this
@@ -392,6 +518,22 @@ async def missing_field_node(state: ServiceRequestState) -> dict[str, Any]:
                             "value": "APPROVED_WITH_CHANGES",
                             "action": "select_rdd_status_approved_with_changes",
                         },
+                    ],
+                }
+            }
+        elif next_field in (
+            "fitout_start_done",
+            "fitout_complete_done",
+            "trading_done",
+        ):
+            # Value-only chips → FE sends "yes"/"no" as the user message; active_field
+            # binds the answer to the radio (same path as typing yes/no).
+            updates["response_decorations"] = {
+                "suggestions": {
+                    "kind": "labeled_options",
+                    "options": [
+                        {"label": "Yes", "value": "yes"},
+                        {"label": "No", "value": "no"},
                     ],
                 }
             }
