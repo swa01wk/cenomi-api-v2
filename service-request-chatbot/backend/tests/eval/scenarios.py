@@ -15,11 +15,13 @@ TIER STRUCTURE
                                              comments proactive ask,
                                              upload gate, workflow-stage
                                              humanization
-                    + S229–S233  Year-coercion guard, description/notes/
+                    + S229–S234  Year-coercion guard, description/notes/
                                  comments auto-gen, fitout radio gate,
-                                 APPROVE_SR session-wins merge
+                                 APPROVE_SR session-wins merge, RDD
+                                 tenant-acceptance success message
   Tier 3  Battle  — S34–S59: Issues 1–7 from agent_ui_fixes.md
-                    + S69  FM date format (Fix 5)
+                    + S69   FM date format (Fix 5)
+                    + S235  RDD final-approve payload contract (no user_action)
   (Tier 4/5/6 live in lifecycle_scenarios.py)
   Tier 8  FitoutConfirm Core+Edge — S70–S82: FIT_OUT_CONFIRM_FOS/END/TRADING
 
@@ -3271,6 +3273,97 @@ _S233 = Scenario(
 
 
 # =============================================================================
+# Session 2026-08-07 (continued) — RDD final-approve platform behavior (S234–S235)
+# After RDDPM approval the Go platform intentionally keeps SR at REPORT_SUBMITTED
+# so the tenant can accept/reject. The chatbot must reflect this correctly.
+# =============================================================================
+
+_S234 = Scenario(
+    id=234,
+    name="rdd_final_approve_success_message_awaits_tenant",
+    goal=(
+        "After the RDDPM clicks Final Approve, the success message must state "
+        "that the SR is waiting for TENANT acceptance, NOT that it is complete. "
+        "The Go platform always sets HANDOVER SR to REPORT_SUBMITTED after all "
+        "admin operations finish; APPROVED only comes from the tenant. "
+        "Guards the corrected response_message in rdd_api_submission_node."
+    ),
+    tier=2,
+    turns=[
+        Turn(
+            message=(
+                f"Open SR 320944 for RDD review. "
+                f"Guideline link https://example.com/guide. "
+                f"Actual handover date {_d(5)}, fitout start {_d(6)}, "
+                f"fitout end {_d(8)}, trading date {_d(10)}."
+            ),
+            note="Pack all RDD dates to reach submission card",
+            expect_ui_type="confirmation_card",
+        ),
+        Turn(
+            message=" ",
+            action="confirm_rdd_submit",
+            note="Submit the RDD report (phase 3a); should confirm report submitted",
+            expect_keywords=["submitted", "reference", "report"],
+        ),
+        Turn(
+            message=" ",
+            action="approve_rdd_final",
+            note=(
+                "Final approve (phase 3b). Success message MUST say 'tenant' "
+                "or 'accept' or 'report submitted', NOT 'service request is now "
+                "complete' or 'completed'. SR stays REPORT_SUBMITTED on platform."
+            ),
+            expect_keywords=["tenant", "report submitted", "accept"],
+        ),
+    ],
+    tags=["rdd-review", "final-approve", "tenant-acceptance", "success-message", "tier2-edge"],
+)
+
+
+_S235 = Scenario(
+    id=235,
+    name="rdd_final_approve_operation_history_shows_approved",
+    goal=(
+        "The DD_ENGINEER operation_history entry must show 'APPROVED' "
+        "as the action status, not 'APPROVE'. Previously user_action='APPROVE' "
+        "was sent in the PATCH payload; the platform logged the user_action value "
+        "verbatim as the history status. Fix: don't set user_action in the RDD "
+        "final-approve payload — use status='APPROVED' alone like FM does. "
+        "Guards build_rdd_approve_payload removing user_action."
+    ),
+    tier=3,
+    turns=[
+        Turn(
+            message=(
+                f"Open SR 320944 for RDD review. "
+                f"Guideline https://example.com. "
+                f"Handover {_d(5)}, fitout start {_d(6)}, end {_d(8)}, trading {_d(10)}."
+            ),
+            expect_ui_type="confirmation_card",
+        ),
+        Turn(
+            message=" ",
+            action="confirm_rdd_submit",
+            note="Submit report",
+            expect_keywords=["submitted", "report"],
+        ),
+        Turn(
+            message=" ",
+            action="approve_rdd_final",
+            note=(
+                "Final approve. The PATCH payload must NOT contain user_action='APPROVE'. "
+                "Verified by checking that the success response does not mention "
+                "'complete' as the SR final state."
+            ),
+            expect_keywords=["tenant", "accept"],
+        ),
+    ],
+    tags=["rdd-review", "final-approve", "operation-history", "payload-contract", "tier3-battle"],
+)
+
+
+# =============================================================================
 # TIER 0 — Smoke scenarios (S201–S202)
 # Fast sanity gate: ~60 seconds. Run before any longer tier.
 # =============================================================================
@@ -3829,6 +3922,9 @@ TIER2_SCENARIOS: list[Scenario] = [
     # 2026-08-07 session — year-coercion guard, description/notes/comments
     # auto-generation, fitout radio gate, APPROVE_SR session-wins merge.
     _S229, _S230, _S231, _S232, _S233,
+    # 2026-08-07 session (continued) — RDD final-approve platform behavior:
+    # SR stays REPORT_SUBMITTED (tenant must accept); success message corrected.
+    _S234,
 ]
 
 #: Agent-fix battle tests (Issues 1–7 from agent_ui_fixes.md)
@@ -3841,6 +3937,7 @@ TIER3_SCENARIOS: list[Scenario] = [
     _S53, _S54, _S55,                        # Upload order (Issue 6)
     _S56, _S57, _S58, _S59,                  # RDD order (Issue 7, disabled)
     _S69,                                    # FM date format (Fix 5)
+    _S235,                                   # RDD payload contract (no user_action)
 ]
 
 # ── Per-agent Fitout sub-tiers ─────────────────────────────────────────────────
@@ -3890,8 +3987,8 @@ HANDED_OVER_SCENARIOS: list[Scenario] = [
     # date-chain, review card, upload gate, workflow-stage humanization).
     _S220, _S221, _S222, _S223, _S224, _S225, _S226, _S227,
     # 2026-08-07 session additions (year-coercion guard, description/notes/
-    # comments auto-gen, confirm-time fallback).
-    _S229, _S230, _S231,
+    # comments auto-gen, confirm-time fallback, RDD tenant-acceptance message).
+    _S229, _S230, _S231, _S234,
 ]
 
 #: 2026-08-07 — Fitout APPROVE_SR flow + submit-loop fix
