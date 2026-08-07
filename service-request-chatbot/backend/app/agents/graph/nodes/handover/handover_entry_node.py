@@ -222,19 +222,20 @@ def _handle_mm_optional_upload_gate(
     user_message: str,
     action_override: str | None,
 ) -> dict[str, Any] | None:
-    """CREATE_SR / SR_CREATED optional MM upload offer/upload wait. Returns patch or None."""
+    """CREATE_SR / CREATE_HANDED_OVER_SR / SR_CREATED MM optional upload gate.
+
+    Handles Continue/skip/upload actions for all three stages so the
+    confirmation_node's pre-submission gate (CREATE_SR + CREATE_HANDED_OVER_SR)
+    and the post-submission Path A gate (SR_CREATED) all funnel through the
+    same status transitions.
+    """
     stage = state.get("workflow_stage") or "CREATE_SR"
-    # Path A: post-submission (SR_CREATED). Path B (Already Trading):
-    # pre-submission — the confirmation node emits the upload UI and marks
-    # `mm_optional_upload_status = AWAITING_UPLOAD` on first entry, so
-    # Continue/skip actions land here and mark DONE.
-    if stage not in ("SR_CREATED", "CREATE_HANDED_OVER_SR"):
+    if stage not in ("CREATE_SR", "SR_CREATED", "CREATE_HANDED_OVER_SR"):
         return None
     if state.get("confirmation_status") == "PENDING":
         return None
-    # When sr_id is already in backend_refs, an FM/DD Manager is opening an existing
-    # SR via the sr_id parameter.  The upload offer is irrelevant in that context.
-    # (Path B has no sr_id yet at this point — it is created on Confirm & Submit.)
+    # SR_CREATED with sr_id → FM/DD opening an existing SR; upload offer is
+    # irrelevant. CREATE_SR / CREATE_HANDED_OVER_SR have no sr_id yet.
     backend_refs = state.get("backend_refs") or {}
     if stage == "SR_CREATED" and backend_refs.get("sr_id"):
         return None
@@ -406,11 +407,22 @@ async def handover_entry_node(state: ServiceRequestState) -> dict[str, Any]:
         log.info("handover_entry.action_select_handover_type", value=value)
         collected = dict(state.get("collected_data") or {})
         collected["already_handovered"] = value
-        patch: dict[str, Any] = {"collected_data": collected}
+        patch: dict[str, Any] = {"collected_data": collected, "status": "IN_PROGRESS"}
         if value == "already_trading":
             patch["workflow_stage"] = "CREATE_HANDED_OVER_SR"
             patch["sub_category"] = "HANDED_OVER"
         return patch
+
+    _INSPECTION_DONE_BY_ACTIONS: dict[str, str] = {
+        "select_inspection_done_by_fm_manager": "FM_MANAGER",
+        "select_inspection_done_by_operations": "OPERATIONS",
+    }
+    if action_override in _INSPECTION_DONE_BY_ACTIONS:
+        value = _INSPECTION_DONE_BY_ACTIONS[action_override]
+        log.info("handover_entry.action_select_inspection_done_by", value=value)
+        collected = dict(state.get("collected_data") or {})
+        collected["inspection_done_by"] = value
+        return {"collected_data": collected, "status": "IN_PROGRESS"}
 
     if action_override == "upload_document":
         log.info("handover_entry.action_override_upload_document")
@@ -656,4 +668,8 @@ async def handover_entry_node(state: ServiceRequestState) -> dict[str, Any]:
             return {"workflow_stage": "CREATE_HANDED_OVER_SR"}
         return {"workflow_stage": "CREATE_SR"}
 
-    return {}
+    # Clear any stale WAITING_FOR_USER status left over from the previous turn
+    # (e.g. missing_field_node asking for notes). Without this, _route_after_handover_entry
+    # would see status="WAITING_FOR_USER" and short-circuit to response_generation,
+    # bypassing field_extraction → validation → confirmation_node entirely.
+    return {"status": "IN_PROGRESS"}

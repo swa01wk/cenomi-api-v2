@@ -509,11 +509,22 @@ def _route_after_work_permit_confirmation(state: dict[str, Any]) -> str:
 
 
 def _route_after_fitout_confirm_entry(state: dict[str, Any]) -> str:
+    # Check confirmation_status BEFORE stale WAITING_FOR_USER, mirroring
+    # _route_after_handover_entry / _route_after_fm_entry. The turn that renders
+    # the confirmation card ends in response_generation, which always leaves
+    # status="WAITING_FOR_USER" persisted. On the NEXT turn the user clicks
+    # Confirm & Submit; fitout_confirm_entry_node sets confirmation_status=
+    # CONFIRMED but that stale status is still in state. Testing status first
+    # short-circuited to response_generation, which re-emitted the previous
+    # question instead of submitting — the flow looped on the date prompt and
+    # never produced a success message or View Service Request button.
+    if state.get("confirmation_status") == "CONFIRMED":
+        return "merge_state"
+    if state.get("confirmation_status") == "REJECTED":
+        return "field_extraction"
     if state.get("status") == "WAITING_FOR_USER":
         return "response_generation"
     if state.get("action_override") == "cancel":
-        return "merge_state"
-    if state.get("confirmation_status") == "CONFIRMED":
         return "merge_state"
     return "field_extraction"
 

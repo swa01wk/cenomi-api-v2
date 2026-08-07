@@ -42,6 +42,7 @@ _PREVIEW_FIELD_ORDER: list[tuple[str, str]] = [
     # skeletons and pre-select the radio. Must be published on every turn
     # once the user picks a handover type.
     ("already_handovered",     "Handover Type"),
+    ("title",                  "Title"),
     ("description",            "Description"),
     ("startDate",              "Inspection Start Date"),
     ("endDate",                "Inspection End Date"),
@@ -58,8 +59,29 @@ _PREVIEW_FIELD_ORDER: list[tuple[str, str]] = [
     ("actual_fitout_start_date",  "Actual Fitout Start Date"),
     ("actual_fitout_end_date",    "Actual Fitout End Date"),
     ("actual_trading_date",       "Actual Trading Date"),
+    ("notes",                  "Notes"),
     ("comments",               "Comments"),
     ("guideLineLink",          "Guideline Link"),
+    # ── Fitout Confirmation (FOS / FOE / Trading) fields ─────────────────
+    # These must be published in draft_preview.fields so the FE bridge can
+    # apply them to Formik.  format_field_display_value returns the raw
+    # string values ("yes"/"no", dates) unchanged so the radio/date fields
+    # bind correctly.
+    ("fitout_start_done",            "Fitout Started"),
+    ("fitout_complete_done",         "Fitout Complete"),
+    ("trading_done",                 "Trading Started"),
+    ("actual_fitout_complete_date",  "Actual Fitout Complete Date"),
+    ("planned_fitout_start_date",    "Planned Fitout Start Date"),
+    ("planned_fitout_end_date",      "Planned Fitout End Date"),
+    ("planned_fitout_complete_date", "Planned Fitout Complete Date"),
+    ("planned_trading_date",         "Planned Trading Date"),
+    ("delay_reason",                 "Delay Reason"),
+    # Base dates from lease contract — sent to FE so the bridge can populate
+    # the read-only "Base Dates" section of the FOS/FOE/Trading form and the
+    # ServiceReqForms auto-fill logic can seed actual dates from them.
+    ("base_fitout_start_date",       "Base Fitout Start Date"),
+    ("base_fitout_end_date",         "Base Fitout End Date"),
+    ("base_trading_date",            "Base Trading Date"),
 ]
 
 # Same keys from the platform API payload blob.
@@ -103,10 +125,9 @@ def _fields_from_collected(collected_data: dict[str, Any]) -> list[dict[str, Any
     """Build ordered field rows from draft collected_data.
 
     Only fields explicitly listed in ``_PREVIEW_FIELD_ORDER`` are included.
-    Internal/system fields such as ``title``, ``brand_id``, ``lease_id``,
-    ``contract_id``, ``property_id``, ``tenant_profile_id``, etc. that live in
-    ``collected_data`` but are not meaningful to the user are intentionally
-    excluded.
+    Internal/system fields such as ``brand_id``, ``lease_id``, ``contract_id``,
+    ``property_id``, ``tenant_profile_id``, etc. that live in ``collected_data``
+    but are not meaningful to the user are intentionally excluded.
     """
     rows: list[dict[str, Any]] = []
     for key, label in _PREVIEW_FIELD_ORDER:

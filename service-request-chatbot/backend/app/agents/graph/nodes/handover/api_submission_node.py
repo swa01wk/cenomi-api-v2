@@ -34,11 +34,6 @@ from typing import Any
 from uuid import UUID
 
 from app.agents.graph.state import ServiceRequestState
-from app.agents.services.review_decorations_service import (
-    MM_OPTIONAL_UPLOAD_STATUS_KEY,
-    MM_OPTIONAL_AWAITING_CHOICE,
-    build_mm_optional_upload_offer_decorations,
-)
 from app.agents.services.service_request_api_service import (
     AbstractServiceRequestAPIService,
     get_service_request_api_service,
@@ -145,9 +140,14 @@ async def api_submission_node(state: ServiceRequestState) -> dict[str, Any]:
         logger.warning(
             "api_submission_node: blocked — create_payload missing from backend_refs"
         )
+        # payload_builder may have already set a specific user-facing message
+        # (e.g. "the inspection_done_by is empty"). Preserve it if so —
+        # overwriting with the generic "payload could not be found" hides the
+        # actual reason from the user.
+        existing_message = state.get("response_message")
         return {
             "status": "FAILED",
-            "response_message": (
+            "response_message": existing_message or (
                 "Submission blocked: the request payload could not be found. "
                 "Please try again or contact support."
             ),
@@ -300,28 +300,24 @@ async def api_submission_node(state: ServiceRequestState) -> dict[str, Any]:
             },
         }
 
-    # Path A (HANDOVER): Present the optional MM upload offer.
-    collected_data_with_offer = dict(state.get("collected_data") or {})
-    collected_data_with_offer[MM_OPTIONAL_UPLOAD_STATUS_KEY] = MM_OPTIONAL_AWAITING_CHOICE
-
-    offer_message = (
-        f"Your Handover Service Request has been submitted — reference **{result.sr_id}**. "
-        "Would you like to upload an optional supporting document for this request?"
+    # Path A (HANDOVER): SR created — the pre-submission upload gate in
+    # confirmation_node already handled the optional supporting document, so
+    # no post-submission re-ask is needed. Just show the success message with
+    # the standard View SR / Create another chips.
+    success_message = (
+        f"Your Handover Service Request has been submitted — reference **{result.sr_id}**."
     )
     return {
         "backend_refs": backend_refs,
         "status": "WAITING_FOR_USER",
         "workflow_stage": "SR_CREATED",
-        # Clear confirmation so the next FM turn does not see a stale CONFIRMED status.
         "confirmation_status": None,
         "confirmation_required": False,
-        "collected_data": collected_data_with_offer,
-        "response_message": offer_message,
+        "response_message": success_message,
         "response_ui": {
             "type": "message",
-            "message": offer_message,
-            "stage_complete": False,
+            "message": success_message,
+            "workflow_complete": True,
             "workflow_stage": "SR_CREATED",
         },
-        "response_decorations": build_mm_optional_upload_offer_decorations(),
     }

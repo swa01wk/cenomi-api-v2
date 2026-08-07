@@ -402,8 +402,17 @@ class ChatOrchestrationService:
         # frontend disables the Edit button on an already-submitted SR.
         collected = result_state.get("collected_data") or {}
         sr_id = (result_state.get("backend_refs") or {}).get("sr_id")
+        # Fields the validator stripped this turn (e.g. an unparseable date).
+        # Surfaced so the FE bridge can wipe them from Formik / draftFields
+        # immediately, otherwise the invalid value stays visible in the form
+        # even though the AI already rejected it.
+        cleared_fields: list[str] = sorted({
+            str(e.get("field"))
+            for e in (result_state.get("validation_errors") or [])
+            if e.get("validation_type") == "date_format" and e.get("field")
+        })
         draft_preview: dict[str, Any] | None = None
-        if collected:
+        if collected or cleared_fields:
             from app.agents.graph.nodes.handover.preview_node import _fields_from_collected
             draft_preview = {
                 "type": "sr_preview_card",
@@ -413,6 +422,8 @@ class ChatOrchestrationService:
                 "isSubmitted": bool(sr_id),
                 "fields": _fields_from_collected(collected),
             }
+            if cleared_fields:
+                draft_preview["cleared_fields"] = cleared_fields
 
         decorations: dict[str, Any] = dict(result_state.get("response_decorations") or {})
         response_ui = finalize_response_ui(

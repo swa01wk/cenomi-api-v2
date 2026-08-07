@@ -116,9 +116,29 @@ async def fitout_confirm_entry_node(state: ServiceRequestState) -> dict[str, Any
     action_override: str | None = state.get("action_override")  # type: ignore[assignment]
 
     # ── 0. Explicit UI action — takes priority over text parsing ───────────
-    if action_override in ("confirm", "confirm_create_sr", "confirm_approve_sr"):
-        log.info("fitout_confirm_entry.action_override_confirm")
-        return {"confirmation_status": "CONFIRMED"}
+    if action_override in (
+        "confirm",
+        "confirm_create_sr",
+        "confirm_approve_sr",
+        "confirm_create_fitout_confirm",
+        "approve",
+        "update_and_approve",
+    ):
+        log.info("fitout_confirm_entry.action_override_confirm", action=action_override)
+        # Clear the stale WAITING_FOR_USER left over from the turn that rendered
+        # the confirmation card, so routing cannot short-circuit back to
+        # response_generation and replay the previous question.
+        return {"confirmation_status": "CONFIRMED", "status": "IN_PROGRESS"}
+
+    if action_override == "update":
+        # Update-only: PATCH with status IN_PROCESS (stays in APPROVE_SR).
+        log.info("fitout_confirm_entry.action_override_update_only")
+        backend_refs = dict(state.get("backend_refs") or {})
+        backend_refs["fitout_action"] = "update_only"
+        return {
+            "backend_refs": backend_refs,
+            "confirmation_status": "CONFIRMED",
+        }
 
     if action_override == "cancel" and confirmation_status == "PENDING":
         log.info("fitout_confirm_entry.cancel_rejects_pending_confirmation")
@@ -265,7 +285,8 @@ async def fitout_confirm_entry_node(state: ServiceRequestState) -> dict[str, Any
     if confirmation_status == "PENDING":
         if _contains_phrase(user_message, _CONFIRM_PHRASES):
             log.info("fitout_confirm_entry.confirmation_accepted")
-            return {"confirmation_status": "CONFIRMED"}
+            # Clear stale WAITING_FOR_USER (see action_override branch above).
+            return {"confirmation_status": "CONFIRMED", "status": "IN_PROGRESS"}
 
         if _contains_phrase(user_message, _REJECT_PHRASES):
             log.info("fitout_confirm_entry.confirmation_rejected")
@@ -282,7 +303,7 @@ async def fitout_confirm_entry_node(state: ServiceRequestState) -> dict[str, Any
             ),
         }
 
-    # ── 4. Stale-clear for terminal stages ────────────────────────────────
+    # ── 4. Stale-clear for terminal stages or previous failure ────────────
     _CREATE_INTENTS: frozenset[str] = frozenset(
         {
             "CREATE_FITOUT_CONFIRM_FOS",
@@ -291,7 +312,8 @@ async def fitout_confirm_entry_node(state: ServiceRequestState) -> dict[str, Any
         }
     )
     if state.get("intent") in _CREATE_INTENTS:
-        if state.get("workflow_stage") in TERMINAL_STAGES:
+        _should_clear = state.get("workflow_stage") in TERMINAL_STAGES or state.get("status") == "FAILED"
+        if _should_clear:
             log.info(
                 "fitout_confirm_entry.stale_sr_cleared",
                 workflow_stage=state.get("workflow_stage"),

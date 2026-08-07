@@ -124,13 +124,19 @@ def _build_confirmation_card(
         f"{request_type} ({stage_label}), or let me know if you want to change anything."
     )
 
-    return {
+    card: dict[str, Any] = {
         "type": "confirmation_card",
         "requestType": request_type,
         "stage": workflow_stage,
         "fields": fields,
         "message": message,
     }
+    if workflow_stage == "APPROVE_SR":
+        card["confirmAction"] = "confirm_approve_sr"
+        card["confirmLabel"] = "Approve"
+    else:
+        card["confirmAction"] = "confirm_create_fitout_confirm"
+    return card
 
 
 @trace_node("fitout_confirm_confirmation", "AGENT")

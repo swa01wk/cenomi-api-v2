@@ -14,6 +14,100 @@ on the chatbot or frontend side.
 
 ---
 
+## 2026-08-07 · Fitout Confirmation APPROVE_SR: base dates, radio gate, session-wins merge, submit-loop fix
+
+**Repo:** `cenomi-api-v2` (chatbot backend)
+
+**Why:** Several issues were found when testing the full FOS / FOE / Trading APPROVE_SR flow end-to-end:
+1. Clicking "Confirm & Submit" on the fitout confirmation card looped back to the previous date question instead of submitting — the routing function tested `WAITING_FOR_USER` before `CONFIRMED`, short-circuiting to `response_generation` on the next turn even though the user had confirmed.
+2. The form pre-fills radio values (`fitout_start_done`, `trading_done`, etc.) before the chat session starts. The old code treated a form-hydrated value as "user answered", skipping the required yes/no chat step entirely.
+3. On APPROVE_SR, `sr_status_sync_node` re-hydrated the platform payload on every turn, overwriting any changes the user made in the chat session (e.g. changing `trading_done` from yes to no reset it back to yes on the next turn).
+4. When asking the user to confirm an actual date, the agent showed a generic "what is the actual date?" prompt — the contract base date was never surfaced, so users had no reference and had to look it up manually.
+5. The year-coercion guard (`can_coerce_year`) ran even when the user typed "yes" or "confirm", silently rewriting a backend-supplied date's year (e.g. `2025-10-31` → `2026-10-31`).
+
+**Fixes:**
+
+`graph/help_agent_graph.py::_route_after_fitout_confirm_entry`
+- Check `confirmation_status == "CONFIRMED"` and `"REJECTED"` BEFORE `status == "WAITING_FOR_USER"`. The turn that renders the confirmation card ends in `response_generation`, which persists `WAITING_FOR_USER`. The old order short-circuited on `WAITING_FOR_USER` and re-emitted the previous question on the next turn, looping indefinitely.
+
+`graph/nodes/fitout_confirm/fitout_confirm_entry_node.py`
+- Action-override `confirm`/`confirm_approve_sr` now also clears stale `WAITING_FOR_USER` by returning `status: "IN_PROGRESS"`.
+
+`graph/nodes/fitout_confirm/fitout_confirm_confirmation_node.py`
+- APPROVE_SR branch emits `confirmAction: "confirm_approve_sr"` and `confirmLabel: "Approve"` so the frontend sends the right action and the router dispatches to merge_state.
+
+`graph/nodes/fitout_confirm/fitout_confirm_payload_builder_node.py`
+- `tenant_profile_id` now included in the APPROVE payload (was missing, caused platform 400s for some tenants).
+
+`graph/nodes/shared/missing_field_node.py`
+- Added `_ACTUAL_TO_ORIGINAL_DATE_CANDIDATES` map: for each actual-date field the agent asks for, it resolves the first non-empty base/planned date from `collected_data` and injects it into the question prompt (e.g. "The base date from the contract is 21/07/2026. Enter the actual date or confirm to keep it.").
+- Added `_format_base_date_for_display()` — converts ISO/platform timestamps to DD/MM/YYYY.
+- Radio gate: when `active_agent` is a fitout agent and `next_field` is `fitout_start_done`/`fitout_complete_done`/`trading_done` and `_approve_radio_confirmed` is not set, force the yes/no question to show even if the form pre-filled the value.
+- `verbatim_question = True` flag set on original-date prompts so `response_generation_node` passes the message through without LLM rewriting (which was dropping the concrete date).
+
+`graph/nodes/shared/response_generation_node.py`
+- If `response_ui.verbatim == True`, bypass the LLM rewrite and return the message as-is.
+
+`graph/nodes/shared/merge_state_node.py`
+- `_DATE_TOKEN_RE = re.compile(r"\d")` — new guard: `can_coerce_year` now requires at least one digit in the user's message. "yes"/"confirm" answers no longer trigger year coercion that was silently rewriting backend-supplied years.
+- `_FITOUT_RADIO_FIELDS` / `_FITOUT_RADIO_TO_ACTUAL` / `_FITOUT_RADIO_TO_PLANNED` — when the user answers the radio in the current session turn (detected via `active_field` + `extracted_keys`), set `_approve_radio_confirmed = True` and clear the opposite branch (actual date on yes→; planned dates + delay_reason on no→) so the agent re-collects the relevant dates.
+- Added `_was_skipped()`, `_generate_description()`, `_generate_notes()`, `_generate_comments()` helpers — auto-fill deterministic defaults when the Mall Manager skips optional fields (answered "none"/"skip", value normalised to `""`). `None` (not yet asked) is left untouched.
+- `_description_was_generated` flag — when the description was synthesised (not typed by the user), the title generator receives `""` instead of the generated sentence, avoiding a redundant slug.
+- Confirm-time fallback: on `confirmation_status == "CONFIRMED"` in `CREATE_SR`, any still-`None` optionals (description, notes, comments) are promoted to `""` so the auto-generation block runs and the SR never reaches the platform with blank required fields.
+- Path B fallback for `comments`: when `workflow_stage == "CREATE_HANDED_OVER_SR"` and `comments` is still `None`, generate a default rather than an empty string.
+- APPROVE_SR merge order for fitout agents: `{**hydrated, **existing_collected}` — session answers always win over re-hydrated platform data.
+
+`graph/nodes/shared/sr_status_sync_node.py`
+- APPROVE_SR fitout: session `existing_collected` wins over `hydrated` (reversed merge order).
+- Added welcome message for `APPROVE_SR` fitout SRs: "Opening Fitout Start/End/Trading Confirmation SR **{id}** for approval."
+
+`schemas/fitout_confirm_schema.py`
+- `TRADING` config: `delay_reason_required = True` (was False — delay reason is always required on the NO branch, same as FOS/END).
+- `OPTIONAL_FIELDS`: removed `delay_reason` from the set (it is only optional when `radio == "yes"`).
+- `get_missing_fields()` APPROVE_SR lease check: accept `lease_code` or `lease_id` as sufficient (open-SR hydration may not have `lease_brand_mall`).
+- `_approve_radio_confirmed` added to the session-flag exclusion list — never asked for by `missing_field_node`.
+- Radio-gate check: radio field always appears in missing list until `_approve_radio_confirmed` is set.
+
+`services/payload_builder_service.py`
+- `build_handover_payload` / `build_handed_over_payload`: safe title/description defaults when user skipped both (no more `KeyError` on missing `title`).
+- `build_rdd_approve_payload`: `user_action: "APPROVE"` now set (was `None`). Without this, the platform updates only the operation row but skips the SR-level status promotion, leaving the SR in `REPORT_SUBMITTED` even after the RDD engineer clicks Approve.
+
+`services/lease_lookup_service.py` / `graph/nodes/shared/lease_lookup_node.py`
+- `LeaseLookupResult` gains `base_fitout_start_date`, `base_fitout_end_date`, `base_trading_date` fields with a Pydantic `model_validator` that normalises common platform aliases (e.g. `fitoutStartDate`, `plannedFitoutStartDate` → `base_fitout_start_date`).
+- `lease_lookup_node` writes these three fields to `collected_data` so `missing_field_node` can surface them when asking for actual dates.
+
+`registries/workflow_config.py`
+- Date prompts for FOS/EON/TRADING changed from YYYY-MM-DD to DD/MM/YYYY (matches portal form display).
+- Agent-specific `lease_code` prompts (FOS: "Fitout Start Confirmation", END: "Fitout End Confirmation", TRADING: "Trading Confirmation") instead of a shared generic string.
+- Extraction prompt updated: "confirm shortcut" rule — when the assistant's previous question showed a base date and the user replies "confirm", extract the base date as the actual-date value.
+
+`graph/nodes/handover/preview_node.py`
+- `_PREVIEW_FIELD_ORDER` extended with fitout confirmation fields (`fitout_start_done`, `fitout_complete_done`, `trading_done`, `actual_fitout_complete_date`, planned dates, `delay_reason`) and base-date fields (`base_fitout_start_date`, `base_fitout_end_date`, `base_trading_date`) so the FE bridge can hydrate Formik from the draft preview.
+
+**Eval scenarios added:** S228–S233 in `tests/eval/scenarios.py`.
+
+---
+
+## 2026-08-07 · MM Create handover: auto-generate description / notes / comments when skipped
+
+**Repo:** `cenomi-api-v2` (chatbot backend)
+
+**Why:** The Mall Manager create flow (`CREATE_SR`, `CREATE_HANDED_OVER_SR`) asks for Description, Notes, and Comments as optional fields. When the user answered "none" or "skip", the field was normalised to `""` and submitted as a blank string. The platform HANDOVER form skeleton marks `comments` as required and shows `description` prominently on the SR card, so blank values left the SR looking incomplete.
+
+Previously only `title` had an auto-generator; description/notes/comments had none.
+
+**Fix:** `graph/nodes/shared/merge_state_node.py`
+- `_generate_description(lease_code, brand, mall, already_trading)` — e.g. `"Handover inspection for lease t0105712 - Under Armour at Jawharat Jeddah."`
+- `_generate_notes(lease_code)` — `"No additional notes provided for lease {lease_code}."`
+- `_generate_comments(lease_code)` — `"No additional comments provided for lease {lease_code}."`
+- `_was_skipped(value)` — returns `True` only when `value == ""` (skipped), not when `value is None` (not yet asked).
+- Auto-generation runs for `workflow_stage in ("CREATE_SR", "CREATE_HANDED_OVER_SR")` after the fields are merged but before the title block.
+- `_description_was_generated` flag prevents the synthesised description from being slugged into the title (would produce `"handover-t0112136-handover-inspection-for-lease-t0112136"`).
+- On `confirmation_status == "CONFIRMED"`, any `None` optionals are promoted to `""` so generation runs even when a field was never asked.
+
+---
+
+
 ## 2026-08-04 · Upload route accepts `SR_HANDED_OVER_OTHER` for MM (Path B)
 
 **Repo:** `cenomi-api-v2` (chatbot backend)
@@ -158,6 +252,188 @@ it into Formik, and the `ServiceReqForms` observer compares
 **Verified:** curl to `/chat/service-request` with
 `action: select_handover_type_already_trading` on a fresh session returns
 `draft_preview.fields.already_handovered == "already_trading"` again.
+
+---
+
+## 2026-08-05 · Title auto-gen only when user explicitly skips (Path A)
+
+**Repo:** `cenomi-api-v2` (chatbot backend)
+
+**Why:** After making title an OPTIONAL asked field the bot STILL
+wasn't asking — it jumped straight from description → start date.
+Root cause: `merge_state_node` auto-generated the title as soon as
+`description` had any value, treating `title=None` (untouched, not
+yet asked) the same as `title=""` (user explicitly skipped). By the
+time `missing_field_node` ran, title already had a fabricated value
+and was skipped from the ask list.
+
+**Fix:** `app/agents/graph/nodes/shared/merge_state_node.py` — Path A
+title auto-gen now fires only when `title == ""` (empty string
+explicitly set by the extractor for skip/none/n/a). `title is None`
+is left alone so the missing-field loop can prompt. Path B keeps the
+existing behaviour (fills on None too) because Path B never asks for
+title. LLM extractor's existing declination handling maps
+"skip"/"none"/… → `""` for any field, so the flow becomes:
+
+1. missing_field asks title → user types one OR replies "skip"
+2. If user typed one → merge leaves it alone, moves on to description
+3. If user skipped → title="", merge waits for description
+4. Once description arrives → merge fires the auto-gen
+   ("handover-{lease}-{slug}") because title is `""`, not `None`
+
+---
+
+## 2026-08-05 · Title asked as optional + Path A pre-submission upload gate
+
+**Repo:** `cenomi-api-v2` (chatbot backend)
+
+**Two asks, one commit:**
+
+1. Title was being auto-generated silently. User wants it asked as
+   optional (like description) — bot prompts, user can accept a value
+   or reply "skip"/"none" and the default is generated on submit.
+2. Path A CREATE_SR stopped after `notes`/`comments` with no upload
+   opportunity. User wanted the same optional supporting-doc upload
+   Path B already has before the review card.
+
+**Fix 1 — title:**
+
+- `missing_field_node.py::_AUTO_GENERATED_FIELDS` → now empty (title
+  removed).
+- `handover_schema.py::OPTIONAL_FIELDS` → `title` added.
+  `merge_state_node` still fabricates `handover-{lease}-{slug}` (Path A)
+  or `Already Trading - {lease}` (Path B) when the resolved title is
+  empty.
+- `missing_field_service.py::HANDOVER_FIELD_QUESTIONS["title"]` —
+  reworded to signal it's OPTIONAL and that "skip" / "none" is
+  accepted.
+
+**Fix 2 — Path A pre-submission upload gate:**
+
+- `confirmation_node.py` — the upload gate condition broadened from
+  `stage == "CREATE_HANDED_OVER_SR"` to
+  `stage in ("CREATE_SR", "CREATE_HANDED_OVER_SR")`. Label / message
+  branch on stage: Path B says "Other (Already Trading)", Path A says
+  "Other". Same single-type SR_HANDOVER_OTHER + Continue chip contract.
+- `handover_entry_node.py::_handle_mm_optional_upload_gate` — accepts
+  all three stages: `CREATE_SR`, `CREATE_HANDED_OVER_SR`, `SR_CREATED`.
+  So the Continue chip / skip / upload actions land here and mark
+  `mm_optional_upload_status = done` regardless of which path emitted
+  the gate.
+
+Result: after `notes`/`comments`, the bot emits the document upload
+card. User can attach a doc (writes to `collected_data.documents[]`
+→ payload builder → `documents_ids`) or tap Continue. On Continue the
+next turn shows the review card. Same UX Path B already ships.
+
+---
+
+## 2026-08-04 · Propagate date-format clears to the form (backend → FE bridge)
+
+**Repos:** `cenomi-api-v2` (chatbot backend), `cenomi-frontend-2` (`feature/rdd-agents-integration`)
+
+**Why:** The AI now rejects unparseable date input (my earlier
+`validate_date_formats` fix), but the form preview kept showing the
+invalid value (e.g. a lease code sitting in the Start Date field).
+And when the user typed a valid replacement the field didn't update.
+
+**Trace:**
+
+- `validation_node` cleared the invalid value from `collected_data`,
+  so on the same turn `draft_preview.fields` simply _omitted_ the
+  field. FE's `mergeFromDraftPreview` skipped nulls, so `draftFields`
+  kept the stale value. `HandoverAgenticBridge` had no diff to write.
+  Formik never got told to clear.
+- Both `buildFormikUpdatesFromDraft` and `applyDraftFieldsToFormik`
+  had a `if (isEmpty(value)) continue` guard, so even if we did send
+  an explicit `''` the bridge would drop it before writing.
+
+**Fix — backend:**
+
+- `app/agents/graph/nodes/shared/validation_node.py` — on `date_format`
+  failures, remove the offending field from `collected_data` and
+  return the mutated snapshot alongside `validation_errors` (already
+  in place).
+- `app/services/chat_orchestration_service.py` — compute a
+  `cleared_fields: list[str]` from `date_format` errors and attach it
+  to `draft_preview.cleared_fields`. Only emitted when non-empty.
+
+**Fix — frontend (`feature/rdd-agents-integration`):**
+
+- `libs/ui-web/src/lib/components/serviceRequestChatbot/useServiceRequestChat.ts::mergeFromDraftPreview`
+  — read `draft_preview.cleared_fields`, set each listed key (and its
+  `<key>LT` companion) to `''` in `draftFields`. Emitted before the
+  normal field-merge loop so a valid new value from the same response
+  can overwrite the clear.
+- `libs/ui-web/src/lib/components/serviceRequestChatbot/handoverDraftFieldSync.ts`
+  — added `CLEARABLE_DATE_FIELDS` / `CLEARABLE_DATE_KEYS` sets. Both
+  `buildFormikUpdatesFromDraft` and `applyDraftFieldsToFormik` now
+  allow `''` through for those keys (bypassing the "skip empty" guard
+  and applying via `setFieldValue`) so the form input visibly clears.
+
+Result: the second the AI rejects a bogus date entry, the
+corresponding form field wipes. The user's next valid value then
+updates the field via the normal draft-preview → bridge path.
+
+---
+
+## 2026-08-04 · Validate date-field format (per single field)
+
+**Repo:** `cenomi-api-v2` (chatbot backend)
+
+**Why:** Agent accepted a lease code (`t0111595`) as a value for
+`startDate` because the extractor routed the token into the field
+slot and no per-field date-format check ran. `validate_start_end_date`
+only fires when both dates are present, so a solo bogus value
+sneaks through until the ordering check happens (or never).
+
+**Fix — date format validation:**
+
+- `app/agents/services/validation_service.py`:
+  - New `_SINGLE_DATE_FIELDS` tuple listing every known date slot
+    (startDate, endDate, unit_readiness_date, expected_handover_date,
+    RDD chain, Path B actuals).
+  - New `validate_date_formats(data)` — for each populated single
+    date field, parse via `_parse_date`; on failure emit a blocking
+    `date_format` result with `field=<field_name>` and message
+    `"…value '<raw>' is not a valid date. Please enter it as
+    DD/MM/YYYY (e.g. 25/07/2026)."`.
+  - Wired into `validate_draft` step 2c, right before the pair-wise
+    ordering checks. `missing_field_node` picks the blocking error
+    and re-asks the exact field with its normal question hint.
+
+Result: typing a lease code (or any non-date) into a date slot now
+triggers an immediate re-ask on that specific field, and the "title"
+question shows up in the create flow with a suggested value.
+
+---
+
+## 2026-08-04 · `inspection_done_by` chips (FM Manager / Operations)
+
+**Repo:** `cenomi-api-v2` (chatbot backend)
+
+**Why:** The Path A CREATE_SR flow asked "Who will perform the
+inspection: FM Manager or Operations?" as free text — same friction
+we removed for the Handover Type prompt. Two fixed choices → chips.
+
+**Fix:**
+
+- `app/agents/graph/nodes/shared/missing_field_node.py` — added an
+  `elif next_field == "inspection_done_by"` branch alongside the
+  existing `already_handovered` / `document_status` chips. Emits
+  `response_decorations.suggestions` with two `labeled_options` whose
+  values (`FM_MANAGER`, `OPERATIONS`) match the enum codes the
+  extractor and payload builder already accept — no schema change.
+- `app/agents/graph/nodes/handover/handover_entry_node.py` — added
+  `_INSPECTION_DONE_BY_ACTIONS` map so the chip's action string
+  (`select_inspection_done_by_fm_manager` /
+  `select_inspection_done_by_operations`) writes
+  `collected_data.inspection_done_by` directly on click, mirroring the
+  Handover Type chip handler.
+
+Result: chat now shows two tap-to-select chips ("FM Manager" /
+"Operations") for that turn. Typing still works — extraction path
+untouched.
 
 ---
 

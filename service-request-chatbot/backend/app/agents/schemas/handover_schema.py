@@ -120,12 +120,11 @@ RDD_REVIEW_STAGE = StageDefinition(
     stage="RDD_REVIEW",
     role="DD_ENGINEER",
     required_fields=(
-        # Guidelines and doc type first — document upload UI is gated on these.
+        # Guidelines first — document upload UI is gated on this.
         "guideLineLink",
-        # Type-first upload: Meeting Report / Rejected / Other.
-        # document_status is NOT unconditionally required — asked only for Meeting Report.
-        "rdd_upload_doc_type",
-        # Dates collected after doc type so the upload card can appear before dates.
+        # Documents (Meeting Report OR Rejected mandatory; Other optional) are
+        # collected via the document_requirement UI, NOT via a chip-driven
+        # rdd_upload_doc_type field. Same UX as FM: one card, all types visible.
         # trading_date intentionally removed — auto-computed as fitout_end_date + 8 days
         # by merge_state_node. It is NOT asked of the user.
         "actual_handover_date",
@@ -233,7 +232,12 @@ USER_SUPPLIED_FIELDS: frozenset[str] = ALLOWED_EXTRACTED_FIELDS - BACKEND_DERIVE
 # ``description`` is included here because users legitimately respond with
 # "no description" — the resulting empty string must not be treated as missing
 # and must not block title auto-generation or the confirmation card.
-OPTIONAL_FIELDS: frozenset[str] = frozenset({"description", "comments", "notes", "inspectionTime"})
+OPTIONAL_FIELDS: frozenset[str] = frozenset(
+    {"description", "comments", "notes", "inspectionTime", "title"}
+)
+# ``title`` is optional — merge_state_node / payload_builder auto-generate a
+# default ("handover-{lease}-{slug}" for Path A, "Already Trading - {lease}"
+# for Path B) when the user skips.
 
 # ── Document type registries ──────────────────────────────────────────────────
 
@@ -243,8 +247,12 @@ FM_ALLOWED_DOCUMENTS: tuple[str, ...] = FM_REVIEW_STAGE.required_documents
 # All document types accepted at the RDD_REVIEW stage.
 RDD_ALLOWED_DOCUMENTS: tuple[str, ...] = RDD_REVIEW_STAGE.required_documents
 
-# The single document type that MUST be present before RDD submission.
-RDD_REQUIRED_DOCUMENTS: tuple[str, ...] = ("DR_SR_HANDOVER_REPORT",)
+# Either Handover Meeting Report or Rejected Report satisfies RDD submission.
+# (Doc-count validation accepts any doc whose type is in this tuple.)
+RDD_REQUIRED_DOCUMENTS: tuple[str, ...] = (
+    "DR_SR_HANDOVER_REPORT",
+    "SR_REJECTED_HANDOVER_REPORT",
+)
 
 # All document types accepted at the CREATE_HANDED_OVER_SR stage (all optional).
 HANDED_OVER_ALLOWED_DOCUMENTS: tuple[str, ...] = ("SR_HANDOVER_OTHER",)

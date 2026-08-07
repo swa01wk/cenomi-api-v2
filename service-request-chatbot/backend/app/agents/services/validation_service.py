@@ -51,6 +51,25 @@ ValidationResult = dict[str, Any]
 
 _INSPECTION_ALLOWED: frozenset[str] = frozenset({"FM_MANAGER", "OPERATIONS"})
 
+# Individual date fields whose value must be parseable (DD/MM/YYYY or ISO).
+# Extraction can occasionally route a non-date token (e.g. the user typing a
+# lease code when asked for a date) straight into the field slot — this list
+# lets validate_date_formats catch that class of bug and re-ask the user.
+_SINGLE_DATE_FIELDS: tuple[str, ...] = (
+    "startDate",
+    "endDate",
+    "unit_readiness_date",
+    "expected_handover_date",
+    "actual_handover_date",
+    "fitout_start_date",
+    "fitout_end_date",
+    "trading_date",
+    "actual_shop_handover_date",
+    "actual_fitout_start_date",
+    "actual_fitout_end_date",
+    "actual_trading_date",
+)
+
 _STAGE_DOCUMENT_ALLOWLIST: dict[str, frozenset[str]] = {
     "FM_REVIEW": frozenset(FM_ALLOWED_DOCUMENTS),
     "RDD_REVIEW": frozenset(RDD_ALLOWED_DOCUMENTS),
@@ -201,6 +220,37 @@ def validate_guideline_link(value: Any) -> ValidationResult:
         ),
         blocking=True,
     )
+
+
+def validate_date_formats(data: dict[str, Any]) -> list[ValidationResult]:
+    """For each known single-date field with a non-empty value, ensure it
+    parses as a real calendar date. Rejects unparseable tokens (e.g. a lease
+    code accidentally routed into a date slot) so missing_field can re-ask.
+
+    Returns a list of ValidationResult; empty when every populated date is
+    parseable. Each failure attaches to its own field so the re-ask targets
+    the correct slot.
+    """
+    results: list[ValidationResult] = []
+    for field_name in _SINGLE_DATE_FIELDS:
+        raw = data.get(field_name)
+        if raw in (None, ""):
+            continue
+        parsed = _parse_date(raw, field_name)
+        if parsed is None:
+            results.append(
+                _result(
+                    field=field_name,
+                    validation_type="date_format",
+                    passed=False,
+                    message=(
+                        f"'{field_name}' value {raw!r} is not a valid date. "
+                        "Please enter it as DD/MM/YYYY (e.g. 25/07/2026)."
+                    ),
+                    blocking=True,
+                )
+            )
+    return results
 
 
 def validate_start_end_date(start_date: Any, end_date: Any) -> ValidationResult:
@@ -415,7 +465,8 @@ def validate_document_count(
                 validation_type="document_count",
                 passed=has_report,
                 message=(
-                    "A Handover Report (DR_SR_HANDOVER_REPORT) must be uploaded before submitting."
+                    "Please upload either the Handover Meeting Report or the "
+                    "Rejected Fitout and Handover Report before submitting."
                     if not has_report
                     else "Required RDD handover report is present."
                 ),
@@ -558,6 +609,15 @@ class ValidationService:
         guideline = data.get("guideLineLink")
         if guideline not in (None, ""):
             r = validate_guideline_link(guideline)
+            if r["status"] == "FAILED":
+                errors.append(r)
+
+        # 2c. Per-field date format check — catches non-date tokens routed
+        # into a date slot (e.g. user typing a lease code when asked for
+        # startDate). Runs before the ordering checks so an unparseable
+        # value is re-asked at its own field, not blamed on a chain
+        # counterpart.
+        for r in validate_date_formats(data):
             if r["status"] == "FAILED":
                 errors.append(r)
 

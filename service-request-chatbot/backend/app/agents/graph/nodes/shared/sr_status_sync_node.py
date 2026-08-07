@@ -133,20 +133,32 @@ def _map_operations_to_stage(
 
 
 def _attachments_to_documents(attachments: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Map platform ``service_request_attachments`` into chat ``documents`` rows."""
+    """Map platform ``service_request_attachments`` into chat ``documents`` rows.
+
+    Preserves ``role`` and ``attached_by`` from the platform attachment so
+    stage-specific upload UIs (FM / RDD document_requirement) can filter
+    ownership. Without ``role``, an SR_HANDOVER_OTHER attached by MM during
+    CREATE_SR shows up as "Uploaded" on RDD's own upload card even though the
+    RDD reviewer never uploaded it (the type ID is shared across roles).
+    """
     docs: list[dict[str, Any]] = []
     for att in attachments:
         doc_id = att.get("document_id") or att.get("id")
         doc_type = att.get("document_type_id") or att.get("document_type")
         if not doc_id and not doc_type:
             continue
-        docs.append(
-            {
-                "document_id": str(doc_id) if doc_id else "",
-                "document_type_id": str(doc_type) if doc_type else "",
-                "file_name": att.get("file_name") or att.get("filename") or "",
-            }
-        )
+        role = str(att.get("role") or att.get("assigned_role") or "").strip()
+        attached_by = str(att.get("attached_by") or "").strip()
+        row: dict[str, Any] = {
+            "document_id": str(doc_id) if doc_id else "",
+            "document_type_id": str(doc_type) if doc_type else "",
+            "file_name": att.get("file_name") or att.get("filename") or "",
+        }
+        if role:
+            row["role"] = role
+        if attached_by:
+            row["attached_by"] = attached_by
+        docs.append(row)
     return docs
 
 
@@ -391,7 +403,17 @@ async def sr_status_sync_node(state: ServiceRequestState) -> dict[str, Any]:
         existing_collected: dict[str, Any] = dict(state.get("collected_data") or {})
         hydrated = payload_to_collected_data(payload)
         if hydrated:
-            updates["collected_data"] = {**existing_collected, **hydrated}
+            # Fitout/Trading APPROVE: session answers must win.  Re-hydrating the
+            # platform create payload on every turn was overwriting trading_done=no
+            # (and cleared actual dates) back to the original yes/actual values.
+            if (
+                effective_stage == "APPROVE_SR"
+                and (sr_sub_category or "") in _FITOUT_CONFIRM_SUB_CATEGORIES
+                and existing_collected
+            ):
+                updates["collected_data"] = {**hydrated, **existing_collected}
+            else:
+                updates["collected_data"] = {**existing_collected, **hydrated}
 
     # Ensure active_agent for review routing when opening existing SR.
     if not state.get("active_agent"):
@@ -416,8 +438,24 @@ async def sr_status_sync_node(state: ServiceRequestState) -> dict[str, Any]:
             review_deco,
         )
 
-    if not state.get("response_message") and sr_id and effective_stage in ("FM_REVIEW", "RDD_REVIEW"):
-        if effective_stage == "RDD_REVIEW":
+    if not state.get("response_message") and sr_id and effective_stage in (
+        "FM_REVIEW",
+        "RDD_REVIEW",
+        "APPROVE_SR",
+    ):
+        if effective_stage == "APPROVE_SR" and sr_sub_category in _FITOUT_CONFIRM_SUB_CATEGORIES:
+            _FITOUT_OPEN_LABELS = {
+                "FIT_OUT_CONFIRM_FOS": "Fitout Start Confirmation",
+                "FIT_OUT_CONFIRM_END": "Fitout End Confirmation",
+                "FIT_OUT_CONFIRM_TRADING": "Trading Confirmation",
+            }
+            label = _FITOUT_OPEN_LABELS.get(sr_sub_category or "", "Fitout Confirmation")
+            updates["response_message"] = (
+                f"Opening {label} SR **{sr_id}** for approval. "
+                "I'll walk you through the yes/no confirmation and any dates that need "
+                "updating, then show a preview before you approve."
+            )
+        elif effective_stage == "RDD_REVIEW":
             collected = dict(merged_state.get("collected_data") or {})
             dates_ready = all(
                 collected.get(f) not in (None, "")
@@ -439,7 +477,7 @@ async def sr_status_sync_node(state: ServiceRequestState) -> dict[str, Any]:
                     "(actual handover, fitout start, and fitout end). "
                     "Document upload will be available after the dates are set."
                 )
-        else:
+        elif effective_stage in ("FM_REVIEW", "RDD_REVIEW"):
             updates["response_message"] = (
                 f"Opening Handover SR **{sr_id}** ({effective_stage.replace('_', ' ').title()}). "
                 "Review the details below, upload any required documents, then choose an action."

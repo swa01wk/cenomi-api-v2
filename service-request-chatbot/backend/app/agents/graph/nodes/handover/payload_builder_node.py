@@ -29,6 +29,69 @@ from app.observability.decorators import trace_node
 logger = logging.getLogger(__name__)
 
 
+_FIELD_LABELS: dict[str, str] = {
+    "inspection_done_by": "who will perform the inspection (FM Manager or Operations)",
+    "startDate": "inspection start date",
+    "endDate": "inspection end date",
+    "unit_readiness_date": "unit readiness date",
+    "expected_handover_date": "expected handover date",
+    "actual_handover_date": "actual handover date",
+    "fitout_start_date": "fitout start date",
+    "fitout_end_date": "fitout end date",
+    "trading_date": "trading date",
+    "lease_code": "lease code",
+    "lease_id": "lease ID",
+    "brand_id": "brand",
+    "tenant_profile_id": "tenant",
+    "contract_id": "contract",
+    "property_id": "property",
+    "unit_codes": "unit codes",
+    "contracted_area": "contracted area",
+    "city": "city",
+    "brand": "brand",
+    "mall": "mall",
+    "title": "title",
+    "description": "description",
+    "lease_brand_mall": "lease / brand / mall",
+}
+
+
+def _humanize_payload_error(raw: str) -> str:
+    """Turn ``build_*_payload`` ValueError messages into a user-facing prompt.
+
+    The raw error text is a repr like
+    ``build_create_handover_payload: missing required data keys: ['inspection_done_by']``.
+    Extract the field list and phrase it in plain English so the user knows
+    which field to supply / retry.
+    """
+    # Extract the bracketed list of keys after "missing required data keys:".
+    marker = "missing required data keys:"
+    idx = raw.find(marker)
+    if idx < 0:
+        return (
+            "Some required details are missing before I can submit. Please review "
+            "the form and try again."
+        )
+    tail = raw[idx + len(marker):].strip().strip("[]")
+    keys = [k.strip().strip("'\"") for k in tail.split(",") if k.strip()]
+    if not keys:
+        return (
+            "Some required details are missing before I can submit. Please review "
+            "the form and try again."
+        )
+    labels = [_FIELD_LABELS.get(k, k) for k in keys]
+    if len(labels) == 1:
+        return (
+            f"I can't submit yet — the {labels[0]} is still empty. "
+            "Please provide it and try again."
+        )
+    joined = ", ".join(labels[:-1]) + f", and {labels[-1]}"
+    return (
+        f"I can't submit yet — these details are still empty: {joined}. "
+        "Please provide them and try again."
+    )
+
+
 @trace_node("payload_builder", "TOOL")
 async def payload_builder_node(state: ServiceRequestState) -> dict[str, Any]:
     """Build the CREATE_SR API payload and store it in ``backend_refs``.
@@ -63,7 +126,13 @@ async def payload_builder_node(state: ServiceRequestState) -> dict[str, Any]:
             logger.warning(
                 "payload_builder_node: handed_over payload build failed — %s", exc
             )
-            return {"status": "FAILED"}
+            # Keep confirmation_status intact so api_submission's confirmation
+            # guard doesn't fire first and mask this specific error. The
+            # payload guard downstream surfaces the field-level message below.
+            return {
+                "status": "FAILED",
+                "response_message": _humanize_payload_error(str(exc)),
+            }
         backend_refs["create_handed_over_payload"] = payload
         backend_refs["create_payload"] = payload  # unified key for api_submission_node
         logger.info(
@@ -76,7 +145,10 @@ async def payload_builder_node(state: ServiceRequestState) -> dict[str, Any]:
         payload = build_create_handover_payload(collected_data, documents=documents)
     except ValueError as exc:
         logger.warning("payload_builder_node: payload build failed — %s", exc)
-        return {"status": "FAILED"}
+        return {
+            "status": "FAILED",
+            "response_message": _humanize_payload_error(str(exc)),
+        }
 
     backend_refs["create_payload"] = payload
 

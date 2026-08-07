@@ -67,7 +67,11 @@ async def fm_payload_builder_node(state: ServiceRequestState) -> dict[str, Any]:
     """
     collected_data: dict[str, Any] = state.get("collected_data") or {}
     backend_refs: dict[str, Any] = dict(state.get("backend_refs") or {})
-    fm_action: str = backend_refs.get("fm_action", "save_progress")
+    # Default to "approve" — the FM review card's primary Submit button maps
+    # to Approve; Save Progress is a separate explicit chip that always sets
+    # fm_action to "save_progress" upstream. Falling back to save_progress
+    # here silently downgrades the user's Submit action.
+    fm_action: str = backend_refs.get("fm_action") or "approve"
 
     sr_id: str | None = backend_refs.get("sr_id")
     if not sr_id:
