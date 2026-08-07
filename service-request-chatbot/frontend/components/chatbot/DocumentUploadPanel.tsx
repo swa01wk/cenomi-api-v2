@@ -115,33 +115,45 @@ export function DocumentUploadPanel({
   if (!shouldShow) return null;
 
   async function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0];
-    if (!file || !selectedDocType) return;
-    // CREATE_SR and CREATE_HANDED_OVER_SR may upload without srId once lease is resolved.
-    if (workflowStage !== "CREATE_SR" && !isPathB && !srId) return;
+    const files = Array.from(e.target.files ?? []);
+    if (files.length === 0 || !selectedDocType) return;
+    // CREATE_SR may upload without srId once lease is resolved.
+    if (workflowStage !== "CREATE_SR" && !srId) return;
 
     setIsUploading(true);
     setUploadError(null);
     setUploadSuccess(null);
 
+    const label = getDocLabel(selectedDocType);
+    let uploaded = 0;
+
     try {
-      const result = await uploadDocument(
-        file,
-        selectedDocType,
-        sessionId,
-        srId,
-        comment,
+      // Upload sequentially so several documents can be attached in one action
+      // without racing the platform upload API.
+      for (const file of files) {
+        const result = await uploadDocument(
+          file,
+          selectedDocType,
+          sessionId,
+          srId,
+          comment,
+        );
+        onUploadComplete({
+          documentId: result.document_id,
+          documentType: selectedDocType,
+          documentTypeLabel: label,
+          filename: file.name,
+          signedUrl: result.signed_url,
+        });
+        uploaded += 1;
+      }
+      setUploadSuccess(
+        uploaded === 1
+          ? `${files[0].name} uploaded as ${label}. You can attach more documents.`
+          : `${uploaded} documents uploaded as ${label}. You can attach more.`,
       );
-      const label = getDocLabel(selectedDocType);
-      onUploadComplete({
-        documentId: result.document_id,
-        documentType: selectedDocType,
-        documentTypeLabel: label,
-        filename: file.name,
-        signedUrl: result.signed_url,
-      });
-      setUploadSuccess(`${file.name} uploaded as ${label}.`);
-      setSelectedDocType("");
+      // Keep the selected type so additional documents can be attached without
+      // re-selecting; only reset the transient file/comment inputs.
       setComment("");
       if (fileInputRef.current) fileInputRef.current.value = "";
     } catch (err) {
@@ -156,7 +168,12 @@ export function DocumentUploadPanel({
     setDeletingId(doc.documentId);
     setUploadError(null);
     try {
-      await deleteDocument(doc.documentId, sessionId, srId);
+      await deleteDocument(
+        doc.documentId,
+        sessionId,
+        srId,
+        collectedData?.lease_id || collectedData?.contract_id || null,
+      );
       onDeleteComplete?.(doc.documentId);
       setUploadSuccess(`${doc.filename} removed.`);
     } catch (err) {
@@ -203,10 +220,11 @@ export function DocumentUploadPanel({
               : "cursor-not-allowed border-zinc-300 bg-zinc-100 text-zinc-400 dark:border-zinc-600 dark:bg-zinc-700 dark:text-zinc-500"
           }`}
         >
-          {isUploading ? "Uploading…" : "Choose file"}
+          {isUploading ? "Uploading…" : "Choose file(s)"}
           <input
             ref={fileInputRef}
             type="file"
+            multiple
             className="hidden"
             disabled={!selectedDocType || isUploading}
             onChange={handleFileChange}

@@ -124,7 +124,22 @@ class TestFMReviewEntryNode:
         state = _state(action_override="reject_fm_review", backend_refs={})
         result = await fm_review_entry_node(state)
         assert result["status"] == "WAITING_FOR_USER"
-        assert "rejection" in result["response_message"].lower()
+        assert "not available" in result["response_message"].lower()
+
+    @pytest.mark.asyncio
+    async def test_cancel_preserves_progress_and_clears_fm_action(self) -> None:
+        state = _state(
+            action_override="cancel",
+            backend_refs={"user_role": "FM_MANAGER", "fm_action": "approve", "sr_id": "1"},
+            collected_data={"unit_readiness_date": "2026-08-20"},
+        )
+        result = await fm_review_entry_node(state)
+        assert result["status"] == "WAITING_FOR_USER"
+        assert result["confirmation_status"] == "REJECTED"
+        assert "fm_action" not in result["backend_refs"]
+        assert "still saved" in result["response_message"].lower()
+        # Soft cancel must not wipe collected_data from the return payload.
+        assert "collected_data" not in result
 
     @pytest.mark.asyncio
     async def test_wrong_role_denied(self) -> None:

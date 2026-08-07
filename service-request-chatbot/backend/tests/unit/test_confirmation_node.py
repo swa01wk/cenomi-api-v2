@@ -281,7 +281,7 @@ class TestConfirmationNodeReady:
         result = await confirmation_node(state)
         fields_by_key = {f["key"]: f["value"] for f in result["response_ui"]["fields"]}
         # Non-editable fields are display-formatted; editable fields are raw.
-        assert fields_by_key["lease_code"] == data["lease_code"]  # non-editable, no format change
+        assert fields_by_key["lease_code"] == data["lease_code"]  # editable, raw value
         assert fields_by_key["brand"] == data["brand"]
         assert fields_by_key["mall"] == data["mall"]
         # unit_codes is non-editable — formatted as comma-joined string.
@@ -296,6 +296,11 @@ class TestConfirmationNodeReady:
         # inspection_done_by is in _CREATE_SR_EDITABLE — raw value preserved.
         assert fields_by_key["inspection_done_by"] == data["inspection_done_by"]
         assert fields_by_key["comments"] == data["comments"]
+
+        # Enum fields expose options so the confirmation card renders a <select>.
+        field_rows = {f["key"]: f for f in result["response_ui"]["fields"]}
+        assert field_rows["lease_code"]["editable"] is True
+        assert field_rows["inspection_done_by"]["options"] == ["FM_MANAGER", "OPERATIONS"]
 
     @pytest.mark.asyncio
     async def test_deterministic_output(self) -> None:

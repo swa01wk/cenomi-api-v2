@@ -2,53 +2,14 @@
 # run_agent_eval.sh — Tiered agent evaluation suite
 #
 # Tier structure:
-#   0    Smoke-Agent    (~2 min)   S200–S201, S203–S206 + FM lifecycle smoke — per-agent sanity
-#   0p   Smoke-Pipeline (~5 min)   L298–L299 — Handover A 3-phase + FOS create→approve
-#
-#   ── Handover A — Stage 1: CREATE_SR (Mall Manager) ──────────────────────────
-#   1    CREATE_SR Happy  (~5 min)   S1–S15, S63–S64 — core flows
-#   2    CREATE_SR Edge   (~8 min)   S16–S33, S60–S68 — corrections, date violations
-#   3    CREATE_SR Battle (~10 min)  S34–S59 — Issues 1–7 agent-fix regressions
-#
-#   ── Handover A — Stage 2: FM_REVIEW (FM Manager / Operations) ───────────────
-#   3a   FM_REVIEW Happy      (~3 min)   L134–L135 — date+approve, save-progress
-#   3b   FM_REVIEW Edge       (~3 min)   L136–L137, L139 — NL date, multi-field, Ops role
-#   3c   FM_REVIEW Battle+RBAC (~2 min)  L138 — DD_ENGINEER denied
-#
-#   ── Handover A — Stage 3: RDD_REVIEW (DD Engineer) ──────────────────────────
-#   3d   RDD_REVIEW Happy      (~4 min)  L140–L141 — packed + turn-by-turn
-#   3e   RDD_REVIEW Edge       (~5 min)  L142–L144 — date-chain, APPROVED_WITH_CHANGES, NL dates
-#   3f   RDD_REVIEW Battle+RBAC (~2 min) L145 — FM_MANAGER denied
-#
-#   ── Handover A — Full Lifecycle (all 3 phases) ───────────────────────────────
-#   3g   Full LC Happy  (~3 min)   L146 — CREATE→FM→RDD→SR_COMPLETED clean run
-#   3h   Full LC Edge   (~5 min)   L147–L149 — corrections at each stage + MM upload gate
-#   3i   Full LC Battle (~12 min)  L150–L172 — state isolation, persistence, payload contracts
-#
-#   ── Handover B ───────────────────────────────────────────────────────────────
-#   4    Handover-B Happy      (~3 min)   L150–L151 — already_trading packed + gradual
-#   5    Handover-B Edge+Battle (~5 min)  L152–L159 — date ordering, path switch, RBAC
-#
-#   ── Fitout Start (FOS) — DD_ENGINEER ─────────────────────────────────────────
-#   6a   FOS Happy       (~2 min)  S73 + L170 — yes-branch create → SR_CREATED
-#   6b   FOS Edge        (~3 min)  S70, S75, S78, S82 + L171 — no-branch, delay, date-order, title
-#   6c   FOS Battle+RBAC (~3 min)  S79, S81 + L179, L181, L182 — cancel, RBAC, stale state
-#   6d   FOS Lifecycle   (~2 min)  L172 — APPROVE_SR: open existing FOS SR → SR_APPROVED
-#
-#   ── Fitout End (END) — DD_ENGINEER ───────────────────────────────────────────
-#   6e   END Happy       (~2 min)  S83 + L173 — yes-branch create → SR_CREATED
-#   6f   END Edge        (~3 min)  S71, S77 + L174 — no-branch, planned dates required
-#   6g   END Lifecycle   (~2 min)  L175 — APPROVE_SR: open existing END SR → SR_APPROVED
-#
-#   ── Trading Confirmation (TRADING) — MALL_MANAGER / OPERATIONS ───────────────
-#   6h   TRADING Happy       (~2 min)  S74 + L176 — yes-branch create → SR_CREATED
-#   6i   TRADING Edge        (~2 min)  S72, S76 + L177 — no-branch, delay optional
-#   6j   TRADING Battle+RBAC (~2 min)  S80 + L178, L180 — approve, DD_ENGINEER denied
-#
-#   ── FAQ + RBAC ───────────────────────────────────────────────────────────────
-#   8    FAQ + RBAC (~5 min)   S201, S208–S212 — help queries, status, RBAC denials
-#
-#   all  All tiers in sequence (~83 min)
+#   0  Smoke     (~1 min)   S201–S202 + lifecycle FM smoke — fast sanity gate
+#   1  Core      (~5 min)   S1–S15    — CREATE_SR happy path & basic flows
+#   2  Edge      (~8 min)   S16–S33, S60–S64 — edge + lease eligibility (S63/S64)
+#   3  Battle    (~12 min)  S34–S59   — Issues 1–7 from agent_ui_fixes.md
+#   4  FM        (~10 min)  L134–L139 — FM_REVIEW lifecycle
+#   5  RDD       (~12 min)  L140–L145 — RDD_REVIEW lifecycle
+#   6  Full-LC   (~25 min)  L146–L173 — full lifecycle + battle + multi-file (L173)
+#   all           All tiers in sequence (equivalent to old a+b+c)
 #
 # Usage:
 #   ./run_agent_eval.sh                            # full suite (all tiers), starts services

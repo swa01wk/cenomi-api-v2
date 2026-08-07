@@ -288,6 +288,16 @@ def _assert_turn(
                 f"Keywords {spec.expect_keywords!r} not found in message. {hint}"
             )
 
+    # ── Soft: forbidden keywords (eligibility regressions) ────────────────────
+    if spec.expect_no_keywords:
+        ui_msg = str((body.get("ui") or {}).get("message") or "")
+        haystack = f"{msg}\n{ui_msg}".lower()
+        for kw in spec.expect_no_keywords:
+            if kw.lower() in haystack:
+                warnings.append(
+                    f"Forbidden keyword {kw!r} found in message/ui.message"
+                )
+
     # ── Soft: active_agent null check (post-reset) ────────────────────────────
     if spec.expect_no_active_agent:
         active_agent = body.get("active_agent")
@@ -314,6 +324,18 @@ def _assert_turn(
                     warnings.append(
                         f"ui.fields[{label!r}]: expected '{expected_val}', got '{actual_val}'"
                     )
+
+    # ── Soft: top-level ui key/value checks (e.g. existing_handover.srId) ──────
+    if spec.expect_ui_contains:
+        ui = body.get("ui") or {}
+        for key, expected_val in spec.expect_ui_contains.items():
+            actual_val = ui.get(key)
+            if actual_val is None:
+                warnings.append(f"ui.{key}: missing (expected '{expected_val}')")
+            elif str(actual_val) != str(expected_val):
+                warnings.append(
+                    f"ui.{key}: expected '{expected_val}', got '{actual_val}'"
+                )
 
     passed = len(failures) == 0
     return passed, failures, warnings, sr_reference

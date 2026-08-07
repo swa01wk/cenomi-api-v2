@@ -81,7 +81,15 @@ class LeaseLookupQuery(BaseModel):
 
 @dataclass
 class LeaseLookupResult:
-    """Output of a single lease lookup call — matches plus full trace metadata."""
+    """Output of a single lease lookup call — matches plus full trace metadata.
+
+    When ``matches`` is empty the platform may still signal *why* via
+    ``reason`` / ``existing_handover_sr_id`` (cenomi-api handover eligibility):
+
+    - ``not_found``          — truly no matching lease
+    - ``activation_pending`` — lease exists but activation/start date not reached
+    - ``handover_exists``    — lease exists; a Handover SR already covers it
+    """
 
     matches: list[LeaseRecord]
     endpoint: str
@@ -90,6 +98,9 @@ class LeaseLookupResult:
     latency_ms: int
     status_code: int | None
     error: str | None = None
+    # Eligibility metadata from empty-match responses (see class docstring).
+    reason: str | None = None
+    existing_handover_sr_id: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -182,10 +193,13 @@ class HttpLeaseLookupService(AbstractLeaseLookupService):
                 )
 
             matches = self._parse_matches(body)
+            reason, existing_sr_id = self._parse_eligibility(body)
             log.info(
                 "lease_lookup.http.success",
                 match_count=len(matches),
                 latency_ms=latency_ms,
+                reason=reason,
+                existing_handover_sr_id=existing_sr_id,
             )
             return LeaseLookupResult(
                 matches=matches,
@@ -194,6 +208,8 @@ class HttpLeaseLookupService(AbstractLeaseLookupService):
                 response_payload=body,
                 latency_ms=latency_ms,
                 status_code=response.status_code,
+                reason=reason,
+                existing_handover_sr_id=existing_sr_id,
             )
 
         except httpx.RequestError as exc:
@@ -262,6 +278,34 @@ class HttpLeaseLookupService(AbstractLeaseLookupService):
             except Exception as exc:
                 log.warning("lease_lookup.parse_record.failed", error=str(exc), item=item)
         return records
+
+    @staticmethod
+    def _parse_eligibility(
+        body: dict[str, Any] | list[Any] | None,
+    ) -> tuple[str | None, str | None]:
+        """Extract ``reason`` / ``existing_handover_sr_id`` from the API envelope.
+
+        Looks on the top-level body and inside ``data`` (cenomi-api Success
+        envelope). Empty-string reasons are normalised to ``None``.
+        """
+        if not isinstance(body, dict):
+            return None, None
+
+        def _from_mapping(payload: dict[str, Any]) -> tuple[str | None, str | None]:
+            raw_reason = payload.get("reason")
+            reason = str(raw_reason).strip() if raw_reason not in (None, "") else None
+            raw_sr = payload.get("existing_handover_sr_id")
+            sr_id = str(raw_sr).strip() if raw_sr not in (None, "") else None
+            return reason, sr_id
+
+        reason, sr_id = _from_mapping(body)
+        if reason is not None or sr_id is not None:
+            return reason, sr_id
+
+        data = body.get("data")
+        if isinstance(data, dict):
+            return _from_mapping(data)
+        return None, None
 
 
 # ---------------------------------------------------------------------------
@@ -333,6 +377,19 @@ _MOCK_LEASES: list[dict[str, Any]] = [
 
 _MOCK_RECORDS: list[LeaseRecord] = [LeaseRecord.model_validate(r) for r in _MOCK_LEASES]
 
+# Empty-match eligibility fixtures for local eval / unit tests.
+# Keys are lowercased lease codes. These codes intentionally do NOT appear in
+# ``_MOCK_LEASES`` so the filter returns zero matches and the reason is surfaced.
+_MOCK_ELIGIBILITY: dict[str, dict[str, str]] = {
+    "t0028568": {
+        "reason": "handover_exists",
+        "existing_handover_sr_id": "10473",
+    },
+    "t0999999": {
+        "reason": "activation_pending",
+    },
+}
+
 
 class MockLeaseLookupService(AbstractLeaseLookupService):
     """In-memory lease lookup for local POC development and unit tests.
@@ -343,6 +400,9 @@ class MockLeaseLookupService(AbstractLeaseLookupService):
         Optional override for the seed data.  Defaults to ``_MOCK_RECORDS``.
     simulated_latency_ms:
         Latency value reported in ``LeaseLookupResult`` (no real sleep).
+    eligibility:
+        Optional override for empty-match eligibility fixtures keyed by
+        lowercased lease code.  Defaults to ``_MOCK_ELIGIBILITY``.
     """
 
     _MOCK_ENDPOINT = "mock://lease-tenant-api/leases"
@@ -351,9 +411,13 @@ class MockLeaseLookupService(AbstractLeaseLookupService):
         self,
         records: list[LeaseRecord] | None = None,
         simulated_latency_ms: int = 12,
+        eligibility: dict[str, dict[str, str]] | None = None,
     ) -> None:
         self._records: list[LeaseRecord] = records if records is not None else list(_MOCK_RECORDS)
         self._latency_ms = simulated_latency_ms
+        self._eligibility: dict[str, dict[str, str]] = (
+            eligibility if eligibility is not None else dict(_MOCK_ELIGIBILITY)
+        )
 
     async def lookup(self, query: LeaseLookupQuery) -> LeaseLookupResult:
         request_payload: dict[str, Any] = {
@@ -368,10 +432,23 @@ class MockLeaseLookupService(AbstractLeaseLookupService):
             "count": len(matches),
         }
 
+        reason: str | None = None
+        existing_sr_id: str | None = None
+        if not matches and query.lease_code:
+            fixture = self._eligibility.get(query.lease_code.strip().lower())
+            if fixture:
+                reason = fixture.get("reason")
+                existing_sr_id = fixture.get("existing_handover_sr_id")
+                if reason:
+                    response_payload["reason"] = reason
+                if existing_sr_id:
+                    response_payload["existing_handover_sr_id"] = existing_sr_id
+
         log.debug(
             "lease_lookup.mock",
             query=query.model_dump(exclude_none=True),
             match_count=len(matches),
+            reason=reason,
         )
 
         return LeaseLookupResult(
@@ -381,6 +458,8 @@ class MockLeaseLookupService(AbstractLeaseLookupService):
             response_payload=response_payload,
             latency_ms=self._latency_ms,
             status_code=200,
+            reason=reason,
+            existing_handover_sr_id=existing_sr_id,
         )
 
     def _filter(self, query: LeaseLookupQuery) -> list[LeaseRecord]:

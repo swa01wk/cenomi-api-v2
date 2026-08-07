@@ -34,6 +34,11 @@ Mock lease data
   t0208831  Nike          Riyadh Park       Riyadh  GF101/102  680 sqm
   t0301144  Nike          Mall of Arabia    Jeddah  LG220      510 sqm
   t0419977  Zara          Dubai Festival City Dubai  UF301      900 sqm
+
+Mock eligibility fixtures (empty matches + reason — MockLeaseLookupService)
+---------------------------------------------------------------------------
+  t0028568  reason=handover_exists     existing_handover_sr_id=10473
+  t0999999  reason=activation_pending
 """
 
 from __future__ import annotations
@@ -97,6 +102,9 @@ class Turn:
     expect_keywords: list[str] = field(default_factory=list)
     """At least one keyword must appear (case-insensitive) in response.message."""
 
+    expect_no_keywords: list[str] = field(default_factory=list)
+    """Soft: none of these keywords may appear in response.message or ui.message."""
+
     expect_no_submit: bool = False
     """Assert that state.ready_to_submit is False (error / pre-submit turn)."""
 
@@ -116,6 +124,9 @@ class Turn:
 
     expect_field_value: Optional[dict] = None
     """Soft: {label: expected_value} — check ui.fields entries on a confirmation_card."""
+
+    expect_ui_contains: Optional[dict] = None
+    """Soft: {key: expected_value} — check top-level keys on response.ui (e.g. srId)."""
 
 
 @dataclass
@@ -2551,198 +2562,84 @@ _S62 = Scenario(
 )
 
 
-# =============================================================================
-# HANDED_OVER / Path B + Path A fix scenarios (S63–S69)
-# =============================================================================
-
-# Past-date anchors for Path B "actual" date fields (already occurred)
-_ACT_HANDOVER = _d(-90)   # actual shop handover date (~3 months ago)
-_ACT_FO_START = _d(-85)   # actual fitout start (~85 days ago)
-_ACT_FO_END   = _d(-30)   # actual fitout end (~1 month ago)
-_ACT_TRADING  = _d(-20)   # actual trading date (~20 days ago)
-
+# ─────────────────────────────────────────────────────────────────────────────
+# Lease eligibility reasons (doc_upload_fix / b9bd469) — S63–S64
+# Mock fixtures: t0028568 → handover_exists; t0999999 → activation_pending
+# ─────────────────────────────────────────────────────────────────────────────
 
 _S63 = Scenario(
     id=63,
-    name="supervisor_classifies_already_trading_as_handed_over",
+    name="Lease eligibility — handover_exists surfaces existing_handover card",
     goal=(
-        "User says 'already trading for t0105712' → intent=CREATE_HANDED_OVER_SR, "
-        "sub_category=HANDED_OVER, agent asks for the 4 actual date fields"
+        "When GET /leases returns empty leases[] with reason=handover_exists, "
+        "agent must emit ui.type='existing_handover' with SR deep link — "
+        "never collapse to 'lease not found' or start a new CREATE_SR"
     ),
-    tier=1,
+    tier=2,
     turns=[
         Turn(
-            message="The unit for lease t0105712 is already trading, I need to register it",
+            message="I want to create a handover service request",
+            note="Bot asks for lease identifier",
+            expect_keywords=["lease", "code", "brand", "mall"],
+        ),
+        Turn(
+            message="t0028568",
             note=(
-                "Supervisor must classify as CREATE_HANDED_OVER_SR with "
-                "sub_category=HANDED_OVER; agent asks for actual date fields"
+                "Mock eligibility: handover_exists + sr_id 10473 → "
+                "existing_handover card; must NOT say lease not found"
             ),
-            expect_workflow_stage="CREATE_HANDED_OVER_SR",
-            expect_keywords=["actual", "date", "handover", "trading", "fitout"],
+            expect_ui_type="existing_handover",
+            expect_no_submit=True,
+            expect_keywords=["already exists", "10473", "handover", "view"],
+            expect_no_keywords=["not found", "couldn't find", "could not find", "no lease"],
+            expect_ui_contains={"srId": "10473", "type": "existing_handover"},
+        ),
+        Turn(
+            message="t0105712",
+            note=(
+                "User switches to an eligible lease; flow must resume CREATE_SR "
+                "and resolve Under Armour (not stuck on blocked lease)"
+            ),
+            expect_keywords=["description", "under armour", "jawharat", "title", "what"],
         ),
     ],
-    tags=["handed-over", "path-b", "intent-classification", "tier1-core"],
+    tags=["lease-eligibility", "handover-exists", "existing-handover", "doc-upload-fix"],
 )
 
 
 _S64 = Scenario(
     id=64,
-    name="already_handovered_field_in_confirmed_payload",
+    name="Lease eligibility — activation_pending does not say not found",
     goal=(
-        "Path A confirm → payload must contain already_handovered=initiate_handover (Fix 1); "
-        "full CREATE_SR happy-path with explicit assertion on that field"
-    ),
-    tier=1,
-    turns=[
-        Turn(
-            message=(
-                f"Create a handover service request for lease t0105712. "
-                f"Description: Fix 1 regression test. "
-                f"Start {_START_A}, end {_END_A}, FM Manager. No comments."
-            ),
-            note="All fields packed in one message; confirmation card expected",
-            expect_ui_type="confirmation_card",
-        ),
-        Turn(
-            message="Confirm",
-            note=(
-                "SR submitted; payload must contain already_handovered=initiate_handover"
-            ),
-            action="confirm",
-            expect_workflow_stage="SR_CREATED",
-            expect_keywords=["submitted", "reference", "successfully", "created"],
-        ),
-    ],
-    tags=["path-a", "fix-1", "already-handovered", "payload-contract"],
-)
-
-
-_S65 = Scenario(
-    id=65,
-    name="fm_cop_checklist_upload_accepted",
-    goal=(
-        "FM Manager uploads SR_COP_CHECKLIST_OTHER (Fix 2); "
-        "agent confirms the document type is valid and accepted"
+        "When GET /leases returns empty leases[] with reason=activation_pending, "
+        "agent must explain activation/start-date block and ask for another lease — "
+        "never collapse to 'lease not found'"
     ),
     tier=2,
     turns=[
         Turn(
-            message="I want to upload the COP checklist for this SR",
+            message="I want to create a handover service request",
+            note="Bot asks for lease identifier",
+            expect_keywords=["lease", "code", "brand", "mall"],
+        ),
+        Turn(
+            message="t0999999",
             note=(
-                "FM Manager requests COP Checklist upload; agent must confirm "
-                "SR_COP_CHECKLIST_OTHER is a valid FM document type"
+                "Mock eligibility: activation_pending → explain lease was found "
+                "but activation not reached; must NOT say not found"
             ),
-            expect_keywords=["upload", "document", "cop", "checklist", "valid", "accepted"],
+            expect_ui_type="text_question",
+            expect_no_submit=True,
+            expect_keywords=["activation", "start date", "found", "later", "lease"],
+            expect_no_keywords=["not found", "couldn't find", "could not find", "no lease"],
+        ),
+        Turn(
+            message="t0105712",
+            note="Eligible lease accepted; CREATE_SR continues with Under Armour",
+            expect_keywords=["description", "under armour", "jawharat", "title", "what"],
         ),
     ],
-    tags=["path-a", "fix-2", "fm-document", "cop-checklist"],
-    enabled=False,  # Requires FM_REVIEW context — run as lifecycle scenario
-)
-
-
-_S66 = Scenario(
-    id=66,
-    name="fm_other_doc_rejected_for_fm_role",
-    goal=(
-        "FM Manager uploads SR_HANDOVER_OTHER (Fix 2); "
-        "agent must reject it because that type belongs to Leasing Admin only"
-    ),
-    tier=2,
-    turns=[
-        Turn(
-            message="I want to upload an SR_HANDOVER_OTHER document",
-            note=(
-                "SR_HANDOVER_OTHER is not permitted for FM Manager (role 20); "
-                "agent must reject or silently discard it"
-            ),
-            expect_keywords=["not valid", "not accepted", "upload", "document", "type",
-                             "checklist", "site survey", "cop"],
-        ),
-    ],
-    tags=["path-a", "fix-2", "fm-document", "sr-handover-other", "rejected"],
-    enabled=False,  # Requires FM_REVIEW context — run as lifecycle scenario
-)
-
-
-_S67 = Scenario(
-    id=67,
-    name="fm_approve_response_not_service_category",
-    goal=(
-        "After FM approve, agent response must NOT re-send service_category "
-        "in the PATCH body (Fix 3) — minimal PATCH contract"
-    ),
-    tier=2,
-    turns=[
-        Turn(
-            message="",
-            note=(
-                "FM approve action sent; PATCH body must not include service_category "
-                "or service_request_id at top level"
-            ),
-            action="approve_fm_review",
-        ),
-        Turn(
-            message="",
-            note="Confirm FM approve — must succeed without service_category",
-            action="confirm_fm_approve",
-            expect_keywords=["approved", "fm", "review"],
-        ),
-    ],
-    tags=["path-a", "fix-3", "fm-approve", "minimal-patch"],
-    enabled=False,  # Requires FM_REVIEW context — run as lifecycle scenario
-)
-
-
-_S68 = Scenario(
-    id=68,
-    name="rdd_approve_confirmation_includes_unit_readiness_date",
-    goal=(
-        "RDD final approve confirmation must show unit_readiness_date from the map entry "
-        "(Fix 4) — confirms the RDD approve payload is correctly enriched"
-    ),
-    tier=2,
-    turns=[
-        Turn(
-            message="",
-            note="RDD final approval — confirmation must mention unit_readiness_date",
-            action="approve_rdd_final",
-        ),
-        Turn(
-            message="",
-            note=(
-                "Confirm final approve → SR_COMPLETED; message must contain "
-                "unit_readiness_date or date reference"
-            ),
-            action="confirm_rdd_final_approve",
-            expect_workflow_stage="SR_COMPLETED",
-            expect_keywords=["completed", "approved", "handover"],
-        ),
-    ],
-    tags=["path-a", "fix-4", "rdd-approve", "unit-readiness-date"],
-    enabled=False,  # Requires full lifecycle context — run as lifecycle scenario
-)
-
-
-_S69 = Scenario(
-    id=69,
-    name="fm_dates_yyyy_mm_dd_format",
-    goal=(
-        "FM save: agent stores unit_readiness_date in YYYY-MM-DD format (Fix 5); "
-        "date entered as DD/MM/YYYY must be normalised before API submission"
-    ),
-    tier=3,
-    turns=[
-        Turn(
-            message="Unit readiness date is 01/05/2026",
-            note=(
-                "User enters date in DD/MM/YYYY; agent must normalise to 2026-05-01 "
-                "before storing and before building the FM payload"
-            ),
-            expect_keywords=["2026-05-01", "readiness", "date", "saved", "noted", "accepted"],
-        ),
-    ],
-    tags=["path-a", "fix-5", "fm-dates", "date-format", "yyyy-mm-dd"],
-    enabled=False,  # Requires FM_REVIEW context — run as lifecycle scenario
+    tags=["lease-eligibility", "activation-pending", "doc-upload-fix"],
 )
 
 
@@ -3292,8 +3189,7 @@ TIER2_SCENARIOS: list[Scenario] = [
     _S16, _S17, _S18, _S19, _S20, _S21, _S22,
     _S23, _S24, _S25, _S26, _S27, _S28, _S29, _S30, _S31, _S32, _S33,
     _S60, _S61, _S62,
-    # HANDED_OVER / Path B + Path A fix scenarios
-    _S65, _S66, _S67, _S68,
+    _S63, _S64,  # Lease eligibility (handover_exists / activation_pending)
 ]
 
 #: Agent-fix battle tests (Issues 1–7 from agent_ui_fixes.md)
