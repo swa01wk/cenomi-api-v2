@@ -393,7 +393,7 @@ async def rdd_api_submission_node(state: ServiceRequestState) -> dict[str, Any]:
             operations,
         )
 
-    backend_refs["rdd_status"] = "APPROVED"
+    backend_refs["rdd_status"] = "REPORT_SUBMITTED"
     if trace_manager is not None and session_id is not None:
         try:
             repo = AuditLogRepository(trace_manager._session)
@@ -422,8 +422,9 @@ async def rdd_api_submission_node(state: ServiceRequestState) -> dict[str, Any]:
             "workflow_stage": "SR_COMPLETED",
         },
         "response_message": (
-            f"The RDD Handover Report has been approved. "
-            f"Your reference number is **{submitted_sr_id}**. "
-            "The service request is now complete."
+            f"The RDD Handover Report has been approved for SR **{submitted_sr_id}**. "
+            "The SR is now in **Report Submitted** status — all admin approvals are done. "
+            "The tenant will receive a notification to accept or reject the handover report. "
+            "Once the tenant accepts, the SR will move to Approved."
         ),
     }

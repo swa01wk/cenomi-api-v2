@@ -956,12 +956,12 @@ def build_rdd_approve_payload(
         **inner,
         "sr_id": sr_id,
         "current_sr_status": "REPORT_SUBMITTED",
-        # user_action drives the platform's `operationsRelatedToApprove…` branch.
-        # Without it, the platform updates only the operation row but skips the
-        # SR-level status promotion (SR stays REPORT_SUBMITTED even though the
-        # RDD operation flips to FINISHED). "APPROVE" is what the manual portal
-        # form sends for the DDPM final approve click.
-        "user_action": "APPROVE",
+        # Do NOT set user_action here. The Go platform's operationsAfterApproveServiceRequest
+        # for HANDOVER subcategory always sets SR status to REPORT_SUBMITTED when all admin
+        # operations finish (MM + FM + RDDPM). Setting user_action="APPROVE" caused the
+        # operation_history to record the action verb "APPROVE" instead of the state "APPROVED".
+        # The routing into operationsRelatedToApproveServiceRequestOperation is governed solely
+        # by (userData.UserType == ADMIN && subCategory == HANDOVER), not by user_action.
     }
     # Keep dates in platform form format if present.
     for date_key in (
@@ -994,9 +994,6 @@ def build_rdd_approve_payload(
         "sub_category": "HANDOVER",
         "status": "APPROVED",
         "comment": comment_text,
-        # Some platform handlers read user_action from the outer envelope;
-        # mirror the inner value so both places agree.
-        "user_action": "APPROVE",
     }
 
     logger.debug("build_rdd_approve_payload: built for sr_id=%s", sr_id)

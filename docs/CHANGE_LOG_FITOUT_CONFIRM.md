@@ -14,6 +14,27 @@ on the chatbot or frontend side.
 
 ---
 
+## 2026-08-07 · RDD final approve: remove user_action, fix success message to reflect tenant-acceptance step
+
+**Repo:** `cenomi-api-v2` (chatbot backend)
+
+**Why:** After the RDDPM clicked Final Approve in the chatbot, two problems appeared in the platform:
+1. The `operation_history` entry for DD_ENGINEER showed `status: "APPROVE"` (action verb) instead of `"APPROVED"` (state). This happened because the PATCH payload included `user_action: "APPROVE"`, which the Go platform logs verbatim as the history status.
+2. The chatbot success message said "The service request is now complete" — incorrect. Reading the Go platform code (`operationsAfterApproveServiceRequest`, lines 10509-10558) confirmed that for `HANDOVER` sub_category the platform **always** sets SR status to `REPORT_SUBMITTED` after all admin operations (MM + FM + RDDPM) finish. `REPORT_SUBMITTED` is the intended intermediate state; the tenant must then accept or reject the handover report before the SR reaches `APPROVED`. The routing into `operationsRelatedToApproveServiceRequestOperation` is governed by `(userData.UserType == ADMIN && subCategory == HANDOVER)`, not by `user_action`, so the field was unnecessary.
+
+**Fix:**
+
+`services/payload_builder_service.py::build_rdd_approve_payload`
+- Removed `user_action: "APPROVE"` from both the inner payload dict and the outer envelope. FM approval has never set this field (`user_action: None`), and Handover routing ignores it. Removing it causes the platform to record `"APPROVED"` (from the top-level `status: "APPROVED"`) in operation_history instead of the raw action string.
+
+`graph/nodes/handover/rdd_api_submission_node.py`
+- `backend_refs["rdd_status"]` changed from `"APPROVED"` to `"REPORT_SUBMITTED"` to accurately reflect the platform state after final approve.
+- `response_message` updated: now explicitly states that all admin approvals are done, the SR is in Report Submitted status, and the tenant will be notified to accept or reject. Removes the misleading "service request is now complete" phrasing.
+
+**Eval scenarios added:** S234, S235 in `tests/eval/scenarios.py`.
+
+---
+
 ## 2026-08-07 · Fitout Confirmation APPROVE_SR: base dates, radio gate, session-wins merge, submit-loop fix
 
 **Repo:** `cenomi-api-v2` (chatbot backend)
