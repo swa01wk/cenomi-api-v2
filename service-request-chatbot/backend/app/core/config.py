@@ -159,28 +159,34 @@ class Settings(BaseSettings):
         description="Azure OpenAI deployment name for chat completions (defaults to LLM_MODEL when absent).",
     )
 
-    # ── LLM — Google Cloud Vertex AI (when LLM_PROVIDER=vertex_ai) ────────────
+    # ── LLM / Embedding — Google Cloud Vertex AI ──────────────────────────────
+    # Shared by both LLM_PROVIDER=vertex_ai and EMBEDDING_PROVIDER=vertex_ai.
     vertex_ai_project: str | None = Field(
         default=None,
         validation_alias="VERTEX_AI_PROJECT",
-        description="Google Cloud project ID for Vertex AI.",
+        description="Google Cloud project ID for Vertex AI (LLM and/or embeddings).",
     )
     vertex_ai_location: str = Field(
         default="us-central1",
         validation_alias="VERTEX_AI_LOCATION",
-        description="Google Cloud region for Vertex AI endpoints.",
+        description="Google Cloud region for Vertex AI endpoints (LLM and/or embeddings).",
     )
     vertex_ai_credentials_path: str | None = Field(
         default=None,
         validation_alias="VERTEX_AI_CREDENTIALS_PATH",
         description="Optional path to GCP service account JSON key file (defaults to ADC).",
     )
+    vertex_ai_embedding_model: str = Field(
+        default="text-embedding-005",
+        validation_alias="VERTEX_AI_EMBEDDING_MODEL",
+        description="Vertex AI embedding model name (only when EMBEDDING_PROVIDER=vertex_ai).",
+    )
 
     # ── RAG provider selection ────────────────────────────────────────────────
     embedding_provider: str = Field(
         default="openai",
         validation_alias="EMBEDDING_PROVIDER",
-        description="Embedding backend: 'openai' (default) or 'azure_openai'.",
+        description="Embedding backend: 'openai' (default), 'azure_openai', or 'vertex_ai'.",
     )
     search_provider: str = Field(
         default="azure_search",
