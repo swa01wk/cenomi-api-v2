@@ -18,7 +18,7 @@ All routes are available at both `/api/v1` (backward compat) and `/api/v2` (curr
 | Health / ready | `/api/v1/health` | `/api/v2/health` |
 | Auth | `/api/auth/login` | `/api/v2/auth/login` |
 | RDD chat | `/api/chat/service-request` | `/api/v2/chat/service-request` |
-| Upload | `/api/v1/upload` | `/api/v2/upload` |
+| Upload | `/api/v1/upload` (POST, DELETE) | `/api/v2/upload` (POST, DELETE) |
 | Observability | `/api/observability/...` | `/api/v2/observability/...` |
 | MSP help chat (sync) | `/api/v1/chat` | *(v1 only)* |
 | MSP help chat (stream) | `/api/v1/chat/stream` | *(v1 only)* |
@@ -294,7 +294,7 @@ Content-Type: application/json
 }
 ```
 
-**Response 400** — incorrect credentials.
+**Response 401** — incorrect credentials.
 
 ---
 
@@ -304,7 +304,18 @@ Returns the current user from the JWT.
 
 **Request** — requires `Authorization: Bearer <token>`
 
-**Response 200 OK** — `UserResponse` with `user_id`, `username`, `role`, `mall_names`, `unique_property_ids`, `is_global_admin`.
+**Response 200 OK** — `MeResponse` with `user_id`, `role`, `roles`, `mall_names`, `unique_property_ids`, `is_global_admin`.
+
+```json
+{
+  "user_id": "441bf99f-...",
+  "role": "MALL_MANAGER",
+  "roles": ["MALL_MANAGER"],
+  "mall_names": ["Jawharat Jeddah"],
+  "unique_property_ids": [3041],
+  "is_global_admin": false
+}
+```
 
 ---
 
@@ -325,8 +336,10 @@ Authorization: Bearer <token>
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `file` | File | Yes | PDF, JPEG, or PNG only |
-| `session_id` | string | Yes | Active session ID |
-| `document_type` | string | Yes | Must be in `ALL_DOCUMENT_TYPES` |
+| `session_id` | string | No | Active session ID — used to load draft backend refs |
+| `document_type` | string | No | Document type identifier (e.g. `SR_HANDOVER_CHECKLIST`); must be in `ALL_DOCUMENT_TYPES` if provided |
+| `sr_id` | string | No | Explicit service request ID; overrides draft-derived sr_id |
+| `comment` | string | No | Optional per-file comment forwarded to the platform |
 
 **Enforced constraints:**
 - MIME type must be one of: `application/pdf`, `image/jpeg`, `image/png`.
@@ -355,6 +368,38 @@ Authorization: Bearer <token>
   "status": "received_pending_sr"
 }
 ```
+
+---
+
+### DELETE /api/v1/upload
+
+Removes a previously uploaded document from the platform and strips it from the session draft.
+
+**Request**
+
+```http
+DELETE /api/v1/upload?document_id=<uuid>&session_id=<uuid>&sr_id=<sr_id>&lease_id=<lease_id>
+Authorization: Bearer <token>
+```
+
+| Query Param | Type | Required | Description |
+|-------------|------|----------|-------------|
+| `document_id` | string | Yes | Document UUID to delete |
+| `session_id` | string | No | Session UUID — used to load draft refs |
+| `sr_id` | string | No | Service request ID |
+| `lease_id` | string | No | Lease ID (overrides draft-derived) |
+
+**Response 200 OK**
+
+```json
+{ "document_id": "<uuid>", "status": "deleted" }
+```
+
+**Response 403** — caller lacks upload/delete permissions.
+
+**Response 422** — `document_id` not provided.
+
+**Response 502** — platform delete call failed.
 
 ---
 
@@ -505,6 +550,6 @@ Simple liveness probe.
 
 Readiness probe — checks DB and Redis connectivity.
 
-**Response 200 OK** — `{ "status": "ready", "db": "ok", "redis": "ok" }`
+**Response 200 OK** — `{ "status": "ready", "checks": { "database": { "status": "ok" }, "redis": { "status": "ok" } } }`
 
-**Response 503** — one or more dependencies unavailable.
+**Response 503** — one or more dependencies unavailable: `{ "status": "degraded", "checks": { ... } }`

@@ -1,7 +1,7 @@
 # Fitout Confirmation Agents — Design & Implementation Reference
 
 > **Audience:** Backend engineers, new developers, and QA extending or testing the fitout confirmation workflows.
-> **Last updated:** July 2026
+> **Last updated:** August 2026
 > **Status:** Production-ready — all three agents fully implemented (entry, validation, payload builder, API submission, confirmation nodes wired in the main graph).
 
 ---
@@ -148,7 +148,7 @@ SUBCAT_CONFIG: dict[str, dict[str, Any]] = {
         "planned_date_fields": ["planned_trading_date"],
         "prior_milestone_field": "actual_fitout_end_date_readonly",
         "base_date_fields": ["base_trading_date"],
-        "delay_reason_required": False,   # optional for TRADING
+        "delay_reason_required": True,     # required on NO branch, same as FOS/END
         "has_documents": False,            # TRADING has NO document upload
         "has_comments":  False,            # TRADING has NO comments field
         "approver_role": "MALL_MANAGER",  # also OPERATIONS — see APPROVE_ROLE_MAP
@@ -169,8 +169,7 @@ radio_field always required first
 │                      (comments optional if has_comments)
 │
 ├── radio == "no"   →  require planned_date_fields
-│                      delay_reason required if delay_reason_required == True
-│                      delay_reason optional  if delay_reason_required == False
+│                      delay_reason required for all three sub-categories
 │                      (actual_date_field NOT required)
 │                      (comments optional if has_comments)
 │
@@ -184,7 +183,7 @@ radio_field always required first
 | Radio field | `fitout_start_done` | `fitout_complete_done` | `trading_done` |
 | Actual date (YES branch) | `actual_fitout_start_date` | `actual_fitout_complete_date` | `actual_trading_date` |
 | Planned dates (NO branch) | 3 dates | 2 dates | 1 date |
-| `delay_reason` | Required | Required | Optional |
+| `delay_reason` | Required | Required | Required |
 | Document upload | Yes | Yes | **No** |
 | Comments field | Yes | Yes | **No** |
 | Approver role | `DD_ENGINEER` | `DD_ENGINEER` | `MALL_MANAGER` / `OPERATIONS` |
@@ -271,11 +270,11 @@ BACKEND_DERIVED_FIELDS = frozenset({
 ### Optional fields
 
 ```python
-OPTIONAL_FIELDS = frozenset({"comments", "delay_reason"})
+OPTIONAL_FIELDS = frozenset({"comments"})
 ```
 
-`comments` is only optional for TRADING (where `has_comments=False`); it is asked but skippable for FOS and END.
-`delay_reason` is required for FOS/END (when radio=no), optional for TRADING.
+`comments` is only applicable for FOS and END (where `has_comments=True`); it is asked but skippable.
+`delay_reason` is required for all three sub-categories when `radio == "no"`.
 
 ---
 

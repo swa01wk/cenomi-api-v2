@@ -76,11 +76,11 @@ Cenomi-RDD-Chatbot/
 │   │   │   ├── services/           # Chat orchestration service
 │   │   │   ├── types/              # Shared Pydantic types
 │   │   │   └── main.py             # FastAPI app factory
-│   │   ├── alembic/                # Database migrations (4 revisions)
+│   │   ├── alembic/                # Database migrations (5 revisions)
 │   │   ├── scripts/                # Seed users, observability export, session viewer
 │   │   ├── tests/                  # Unit, integration, e2e, eval
 │   │   ├── Dockerfile              # Production multi-stage build
-│   │   ├── run_lifecycle_tests.sh  # Priority lifecycle test runner (68 tests)
+│   │   ├── run_lifecycle_tests.sh  # Priority lifecycle test runner (71 tests)
 │   │   ├── pyproject.toml          # Python dependencies
 │   │   └── .env.example            # Environment variable template
 │   ├── frontend/                   # Next.js 15 app
@@ -329,7 +329,7 @@ All v1 routes remain active for backward compatibility. New callers should use t
 | `POST` | `/api/v1/upload` | `/api/v2/upload` | Document upload |
 | `GET` | `/api/observability/traces` | `/api/v2/observability/traces` | Paginated trace list |
 | `GET` | `/api/observability/traces/{id}` | `/api/v2/observability/traces/{id}` | Trace detail |
-| `POST` | `/api/observability/feedback` | `/api/v2/observability/feedback` | Submit feedback |
+| `POST` | `/api/observability/traces/{trace_id}/feedback` | `/api/v2/observability/traces/{trace_id}/feedback` | Submit feedback |
 | `GET` | `/api/observability/sessions/{id}/replay` | `/api/v2/observability/sessions/{id}/replay` | Session replay |
 | `GET` | `/api/v1/observability/metrics/summary` | `/api/v2/observability/metrics/summary` | Aggregate metrics |
 
@@ -444,14 +444,16 @@ The graph is compiled once at startup via `get_compiled_graph()` and reused. It 
 
 #### Agent registry
 
-`SERVICE_REQUEST_AGENT_REGISTRY` in `agents/registries/service_request_registry.py`
+`SERVICE_REQUEST_AGENT_REGISTRY` in `app/agents/registry.py`
 
 | Service Category | Sub-category | Agent |
 |-----------------|-------------|-------|
 | `FIT_OUT_AND_HANDOVER` | `HANDOVER` | `rdd_handover_agent` (Path A — full 3-phase lifecycle) |
 | `FIT_OUT_AND_HANDOVER` | `HANDED_OVER` | `rdd_handover_agent` (Path B — Already Trading fast-path, single-phase) |
-| `FIT_OUT_AND_HANDOVER` | `FOS` / `END` / `TRADING` | `rdd_handover_agent` (extended sub-category support) |
-| `WORK_PERMIT` | `*` | `work_permit_agent` (single-stage) |
+| `FIT_OUT_AND_HANDOVER` | `FIT_OUT_CONFIRM_FOS` | `rdd_fitout_start_agent` (Fitout start confirmation) |
+| `FIT_OUT_AND_HANDOVER` | `FIT_OUT_CONFIRM_END` | `rdd_fitout_end_agent` (Fitout end confirmation) |
+| `FIT_OUT_AND_HANDOVER` | `FIT_OUT_CONFIRM_TRADING` | `rdd_trading_confirmation_agent` (Trading confirmation) |
+| `WORK_PERMIT` | `WORK_PERMIT` | `work_permit_agent` (single-stage) |
 
 #### Supervisor intents (extended)
 
@@ -583,14 +585,15 @@ Stored in `chat_sessions.workflow_stage`:
 
 ### 8.5 Migrations
 
-Run with `alembic upgrade head`. Four migrations:
+Run with `alembic upgrade head`. Five migrations:
 
 | Revision | Creates |
 |----------|---------|
 | `001_initial_schema` | Domain tables + legacy stubs |
 | `002_agent_observability` | All observability tables |
 | `003_users` | `users` table (JWT auth) |
-| `004_*` | Any additional schema updates — check `alembic/versions/` |
+| `004_rename_rdd_agent` | Renames RDD agent references in schema |
+| `005_rename_agents` | Renames fitout confirm agent identifiers |
 
 ---
 
@@ -700,12 +703,12 @@ frontend/tests/e2e/
 ```bash
 cd service-request-chatbot/backend
 
-# Priority lifecycle suite (68 tests, ~52s)
+# Priority lifecycle suite (71 tests, ~52s)
 ./run_lifecycle_tests.sh
 ./run_lifecycle_tests.sh --coverage   # + HTML coverage report
 ./run_lifecycle_tests.sh --fast       # stop on first failure
 
-# Full pytest suite (1,387+ tests, ~85s)
+# Full pytest suite (1,943+ tests, ~85s)
 pytest tests/ -v --tb=short
 
 # Agent evaluation — all tiers via shell script (27 tiers)
@@ -786,12 +789,12 @@ cd service-request-chatbot
 | `PermissionService` — fail-closed for unknown actions + JWT role name expansion | ✅ Complete |
 | MSP Platform endpoints (`POST /api/v1/chat`, `/api/v1/chat/stream`) | ✅ Complete |
 | API v2 routes (`/api/v2/*`) | ✅ Complete |
-| Alembic migrations (4 migrations, 15+ tables) | ✅ Complete |
+| Alembic migrations (5 migrations, 15+ tables) | ✅ Complete |
 | **Path B (Already Trading fast-path)** — `CREATE_HANDED_OVER_SR` single-phase auto-approve | ✅ Complete |
 | **Work Permit agent** — `work_permit_agent` single-stage SR creation | ✅ Complete |
 | **FOS / END / TRADING sub-categories** — extended `rdd_handover_agent` sub-category support | ✅ Complete |
-| Unit test suite (~46+ files, ~1,400+ tests) | ✅ Complete |
-| E2E + integration lifecycle suite (68 tests) | ✅ Complete |
+| Unit test suite (~46+ files, ~1,943+ tests) | ✅ Complete |
+| E2E + integration lifecycle suite (71 tests) | ✅ Complete |
 | Eval suite — 27 tiers (CREATE_SR, FM, RDD, Full LC, Path B, FOS/END/TRADING, FAQ+RBAC) | ✅ ~98% overall (6 known LLM variability scenarios) |
 | Playwright mocked frontend tests (42 tests) | ✅ Complete |
 | Playwright live-stack tests (50 tests) | ✅ 48/50 (2 LLM variability — not bugs) |
@@ -799,7 +802,7 @@ cd service-request-chatbot
 | Production Dockerfiles — backend + frontend multi-stage | ✅ Complete |
 | Production docker-compose stack | ✅ Complete (`docker-compose.prod.yml`) |
 | Mock mode — stateful across requests for full lifecycle testing | ✅ Complete |
-| Mock state reset endpoint — `POST /dev/mock/reset` | ✅ Complete |
+| Mock state reset endpoint — `POST /api/v1/dev/mock/reset` | ✅ Complete |
 | Lifecycle test runner script — `./run_lifecycle_tests.sh` | ✅ Complete |
 | Live test orchestrator — `./run-live-tests.sh` (all 5 tiers) | ✅ Complete |
 | Agent eval script — `./run_agent_eval.sh` (all 27 tiers) | ✅ Complete |

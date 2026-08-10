@@ -13,16 +13,19 @@ cenomi-api-v2/
 ├── service-request-chatbot/          Main application (backend + frontend + docs)
 │   ├── backend/                      FastAPI + LangGraph Python 3.11 API
 │   │   ├── Dockerfile                Production multi-stage image
-│   │   └── run_lifecycle_tests.sh    68-test lifecycle test runner
+│   │   └── run_lifecycle_tests.sh    71-test lifecycle test runner
 │   ├── frontend/                     Next.js 15 (App Router) chat & admin UI
 │   │   └── Dockerfile                Production standalone image
-│   ├── docs/                         24 architecture, API, agent, testing, and ops documents
+│   ├── docs/                         29 architecture, API, agent, testing, and ops documents
 │   ├── docker-compose.yml            PostgreSQL 16 + Redis 7 for local dev
 │   └── docker-compose.prod.yml       Full production stack (app + infra)
 │
-├── REPORT.md                         UAT readiness report (Help Agent + RDD lifecycle)
+├── docs/
+│   ├── reports/
+│   │   ├── REPORT.md                 UAT readiness report (Help Agent + RDD lifecycle)
+│   │   └── STAKEHOLDER_REPORT.md     Stakeholder-facing project report
+│   └── CHANGELOG.md                  Detailed per-file diff — v1.3.0 → v1.4.0
 ├── HANDOVER.md                       Full developer handover document
-├── STAKEHOLDER_REPORT.md             Stakeholder-facing project report
 └── RELEASE_NOTES.md                  Version history and change log
 ```
 
@@ -118,10 +121,10 @@ npm run dev
 ```bash
 cd service-request-chatbot/backend
 
-# Full pytest suite (1,387 tests — unit + integration + mocked E2E)
+# Full pytest suite (1,943 tests — unit + integration + mocked E2E)
 pytest
 
-# Priority lifecycle suite only (68 tests — fastest UAT gate)
+# Priority lifecycle suite only (71 tests — fastest UAT gate)
 ./run_lifecycle_tests.sh
 
 # With coverage
@@ -223,7 +226,7 @@ Default password for all seeded users: **`test1234`**
 
 ## Implemented features
 
-- **Full RDD Handover lifecycle** — CREATE_SR → FM_REVIEW → RDD_REVIEW → SR_COMPLETED, all three phases tested (99 eval scenarios, 7 tiers, ~1,400 unit tests passing)
+- **Full RDD Handover lifecycle** — CREATE_SR → FM_REVIEW → RDD_REVIEW → SR_COMPLETED, all three phases tested (27 eval tiers, ~1,943+ unit tests passing)
 - **Work Permit SR flow** — conversational single-stage creation
 - **MSP Help Agent** — LangGraph-backed supervisor + FAQ answering via Azure AI Search RAG, SSE streaming
 - **Lease lookup** — external API or built-in stateful mock (e.g. lease `t0105712`)
@@ -256,7 +259,7 @@ Default password for all seeded users: **`test1234`**
 | [`service-request-chatbot/docs/architecture.md`](service-request-chatbot/docs/architecture.md) | System design, DB schema, integrations |
 | [`service-request-chatbot/docs/agent-design-complete.md`](service-request-chatbot/docs/agent-design-complete.md) | Authoritative LangGraph agent design reference |
 | [`service-request-chatbot/docs/help-agent-pipeline.md`](service-request-chatbot/docs/help-agent-pipeline.md) | Help Agent pipeline, taxonomy, RBAC, FAQ RAG |
-| [`service-request-chatbot/docs/rdd-agent.md`](service-request-chatbot/docs/rdd-agent.md) | RDD agent lifecycle architecture (3-phase) |
+| [`service-request-chatbot/docs/rdd-handover-agent.md`](service-request-chatbot/docs/rdd-handover-agent.md) | RDD agent lifecycle architecture (3-phase) |
 | [`service-request-chatbot/docs/handover-workflow.md`](service-request-chatbot/docs/handover-workflow.md) | Handover CREATE_SR sequence and schema |
 | [`service-request-chatbot/docs/extensibility-guide.md`](service-request-chatbot/docs/extensibility-guide.md) | Adding new agents and workflow stages |
 | [`service-request-chatbot/docs/api-reference.md`](service-request-chatbot/docs/api-reference.md) | Full HTTP API reference |
@@ -292,7 +295,7 @@ Default password for all seeded users: **`test1234`**
 |----------|-------------|
 | [`service-request-chatbot/docs/help-agent-validation.md`](service-request-chatbot/docs/help-agent-validation.md) | Help Agent / MSP integration contract and alignment gap table |
 | [`service-request-chatbot/docs/client-demo-script.md`](service-request-chatbot/docs/client-demo-script.md) | End-to-end client demo walkthrough |
-| [`service-request-chatbot/docs/eval-howto.md`](service-request-chatbot/docs/eval-howto.md) | Local eval workflow — running all 7 tiers, interpreting results |
+| [`service-request-chatbot/docs/eval-howto.md`](service-request-chatbot/docs/eval-howto.md) | Local eval workflow — running all 27 tiers, interpreting results |
 | [`docs/reports/REPORT.md`](docs/reports/REPORT.md) | UAT readiness report (Help Agent + RDD lifecycle)
 | [`HANDOVER.md`](HANDOVER.md) | Developer handover document |
 | [`docs/reports/STAKEHOLDER_REPORT.md`](docs/reports/STAKEHOLDER_REPORT.md) | Stakeholder-facing project report |

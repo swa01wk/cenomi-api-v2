@@ -775,7 +775,7 @@ These hooks can be added as new `ToolNode` entries in the LangGraph graph withou
 The system is explicitly designed for extension. Adding a new service category (e.g., `MAINTENANCE_REQUEST`) requires:
 
 1. Define a new `StageDefinition` in `handover_schema.py` (or a new schema file).
-2. Add the entry to `SERVICE_REQUEST_AGENT_REGISTRY` in `service_request_registry.py`.
+2. Add the entry to `SERVICE_REQUEST_AGENT_REGISTRY` in `registry.py`.
 3. Implement a set of LangGraph nodes (entry, extraction, validation, payload builder, submission).
 4. Wire the nodes into the graph with routing functions.
 5. Add a Pydantic schema for extracted fields.

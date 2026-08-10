@@ -490,6 +490,19 @@ The guard uses regex substring matching with a hardcoded threshold. It has no Un
 
 ---
 
+### Graph — Fitout Confirm Pipeline (FOS / END / TRADING)
+
+| Component | Status | Key Gap |
+|-----------|--------|---------|
+| `SUBCAT_CONFIG` branching (YES/NO radio) | ✅ Solid | Config-driven, no per-agent conditionals |
+| `APPROVE_ROLE_MAP` enforcement | ✅ Solid | Hard guard in submission node before any API call |
+| HITL confirmation (CREATE_SR + APPROVE_SR) | ✅ Solid | Same guard pattern as Handover |
+| Platform API submission (POST/PATCH) | ⚠️ Partial | No 429/retry — same gap as Handover (S9) |
+| Lease lookup | ⚠️ Partial | No retry on lease API |
+| Cancel-SR sub-flow | ✅ Solid | CANCEL_PENDING → PATCH cancel → clear state |
+
+---
+
 ### Persistence (`app/db/`, `app/services/conversation_state_service.py`)
 
 | Component | Status | Key Gap |
@@ -536,6 +549,7 @@ The guard uses regex substring matching with a hardcoded threshold. It has no Un
 | Graph infrastructure | ⚠️ No | C5 (no graph timeout); C6 (silent persistence failure) |
 | FAQ / RAG path | ✅ Yes | None — fully fallback-safe |
 | Handover SR pipeline | ✅ Yes | S9 (no platform retry — operational) |
+| Fitout Confirm pipeline | ✅ Yes | S9 (no platform retry — same as Handover) |
 | Persistence / DB | ⚠️ No | S2 (pool tuning); S3/S4 (Redis) |
 | Observability | ✅ Yes | Minor gaps (S10, N3) |
 | **Overall** | **⚠️ Not yet** | **7 critical items to close** |

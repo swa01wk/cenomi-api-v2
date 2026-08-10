@@ -234,7 +234,7 @@ sequenceDiagram
 
 ## 4. LangGraph Agent Graph
 
-**File:** `app/agents/graph/help_agent_graph.py`  (`service_request_graph.py` is a backward-compat re-export stub that delegates here.)
+**File:** `app/agents/graph/help_agent_graph.py`
 
 The graph is compiled once at application startup as a singleton via `get_compiled_help_graph()`. Each HTTP turn calls `ainvoke(initial_state)` on this compiled graph from scratch — there is **no LangGraph interrupt/resume mechanism**. Conversation continuity is achieved by loading state from PostgreSQL at `load_session_node`. The graph currently contains **26 nodes** spanning session management, routing (Help Agent + FAQ), stage entry, data pipeline, confirmation gates, payload builders, submission, and finalization.
 
@@ -1377,7 +1377,7 @@ For each decorated node:
 |---|---|
 | `GET /api/observability/traces` | Paginated trace list (`session_id`, `agent`, `status`, `limit`, `offset`) |
 | `GET /api/observability/traces/{trace_id}` | Trace detail with full run tree |
-| `POST /api/observability/feedback` | Submit user feedback (`score`, `label`, `comment`) |
+| `POST /api/observability/traces/{trace_id}/feedback` | Submit user feedback (`score`, `label`, `comment`) |
 | `GET /api/v1/observability/metrics/summary` | Aggregate metrics counters |
 
 Admin UI at `/admin/agent-observability` — components: `TraceList`, `TraceDetail`, `ReplayViewer`, `LLMCallViewer`, `ToolCallViewer`, `StateDiffViewer`.

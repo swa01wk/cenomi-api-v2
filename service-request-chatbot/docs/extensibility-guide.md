@@ -38,6 +38,11 @@ SERVICE_REQUEST_AGENT_REGISTRY = {
             "display_name": "RDD Handover Agent",
             "schema_key": "handover_service_request_schema",
         },
+        "HANDED_OVER": {
+            "agent_name": "rdd_handover_agent",
+            "display_name": "RDD Handover Agent",
+            "schema_key": "handover_service_request_schema",
+        },
         "FIT_OUT_CONFIRM_FOS": {
             "agent_name": "rdd_fitout_start_agent",
             "display_name": "RDD Fitout Start Agent",
@@ -74,8 +79,8 @@ SERVICE_REQUEST_AGENT_REGISTRY = {
 ```python
 STAGE_REGISTRY: dict[str, StageDefinition] = {
     "CREATE_SR":  CREATE_SR_STAGE,
-    "FM_REVIEW":  FM_REVIEW_STAGE,   # schema complete; nodes not yet wired
-    "RDD_REVIEW": RDD_REVIEW_STAGE,  # schema complete; nodes not yet wired
+    "FM_REVIEW":  FM_REVIEW_STAGE,   # fully implemented
+    "RDD_REVIEW": RDD_REVIEW_STAGE,  # fully implemented
 }
 ```
 

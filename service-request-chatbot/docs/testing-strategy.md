@@ -6,7 +6,7 @@ Tests live under `backend/tests/` and are split into four layers:
 
 ```
 backend/tests/
-├── unit/          # Pure function and service tests (41+ files)
+├── unit/          # Pure function and service tests (50+ files)
 ├── integration/   # Compiled graph with mocked LLM/API/DB
 ├── e2e/           # Full HTTP stack via ASGI transport
 └── eval/          # Live HTTP eval suite (NOT pytest — requires running backend)
@@ -38,10 +38,8 @@ pytest tests/e2e/
 | `handover_entry_node` | `app.agents.graph.nodes.handover.handover_entry_node` | |
 | `validation_node` | `app.agents.graph.nodes.handover.validation_node` | |
 | `lease_lookup_node` | `app.agents.graph.nodes.handover.lease_lookup_node` | |
-| `agent registry` | `app.agents.registry` | (was `service_request_registry`) |
+| `agent registry` | `app.agents.registry` | |
 | `workflow_config` | `app.agents.registries.workflow_config` | |
-
-Backward-compat re-export stubs exist at all old paths — existing tests continue to work unchanged.
 
 ---
 
@@ -56,7 +54,7 @@ Backward-compat re-export stubs exist at all old paths — existing tests contin
 |------|--------------|
 | `test_security_guardrails.py` | Injection detection, confirmation bypass prevention, validation blocking submission, backend field protection |
 | `test_handover_schema.py` | `CREATE_SR_STAGE` required fields, `HandoverExtractedFields` validator stripping backend-only keys, `EXTRACTABLE_FIELDS` membership |
-| `test_service_request_graph.py` | Routing functions (`_route_after_*`) with various state combinations |
+| `test_help_agent_graph.py` | Routing predicates (`_route_after_*`), RBAC, `_SR_ACTION_INTENTS` |
 | `test_supervisor_node.py` | Intent classification including `ASK_HELP`, confidence thresholding, `SupervisorDecision` parsing |
 | `test_field_extraction_node.py` | LLM extraction, confidence filtering, field merge |
 | `test_merge_state_node.py` | Backend field protection, confidence threshold (0.6), `collected_data` update |
@@ -438,6 +436,10 @@ markers = [
 | **Work Permit PermissionService enforcement** | ✅ `test_work_permit_permissions.py` — `TestPermissionServiceWP` | — | — | — |
 | **Work Permit validation (type enum)** | ✅ `test_work_permit_permissions.py` — `TestWorkPermitValidation` | — | — | — |
 | **WP submission node permission guard** | ✅ `test_work_permit_permissions.py` — `TestWorkPermitSubmissionGuard` | — | — | — |
+| **Fitout confirm SUBCAT_CONFIG / `get_missing_fields`** | ✅ `test_fitout_confirm_schema.py` | — | — | Tier 8 S70–S83 |
+| **Fitout confirm payload builder (YES/NO branches, FOS/END/TRADING)** | ✅ `test_fitout_confirm_payload_builder.py` | — | — | Tier 8 |
+| **Fitout confirm validation node** | ✅ `test_fitout_confirm_validation.py` | — | — | Tier 8 |
+| **WorkflowConfig — all 5 agents registered** | ✅ `test_workflow_config.py` (extended) | — | — | — |
 
 ---
 
@@ -448,6 +450,9 @@ markers = [
 | `tests/unit/test_document_count_validation.py` | Unit | 40+ | `validate_document_count` for FM/RDD; new doc types `SR_HANDOVER_OTHER` and `SR_REJECTED_HANDOVER_REPORT`; `ValidationService.validate_draft()` integration |
 | `tests/unit/test_work_permit_permissions.py` | Unit | 30+ | WP actions in `ACTION_PERMISSION_MAP`; role map; `PermissionService.check()`; WP validation (enum); `work_permit_api_submission_node` guard |
 | `tests/unit/test_confirmation_node.py` — `TestStageSpecificConfirmationCards` | Unit | 22 (added to existing file) | FM card shows `unit_readiness_date`/`expected_handover_date`; RDD card shows dates + `guideLineLink`; neither shows CREATE_SR-only fields |
+| `tests/unit/test_fitout_confirm_schema.py` | Unit | 14+ | `SUBCAT_CONFIG` structure; `get_missing_fields` YES/NO branch; `APPROVE_ROLE_MAP`; `build_title` |
+| `tests/unit/test_fitout_confirm_payload_builder.py` | Unit | 20+ | CREATE/APPROVE payload shape; YES branch (actual date set, planned empty); NO branch (planned dates + delay_reason); FOS vs END vs TRADING differences |
+| `tests/unit/test_fitout_confirm_validation.py` | Unit | 10+ | Validation node with fitout confirm WorkflowConfig; radio-field gating; missing-field ordering |
 
 ### Run new tests in isolation
 

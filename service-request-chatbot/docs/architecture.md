@@ -180,7 +180,7 @@ graph TD
   - `POST /api/v1/upload`
   - `GET /api/observability/traces`, `GET /api/observability/traces/{id}`
   - `GET /api/observability/sessions/{session_id}/replay`
-  - `POST /api/observability/feedback`
+  - `POST /api/observability/traces/{trace_id}/feedback`
   - `GET /api/v1/observability/metrics/summary`
   - `POST /api/v1/chat` — **MSP Platform help chat (sync)** — contractually pinned to v1
   - `POST /api/v1/chat/stream` — **MSP Platform help chat (SSE)** — contractually pinned to v1
@@ -225,7 +225,7 @@ graph TD
 
 ## LangGraph Architecture
 
-The main graph is defined in `app/agents/graph/help_agent_graph.py` and compiled once as a singleton (`get_compiled_help_graph()`). `service_request_graph.py` is a backward-compat re-export stub that delegates to the helper graph.
+The main graph is defined in `app/agents/graph/help_agent_graph.py` and compiled once as a singleton (`get_compiled_help_graph()`).
 
 The helper graph adds a **FAQ path** (ASK_HELP / UNKNOWN intent → `faq_node` → `response_generation`) and **RBAC enforcement** in `supervisor_node` on top of the core SR workflow nodes.
 
@@ -417,6 +417,8 @@ erDiagram
 - `001_initial_schema.py` — domain tables: `chat_sessions`, `chat_messages`, `service_request_drafts`, `service_request_chat_audit_logs`, and legacy observability stubs.
 - `002_agent_observability.py` — agent observability tables: `agent_traces`, `agent_runs`, `agent_state_snapshots`, `agent_state_diffs`, `agent_llm_calls`, `agent_tool_calls`, `agent_feedback`.
 - `003_users.py` — `users` table for JWT-based local auth: `username`, `email`, `password_hash` (bcrypt), `role`, `unique_property_ids`, `mall_names`, `is_global_admin`, `is_active`.
+- `004_rename_rdd_agent.py` — renames RDD agent references in schema.
+- `005_rename_agents.py` — renames fitout confirm agent identifiers.
 
 **ORM:** Async SQLAlchemy with asyncpg driver (`DATABASE_URL` must use `postgresql+asyncpg://...`).
 

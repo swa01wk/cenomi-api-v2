@@ -191,7 +191,7 @@ Full request/response schemas: [`docs/api-reference.md`](docs/api-reference.md).
 |------|-------|
 | [`docs/architecture.md`](docs/architecture.md) | System design, LangGraph execution model, DB schema, integrations |
 | [`docs/api-reference.md`](docs/api-reference.md) | Full HTTP API reference |
-| [`docs/agent-design.md`](docs/agent-design.md) | Agent and graph node design |
+| [`docs/agent-design-complete.md`](docs/agent-design-complete.md) | Agent and graph node design |
 | [`docs/handover-workflow.md`](docs/handover-workflow.md) | CREATE_SR sequence and schema |
 | [`docs/security-guardrails.md`](docs/security-guardrails.md) | Injection guard, confirmation guards, submission guards |
 | [`docs/observability.md`](docs/observability.md) | Observability data model and behavior |

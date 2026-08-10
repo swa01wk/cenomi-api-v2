@@ -98,7 +98,7 @@ graph TB
 
         ORCH["ChatOrchestrationService\nJWT → AuthContext\nInjection guard\nTrace lifecycle"]
 
-        subgraph GraphLayer["LangGraph (24 nodes)"]
+        subgraph GraphLayer["LangGraph (26 nodes)"]
             LS["load_session"]
             SV["supervisor\nLLM intent + RBAC"]
             FAQ["faq_node\nLLM + FAQ prompt"]
@@ -354,7 +354,7 @@ ROLE_PERMITTED_INTENTS = {
 
 ## 6. The Help Agent Graph
 
-### Full graph (24 nodes)
+### Full graph (26 nodes)
 
 ```mermaid
 flowchart TD
@@ -1317,7 +1317,7 @@ graph TD
 |---|---|
 | `GET /api/observability/traces` | Paginated trace list |
 | `GET /api/observability/traces/{trace_id}` | Full trace with run tree |
-| `POST /api/observability/feedback` | User feedback (`score`, `label`, `comment`) |
+| `POST /api/observability/traces/{trace_id}/feedback` | User feedback (`score`, `label`, `comment`) |
 | `GET /api/v1/observability/metrics/summary` | Aggregate metrics |
 
 ### Redaction policy
@@ -1494,15 +1494,15 @@ backend/
 │   │       └── upload.py                POST /api/v1/upload
 │   ├── agents/
 │   │   ├── graph/
-│   │   │   ├── help_agent_graph.py    ← MAIN GRAPH (24 nodes, all routing)
-│   │   │   ├── service_request_graph.py ← Backward-compat stub → helper graph
+│   │   │   ├── help_agent_graph.py    ← MAIN GRAPH (26 nodes, all routing)
 │   │   │   ├── state.py                 ServiceRequestGraphState TypedDict
 │   │   │   └── nodes/
 │   │   │       ├── supervisor_node.py   ← At root for test patching compat
 │   │   │       ├── document_upload_node.py ← FM/RDD document partitioning
 │   │   │       ├── shared/              load_session, save_state, registry, sr_status_sync, response_gen
 │   │   │       ├── faq/                 faq_node.py
-│   │   │       └── handover/            All SR workflow nodes (17 files)
+│   │   │       ├── handover/            All handover SR workflow nodes (18 files)
+│   │   │       └── fitout_confirm/      All fitout confirmation nodes (8 files)
 │   │   ├── prompts/
 │   │   │   ├── supervisor_prompt.py     SUPERVISOR_SYSTEM_PROMPT (7 intents including ASK_HELP)
 │   │   │   ├── faq_prompt.py            FAQ_SYSTEM_PROMPT (editable knowledge)
@@ -1513,8 +1513,7 @@ backend/
 │   │   │   ├── handover_schema.py       Stage definitions, field sets, BACKEND_COMPUTED_FIELDS
 │   │   │   └── supervisor_schema.py     SupervisorDecision Pydantic model
 │   │   ├── registries/
-│   │   │   ├── workflow_config.py       ← WorkflowConfig + per-workflow registration (NEW)
-│   │   │   └── service_request_registry.py ← Compat stub → agents/registry.py
+│   │   │   └── workflow_config.py       ← WorkflowConfig + per-workflow registration
 │   │   ├── registry.py                  SERVICE_REQUEST_AGENT_REGISTRY
 │   │   ├── llm/
 │   │   │   └── gateway.py               LLMGateway.complete_json() (JSON mode, T=0)

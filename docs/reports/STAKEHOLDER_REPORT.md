@@ -523,7 +523,7 @@ Twenty-four technical documentation files totalling approximately **18,000+ line
 | `REPORT.md` (root) | UAT readiness report — 12 sections covering all phases and RBAC |
 | `docs/agent-design-complete.md` | Authoritative node-by-node reference — all 26 nodes, routing, state schema, LLM calls |
 | `docs/help-agent-pipeline.md` | Help Agent design — all 4 workflows, RBAC, lifecycle, API reference |
-| `docs/rdd-agent.md` | RDD agent lifecycle architecture (3-phase deep-dive) |
+| `docs/rdd-handover-agent.md` | RDD agent lifecycle architecture (3-phase deep-dive) |
 | `docs/architecture.md` | System architecture — frontend/backend contract, DB schema, integration diagram |
 | `docs/database.md` | Database schema, models, migrations |
 | `docs/handover-workflow.md` | CREATE_SR / FM_REVIEW / RDD_REVIEW stage definitions, payload shapes, sequence diagrams |

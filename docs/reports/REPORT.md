@@ -490,7 +490,7 @@ cd ../frontend && npm run dev
 ### Reset between test runs
 
 ```bash
-curl -X POST http://localhost:8000/dev/mock/reset
+curl -X POST http://localhost:8000/api/v1/dev/mock/reset
 ```
 
 ---
@@ -504,7 +504,7 @@ curl -X POST http://localhost:8000/dev/mock/reset
 | [`service-request-chatbot/docs/architecture.md`](service-request-chatbot/docs/architecture.md) | System design, DB schema, integrations |
 | [`service-request-chatbot/docs/agent-design-complete.md`](service-request-chatbot/docs/agent-design-complete.md) | Authoritative LangGraph agent design reference |
 | [`service-request-chatbot/docs/help-agent-pipeline.md`](service-request-chatbot/docs/help-agent-pipeline.md) | Help Agent pipeline, taxonomy, RBAC, FAQ RAG |
-| [`service-request-chatbot/docs/rdd-agent.md`](service-request-chatbot/docs/rdd-agent.md) | RDD agent lifecycle architecture (3-phase) |
+| [`service-request-chatbot/docs/rdd-handover-agent.md`](service-request-chatbot/docs/rdd-handover-agent.md) | RDD agent lifecycle architecture (3-phase) |
 | [`service-request-chatbot/docs/handover-workflow.md`](service-request-chatbot/docs/handover-workflow.md) | Handover CREATE_SR field schema and sequence |
 | [`service-request-chatbot/docs/api-reference.md`](service-request-chatbot/docs/api-reference.md) | Full HTTP API reference |
 | [`service-request-chatbot/docs/database.md`](service-request-chatbot/docs/database.md) | Database schema, models, migrations |

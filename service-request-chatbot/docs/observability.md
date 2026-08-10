@@ -231,5 +231,5 @@ The Admin UI is at `/admin/agent-observability` in the Next.js frontend.
 - `GET /api/observability/traces` — paginated trace list (params: `session_id`, `agent`, `status`, `intent`, `page`, `page_size`). Response: `{ items, total, page, page_size, has_next }`.
 - `GET /api/observability/traces/{trace_id}` — trace detail: flat `runs[]`, `state_snapshots[]`, `state_diffs[]`, `llm_calls[]`, `tool_calls[]`, `feedback[]` + `run_tree`.
 - `GET /api/observability/sessions/{session_id}/replay` — all traces for a session oldest-first, each fully enriched. Used by `eval_session.py` for post-hoc scoring.
-- `POST /api/observability/feedback` — submit user feedback on a trace turn.
+- `POST /api/observability/traces/{trace_id}/feedback` — submit user feedback on a trace turn.
 - `GET /api/v1/observability/metrics/summary` — aggregate metrics: `total_traces`, `success_rate`, `failed_traces`, `avg_latency_ms`, `total_tokens`, `total_cost`.

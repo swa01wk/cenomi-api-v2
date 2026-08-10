@@ -50,12 +50,15 @@ OpenAI (LLM — GPT-4o-mini or configured model)
 Cenomi Platform APIs (SR create/patch/fetch, Lease lookup, File upload)
 ```
 
-### Three agents in one graph
+### Six agents in one graph
 
 | Agent | Trigger | Description |
 |-------|---------|-------------|
 | `help_agent` | Every message | Supervisor — classifies intent, routes to FAQ or SR workflow |
-| `rdd_handover_agent` | Handover SR intents | Full 3-phase handover lifecycle (CREATE_SR → FM_REVIEW → RDD_REVIEW) |
+| `rdd_handover_agent` | Handover SR intents | Full 3-phase handover lifecycle (CREATE_SR → FM_REVIEW → RDD_REVIEW); also Path B (HANDED_OVER fast-path) |
+| `rdd_fitout_start_agent` | `FIT_OUT_CONFIRM_FOS` intent | Fitout Start Confirmation — CREATE_SR + APPROVE_SR (DD_ENGINEER) |
+| `rdd_fitout_end_agent` | `FIT_OUT_CONFIRM_END` intent | Fitout End Confirmation — CREATE_SR + APPROVE_SR (DD_ENGINEER) |
+| `rdd_trading_confirmation_agent` | `FIT_OUT_CONFIRM_TRADING` intent | Trading Confirmation — CREATE_SR + APPROVE_SR (MALL_MANAGER / OPERATIONS) |
 | `work_permit_agent` | Work permit intent | Single-stage work permit SR creation |
 
 ---
@@ -73,7 +76,7 @@ Cenomi Platform APIs (SR create/patch/fetch, Lease lookup, File upload)
 | Playwright live — FM/RDD eval + full lifecycle | 14 | ✅ 14/14 |
 | Playwright live — UI lifecycle | 16 | ✅ 16/16 |
 
-### Priority lifecycle test suite (68 tests — run these for UAT validation)
+### Priority lifecycle test suite (82 tests — run these for UAT validation)
 
 | File | Tests | What it covers |
 |------|-------|---------------|
@@ -82,6 +85,7 @@ Cenomi Platform APIs (SR create/patch/fetch, Lease lookup, File upload)
 | `integration/test_fm_review_e2e.py` | 14 | Phase 2 pipeline: doc upload bridge, date auto-calc, payload shape (IN_PROCESS vs APPROVED), wrong-role denial |
 | `integration/test_rdd_review_e2e.py` | 16 | Phase 3a + 3b: report upload, REPORT_SUBMITTED payload, DD/MM/YYYY format, chained 3a→3b flow |
 | `integration/test_role_stage_access.py` | 21 | RBAC matrix: every role × every stage entry/submit/approve action |
+| `unit/test_fitout_confirm_schema.py` | 14 | SUBCAT_CONFIG, `get_missing_fields` (YES/NO branch), `APPROVE_ROLE_MAP`, `build_title` |
 
 ---
 
@@ -327,7 +331,7 @@ cd service-request-chatbot
 
 ## 9. Manual UAT — How to Run
 
-See `docs/manual-testing-guide.md` for the full step-by-step guide.
+See `docs/e2e-user-testing-guide.md` for the full step-by-step guide.
 
 ### Quick start
 
@@ -361,7 +365,7 @@ open http://localhost:3000
 ### Reset between test runs
 
 ```bash
-curl -X POST http://localhost:8000/dev/mock/reset
+curl -X POST http://localhost:8000/api/v1/dev/mock/reset
 ```
 
 ### Mock leases available (in mock mode)
@@ -535,6 +539,7 @@ The `AuthContext` dataclass is the internal wall. Everything to the right of it 
 | Item | Note |
 |------|------|
 | Work Permit agent (`work_permit_agent`) | Graph nodes and schema exist. Not part of the Handover lifecycle UAT scope |
+| Fitout Confirm agents (FOS / END / TRADING) | Fully implemented and eval-covered (Tier 8 — S70–S83). Separate UAT track from the Handover lifecycle; run `./run_agent_eval.sh --no-start --tier 8` to validate |
 | "Ask for more information" action | Mentioned in RDD lifecycle spec as needing product team clarification — not implemented |
 | "Assign To" action | Same — pending product clarification |
 | Webhook / push for platform status changes | Status sync is pull-based (called each turn). Real-time push is not implemented |
