@@ -156,29 +156,39 @@ async def fm_review_entry_node(state: ServiceRequestState) -> dict[str, Any]:
         backend_refs["fm_action"] = "approve"
         return {"backend_refs": backend_refs, "confirmation_status": "CONFIRMED", "status": "IN_PROGRESS"}
 
-    if action_override in ("cancel", "cancel_fm"):
-        log.info("fm_review_entry.action_cancel")
+    if action_override in ("cancel", "cancel_fm", "cancel_update"):
+        # Soft cancel: drop pending confirmation / staged fm_action only.
+        # Do NOT clear collected_data, documents, sr_id, or workflow_stage —
+        # that felt like a full workflow reload and forced re-collection.
+        log.info("fm_review_entry.action_cancel", action=action_override)
+        backend_refs.pop("fm_action", None)
+        message = (
+            "Update cancelled. Your FM review progress is still saved. "
+            "What would you like to do next?"
+            if action_override == "cancel_update"
+            else (
+                "Action cancelled. Your FM review progress is still saved. "
+                "You can save progress, approve, or continue editing."
+            )
+        )
         return {
             "confirmation_status": "REJECTED",
             "status": "WAITING_FOR_USER",
-            "response_message": "Action cancelled. What would you like to do next?",
+            "backend_refs": backend_refs,
+            "response_message": message,
         }
 
     if action_override == "reject_fm_review":
+        # Platform reject PATCH contract is not wired yet — keep as explicit stub.
         log.info("fm_review_entry.action_reject")
         return {
             "status": "WAITING_FOR_USER",
             "response_message": (
-                "FM review has been marked for rejection. "
-                "Please provide a rejection reason or contact the tenant."
+                "Reject via the AI assistant is not available yet. "
+                "Please use the Action menu on the Service Request form to reject, "
+                "or ask the product team to enable AI reject once the platform "
+                "reject API contract is confirmed."
             ),
-        }
-
-    if action_override == "cancel_update":
-        log.info("fm_review_entry.action_cancel")
-        return {
-            "status": "WAITING_FOR_USER",
-            "response_message": "Update cancelled. What would you like to do next?",
         }
 
     if action_override == "upload_document":

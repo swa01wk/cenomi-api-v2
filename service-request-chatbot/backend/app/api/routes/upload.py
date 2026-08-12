@@ -490,6 +490,7 @@ async def delete_uploaded_document(
     resolved_lease = lease_id or ""
     resolved_sr = sr_id or ""
     resolved_session: UUID | None = None
+    draft_backend: dict[str, Any] = {}
     if session_id:
         try:
             resolved_session = UUID(session_id)
@@ -497,8 +498,21 @@ async def delete_uploaded_document(
             draft = await draft_repo.get_by_session(resolved_session)
             if draft:
                 collected = dict(draft.collected_data or {})
+                # Mirror upload_document: draft stores refs inside collected_data.
+                draft_backend = {
+                    "lease_id": collected.get("lease_id", ""),
+                    "brand_id": collected.get("brand_id", ""),
+                    "property_id": collected.get("property_id", ""),
+                    "lease_code": collected.get("lease_code", ""),
+                    "tenant_profile_id": collected.get("tenant_profile_id", ""),
+                    "contract_id": collected.get("contract_id", ""),
+                }
                 if not resolved_lease:
-                    resolved_lease = str(collected.get("lease_id") or "")
+                    resolved_lease = str(
+                        collected.get("lease_id")
+                        or collected.get("contract_id")
+                        or ""
+                    )
                 if not resolved_sr and draft.sr_id:
                     resolved_sr = str(draft.sr_id)
         except (ValueError, Exception) as exc:
@@ -507,7 +521,45 @@ async def delete_uploaded_document(
     from app.core.config import settings as _settings
     from app.agents.services.platform_api_client import get_platform_client
 
-    _in_mock_mode = not bool(_settings.service_request_api_base_url)
+    _in_mock_mode = (
+        not bool(_settings.service_request_api_base_url)
+        or _settings.service_request_use_mock
+    )
+
+    # Same hydrate path as upload: FM/RDD drafts often lack numeric lease_id.
+    if not _in_mock_mode and not resolved_lease and resolved_sr:
+        draft_backend = await _hydrate_backend_refs_from_platform(
+            resolved_sr, draft_backend, auth
+        )
+        resolved_lease = str(
+            draft_backend.get("lease_id") or draft_backend.get("contract_id") or ""
+        )
+        if resolved_lease and resolved_session:
+            try:
+                draft_repo = ServiceRequestDraftRepository(db)
+                draft = await draft_repo.get_by_session(resolved_session)
+                if draft:
+                    merged_collected = dict(draft.collected_data or {})
+                    for key in (
+                        "lease_id",
+                        "contract_id",
+                        "brand_id",
+                        "property_id",
+                        "lease_code",
+                        "tenant_profile_id",
+                    ):
+                        if not merged_collected.get(key) and draft_backend.get(key) not in (
+                            None,
+                            "",
+                            0,
+                        ):
+                            merged_collected[key] = draft_backend[key]
+                    await draft_repo.update(
+                        draft.id, {"collected_data": merged_collected}
+                    )
+                    await db.commit()
+            except Exception as exc:
+                logger.warning("delete_upload: lease hydrate persist failed — %s", exc)
 
     if not _in_mock_mode:
         ctx_token = set_current_auth_context(auth)

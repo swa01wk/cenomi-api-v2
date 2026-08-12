@@ -15,6 +15,23 @@ log = structlog.get_logger(__name__)
 class AzureOpenAIEmbeddingProvider:
     """Embed text using the Azure OpenAI embeddings endpoint."""
 
+    @classmethod
+    def from_settings(cls) -> AzureOpenAIEmbeddingProvider:
+        """Instantiate using application ``Settings``."""
+        from app.core.config import settings
+
+        if not settings.azure_ai_endpoint or not settings.azure_ai_api_key:
+            raise RuntimeError(
+                "AZURE_AI_ENDPOINT and AZURE_AI_API_KEY are required "
+                "when EMBEDDING_PROVIDER=azure_openai."
+            )
+        return cls(
+            azure_endpoint=settings.azure_ai_endpoint,
+            api_key=settings.azure_ai_api_key,
+            model=settings.embedding_model,
+            api_version=settings.azure_ai_api_version,
+        )
+
     def __init__(
         self,
         azure_endpoint: str,

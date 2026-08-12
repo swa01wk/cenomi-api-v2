@@ -64,10 +64,12 @@ export async function deleteDocument(
   documentId: string,
   sessionId: string,
   srId?: string | null,
+  leaseId?: string | null,
 ): Promise<{ document_id: string; status: string }> {
   const token = getStoredToken();
   const params = new URLSearchParams({ document_id: documentId, session_id: sessionId });
   if (srId) params.set("sr_id", srId);
+  if (leaseId) params.set("lease_id", leaseId);
 
   const headers: Record<string, string> = {};
   if (token) headers["Authorization"] = `Bearer ${token}`;

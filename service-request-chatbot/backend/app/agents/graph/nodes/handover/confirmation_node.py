@@ -75,8 +75,19 @@ _FIELD_LABELS: dict[str, str] = {
 }
 
 # Fields the user may inline-edit on the CREATE_SR card.
+# lease_code is editable so users can correct a wrong lease; merge clears
+# resolved IDs and lease_lookup revalidates the new code.
 _CREATE_SR_EDITABLE: frozenset[str] = frozenset(
-    {"title", "description", "startDate", "endDate", "inspection_done_by", "notes", "comments"}
+    {
+        "lease_code",
+        "title",
+        "description",
+        "startDate",
+        "endDate",
+        "inspection_done_by",
+        "notes",
+        "comments",
+    }
 )
 
 # Fields the user may inline-edit on the FM_REVIEW card.
@@ -249,6 +260,10 @@ def _build_confirmation_card(
             "APPROVED",
             "APPROVED_WITH_CHANGES",
             "DISAPPROVED",
+        ],
+        "inspection_done_by": [
+            "FM_MANAGER",
+            "OPERATIONS",
         ],
     }
 

@@ -16,6 +16,21 @@ log = structlog.get_logger(__name__)
 class OpenAIEmbeddingProvider:
     """Embed text using the standard OpenAI embeddings API."""
 
+    @classmethod
+    def from_settings(cls) -> OpenAIEmbeddingProvider:
+        """Instantiate using application ``Settings``."""
+        from app.core.config import settings
+
+        if not settings.openai_api_key:
+            raise RuntimeError(
+                "OPENAI_API_KEY is required when EMBEDDING_PROVIDER=openai."
+            )
+        return cls(
+            api_key=settings.openai_api_key,
+            model=settings.embedding_model,
+            base_url=settings.embedding_base_url,
+        )
+
     def __init__(
         self,
         api_key: str,

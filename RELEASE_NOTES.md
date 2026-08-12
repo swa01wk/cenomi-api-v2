@@ -2,140 +2,16 @@
 
 ---
 
-## v1.5.0 — July 31, 2026
+## v1.4.1 — July 22, 2026 (Unreleased)
 
-> **Theme:** Expanded eval suite (27 tiers), Path B (Already Trading fast-path), Work Permit agent, FOS/END/TRADING sub-category support, and full lifecycle eval at 100% on Battle tier.
+> **Theme:** Lease eligibility reasons (`handover_exists` / `activation_pending`) + multi-file document uploads.
 
 ### What's new
 
-#### Path B — Already Trading Fast-Path (`CREATE_HANDED_OVER_SR`)
-
-A second SR creation path for tenants that are already trading in their unit, requiring no FM or RDD review:
-
-- `CREATE_HANDED_OVER_SR` intent added to `SupervisorDecision`
-- Single-phase collection: abbreviated field set (no FM/RDD dates required)
-- Auto-approved in the same transaction — no confirmation loop waiting for FM/DD
-- Routed via `rdd_handover_agent` under sub-category `HANDED_OVER`
-- Covered by eval tiers 4 (Happy) and 5 (Edge + Battle) — 100% pass rate
-
-#### Work Permit Agent
-
-`work_permit_agent` registered for `WORK_PERMIT` service category:
-
-- Single-stage SR creation (no multi-phase lifecycle)
-- Uses shared pipeline nodes: `field_extraction → merge_state → validation → confirmation → api_submission`
-- Registered in `SERVICE_REQUEST_AGENT_REGISTRY`
-
-#### FOS / END / TRADING Sub-Category Support
-
-`rdd_handover_agent` extended to handle three additional Fit Out sub-categories:
-
-| Sub-category | Eval tiers | Status |
-|---|---|---|
-| `FOS` (Fit Out Services) | 6a–6d, 6alc–6clc | ✅ 100% pass |
-| `END` | 6e–6g, 6elc–6flc | ✅ 100% pass |
-| `TRADING` | 6h–6j, 6hlc–6jlc | ✅ 100% pass |
-
-#### Expanded Eval Suite — 27 Tiers
-
-The eval suite has grown from 7 tiers (99 scenarios) to **27 tiers** covering the full agent scope:
-
-| Tier | Description | Scenarios | Pass % |
-|------|-------------|-----------|--------|
-| 0 | Smoke-Agent | 6 | 100% |
-| 0fm | Smoke FM lifecycle | 1 | 100% |
-| 0p | Smoke-Pipeline | 2 | 100% |
-| 1 | CREATE_SR Happy | 17 | 98.0% |
-| 2 | CREATE_SR Edge | 20 | 98.4% |
-| 3 | CREATE_SR Battle | 22 | 98.6% |
-| 3a | FM_REVIEW Happy | 2 | 100% |
-| 3b | FM_REVIEW Edge | 3 | 100% |
-| 3c | FM_REVIEW Battle+RBAC | 1 | 100% |
-| 3d | RDD_REVIEW Happy | 2 | 100% |
-| 3e | RDD_REVIEW Edge | 3 | 100% |
-| 3f | RDD_REVIEW Battle+RBAC | 1 | 100% |
-| 3g | Full LC Happy | 1 | 100% |
-| 3h | Full LC Edge | 3 | 100% |
-| 3i | Full LC Battle | 23 | 100% |
-| 4 | Handover B Happy (Path B) | 2 | 100% |
-| 5 | Handover B Edge+Battle | 8 | 100% |
-| 6a–6d | FOS Happy/Edge/Battle/LC | 12 | 100% |
-| 6e–6g | END Happy/Edge/LC | 8 | 100% |
-| 6h–6j | TRADING Happy/Edge/Battle/LC | 8 | 100% |
-| 8 | FAQ + RBAC | 6 | 100% |
-
-Remaining failures (6 scenarios — LLM variability, not bugs):
-
-| Scenario | Tier | Root cause |
-|---|---|---|
-| S4 | 1 | Mall-name-only partial search routing edge case |
-| S8 | 1 | Ambiguous opening delays confirmation card |
-| S23 | 2 | Brand single-match auto-resolve misroutes |
-| S32 | 2 | Multiple SRs in same session (known open gap) |
-| S37 | 3 | Cancel from confirmation card — change-mind vs cancel-SR |
-| S64 | 1 | Already-handovered field in confirmed payload |
-
-#### Eval Runner Script
-
-`run_agent_eval.sh` — wraps both `run_eval.py` and `run_lifecycle_eval.py` across all 27 tiers:
-
-```bash
-./run_agent_eval.sh                    # all tiers
-./run_agent_eval.sh --tier 1           # single tier
-./run_agent_eval.sh --tier 3a,3b,3c   # multiple tiers
-```
-
-Generates timestamped results folder under `results/eval_YYYYMMDD_HHMMSS/` with `REPORT.md` and per-scenario log files.
-
-#### Full Lifecycle Eval Improvements
-
-| Tier | July 18 | July 31 | Change |
-|---|---|---|---|
-| 3g — Full LC Happy | 75.8%* | 100% | +24.2pp |
-| 3h — Full LC Edge | 36.8% | 100% | +63.2pp |
-| 3i — Full LC Battle | 98.1% | 100% | +1.9pp |
-| 5 — Handover B Edge+Battle | 93.1% | 100% | +6.9pp |
-
-*July 18 figures reflect the previous 7-tier structure; direct comparison is approximate.
-
----
-
-### New files
-
-```
-Added
-  service-request-chatbot/docs/eval-setup-guide.md      ← full eval infrastructure reference
-  service-request-chatbot/docs/testing-strategy.md      ← test pyramid + node import paths
-  service-request-chatbot/docs/rdd-handover-agent.md    ← RDD agent lifecycle (replaces rdd-agent.md)
-
-Modified
-  HANDOVER.md                                           ← sections 1, 6, 11, 12, 13, 16 updated
-  RELEASE_NOTES.md                                      ← this file
-  backend/tests/eval/scenarios.py                       ← expanded to 64+ CREATE_SR scenarios
-  backend/tests/eval/lifecycle_scenarios.py             ← full lifecycle + Path B + FOS/END/TRADING
-  backend/tests/eval/run_eval.py                        ← 27 tier structure
-  backend/tests/eval/run_lifecycle_eval.py              ← FM/RDD/LC runner updated
-  backend/app/agents/registries/service_request_registry.py ← Path B + work_permit entries
-  backend/app/agents/graph/nodes/supervisor_node.py     ← CREATE_HANDED_OVER_SR intent
-  backend/app/agents/prompts/supervisor_prompt.py       ← Path B / work permit classification
-  service-request-chatbot/run_agent_eval.sh             ← 27-tier eval runner script
-```
-
----
-
-### Open items
-
-| Item | Priority | Notes |
-|------|----------|-------|
-| Gap 6 — `sr_status_sync_node` field name verification | High | 30-minute check once live platform credentials available |
-| S32 — Multiple SRs in same session | Medium | `sr_status_sync_node` routes to FM_REVIEW after first SR completed |
-| S4, S8, S23, S37, S64 — LLM variability | Low | Routing edge cases; all other tiers at 100% |
-| CI/CD pipeline | Medium | `./run-live-tests.sh` is the manual gate |
-| Redis session caching | Low | Performance optimisation — not a functional gap |
-| True SSE token streaming | Low | Requires LangGraph/gateway changes — deferred |
-| 7 frontend UI contract bindings | Medium | Agent emits correct signals; frontend binding only |
-
----
+- Empty lease-lookup responses honour platform `reason` instead of always saying “not found”
+- `ui.type = existing_handover` with SR deep link when a handover already exists
+- Multi-file document upload with coalesced chat refresh
+- Eval tracking: **S63**, **S64** (Tier 2), **L173** (Tier 6) — see `docs/CHANGELOG.md` and `docs/fix-notes/lease_eligibility_and_multifile_upload.md`
 
 ---
 
