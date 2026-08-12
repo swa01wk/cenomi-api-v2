@@ -2,6 +2,97 @@
 
 ---
 
+## v1.5.0 — 2026-08-12 (Unreleased / `dev`)
+
+> **Theme:** Multi-provider LLM adapter, pluggable embedding registry, and dynamic cost tracking  
+> **Merge commit:** `6542eca` — *feat: multi-provider LLM adapter, embedding registry, and dynamic cost tracking*  
+> **Source branch:** `feat/llm-adapter-cherrypick` merged into `dev`
+
+### What changed
+
+| Area | Change |
+|---|---|
+| LLM gateway | `gateway.py` fully replaced — now dispatches via `LLMProviderRegistry`; hardcoded OpenAI path removed |
+| LLM providers | New `OpenAIGateway`, `AzureOpenAIGateway`, `VertexAIGateway`; selected by `LLM_PROVIDER` env var |
+| LLM contract | `LLMProviderProtocol` + `BaseLLMGateway` + `LLMResult` dataclass (content, model, usage, provider) |
+| LLM registry | `LLMProviderRegistry` — class-level factory map + singleton instance cache |
+| Embedding registry | `EmbeddingProviderRegistry` replaces inline if/else in `integrations/factory.py` |
+| Vertex AI embeddings | New `VertexAIEmbeddingProvider` backed by `google-genai` |
+| Cost tracking | `cost_calculator.py` delegates to `litellm.completion_cost()`; `trace_manager.py` accumulates per-trace tokens + USD cost |
+| Config | `LLM_PROVIDER`, `AZURE_OPENAI_LLM_DEPLOYMENT`, `VERTEX_AI_PROJECT/LOCATION/MODEL`, `EMBEDDING_PROVIDER=vertex_ai` support added |
+| Supervisor / extraction nodes | `provider="openai"` hardcode replaced with `getattr(gateway, "provider_name", "openai")` |
+| Bug fix | Duplicate `obs_metrics` router at `prefix="/api"` removed from `app/main.py` |
+| Dependencies | `litellm>=1.40.0,<2.0.0` (core); `google-genai>=1.0.0` (optional `[vertex_ai]` extra) |
+
+---
+
+### File-level detail
+
+#### New files
+
+| File | Purpose |
+|---|---|
+| `app/agents/llm/base.py` | `LLMResult` · `LLMProviderProtocol` · `BaseLLMGateway` |
+| `app/agents/llm/registry.py` | `LLMProviderRegistry` — factory map + singleton cache |
+| `app/agents/llm/providers/__init__.py` | Package marker |
+| `app/agents/llm/providers/openai_provider.py` | `OpenAIGateway` |
+| `app/agents/llm/providers/azure_openai_provider.py` | `AzureOpenAIGateway` |
+| `app/agents/llm/providers/vertex_ai_provider.py` | `VertexAIGateway` |
+| `app/observability/cost_calculator.py` | Pure litellm cost delegation |
+| `app/integrations/embeddings/registry.py` | `EmbeddingProviderRegistry` |
+| `app/integrations/embeddings/vertex_ai_embed.py` | `VertexAIEmbeddingProvider` |
+| `tests/unit/test_llm_adapters.py` | LLM adapter + registry unit tests |
+| `tests/unit/test_embedding_adapters.py` | Embedding adapter + registry unit tests |
+
+#### Modified files
+
+| File | What changed |
+|---|---|
+| `app/agents/llm/gateway.py` | Full replacement — `LLMProviderRegistry.get(settings.LLM_PROVIDER)` replaces hardcoded OpenAI |
+| `app/core/config.py` | `LLM_PROVIDER`, `AZURE_OPENAI_LLM_DEPLOYMENT`, `VERTEX_AI_PROJECT`, `VERTEX_AI_LOCATION`, `VERTEX_AI_MODEL`, `EMBEDDING_PROVIDER` now includes `vertex_ai` |
+| `app/observability/trace_manager.py` | End-of-turn hook calls `calculate_llm_cost()`; `_trace_tokens` and `_trace_cost_usd` accumulators per trace |
+| `app/integrations/factory.py` | `create_embedding_provider()` delegates to `EmbeddingProviderRegistry.get(settings.EMBEDDING_PROVIDER)` |
+| `app/integrations/embeddings/openai_embed.py` | `from_settings(cls, settings)` classmethod added |
+| `app/integrations/embeddings/azure_openai_embed.py` | `from_settings(cls, settings)` classmethod added |
+| `app/agents/graph/nodes/supervisor_node.py` | `provider="openai"` → `provider=getattr(gateway, "provider_name", "openai")` |
+| `app/agents/graph/nodes/shared/field_extraction_node.py` | Same `provider_name` fix as supervisor |
+| `app/main.py` | Duplicate `include_router(obs_metrics.router, prefix="/api")` line removed |
+| `pyproject.toml` | `litellm>=1.40.0,<2.0.0` added to `[project.dependencies]`; `google-genai>=1.0.0` added under `[project.optional-dependencies] vertex_ai` |
+| `.env.example` | All new env vars documented with descriptions and example values |
+
+#### Unchanged on dev (merge conflicts resolved with `--ours`)
+
+These 5 files had conflicts because the cherry-pick branch carried stale non-LLM commits. Dev's more evolved versions were kept in full:
+
+| File | What dev has that the branch lacked |
+|---|---|
+| `nodes/shared/lease_lookup_node.py` | Fitout-confirm enrichment, `_LEASE_LOOKUP_PURPOSE_BY_AGENT`, `purpose` param |
+| `nodes/shared/merge_state_node.py` | `_DATE_TOKEN_RE`, `_OPTIONAL_SKIPPABLE_FIELDS`, `can_coerce_year` guard |
+| `nodes/shared/response_generation_node.py` | `verbatim` fitout-confirm early-return block |
+| `agents/services/lease_lookup_service.py` | `base_fitout_start_date/end/trading`, `_normalise_base_dates` validator |
+| `tests/eval/scenarios.py` | Original S63 (Path B) + S220–S235 scenario additions |
+
+---
+
+### Known issues (non-blocking, tracked for follow-up)
+
+| # | File | Issue | Severity |
+|---|---|---|---|
+| 1 | `azure_openai_provider.py`, `openai_provider.py` | `stream=True` sets flag but response read as non-stream — `AttributeError` dormant until a caller passes `stream=True` | Medium / dormant |
+| 2 | `vertex_ai_provider.py` | `tools` parameter silently ignored | Low |
+| 3 | `azure_openai_provider.py` | `AZURE_AI_ENDPOINT`/`AZURE_AI_API_KEY` shared with embedding provider | Low / deployment |
+| 4 | `registry.py` (both) | Class-level `_factories`/`_instances` dicts — cross-test state leakage with `pytest-xdist` parallel runs | Low / test |
+
+---
+
+### Migration notes
+
+No DB schema changes. No Alembic migrations required.
+
+New env vars are **additive and optional** — existing deployments continue to work with `LLM_PROVIDER=openai` (the default). Vertex AI support requires installing the `[vertex_ai]` extra and providing `VERTEX_AI_*` credentials.
+
+---
+
 ## v1.4.1 — 2026-07-22 (Unreleased / `doc_upload_fix`)
 
 > **Theme:** Lease lookup eligibility reasons + multi-file document uploads  

@@ -2,6 +2,96 @@
 
 ---
 
+## v1.5.0 — August 12, 2026 (Unreleased)
+
+> **Theme:** Multi-provider LLM adapter, pluggable embedding registry, and dynamic per-trace cost tracking.
+
+### What's new
+
+#### Multi-Provider LLM Adapter
+
+The gateway layer is now fully provider-agnostic. A new `LLMProviderRegistry` dispatches to any registered provider at startup; changing provider requires only an env-var change — no code change.
+
+| Provider | Class | Env var |
+|---|---|---|
+| OpenAI | `OpenAIGateway` | `LLM_PROVIDER=openai` |
+| Azure OpenAI | `AzureOpenAIGateway` | `LLM_PROVIDER=azure_openai` |
+| Vertex AI (Gemini) | `VertexAIGateway` | `LLM_PROVIDER=vertex_ai` |
+
+- `LLMProviderProtocol` + `BaseLLMGateway` define the contract — future providers implement one interface
+- `LLMResult` dataclass carries `content`, `model`, `usage` (prompt/completion/total tokens), and `provider` name
+- `supervisor_node` and `field_extraction_node` now read `provider_name` from the gateway instead of hardcoding `"openai"`
+
+#### Pluggable Embedding Registry
+
+`EmbeddingProviderRegistry` replaces the inline if/else in `integrations/factory.py`. Each existing provider (`OpenAIEmbeddingProvider`, `AzureOpenAIEmbeddingProvider`) gains a `from_settings()` classmethod. Vertex AI embeddings added as a new provider (`VertexAIEmbeddingProvider`, `google-genai` backed).
+
+#### Dynamic Cost Tracking
+
+`cost_calculator.py` delegates to `litellm.completion_cost()` — tracks token spend without vendoring pricing tables. `trace_manager.py` automatically calls `calculate_llm_cost()` at the end of every trace turn and accumulates per-trace `total_tokens` and `total_cost_usd` counters.
+
+#### New dependencies
+
+| Package | Version constraint | Extra |
+|---|---|---|
+| `litellm` | `>=1.40.0,<2.0.0` | core |
+| `google-genai` | `>=1.0.0` | `[vertex_ai]` optional |
+
+Install with Vertex AI support: `pip install '.[vertex_ai]'`
+
+#### New env vars (`.env.example` updated)
+
+```
+LLM_PROVIDER=openai                  # openai | azure_openai | vertex_ai
+AZURE_OPENAI_LLM_DEPLOYMENT=...      # Azure deployment name for the chat model
+VERTEX_AI_PROJECT=...
+VERTEX_AI_LOCATION=us-central1
+VERTEX_AI_MODEL=gemini-1.5-pro
+EMBEDDING_PROVIDER=openai            # openai | azure_openai | vertex_ai
+```
+
+### Known issues (non-blocking)
+
+| # | Location | Issue |
+|---|---|---|
+| 1 | `azure_openai_provider.py`, `openai_provider.py` | `stream=True` flag accepted but response read as non-stream — `AttributeError` if any caller passes `stream=True` (currently no callers do) |
+| 2 | `vertex_ai_provider.py` | `tools` kwarg silently ignored |
+| 3 | `azure_openai_provider.py` | `AZURE_AI_ENDPOINT` / `AZURE_AI_API_KEY` shared with embedding provider — no separate config for LLM vs embedding Azure resources |
+
+---
+
+### New files
+
+```
+Added
+  service-request-chatbot/backend/app/agents/llm/base.py
+  service-request-chatbot/backend/app/agents/llm/registry.py
+  service-request-chatbot/backend/app/agents/llm/providers/__init__.py
+  service-request-chatbot/backend/app/agents/llm/providers/openai_provider.py
+  service-request-chatbot/backend/app/agents/llm/providers/azure_openai_provider.py
+  service-request-chatbot/backend/app/agents/llm/providers/vertex_ai_provider.py
+  service-request-chatbot/backend/app/observability/cost_calculator.py
+  service-request-chatbot/backend/app/integrations/embeddings/registry.py
+  service-request-chatbot/backend/app/integrations/embeddings/vertex_ai_embed.py
+  service-request-chatbot/backend/tests/unit/test_llm_adapters.py
+  service-request-chatbot/backend/tests/unit/test_embedding_adapters.py
+
+Modified
+  backend/app/agents/llm/gateway.py              ← dispatches via LLMProviderRegistry
+  backend/app/core/config.py                     ← LLM_PROVIDER, VERTEX_AI_*, EMBEDDING_PROVIDER
+  backend/app/observability/trace_manager.py     ← per-trace token/cost accumulators
+  backend/app/integrations/factory.py            ← delegates to EmbeddingProviderRegistry
+  backend/app/integrations/embeddings/openai_embed.py     ← from_settings() classmethod
+  backend/app/integrations/embeddings/azure_openai_embed.py ← from_settings() classmethod
+  backend/app/agents/graph/nodes/supervisor_node.py       ← provider_name from gateway
+  backend/app/agents/graph/nodes/shared/field_extraction_node.py ← same provider_name fix
+  backend/app/main.py                            ← duplicate obs_metrics router removed
+  backend/pyproject.toml                         ← litellm + google-genai dependencies
+  backend/.env.example                           ← new env vars documented
+```
+
+---
+
 ## v1.4.1 — July 22, 2026 (Unreleased)
 
 > **Theme:** Lease eligibility reasons (`handover_exists` / `activation_pending`) + multi-file document uploads.
