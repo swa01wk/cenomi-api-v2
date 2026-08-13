@@ -264,6 +264,41 @@ class TestLeaseResolutionLogic:
             assert asked != "lease_code"
 
     @pytest.mark.asyncio
+    async def test_does_not_ask_company_after_lease_is_resolved(self) -> None:
+        """Successful lease lookup must not re-ask tenant/company when a backend
+        field (e.g. city) is empty on that lease — QA-only flake on some codes."""
+        collected = {
+            "lease_code": "t0031371",
+            "lease_id": 42,
+            "tenant_profile_id": 116,
+            "property_id": 3041,
+            "brand_id": 267,
+            "mall": "Jawharat Jeddah",
+            "brand": "Brand Under Armour",
+            "lease": "t0031371",
+            "unit_codes": ["FF050"],
+            "contracted_area": 420,
+            "lease_brand_mall": "t0031371 - Brand Under Armour - Jawharat Jeddah",
+            # city omitted — previously kept backend_missing true, so the next
+            # empty lease trigger (company) was asked even though the form
+            # already showed the tenant from the lease.
+        }
+        state = _state(
+            workflow_stage="CREATE_SR",
+            active_agent="rdd_handover_agent",
+            collected_data=collected,
+        )
+        result = await missing_field_node(state)
+        asked = (
+            result.get("response_ui", {}).get("field")
+            if result.get("status") == "WAITING_FOR_USER"
+            else None
+        )
+        assert asked != "company"
+        assert asked != "lease_code"
+        assert asked != "lease_brand_mall"
+
+    @pytest.mark.asyncio
     async def test_lease_code_question_text_is_from_question_map(self) -> None:
         """The question asked for lease_code must come from HANDOVER_FIELD_QUESTIONS."""
         from app.agents.services.missing_field_service import HANDOVER_FIELD_QUESTIONS

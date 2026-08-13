@@ -155,6 +155,80 @@ def _to_date_only(value: Any) -> Any:
     return value
 
 
+def _salvage_inspection_time(
+    collected: dict[str, Any],
+    extracted: dict[str, Any],
+    datetime_value: str,
+    field_name: str = "startDate",
+) -> None:
+    """Keep the time from a datetime extraction before ``_to_date_only`` strips it.
+
+    Start-date times update ``inspectionTime``. End-date times update only
+    ``endDateLT`` so they never overwrite the start clock.
+    """
+    from app.agents.services.payload_builder_service import extract_hhmm_from_datetime
+
+    salvaged = extract_hhmm_from_datetime(datetime_value)
+    if not salvaged:
+        return
+    if field_name == "endDate":
+        _apply_hhmm_to_date(
+            collected, "endDate", "endDateLT", salvaged, date_value=datetime_value
+        )
+        return
+    if "inspectionTime" in extracted:
+        return
+    collected["inspectionTime"] = salvaged
+
+
+def _is_end_date_turn(
+    extracted: dict[str, Any],
+    active_field: str | None,
+) -> bool:
+    """True when this turn's time belongs to the end date, not the start."""
+    if str(active_field or "") == "endDate":
+        return True
+    keys = set(extracted)
+    return "endDate" in keys and "startDate" not in keys
+
+
+def _apply_hhmm_to_date(
+    collected: dict[str, Any],
+    date_key: str,
+    lt_key: str,
+    hhmm: str,
+    date_value: Any = None,
+) -> None:
+    """Write ``*LT`` for one date from YYYY-MM-DD + HH:MM without touching the other."""
+    raw = date_value if date_value is not None else collected.get(date_key)
+    if not raw or not hhmm:
+        return
+    from app.agents.services.payload_builder_service import format_inspection_datetime_pair
+
+    _, lt_display = format_inspection_datetime_pair(
+        _to_date_only(raw), collected.get(lt_key), inspection_time=str(hhmm)
+    )
+    if lt_display:
+        collected[lt_key] = lt_display
+
+
+def _sync_inspection_lt_fields(collected: dict[str, Any]) -> None:
+    """Write startDateLT from start time; keep endDateLT's own time when set."""
+    from app.agents.services.payload_builder_service import extract_hhmm_from_datetime
+
+    start_time = collected.get("inspectionTime") or extract_hhmm_from_datetime(
+        str(collected.get("startDateLT") or "")
+    )
+    if start_time:
+        collected["inspectionTime"] = start_time
+        _apply_hhmm_to_date(collected, "startDate", "startDateLT", str(start_time))
+    end_time = extract_hhmm_from_datetime(
+        str(collected.get("endDateLT") or "")
+    ) or start_time
+    if end_time:
+        _apply_hhmm_to_date(collected, "endDate", "endDateLT", str(end_time))
+
+
 # Fields that become immutable once the lease has been confirmed via the API
 # (i.e. lease_id is present in collected_data).  Before lease resolution the
 # user must be free to provide / correct these identifiers; after resolution
@@ -306,6 +380,8 @@ async def merge_state_node(state: ServiceRequestState) -> dict[str, Any]:
             ):
                 continue
             if field_name in _USER_DATE_FIELDS and field_name not in _USER_TIME_FIELDS:
+                if field_name in ("startDate", "endDate") and isinstance(value, str):
+                    _salvage_inspection_time(collected, {}, value, field_name)
                 value = _to_date_only(value)
             collected[field_name] = value
 
@@ -380,17 +456,27 @@ async def merge_state_node(state: ServiceRequestState) -> dict[str, Any]:
             continue
 
         # Time fields: keep raw HH:MM, never strip via _to_date_only.
+        # A time extracted while answering endDate belongs on endDateLT only —
+        # never overwrite the start inspectionTime (2 PM start + 6 PM end).
         if field_name in _USER_TIME_FIELDS:
-            pass  # preserve value as-is
+            if field_name == "inspectionTime" and _is_end_date_turn(
+                extracted, state.get("active_field")
+            ):
+                _apply_hhmm_to_date(collected, "endDate", "endDateLT", str(new_value))
+                continue
         # Repair hallucinated years on bare dates (no year typed by the user).
         elif (
             can_coerce_year
             and field_name in _USER_DATE_FIELDS
             and isinstance(new_value, str)
         ):
+            if field_name in ("startDate", "endDate"):
+                _salvage_inspection_time(collected, extracted, new_value, field_name)
             new_value = _to_date_only(new_value)
             new_value = _coerce_year_if_absent(new_value, message_has_year)
         elif field_name in _USER_DATE_FIELDS:
+            if field_name in ("startDate", "endDate") and isinstance(new_value, str):
+                _salvage_inspection_time(collected, extracted, new_value, field_name)
             new_value = _to_date_only(new_value)
 
         current_value = collected.get(field_name)
@@ -589,10 +675,23 @@ async def merge_state_node(state: ServiceRequestState) -> dict[str, Any]:
     active_agent: str | None = state.get("active_agent")
     if (
         workflow_stage == "CREATE_SR"
-        and not collected.get("inspectionTime")
         and active_agent not in _FITOUT_AGENTS
     ):
-        collected["inspectionTime"] = datetime.datetime.now().strftime("%H:%M")
+        # A clock time typed this turn always wins — gpt-4o-mini often omits
+        # inspectionTime or hallucinates 09:00 (the prompt's documented default).
+        from app.agents.services.payload_builder_service import (
+            extract_hhmm_from_message,
+        )
+
+        msg_time = extract_hhmm_from_message(user_message)
+        if msg_time:
+            if _is_end_date_turn(extracted, state.get("active_field")):
+                _apply_hhmm_to_date(collected, "endDate", "endDateLT", msg_time)
+            else:
+                collected["inspectionTime"] = msg_time
+        if not collected.get("inspectionTime"):
+            collected["inspectionTime"] = datetime.datetime.now().strftime("%H:%M")
+        _sync_inspection_lt_fields(collected)
 
     # CREATE_SR / APPROVE_SR: when the user answers the yes/no radio in this
     # session (via extracted_fields — not silent form corrected_fields), mark

@@ -50,6 +50,8 @@ def test_build_review_decorations_fm_stage() -> None:
         "SR_COP_CHECKLIST_OTHER",  # Fix 2: SR_COP_CHECKLIST_OTHER replaced SR_HANDOVER_OTHER
     }
     assert "SR_HANDOVER_OTHER" not in {d["key"] for d in docs}
+    labels = {d["key"]: d["label"] for d in docs}
+    assert labels["SR_COP_CHECKLIST_OTHER"] == "Other"
 
 
 def test_build_review_decorations_fm_approve_when_ready() -> None:

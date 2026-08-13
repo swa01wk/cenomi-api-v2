@@ -212,7 +212,8 @@ class TestBuildDocumentUploadAskResponseDecorations:
     def test_fm_doc_keys_are_fm_types_only(self) -> None:
         result = build_document_upload_ask_response(_fm_state())
         deco = result["response_decorations"]
-        keys = {d["key"] for d in deco["document_requirement"]["documents"]}
+        docs = deco["document_requirement"]["documents"]
+        keys = {d["key"] for d in docs}
         assert keys == {
             "SR_HANDOVER_CHECKLIST",
             "SR_HANDOVER_SITE_SURVEY",
@@ -220,6 +221,8 @@ class TestBuildDocumentUploadAskResponseDecorations:
         }
         assert "SR_HANDOVER_OTHER" not in keys
         assert "DR_SR_HANDOVER_REPORT" not in keys
+        labels = {d["key"]: d["label"] for d in docs}
+        assert labels["SR_COP_CHECKLIST_OTHER"] == "Other"
 
     def test_rdd_decorations_contain_document_requirement(self) -> None:
         # Fix 6: guideLineLink + rdd_upload_doc_type must be collected before upload card appears

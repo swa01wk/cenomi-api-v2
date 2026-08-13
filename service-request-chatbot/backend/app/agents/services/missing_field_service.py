@@ -39,16 +39,28 @@ HANDOVER_FIELD_QUESTIONS: dict[str, str] = {
         "Ask the user for a short description of this handover request "
         "(or say 'none' to skip)."
     ),
-    "startDate": "Ask the user when the inspection should start (date).",
-    "endDate": "Ask the user when the inspection should end (date).",
+    "startDate": (
+        "Ask the user when the inspection should start — date and time together. "
+        "Instruct them to use DD/MM/YYYY format and include the time, "
+        "e.g. '20/08/2026 9:00 AM' or '20 Aug 2:00 PM'. "
+        "If they provide the time here, no separate time question will be needed."
+    ),
+    "endDate": (
+        "Ask the user when the inspection should end — date and optionally time. "
+        "Instruct them to use DD/MM/YYYY format, e.g. '21/08/2026' or '21/08/2026 6:00 PM'. "
+        "If no time is given the same inspection time as the start will be used."
+    ),
     "inspectionTime": (
         "Ask the user what time the inspection should start (e.g. '10:00 AM', '14:30'). "
-        "Accept 'skip' or 'none' to use the current time."
+        "Only ask this if the user did not already provide a time with the start date. "
+        "Accept 'skip' or 'none' to use 9:00 AM as the default."
     ),
     "inspection_done_by": (
         "Ask the user who will perform the inspection. "
-        "They must choose one of exactly two options: FM Manager or Operations. "
-        "Make the two choices explicit."
+        "They must choose one of exactly two options using the buttons below: "
+        "'FM Manager' or 'Operations'. "
+        "Do not accept any other role name — if they type anything else, "
+        "ask them to use the selection buttons."
     ),
     "notes": (
         "Ask the user if they have any additional notes for this handover request. "

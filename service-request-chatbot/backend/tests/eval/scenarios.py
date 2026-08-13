@@ -1731,10 +1731,10 @@ _S36 = Scenario(
 
 _S37 = Scenario(
     id=37,
-    name="Cancel from confirmation card — change-mind vs cancel-SR distinction",
+    name="Cancel from confirmation card — are-you-sure, then restore preview",
     goal=(
-        "Cancel action on confirmation card (action=cancel) must show 'what to change?' — "
-        "NOT cancel the SR; separate cancel_sr must exist for SR cancellation"
+        "Cancel on the review card must ask are-you-sure (not 'make changes'). "
+        "No restores the confirmation card; Yes clears the lease and asks for a new one."
     ),
     tier=3,
     turns=[
@@ -1749,13 +1749,13 @@ _S37 = Scenario(
         ),
         Turn(
             message="",
-            note="Cancel action on card — must trigger 'what would you like to change?' NOT cancel SR",
+            note="Cancel on review card — must ask are you sure, not treat as make-changes",
             action="cancel",
-            expect_keywords=["change", "update", "what", "modify", "edit"],
+            expect_keywords=["sure", "cancel", "yes", "no"],
         ),
         Turn(
-            message=f"change the end date to {_CORR_END_B}",
-            note="Field updated; confirmation card re-shown",
+            message="no",
+            note="Decline cancel — confirmation card re-shown",
             expect_ui_type="confirmation_card",
         ),
         Turn(

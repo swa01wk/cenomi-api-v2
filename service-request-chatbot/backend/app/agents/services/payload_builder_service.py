@@ -46,6 +46,12 @@ _LT_DISPLAY_RE = re.compile(
     r"^\d{1,2}/\d{1,2}/\d{4}\s+\d{1,2}:\d{2}\s+(?:AM|PM)$",
     re.IGNORECASE,
 )
+# Clock times in user text. AMPM is tried first so "2:00 PM" is 14:00, not 02:00.
+_AMPM_TIME_RE = re.compile(
+    r"\b(\d{1,2})(?::(\d{2}))?\s*(a\.?m\.?|p\.?m\.?)\b",
+    re.IGNORECASE,
+)
+_HHMM_TIME_RE = re.compile(r"\b([01]?\d|2[0-3]):([0-5]\d)\b")
 
 # ── Required data keys ────────────────────────────────────────────────────────
 
@@ -137,6 +143,91 @@ def _parse_lt_display(value: str) -> datetime | None:
         return None
 
 
+def extract_hhmm_from_datetime(value: str) -> str | None:
+    """Return Riyadh ``HH:MM`` from an ISO datetime or LT display.
+
+    Date-only ``YYYY-MM-DD`` returns ``None`` so callers do not invent a time.
+    UTC (``Z`` / offset) values are converted to Asia/Riyadh wall clock.
+    Naive ISO times are treated as already-Riyadh.
+    """
+    text = (value or "").strip()
+    if not text:
+        return None
+    lt_dt = _parse_lt_display(text)
+    if lt_dt is not None:
+        return f"{lt_dt.hour:02d}:{lt_dt.minute:02d}"
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", text):
+        return None
+    normalized = text.replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return f"{parsed.hour:02d}:{parsed.minute:02d}"
+    local = parsed.astimezone(_PORTAL_TZ)
+    return f"{local.hour:02d}:{local.minute:02d}"
+
+
+def extract_hhmm_from_message(message: str) -> str | None:
+    """Parse the first clock time in free text into 24-hour ``HH:MM``."""
+    text = (message or "").strip()
+    if not text:
+        return None
+    ampm = _AMPM_TIME_RE.search(text)
+    if ampm:
+        hour = int(ampm.group(1))
+        minute = int(ampm.group(2) or "0")
+        meridiem = ampm.group(3).lower().replace(".", "")
+        if meridiem.startswith("p") and hour < 12:
+            hour += 12
+        elif meridiem.startswith("a") and hour == 12:
+            hour = 0
+        if 0 <= hour <= 23 and 0 <= minute <= 59:
+            return f"{hour:02d}:{minute:02d}"
+        return None
+    hhmm = _HHMM_TIME_RE.search(text)
+    if not hhmm:
+        return None
+    hour, minute = int(hhmm.group(1)), int(hhmm.group(2))
+    if 0 <= hour <= 23 and 0 <= minute <= 59:
+        return f"{hour:02d}:{minute:02d}"
+    return None
+
+
+def format_inspection_datetime_pair(
+    iso_or_date: Any,
+    existing_lt: Any = None,
+    inspection_time: str | None = None,
+) -> tuple[str, str]:
+    """Public wrapper: ``(utc_iso, lt_display)`` for form/preview hydration.
+
+    UTC ISO is always ``YYYY-MM-DDTHH:MM:SS.mmmZ`` (e.g. ``2026-08-13T07:56:00.000Z``)
+    so the frontend DateTimePicker does not fall back to 9:00 AM on date-only values.
+    """
+    return _normalize_inspection_datetime(iso_or_date, existing_lt, inspection_time)
+
+
+def resolve_start_end_hhmm(data: dict[str, Any]) -> tuple[str | None, str | None]:
+    """Return independent ``(start_hhmm, end_hhmm)`` for CREATE dates.
+
+    Start time comes from ``inspectionTime`` or a portal ``startDateLT``
+    (``DD/MM/YYYY h:mm AM/PM``). End time comes from portal ``endDateLT``
+    when the user gave an end-specific time; otherwise it falls back to start.
+    Legacy ISO-offset LT strings are ignored so the 9:00 AM default still applies.
+    """
+    start_hhmm = data.get("inspectionTime") or None
+    if not start_hhmm:
+        lt_dt = _parse_lt_display(str(data.get("startDateLT") or ""))
+        if lt_dt is not None:
+            start_hhmm = f"{lt_dt.hour:02d}:{lt_dt.minute:02d}"
+    end_hhmm = None
+    end_lt_dt = _parse_lt_display(str(data.get("endDateLT") or ""))
+    if end_lt_dt is not None:
+        end_hhmm = f"{end_lt_dt.hour:02d}:{end_lt_dt.minute:02d}"
+    return start_hhmm, end_hhmm or start_hhmm
+
+
 def _parse_hhmm(value: str) -> tuple[int, int] | None:
     """Parse HH:MM (24-hour) or H:MM into (hour, minute), or None on failure."""
     text = (value or "").strip()
@@ -202,11 +293,50 @@ def _normalize_inspection_datetime(
     Chatbot extraction stores date-only ``YYYY-MM-DD``.  The portal CREATE
     contract and DateTimePicker expect UTC ISO plus ``DD/MM/YYYY h:mm AM/PM``.
 
-    When *inspection_time* (HH:MM) is provided it overrides the time component;
-    an existing LT display string is only used when no inspection_time is given.
+    Priority rules:
+    1. When *inspection_time* (HH:MM) is provided, it always overrides the time.
+    2. When *iso_or_date* is a plain YYYY-MM-DD (AI-collected date), it takes
+       priority over the DATE portion of *existing_lt* (the form's pre-filled LT
+       display). Only the TIME portion of *existing_lt* is reused so the user's
+       form-entered time is preserved while the AI's date wins.
+    3. When *iso_or_date* is absent or invalid, fall back to *existing_lt* in full.
     """
     lt_raw = "" if existing_lt is None else str(existing_lt).strip()
     iso_raw = "" if iso_or_date is None else str(iso_or_date).strip()
+
+    # When the AI collected a plain date (YYYY-MM-DD) AND the form has a LT
+    # display string, the AI's date must win. Reuse only the TIME from lt_raw
+    # so we preserve the form's chosen time while correcting the date.
+    if iso_raw and re.fullmatch(r"\d{4}-\d{2}-\d{2}", iso_raw) and lt_raw and not inspection_time:
+        lt_dt = _parse_lt_display(lt_raw)
+        if lt_dt is not None:
+            # Extract the time from the LT display and apply it to the AI's date.
+            time_hhmm = f"{lt_dt.hour:02d}:{lt_dt.minute:02d}"
+            local_dt = _parse_inspection_datetime(iso_raw, time_hhmm)
+            if local_dt is not None:
+                utc = local_dt.astimezone(timezone.utc)
+                utc_iso = utc.strftime("%Y-%m-%dT%H:%M:%S.") + f"{utc.microsecond // 1000:03d}Z"
+                lt_display = _format_lt_display(local_dt)
+                return utc_iso, lt_display
+
+    # When iso_raw is already in LT display format (form bridge has overwritten
+    # startDate/endDate from YYYY-MM-DD to "DD/MM/YYYY h:mm AM/PM"), extract the
+    # date portion and apply inspection_time (chat-provided) or use LT's time.
+    if iso_raw and _LT_DISPLAY_RE.match(iso_raw):
+        lt_iso_dt = _parse_lt_display(iso_raw)
+        if lt_iso_dt is not None:
+            if inspection_time:
+                # Chat-provided time wins over the form's embedded time
+                local_dt_from_lt = _parse_inspection_datetime(
+                    lt_iso_dt.strftime("%Y-%m-%d"), inspection_time
+                )
+            else:
+                local_dt_from_lt = lt_iso_dt
+            if local_dt_from_lt is not None:
+                utc = local_dt_from_lt.astimezone(timezone.utc)
+                utc_iso = utc.strftime("%Y-%m-%dT%H:%M:%S.") + f"{utc.microsecond // 1000:03d}Z"
+                lt_display = _format_lt_display(local_dt_from_lt)
+                return utc_iso, lt_display
 
     local_dt = _parse_lt_display(lt_raw) if (lt_raw and not inspection_time) else None
     if local_dt is None:
@@ -252,21 +382,21 @@ def build_create_handover_payload(
     """
     _validate_required_keys(data)
 
-    # inspectionTime (HH:MM) from collected_data.
-    # When explicitly provided, it overrides any stored LT display string.
-    # When absent and no LT display exists either, fall back to current wall time
-    # so the payload always carries a meaningful time (not just midnight).
-    inspection_time: str | None = data.get("inspectionTime") or None
-    if not inspection_time and not data.get("startDateLT") and not data.get("endDateLT"):
+    # Start and end times are independent. inspectionTime / startDateLT is the
+    # start clock; endDateLT keeps an end-specific time when the user gave one,
+    # otherwise the start time is reused.
+    start_time, end_time = resolve_start_end_hhmm(data)
+    if not start_time and not data.get("startDateLT") and not data.get("endDateLT"):
         from datetime import datetime as _dt
         from zoneinfo import ZoneInfo as _ZI
-        inspection_time = _dt.now(_ZI("Asia/Riyadh")).strftime("%H:%M")
+        start_time = _dt.now(_ZI("Asia/Riyadh")).strftime("%H:%M")
+        end_time = start_time
 
     start_iso, start_lt = _normalize_inspection_datetime(
-        data["startDate"], data.get("startDateLT"), inspection_time=inspection_time
+        data["startDate"], data.get("startDateLT"), inspection_time=start_time
     )
     end_iso, end_lt = _normalize_inspection_datetime(
-        data["endDate"], data.get("endDateLT"), inspection_time=inspection_time
+        data["endDate"], data.get("endDateLT"), inspection_time=end_time
     )
 
     doc_ids: list[str] = []

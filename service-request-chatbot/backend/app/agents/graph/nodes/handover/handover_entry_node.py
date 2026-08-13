@@ -9,7 +9,10 @@ Responsibilities
     - Explicit YES phrases → set ``confirmation_status = "CONFIRMED"``
     - Explicit NO / change phrases → set ``confirmation_status = "REJECTED"``
     - Ambiguous input → leave confirmation_status unchanged (re-show card)
-- Detect explicit cancel / workflow-switch phrases and clear ``active_agent``
+- Detect Cancel on the review card (and cancel_sr / typed cancel) and ask
+  Yes/No before clearing. Yes clears the lease and prompts for a new one;
+  No re-shows the review card.
+- Detect explicit workflow-switch phrases and clear ``active_agent``
   so the next routing step re-enters through the supervisor.
 
 Non-responsibilities
@@ -178,7 +181,7 @@ _CONTINUE_OPTIONAL_UPLOAD_ACTIONS = frozenset({"continue_optional_upload"})
 # ---------------------------------------------------------------------------
 
 
-def _clear_all_state() -> dict:
+def _clear_all_state(*, cancelled_banner: bool = True) -> dict:
     """Return state patch that zeroes all workflow-related fields after cancel."""
     return {
         "active_agent": None,
@@ -196,9 +199,174 @@ def _clear_all_state() -> dict:
         "lease_matches": [],
         "backend_refs": {},
         "documents": [],
-        "response_ui": {"cancelled": True},
+        "response_ui": (
+            {"cancelled": True} if cancelled_banner else {"type": "message", "verbatim": True}
+        ),
         "status": "WAITING_FOR_USER",
     }
+
+
+_CLEARED_REQUEST_MESSAGE = (
+    "The handover request has been cleared. Would you like to continue?"
+)
+
+_CREATE_HANDOVER_SR_CHIP: dict[str, Any] = {
+    "kind": "labeled_options",
+    "options": [
+        {
+            "label": "Create handover SR",
+            "value": "I want to create a Handover service request",
+            "action": "create_handover_sr",
+        }
+    ],
+}
+
+
+def _cleared_conversation_ui(*, cancelled: bool = False, workflow_stage: str | None = None) -> dict[str, Any]:
+    """UI payload that tells the frontend to wipe chat history and show only this turn."""
+    ui: dict[str, Any] = {
+        "type": "message",
+        "verbatim": True,
+        "reset_conversation": True,
+        "suggestions": _CREATE_HANDOVER_SR_CHIP,
+    }
+    if cancelled:
+        ui["cancelled"] = True
+    if workflow_stage:
+        ui["workflow_stage"] = workflow_stage
+    return ui
+
+
+_MILESTONE_ACK_KEY = "_milestone_confirmed_ack"
+
+_CONTINUE_MILESTONE_PHRASES: frozenset[str] = frozenset(
+    {
+        "continue",
+        "proceed",
+        "go ahead",
+        "revise",
+        "keep going",
+        "yes",
+        "yep",
+        "yeah",
+        "ok",
+        "okay",
+    }
+)
+
+
+def _ack_milestone(state: ServiceRequestState) -> dict[str, Any]:
+    """User chose Continue on an already-confirmed milestone — keep the lease."""
+    collected = dict(state.get("collected_data") or {})
+    collected[_MILESTONE_ACK_KEY] = True
+    log.info("handover_entry.continue_milestone")
+    return {
+        "collected_data": collected,
+        "confirmation_status": None,
+        "status": "IN_PROGRESS",
+    }
+
+
+def _clear_draft_for_milestone_cancel() -> dict[str, Any]:
+    """Cancel on the already-confirmed prompt: wipe draft, no platform PATCH."""
+    patch = _clear_all_state(cancelled_banner=False)
+    patch["response_ui"] = _cleared_conversation_ui()
+    patch["response_message"] = _CLEARED_REQUEST_MESSAGE
+    return patch
+
+
+_CANCEL_YES_NO_SUGGESTIONS: dict[str, Any] = {
+    "kind": "labeled_options",
+    "options": [
+        {"label": "Yes", "value": "yes", "action": "confirm_cancel_sr"},
+        {"label": "No", "value": "no", "action": "decline_cancel_sr"},
+    ],
+}
+
+
+def _ask_cancel_confirmation(sr_id: str | None) -> dict[str, Any]:
+    """Ask Yes/No before clearing a draft or cancelling a submitted SR."""
+    if sr_id:
+        message = (
+            f"Are you sure you want to cancel Service Request **{sr_id}**? "
+            "This will mark it as cancelled on the platform. "
+            "Reply **yes** to confirm, or **no** to go back."
+        )
+    else:
+        message = (
+            "Are you sure you want to cancel this handover request? "
+            "This will clear the current lease and all collected details. "
+            "Reply **yes** to confirm, or **no** to go back to the review."
+        )
+    return {
+        "confirmation_status": "CANCEL_PENDING",
+        "status": "WAITING_FOR_USER",
+        "response_message": message,
+        "response_ui": {"type": "message", "verbatim": True},
+        "response_decorations": {"suggestions": _CANCEL_YES_NO_SUGGESTIONS},
+    }
+
+
+def _restore_preview_after_decline(state: ServiceRequestState) -> dict[str, Any]:
+    """Keep collected data and re-show the confirmation card when the user says No."""
+    from app.agents.graph.nodes.handover.confirmation_node import _build_confirmation_card
+    from app.agents.schemas.handover_schema import OPTIONAL_FIELDS, get_missing_fields
+
+    collected = dict(state.get("collected_data") or {})
+    workflow_stage: str = state.get("workflow_stage") or "CREATE_SR"
+    backend_refs: dict[str, Any] = dict(state.get("backend_refs") or {})
+    missing = get_missing_fields(workflow_stage, collected)
+    non_optional_missing = [f for f in missing if f not in OPTIONAL_FIELDS]
+    if non_optional_missing:
+        return {
+            "confirmation_status": None,
+            "status": "IN_PROGRESS",
+            "response_message": (
+                "No problem — your request is still active. Let's continue."
+            ),
+        }
+
+    card = _build_confirmation_card(collected, workflow_stage, backend_refs)
+    card["verbatim"] = True
+    return {
+        "confirmation_status": "PENDING",
+        "confirmation_required": True,
+        "status": "WAITING_FOR_USER",
+        "response_ui": card,
+        "response_message": (
+            "No problem — here is your request again. "
+            "Review the details and confirm to submit, or cancel."
+        ),
+        "missing_fields": [],
+        "active_field": None,
+    }
+
+
+async def _execute_confirmed_cancel(state: ServiceRequestState) -> dict[str, Any]:
+    """Clear the draft (and PATCH the platform SR when one exists) after Yes."""
+    backend_refs = state.get("backend_refs") or {}
+    sr_id = backend_refs.get("sr_id")
+    if sr_id:
+        try:
+            svc = get_service_request_api_service()
+            await svc.patch_service_request(sr_id, {"status": "CANCELLED"})
+            log.info("handover_entry.sr_cancelled_on_platform", sr_id=sr_id)
+        except Exception:
+            log.warning(
+                "handover_entry.cancel_patch_failed", sr_id=sr_id, exc_info=True
+            )
+        patch = _clear_all_state()
+        patch["workflow_stage"] = "CANCELLED"
+        patch["response_ui"] = _cleared_conversation_ui(
+            cancelled=True, workflow_stage="CANCELLED"
+        )
+        patch["response_message"] = _CLEARED_REQUEST_MESSAGE
+        return patch
+
+    patch = _clear_all_state(cancelled_banner=False)
+    patch["response_ui"] = _cleared_conversation_ui()
+    patch["response_message"] = _CLEARED_REQUEST_MESSAGE
+    return patch
 
 
 def _contains_phrase(message: str, phrases: frozenset[str]) -> bool:
@@ -326,77 +494,62 @@ async def handover_entry_node(state: ServiceRequestState) -> dict[str, Any]:
     confirmation_status: str | None = state.get("confirmation_status")
     action_override: str | None = state.get("action_override")  # type: ignore[assignment]
 
+    if action_override == "continue_milestone":
+        return _ack_milestone(state)
+
+    if action_override == "cancel_milestone":
+        log.info("handover_entry.action_override_cancel_milestone")
+        return _clear_draft_for_milestone_cancel()
+
+    if state.get("confirmation_status") == "MILESTONE_PENDING":
+        if _contains_phrase(user_message, _CONTINUE_MILESTONE_PHRASES):
+            return _ack_milestone(state)
+        if _contains_phrase(user_message, _CANCEL_SR_PHRASES) or _contains_phrase(
+            user_message, frozenset({"cancel"})
+        ):
+            log.info("handover_entry.milestone_cancel_by_text")
+            return _clear_draft_for_milestone_cancel()
+        return {
+            "status": "WAITING_FOR_USER",
+            "confirmation_status": "MILESTONE_PENDING",
+            "response_message": (
+                "Please tap **Continue** to revise the existing date, "
+                "or **Cancel** to pick a different lease."
+            ),
+            "response_ui": {"type": "message", "verbatim": True},
+            "response_decorations": {
+                "suggestions": {
+                    "kind": "labeled_options",
+                    "options": [
+                        {"label": "Cancel", "value": "cancel", "action": "cancel_milestone"},
+                        {"label": "Continue", "value": "continue", "action": "continue_milestone"},
+                    ],
+                }
+            },
+        }
+
     # ── 0. Explicit UI action — takes priority over text parsing ───────────
     if action_override in ("confirm", "confirm_create_sr"):
         log.info("handover_entry.action_override_confirm")
         return {"confirmation_status": "CONFIRMED"}
 
-    # When the confirmation card is shown (PENDING) and the user clicks the generic
-    # "cancel" button (not "cancel_sr"), treat it as rejecting the confirmation card
-    # rather than cancelling the entire SR.  This preserves collected_data so the
-    # user can make corrections without losing their answers.
-    if action_override == "cancel" and confirmation_status == "PENDING":
-        log.info("handover_entry.cancel_rejects_pending_confirmation")
-        return {"confirmation_status": "REJECTED", "status": "IN_PROGRESS"}
-
-    # cancel_sr: request confirmation before clearing state
+    # Cancel on the review card (and cancel_sr / cancel_create_sr) always asks
+    # Yes/No first.  It does not mean "I want to make changes" — that is typed
+    # as a field correction while the card is still showing.
     if action_override in ("cancel_sr", "cancel", "cancel_create_sr"):
         log.info("handover_entry.action_override_cancel_sr")
         backend_refs: dict[str, Any] = state.get("backend_refs") or {}
-        sr_id = backend_refs.get("sr_id")
-        if not sr_id:
-            # No SR created yet — clear state immediately
-            patch = _clear_all_state()
-            patch["response_message"] = (
-                "Your handover request has been cancelled. "
-                "What would you like to do next?"
-            )
-            return patch
-        # SR exists — ask for confirmation before cancelling
-        return {
-            "confirmation_status": "CANCEL_PENDING",
-            "status": "WAITING_FOR_USER",
-            "response_message": (
-                f"Are you sure you want to cancel Service Request **{sr_id}**? "
-                "This will mark it as cancelled on the platform. "
-                "Reply **yes** to confirm, or **no** to go back."
-            ),
-        }
+        return _ask_cancel_confirmation(backend_refs.get("sr_id"))
 
     # confirm_cancel_sr: user confirmed — patch platform + clear state
     if action_override == "confirm_cancel_sr":
         log.info("handover_entry.action_override_confirm_cancel_sr")
-        backend_refs = state.get("backend_refs") or {}
-        sr_id = backend_refs.get("sr_id")
-        if sr_id:
-            try:
-                svc = get_service_request_api_service()
-                await svc.patch_service_request(sr_id, {"status": "CANCELLED"})
-                log.info("handover_entry.sr_cancelled_on_platform", sr_id=sr_id)
-            except Exception:
-                log.warning(
-                    "handover_entry.cancel_patch_failed", sr_id=sr_id, exc_info=True
-                )
-        patch = _clear_all_state()
-        patch["workflow_stage"] = "CANCELLED"
-        patch["response_ui"] = {"cancelled": True, "workflow_stage": "CANCELLED"}
-        patch["response_message"] = (
-            f"Service Request **{sr_id or 'N/A'}** has been cancelled. "
-            "What would you like to do next?"
-        )
-        return patch
+        return await _execute_confirmed_cancel(state)
 
-    # decline_cancel_sr: user chose not to cancel — restore previous state
+    # decline_cancel_sr: user chose not to cancel — re-show the review card
     if action_override == "decline_cancel_sr":
         log.info("handover_entry.action_override_decline_cancel_sr")
-        return {
-            "confirmation_status": None,
-            "status": "IN_PROGRESS",
-            "response_message": (
-                "No problem — your request is still active. "
-                "What would you like to do next?"
-            ),
-        }
+        return _restore_preview_after_decline(state)
 
     _HANDOVER_TYPE_ACTIONS: dict[str, str] = {
         "select_handover_type_already_trading": "already_trading",
@@ -442,42 +595,19 @@ async def handover_entry_node(state: ServiceRequestState) -> dict[str, Any]:
     if state.get("confirmation_status") == "CANCEL_PENDING":
         if _contains_phrase(user_message, _CONFIRM_PHRASES):
             log.info("handover_entry.cancel_confirmed_by_text")
-            backend_refs = state.get("backend_refs") or {}
-            sr_id = backend_refs.get("sr_id")
-            if sr_id:
-                try:
-                    svc = get_service_request_api_service()
-                    await svc.patch_service_request(sr_id, {"status": "CANCELLED"})
-                    log.info("handover_entry.sr_cancelled_on_platform", sr_id=sr_id)
-                except Exception:
-                    log.warning(
-                        "handover_entry.cancel_patch_failed", sr_id=sr_id, exc_info=True
-                    )
-            patch = _clear_all_state()
-            patch["workflow_stage"] = "CANCELLED"
-            patch["response_ui"] = {"cancelled": True, "workflow_stage": "CANCELLED"}
-            patch["response_message"] = (
-                f"Service Request **{sr_id or 'N/A'}** has been cancelled. "
-                "What would you like to do next?"
-            )
-            return patch
+            return await _execute_confirmed_cancel(state)
 
         if _contains_phrase(user_message, _REJECT_PHRASES):
             log.info("handover_entry.cancel_declined_by_text")
-            return {
-                "confirmation_status": None,
-                "status": "IN_PROGRESS",
-                "response_message": (
-                    "No problem — your request is still active. "
-                    "What would you like to do next?"
-                ),
-            }
+            return _restore_preview_after_decline(state)
 
         return {
             "status": "WAITING_FOR_USER",
             "response_message": (
                 "Please reply **yes** to confirm cancellation, or **no** to keep the request."
             ),
+            "response_ui": {"type": "message", "verbatim": True},
+            "response_decorations": {"suggestions": _CANCEL_YES_NO_SUGGESTIONS},
         }
 
     # ── 2. Workflow cancel / restart ───────────────────────────────────────
@@ -496,22 +626,7 @@ async def handover_entry_node(state: ServiceRequestState) -> dict[str, Any]:
             user_message=user_message[:120],
         )
         backend_refs = state.get("backend_refs") or {}
-        sr_id = backend_refs.get("sr_id")
-        if not sr_id:
-            patch = _clear_all_state()
-            patch["response_message"] = (
-                "Your handover request has been cancelled. "
-                "What would you like to do next?"
-            )
-            return patch
-        return {
-            "confirmation_status": "CANCEL_PENDING",
-            "status": "WAITING_FOR_USER",
-            "response_message": (
-                f"Are you sure you want to cancel Service Request **{sr_id}**? "
-                "Reply **yes** to confirm, or **no** to go back."
-            ),
-        }
+        return _ask_cancel_confirmation(backend_refs.get("sr_id"))
 
     if _contains_phrase(user_message, _CANCEL_WORKFLOW_PHRASES):
         log.info(

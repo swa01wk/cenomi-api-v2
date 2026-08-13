@@ -432,6 +432,8 @@ def _route_after_handover_entry(state: dict[str, Any]) -> str:
     # from the previous save_state.  Mirrors the same guard in _route_after_fm_entry.
     if state.get("confirmation_status") == "CONFIRMED":
         return "merge_state"
+    if state.get("action_override") == "continue_milestone":
+        return "merge_state"
     # When REJECTED (e.g. after cancel+edit), always route through field_extraction
     # to process the correction, bypassing a stale WAITING_FOR_USER saved from the
     # prior turn's "what would you like to change?" message.
@@ -519,6 +521,8 @@ def _route_after_fitout_confirm_entry(state: dict[str, Any]) -> str:
     # question instead of submitting — the flow looped on the date prompt and
     # never produced a success message or View Service Request button.
     if state.get("confirmation_status") == "CONFIRMED":
+        return "merge_state"
+    if state.get("action_override") == "continue_milestone":
         return "merge_state"
     if state.get("confirmation_status") == "REJECTED":
         return "field_extraction"

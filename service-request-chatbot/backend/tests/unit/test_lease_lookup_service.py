@@ -108,6 +108,21 @@ class TestLeaseRecord:
         assert dumped["lease_code"] == _UA_RECORD["lease_code"]
         assert dumped["lease_id"] == _UA_RECORD["lease_id"]
 
+    def test_maps_actual_shop_handover_to_both_handover_fields(self) -> None:
+        payload = dict(_UA_RECORD)
+        payload["actual_shop_handover_date"] = "2026-03-15"
+        record = LeaseRecord.model_validate(payload)
+        assert record.actual_shop_handover_date == "2026-03-15"
+        assert record.actual_handover_date == "2026-03-15"
+
+    def test_maps_actual_handover_alias(self) -> None:
+        payload = dict(_UA_RECORD)
+        payload["actual_handover_date"] = "2026-03-15"
+        record = LeaseRecord.model_validate(payload)
+        assert record.actual_handover_date == "2026-03-15"
+        assert record.actual_shop_handover_date == "2026-03-15"
+
+
 
 # ---------------------------------------------------------------------------
 # TestLeaseLookupQuery

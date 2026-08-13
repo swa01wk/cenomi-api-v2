@@ -28,7 +28,7 @@ _GRAPH_ROLES: tuple[str, ...] = ("FM_MANAGER", "OPERATIONS", "DD_ENGINEER", "MAL
 _DOC_LABELS: dict[str, str] = {
     "SR_HANDOVER_CHECKLIST": "Handover Checklist",
     "SR_HANDOVER_SITE_SURVEY": "Site Survey",
-    "SR_COP_CHECKLIST_OTHER": "COP Checklist / Other",  # Fix 2: was SR_HANDOVER_OTHER
+    "SR_COP_CHECKLIST_OTHER": "Other",
     "SR_HANDOVER_OTHER": "Other",
     "DR_SR_HANDOVER_REPORT": "Handover Meeting Report",
     "SR_REJECTED_HANDOVER_REPORT": "Rejected Fitout and Handover Report",

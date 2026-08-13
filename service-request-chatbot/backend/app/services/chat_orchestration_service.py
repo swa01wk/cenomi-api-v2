@@ -67,6 +67,26 @@ from app.observability.trace_manager import TraceManager
 log = structlog.get_logger(__name__)
 
 
+def resolve_turn_sr_id(
+    *,
+    session_id: UUID | None,
+    sr_id: str | None,
+    message: str,
+) -> str | None:
+    """Drop a stale sr_id when the client starts a new conversation with a message.
+
+    Opening an existing SR uses a new session, empty message, and sr_id.
+    Create another resets the FE session then immediately sends a seed
+    message; React has not flushed ``activeSrId`` yet so the previous SR
+    is still attached. Binding that id loads FM_REVIEW and Mall Managers
+    see a permission error plus FM document cards.
+    """
+    if session_id is None and sr_id and str(message or "").strip():
+        log.info("chat.drop_stale_sr_id_on_new_session", sr_id=sr_id)
+        return None
+    return sr_id
+
+
 # ---------------------------------------------------------------------------
 # Result type
 # ---------------------------------------------------------------------------
@@ -82,6 +102,7 @@ class ChatTurnState:
     fm_status: str | None = None
     sr_id: str | None = None
     action_result: str | None = None  # "success" | "failed" | None
+    confirmation_status: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,6 +153,10 @@ class ChatOrchestrationService:
         msp_context: dict[str, Any] | None = None,
     ) -> ChatTurnResult:
         """Execute one complete chat turn and return structured result."""
+
+        sr_id = resolve_turn_sr_id(
+            session_id=session_id, sr_id=sr_id, message=message
+        )
 
         # 1. Load or create session ----------------------------------------
         chat_session = await self._load_or_create_session(session_id, user_id)
@@ -272,7 +297,10 @@ class ChatOrchestrationService:
             user_role = derive_user_role(auth_context)
             if user_role:
                 backend_refs["user_role"] = user_role
-            if not sr_id:
+            if not sr_id and not chat_session.active_agent:
+                # Only show the Handover reviewer inbox when there is no active
+                # workflow.  Fitout/Trading confirmation agents in CREATE_SR stage
+                # have no sr_id yet but must not see the Handover SR picker.
                 inbox_deco = build_inbox_decorations(auth_context)
                 if inbox_deco:
                     initial_state["response_decorations"] = inbox_deco
@@ -447,6 +475,7 @@ class ChatOrchestrationService:
                 fm_status=fm_status,
                 sr_id=sr_id,
                 action_result=action_result,
+                confirmation_status=result_state.get("confirmation_status"),
             ),
             trace_id=trace_id,
             draft_preview=draft_preview,

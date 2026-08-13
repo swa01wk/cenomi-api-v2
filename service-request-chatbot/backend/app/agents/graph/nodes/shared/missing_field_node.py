@@ -299,9 +299,12 @@ async def missing_field_node(state: ServiceRequestState) -> dict[str, Any]:
                 f"Please correct the value for: {error_field}",
             )
 
-    elif backend_missing:
-        # One or more backend-derived fields are unresolved — ask for a lease
-        # trigger so ``lease_lookup_node`` can fill them programmatically.
+    elif backend_missing and not collected.get("lease_id"):
+        # Backend-derived fields are unresolved and the lease is not identified
+        # yet — ask for a lease trigger so ``lease_lookup_node`` can fill them.
+        # Once lease_id is set the lease is already resolved (form is populated).
+        # Do not fall through to ``company`` just because city/units/etc. came
+        # back empty for that lease — that re-asks tenant/company QA already see.
         for trigger in _effective_lease_triggers:
             if not collected.get(trigger):
                 next_field = trigger

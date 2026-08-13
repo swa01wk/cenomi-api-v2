@@ -128,13 +128,49 @@ def _fields_from_collected(collected_data: dict[str, Any]) -> list[dict[str, Any
     Internal/system fields such as ``brand_id``, ``lease_id``, ``contract_id``,
     ``property_id``, ``tenant_profile_id``, etc. that live in ``collected_data``
     but are not meaningful to the user are intentionally excluded.
+
+    ``startDate`` / ``endDate`` are emitted as UTC ISO
+    (``YYYY-MM-DDTHH:MM:SS.mmmZ``) plus companion ``*LT`` display strings so
+    the FE DateTimePicker hydrates the user's inspection time instead of
+    defaulting date-only values to 9:00 AM.
     """
     rows: list[dict[str, Any]] = []
+    from app.agents.services.payload_builder_service import resolve_start_end_hhmm
+
+    start_hhmm, end_hhmm = resolve_start_end_hhmm(collected_data)
+    times = {"startDate": start_hhmm, "endDate": end_hhmm}
     for key, label in _PREVIEW_FIELD_ORDER:
         val = collected_data.get(key)
-        if val is not None and val != "" and val != []:
+        if val is None or val == "" or val == []:
+            continue
+        if key in ("startDate", "endDate"):
+            utc_iso, lt_display = _inspection_preview_pair(
+                val, collected_data.get(f"{key}LT"), times.get(key)
+            )
+            rows.append({"key": key, "label": label, "value": utc_iso})
+            if lt_display:
+                rows.append(
+                    {"key": f"{key}LT", "label": f"{label} LT", "value": lt_display}
+                )
+        else:
             rows.append(_field(key, label, val))
     return rows
+
+
+def _inspection_preview_pair(
+    iso_or_date: Any,
+    existing_lt: Any,
+    inspection_time: str | None,
+) -> tuple[str, str]:
+    """Return ``(utc_iso, lt_display)`` for draft_preview start/end dates."""
+    from app.agents.services.payload_builder_service import format_inspection_datetime_pair
+
+    utc_iso, lt_display = format_inspection_datetime_pair(
+        iso_or_date, existing_lt, inspection_time=inspection_time
+    )
+    if utc_iso:
+        return utc_iso, lt_display
+    return str(iso_or_date), lt_display or ("" if existing_lt is None else str(existing_lt))
 
 
 def _fields_from_platform(payload: dict[str, Any]) -> list[dict[str, Any]]:

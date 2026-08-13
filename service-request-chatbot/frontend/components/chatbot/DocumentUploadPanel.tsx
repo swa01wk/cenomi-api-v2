@@ -14,7 +14,7 @@ type DocTypeConfig = {
 const FM_DOC_TYPES: DocTypeConfig[] = [
   { id: "SR_HANDOVER_CHECKLIST", label: "Handover Checklist" },
   { id: "SR_HANDOVER_SITE_SURVEY", label: "Site Survey" },
-  { id: "SR_COP_CHECKLIST_OTHER", label: "COP Checklist" },
+  { id: "SR_COP_CHECKLIST_OTHER", label: "Other" },
 ];
 
 const RDD_DOC_TYPES: DocTypeConfig[] = [

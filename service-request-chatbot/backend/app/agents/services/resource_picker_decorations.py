@@ -52,7 +52,15 @@ def build_create_lease_picker() -> dict[str, Any]:
 
 
 def should_browse_leases(state: dict[str, Any]) -> bool:
-    """True when Handover CREATE should offer eligible-lease browse chips."""
+    """True when Handover CREATE should offer eligible-lease browse chips.
+
+    Only offered for the Handover agent (rdd_handover_agent).  Fitout/Trading
+    confirmation agents use purpose-scoped lease lookups and must not show the
+    generic Handover SR picker.
+    """
+    active_agent = state.get("active_agent") or ""
+    if active_agent not in ("rdd_handover_agent", ""):
+        return False
     if (state.get("workflow_stage") or "CREATE_SR") != "CREATE_SR":
         return False
     collected = state.get("collected_data") or {}

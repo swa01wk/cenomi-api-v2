@@ -50,7 +50,7 @@ class ServiceRequestGraphState(TypedDict, total=False):
 
     # ── Human-in-the-loop confirmation ────────────────────────────────────────
     confirmation_required: bool
-    confirmation_status: Optional[Literal["PENDING", "CONFIRMED", "REJECTED"]]
+    confirmation_status: Optional[Literal["PENDING", "CONFIRMED", "REJECTED", "CANCEL_PENDING", "MILESTONE_PENDING"]]
 
     # ── Backend integration ───────────────────────────────────────────────────
     backend_refs: dict[str, Any]

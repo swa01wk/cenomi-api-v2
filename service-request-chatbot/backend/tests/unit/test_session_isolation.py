@@ -197,3 +197,43 @@ class TestLoadSessionTransientClear:
 
         # missing_fields is always popped regardless of workflow_stage
         assert "missing_fields" not in result
+
+
+class TestResolveTurnSrId:
+    def test_drops_sr_id_on_new_session_with_create_message(self) -> None:
+        from app.services.chat_orchestration_service import resolve_turn_sr_id
+
+        assert (
+            resolve_turn_sr_id(
+                session_id=None,
+                sr_id="11728",
+                message="I want to create a Handover service request",
+            )
+            is None
+        )
+
+    def test_keeps_sr_id_when_opening_existing_sr(self) -> None:
+        from app.services.chat_orchestration_service import resolve_turn_sr_id
+
+        assert (
+            resolve_turn_sr_id(session_id=None, sr_id="11728", message=" ")
+            == "11728"
+        )
+        assert (
+            resolve_turn_sr_id(session_id=None, sr_id="11728", message="")
+            == "11728"
+        )
+
+    def test_keeps_sr_id_on_existing_session(self) -> None:
+        from uuid import uuid4
+        from app.services.chat_orchestration_service import resolve_turn_sr_id
+
+        sid = uuid4()
+        assert (
+            resolve_turn_sr_id(
+                session_id=sid,
+                sr_id="11728",
+                message="I want to create a Handover service request",
+            )
+            == "11728"
+        )
