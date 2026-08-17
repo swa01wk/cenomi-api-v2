@@ -40,6 +40,10 @@ class ServiceRequestGraphState(TypedDict, total=False):
     # bare answers ("10th August") bind to the correct key even when
     # ``missing_fields`` is cleared at load time.
     active_field: Optional[str]
+    # One-turn signal set by field_extraction_node when a deterministic
+    # "change field X" redirect is detected with no inline value yet.
+    # missing_field_node consumes and clears it on the very next node run.
+    correction_pending_field: Optional[str]
 
     # ── Lease resolution ──────────────────────────────────────────────────────
     lease_matches: list[dict]

@@ -221,10 +221,12 @@ def resolve_start_end_hhmm(data: dict[str, Any]) -> tuple[str | None, str | None
         lt_dt = _parse_lt_display(str(data.get("startDateLT") or ""))
         if lt_dt is not None:
             start_hhmm = f"{lt_dt.hour:02d}:{lt_dt.minute:02d}"
-    end_hhmm = None
-    end_lt_dt = _parse_lt_display(str(data.get("endDateLT") or ""))
-    if end_lt_dt is not None:
-        end_hhmm = f"{end_lt_dt.hour:02d}:{end_lt_dt.minute:02d}"
+    # An explicitly collected end time outranks the portal LT string.
+    end_hhmm = data.get("inspectionEndTime") or None
+    if not end_hhmm:
+        end_lt_dt = _parse_lt_display(str(data.get("endDateLT") or ""))
+        if end_lt_dt is not None:
+            end_hhmm = f"{end_lt_dt.hour:02d}:{end_lt_dt.minute:02d}"
     return start_hhmm, end_hhmm or start_hhmm
 
 

@@ -109,7 +109,9 @@ _USER_DATE_FIELDS: frozenset[str] = frozenset({
 })
 
 # Time-only fields — stored as HH:MM; must NOT pass through _to_date_only.
-_USER_TIME_FIELDS: frozenset[str] = frozenset({"inspectionTime"})
+_USER_TIME_FIELDS: frozenset[str] = frozenset(
+    {"inspectionTime", "inspectionEndTime"}
+)
 
 _EXPLICIT_YEAR_RE = re.compile(r"\b(?:19|20)\d{2}\b")
 
@@ -172,6 +174,9 @@ def _salvage_inspection_time(
     if not salvaged:
         return
     if field_name == "endDate":
+        # Record it as the answer to inspectionEndTime too, so "21/08/2026
+        # 6:00 PM" in one message does not then prompt for the end time.
+        collected["inspectionEndTime"] = salvaged
         _apply_hhmm_to_date(
             collected, "endDate", "endDateLT", salvaged, date_value=datetime_value
         )
@@ -186,7 +191,11 @@ def _is_end_date_turn(
     active_field: str | None,
 ) -> bool:
     """True when this turn's time belongs to the end date, not the start."""
-    if str(active_field or "") == "endDate":
+    # ``inspectionEndTime`` is the bot explicitly asking for the end clock.
+    # The extractor has no such field and reports the answer as
+    # ``inspectionTime``; without this the reply would overwrite the start
+    # time the user already gave.
+    if str(active_field or "") in ("endDate", "inspectionEndTime"):
         return True
     keys = set(extracted)
     return "endDate" in keys and "startDate" not in keys
@@ -222,9 +231,14 @@ def _sync_inspection_lt_fields(collected: dict[str, Any]) -> None:
     if start_time:
         collected["inspectionTime"] = start_time
         _apply_hhmm_to_date(collected, "startDate", "startDateLT", str(start_time))
-    end_time = extract_hhmm_from_datetime(
-        str(collected.get("endDateLT") or "")
-    ) or start_time
+    # An explicit end time wins; otherwise reuse whatever endDateLT already
+    # carries, and only then fall back to the start clock (which is what the
+    # user gets when they skip the end-time question).
+    end_time = (
+        collected.get("inspectionEndTime")
+        or extract_hhmm_from_datetime(str(collected.get("endDateLT") or ""))
+        or start_time
+    )
     if end_time:
         _apply_hhmm_to_date(collected, "endDate", "endDateLT", str(end_time))
 
@@ -240,11 +254,28 @@ _LEASE_CONFIRMED_FIELDS: frozenset[str] = frozenset({"lease_code", "mall", "bran
 # Minimum confidence score required to accept an LLM-extracted value.
 _CONFIDENCE_THRESHOLD: float = 0.6
 
+# Fixed-choice fields and their accepted values (upper-cased for comparison).
+# Used to stop the active-field remap from writing free text or a date into a
+# field the UI only ever offers as buttons.
+_ENUM_FIELD_VALUES: dict[str, frozenset[str]] = {
+    "inspection_done_by": frozenset({"FM_MANAGER", "OPERATIONS"}),
+    "already_handovered": frozenset({"ALREADY_TRADING", "INITIATE_HANDOVER"}),
+    "document_status": frozenset({"APPROVED", "APPROVED_WITH_CHANGES", "DISAPPROVED"}),
+}
+
 # Optional fields that legitimately accept "" (user declined). If the LLM
 # fills these with "" but the bot was NOT actually asking for them, discard —
 # see the empty-string bleed guard in the merge loop.
 _OPTIONAL_SKIPPABLE_FIELDS: frozenset[str] = frozenset(
-    {"title", "description", "notes", "comments", "inspectionTime", "delay_reason"}
+    {
+        "title",
+        "description",
+        "notes",
+        "comments",
+        "inspectionTime",
+        "inspectionEndTime",
+        "delay_reason",
+    }
 )
 
 # Required fields for which an empty-string correction from the FE must NOT
@@ -301,12 +332,40 @@ def _remap_extracted_to_active_field(
         return extracted
 
     # Find all non-backend-protected keys in the extraction.
-    candidate_keys = [k for k in extracted if k not in BACKEND_PROTECTED_FIELDS]
+    # ``inspectionTime`` rides along with any date the user types ("27/08/2026
+    # 4:00 PM" extracts a date *and* a time), so counting it as a competing
+    # candidate suppressed the remap and let the date land on whichever field
+    # the LLM guessed — e.g. an answer meant for endDate overwriting startDate.
+    candidate_keys = [
+        k for k in extracted
+        if k not in BACKEND_PROTECTED_FIELDS and k not in _USER_TIME_FIELDS
+    ]
     if len(candidate_keys) != 1:
         # Multiple or zero candidates — don't guess; return as-is.
         return extracted
 
     wrong_key = candidate_keys[0]
+    # Never bind a value that is not a date onto a date field. While a blocking
+    # date error is pending the bot keeps ``active_field`` on that date, so an
+    # answer aimed at a different field ("FM_MANAGER", a free-text note) would
+    # otherwise be remapped onto the date, corrupting it and losing the real
+    # answer — the user's input silently disappears.
+    raw = extracted[wrong_key]
+    candidate_value = raw.get("value") if isinstance(raw, dict) else raw
+
+    if active_field in _USER_DATE_FIELDS:
+        from app.agents.services.validation_service import _parse_date
+
+        if _parse_date(candidate_value, active_field) is None:
+            return extracted
+
+    # The mirror case: never drop an arbitrary value into a fixed-choice field.
+    # A date typed while ``active_field`` sits on an enum would otherwise be
+    # stored as the enum's value (e.g. inspection_done_by="2026-08-27"), which
+    # then fails validation with a nonsensical message.
+    allowed = _ENUM_FIELD_VALUES.get(active_field)
+    if allowed is not None and str(candidate_value or "").strip().upper() not in allowed:
+        return extracted
     # Do NOT remap when both keys are distinct "actual_*" date fields.  When the
     # user explicitly names a specific historical date (e.g. "Corrected trading
     # date: 2026-07-10") and the bot was asking for a different specific date
@@ -361,6 +420,7 @@ async def merge_state_node(state: ServiceRequestState) -> dict[str, Any]:
     # are treated as maximum-confidence updates and bypass the normal threshold.
     # Backend-protected fields are still guarded.
     corrected: dict[str, Any] = state.get("corrected_fields") or {}  # type: ignore[assignment]
+    active_field_this_turn: str = str(state.get("active_field") or "")
     for field_name, value in corrected.items():
         if field_name in BACKEND_PROTECTED_FIELDS:
             continue
@@ -371,12 +431,26 @@ async def merge_state_node(state: ServiceRequestState) -> dict[str, Any]:
             # loses its selection when the ConfirmationCard mounts before the
             # bridge writes it back), and that empty overrides the real value
             # collected via chip clicks — breaking payload_builder.
+            #
+            # Optional free-text fields (description, title, notes, comments)
+            # get the same protection: the form bridge syncs corrected_fields
+            # on every turn, and a stale/not-yet-hydrated "" for one of these
+            # can race a genuine correction answer and wipe it right back to
+            # empty on the very next turn. Only allow "" through when the bot
+            # is actively asking about this exact field right now — that is
+            # the one case where "" legitimately means "user skipped".
             existing = collected.get(field_name)
             if (
                 isinstance(value, str)
                 and value == ""
                 and existing not in (None, "", [])
-                and field_name in _REQUIRED_NON_OPTIONAL_FIELDS
+                and (
+                    field_name in _REQUIRED_NON_OPTIONAL_FIELDS
+                    or (
+                        field_name in _OPTIONAL_SKIPPABLE_FIELDS
+                        and field_name != active_field_this_turn
+                    )
+                )
             ):
                 continue
             if field_name in _USER_DATE_FIELDS and field_name not in _USER_TIME_FIELDS:
@@ -393,9 +467,19 @@ async def merge_state_node(state: ServiceRequestState) -> dict[str, Any]:
     # extracted_fields can still be present in state on T2.  Guard every field
     # that was already written by corrected_fields so stale extraction values
     # from a previous turn cannot overwrite the deliberate correction.
+    #
+    # EXCEPT the field the bot is actively collecting this turn: an answer to
+    # the question just asked is by definition fresh, not a leftover from a
+    # prior turn. Without this carve-out, a session that was ever CONFIRMED
+    # plus the form bridge's every-turn corrected_fields sync (which still
+    # carries the OLD form value) silently discarded the user's correction —
+    # the bot then re-asked quoting the stale value, looping forever.
+    _active_field_now: str = str(state.get("active_field") or "")
     _confirmed_correction_keys: frozenset[str] = frozenset(
         k for k, v in corrected.items()
-        if k not in BACKEND_PROTECTED_FIELDS and v is not None
+        if k not in BACKEND_PROTECTED_FIELDS
+        and v is not None
+        and k != _active_field_now
     ) if state.get("confirmation_status") == "CONFIRMED" and corrected else frozenset()
 
     # Once the lease is resolved (lease_id present) the user-facing lease
@@ -455,13 +539,31 @@ async def merge_state_node(state: ServiceRequestState) -> dict[str, Any]:
         ):
             continue
 
+        # An unusable answer must not destroy a good value. Extraction maps
+        # junk and refusals ("not a real date", "no") to an empty string, which
+        # for a required field would wipe a previously valid entry the user was
+        # merely trying to amend. Keep the old value; the field stays active and
+        # is re-asked until a real replacement arrives.
+        if (
+            isinstance(new_value, str)
+            and new_value == ""
+            and field_name in _REQUIRED_NON_OPTIONAL_FIELDS
+            and collected.get(field_name) not in (None, "", [])
+        ):
+            continue
+
         # Time fields: keep raw HH:MM, never strip via _to_date_only.
         # A time extracted while answering endDate belongs on endDateLT only —
         # never overwrite the start inspectionTime (2 PM start + 6 PM end).
         if field_name in _USER_TIME_FIELDS:
+            # A clock time supplied while answering the END date belongs to the
+            # end of the window. The extractor still reports it as
+            # `inspectionTime`, so re-key it rather than letting it overwrite
+            # the start clock (2 PM start + 6 PM end must survive).
             if field_name == "inspectionTime" and _is_end_date_turn(
                 extracted, state.get("active_field")
             ):
+                collected["inspectionEndTime"] = str(new_value)
                 _apply_hhmm_to_date(collected, "endDate", "endDateLT", str(new_value))
                 continue
         # Repair hallucinated years on bare dates (no year typed by the user).
@@ -503,20 +605,25 @@ async def merge_state_node(state: ServiceRequestState) -> dict[str, Any]:
 
     workflow_stage: str = state.get("workflow_stage") or ""
 
-    # For CREATE_SR, auto-set optional text fields to "" when the user has
-    # confirmed (confirmation_status == CONFIRMED) so that the payload builder
-    # never sends a null value to the API and so that _route_after_validation's
-    # optional_never_asked guard (now bypassed for already-confirmed turns) does
-    # not leave None in collected_data.
-    if (
-        workflow_stage == "CREATE_SR"
-        and state.get("confirmation_status") == "CONFIRMED"
-    ):
+    # Auto-set optional text fields to "" when the user has confirmed
+    # (confirmation_status == CONFIRMED) so that the payload builder never sends
+    # a null value to the API and so that _route_after_validation's
+    # optional_never_asked guard (bypassed for already-confirmed turns) does not
+    # leave None in collected_data.
+    #
+    # Path A collects description / notes / comments; Path B collects only
+    # comments (its payload has no description or notes fields), so filling those
+    # here would invent values for fields that flow never had.
+    _CONFIRMED_OPTIONAL_DEFAULTS: dict[str, tuple[str, ...]] = {
+        "CREATE_SR": ("description", "notes", "comments"),
+        "CREATE_HANDED_OVER_SR": ("comments",),
+    }
+    if state.get("confirmation_status") == "CONFIRMED":
         # Mark still-unanswered optionals as skipped ("") rather than leaving
         # None. The auto-generation block below then turns each "" into a
         # readable default, so a confirmed SR never reaches the platform with a
         # blank Description / Notes / Comments.
-        for _optional_key in ("description", "notes", "comments"):
+        for _optional_key in _CONFIRMED_OPTIONAL_DEFAULTS.get(workflow_stage, ()):
             if collected.get(_optional_key) is None:
                 collected[_optional_key] = ""
 
@@ -599,23 +706,23 @@ async def merge_state_node(state: ServiceRequestState) -> dict[str, Any]:
     # Skipped for CREATE_HANDED_OVER_SR — expected_handover_date is not used
     # in Path B and must not be auto-computed from stale state.
 
-    # For FM_REVIEW, RDD_REVIEW, and CREATE_HANDED_OVER_SR the bot no longer
-    # proactively asks for optional comments before showing the confirmation card
-    # (see _route_after_validation).  Auto-satisfy comments to empty string so
-    # the backend API never receives a null value and rejects the submission.
-    if workflow_stage in ("FM_REVIEW", "RDD_REVIEW", "CREATE_HANDED_OVER_SR"):
+    # For FM_REVIEW and RDD_REVIEW the bot does not proactively ask for optional
+    # comments before showing the confirmation card (see _route_after_validation).
+    # Auto-satisfy comments to empty string so the backend API never receives a
+    # null value and rejects the submission. FM_REVIEW / RDD_REVIEW comments are
+    # reviewer remarks — an empty string is the correct neutral value.
+    #
+    # CREATE_HANDED_OVER_SR is deliberately NOT in this list. Path B is a Mall
+    # Manager create flow and _route_after_validation does route it through the
+    # proactive optional ask, but that branch only fires while comments is still
+    # None — filling it here consumed the question before it could be asked, so
+    # every Already Trading SR shipped with the generated "No additional comments
+    # provided for lease X." sentence and the user was never consulted. The
+    # CONFIRMED-path block above is the safety net that keeps a submitted Path B
+    # SR from carrying a null.
+    if workflow_stage in ("FM_REVIEW", "RDD_REVIEW"):
         if collected.get("comments") is None:
-            # Path B is a Mall Manager create flow, so give it the same
-            # generated default as CREATE_SR instead of a blank required field.
-            # This block runs after the auto-generation section above, so it has
-            # to generate here rather than fall through to "".
-            # FM_REVIEW / RDD_REVIEW comments are reviewer remarks — an empty
-            # string is the correct neutral value for those.
-            _lease_for_comments = str(collected.get("lease_code") or "").strip()
-            if workflow_stage == "CREATE_HANDED_OVER_SR" and _lease_for_comments:
-                collected["comments"] = _generate_comments(_lease_for_comments)
-            else:
-                collected["comments"] = ""
+            collected["comments"] = ""
 
     if (
         workflow_stage != "CREATE_HANDED_OVER_SR"
@@ -686,11 +793,17 @@ async def merge_state_node(state: ServiceRequestState) -> dict[str, Any]:
         msg_time = extract_hhmm_from_message(user_message)
         if msg_time:
             if _is_end_date_turn(extracted, state.get("active_field")):
+                collected["inspectionEndTime"] = msg_time
                 _apply_hhmm_to_date(collected, "endDate", "endDateLT", msg_time)
             else:
                 collected["inspectionTime"] = msg_time
-        if not collected.get("inspectionTime"):
-            collected["inspectionTime"] = datetime.datetime.now().strftime("%H:%M")
+        # Deliberately NOT defaulted to the current clock time here. Doing so
+        # marked the field answered, so a date given without a time silently
+        # advanced to the next question and the inspection was booked at
+        # whatever time the user happened to be typing. Leaving it None keeps
+        # it "missing" so missing_field_node asks for the time straight after
+        # the start date. A user who declines still gets a real default:
+        # payload_builder falls back to _DEFAULT_INSPECTION_HOUR (09:00).
         _sync_inspection_lt_fields(collected)
 
     # CREATE_SR / APPROVE_SR: when the user answers the yes/no radio in this

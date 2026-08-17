@@ -530,3 +530,153 @@ class TestMissingFieldNodeWorkflowConfig:
             assert asked_field != "title", "auto_generated field 'title' should not be asked"
         finally:
             WORKFLOW_CONFIG_REGISTRY.pop("test_auto_gen_agent", None)
+
+
+# ---------------------------------------------------------------------------
+# TestCorrectionPendingField
+# ---------------------------------------------------------------------------
+
+
+class TestCorrectionOnLockedField:
+    """B3: fields the merge layer refuses to overwrite must not be offered."""
+
+    @pytest.mark.asyncio
+    async def test_lease_derived_field_correction_is_refused(self) -> None:
+        state = _state(
+            workflow_stage="CREATE_SR",
+            collected_data={"lease_id": 7001, "mall": "Hamraa Mall"},
+            correction_pending_field="mall",
+        )
+        result = await missing_field_node(state)
+
+        assert result["correction_pending_field"] is None
+        assert result["active_field"] is None
+        assert "can't be edited" in result["response_message"]
+        # Must not pose a question it cannot honour.
+        assert "what would you like to change it to" not in (
+            result["response_message"].lower()
+        )
+
+    @pytest.mark.asyncio
+    async def test_backend_protected_field_correction_is_refused(self) -> None:
+        state = _state(
+            workflow_stage="CREATE_SR",
+            collected_data={"lease_id": 7001, "city": "Riyadh"},
+            correction_pending_field="city",
+        )
+        result = await missing_field_node(state)
+        assert "can't be edited" in result["response_message"]
+
+    @pytest.mark.asyncio
+    async def test_editable_field_still_offered_when_lease_resolved(self) -> None:
+        state = _state(
+            workflow_stage="CREATE_SR",
+            collected_data={"lease_id": 7001, "title": "Some title"},
+            correction_pending_field="title",
+        )
+        result = await missing_field_node(state)
+        assert result["active_field"] == "title"
+        assert "Some title" in result["response_message"]
+
+
+class TestCorrectionPendingField:
+    """missing_field_node must honor a pending 'change field X' redirect."""
+
+    @pytest.mark.asyncio
+    async def test_asks_for_correction_pending_field(self) -> None:
+        state = _state(
+            workflow_stage="CREATE_SR",
+            collected_data={"title": "handover-t0031259", "description": "old desc"},
+            correction_pending_field="title",
+        )
+        result = await missing_field_node(state)
+
+        assert result["missing_fields"] == ["title"]
+        assert result["active_field"] == "title"
+        assert result["status"] == "WAITING_FOR_USER"
+        assert result["response_ui"]["field"] == "title"
+        assert "handover-t0031259" in result["response_message"]
+
+    @pytest.mark.asyncio
+    async def test_response_is_marked_verbatim(self) -> None:
+        """Regression: without verbatim=True, response_generation_node's LLM
+        rewrite sees the field's OLD value still in collected_data and
+        re-confirms it instead of asking for a new one — silently discarding
+        the correction. The re-ask message must bypass that rewrite."""
+        state = _state(
+            workflow_stage="CREATE_SR",
+            collected_data={"endDate": "2026-08-21T19:00:00"},
+            correction_pending_field="endDate",
+        )
+        result = await missing_field_node(state)
+
+        assert result["response_ui"]["verbatim"] is True
+        assert result["response_message"] == result["response_ui"]["message"]
+
+    @pytest.mark.asyncio
+    async def test_date_field_correction_includes_format_hint(self) -> None:
+        state = _state(
+            workflow_stage="CREATE_SR",
+            collected_data={"endDate": "2026-08-21T19:00:00"},
+            correction_pending_field="endDate",
+        )
+        result = await missing_field_node(state)
+
+        assert "DD/MM/YYYY" in result["response_message"]
+        assert "21/08/2026" in result["response_message"]
+
+    @pytest.mark.asyncio
+    async def test_enum_field_correction_includes_chip_decorations(self) -> None:
+        state = _state(
+            workflow_stage="CREATE_SR",
+            collected_data={"inspection_done_by": "FM_MANAGER"},
+            correction_pending_field="inspection_done_by",
+        )
+        result = await missing_field_node(state)
+
+        options = result["response_decorations"]["suggestions"]["options"]
+        assert [(o["label"], o["value"]) for o in options] == [
+            ("FM Manager", "FM_MANAGER"),
+            ("Operations", "OPERATIONS"),
+        ]
+        # Each chip must also carry the action the entry node keys off, so a
+        # correction click writes the value directly instead of going through
+        # LLM re-extraction (which re-asks the question just answered).
+        assert [o["action"] for o in options] == [
+            "select_inspection_done_by_fm_manager",
+            "select_inspection_done_by_operations",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_clears_correction_pending_field_signal(self) -> None:
+        """The signal is one-turn only — must be explicitly cleared in the patch."""
+        state = _state(
+            workflow_stage="CREATE_SR",
+            collected_data={"title": "handover-t0031259"},
+            correction_pending_field="title",
+        )
+        result = await missing_field_node(state)
+
+        assert result["correction_pending_field"] is None
+
+    @pytest.mark.asyncio
+    async def test_takes_priority_over_other_missing_fields(self) -> None:
+        """Even with other required fields missing, the correction is asked first."""
+        state = _state(
+            workflow_stage="FM_REVIEW",
+            collected_data={},
+            correction_pending_field="unit_readiness_date",
+        )
+        result = await missing_field_node(state)
+
+        assert result["active_field"] == "unit_readiness_date"
+
+    @pytest.mark.asyncio
+    async def test_no_pending_correction_falls_through_normally(self) -> None:
+        state = _state(
+            workflow_stage="CREATE_SR",
+            collected_data={"title": "handover-t0031259", "description": "old desc"},
+        )
+        result = await missing_field_node(state)
+
+        assert result.get("active_field") != "title"

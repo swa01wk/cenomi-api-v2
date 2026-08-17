@@ -277,6 +277,26 @@ Examples:
 Always prefer extracting MORE fields over fewer when values are explicitly stated.
 Never skip a clearly-stated field just because it was not the one being asked about.
 
+**Answers belonging to a DIFFERENT field — never discard them**
+
+If the user's message is clearly a value for some other collectible field than
+the one being asked, extract it into the field it actually belongs to.  Do NOT
+return an empty extraction merely because the value does not fit the asked
+field — the value is then lost and the user has to type it again, which happens
+most often while a validation error keeps the bot pinned to one field.
+
+- Question: "Please enter an end date later than 22/08/2026, in DD/MM/YYYY format."
+  User: "FM_MANAGER"
+  → Extract `inspection_done_by: "FM_MANAGER"` (confidence 1.0)
+  → Do NOT extract `endDate`, and do NOT return an empty result
+
+- Question: "Please enter a valid end date."
+  User: "Operations"
+  → Extract `inspection_done_by: "OPERATIONS"` (confidence 1.0)
+
+Only return an empty extraction when the message carries no usable field value
+at all (a greeting, a question, or an unresolvable relative date).
+
 **Time alongside a date**: when the user answers a date question with a date AND a time,
 extract BOTH the date field AND `inspectionTime` as separate fields.
 
@@ -295,12 +315,22 @@ extract BOTH the date field AND `inspectionTime` as separate fields.
     AND `inspectionTime: "14:00"` (start time). Include the time on each date
     value so the end clock is not lost.
 
-## Path B (Already Trading) date field corrections — CRITICAL
+## Field redirects — CRITICAL
 
-When in the CREATE_HANDED_OVER_SR (Already Trading) flow, the user may correct a date
-by explicitly naming the field they are correcting, even if the bot had asked for a
-DIFFERENT date field.  In such cases the user's explicit label ALWAYS takes priority
-over the active_field context.
+At any stage, the user may redirect to a field other than the one currently
+being collected — most often by explicitly naming a different field ("I want
+to change the title", "actually update the mall to Riyadh Park"). When the
+"Field currently being collected" hint differs from what the "Previous
+assistant question" actually asked about, that is a signal the user's message
+already redirected the flow — trust the "Field currently being collected"
+hint over the previous question's topic; a deterministic pre-check upstream
+of this prompt already resolved which field the user meant.
+
+This applies to dates too: in the CREATE_HANDED_OVER_SR (Already Trading) flow,
+the user may correct a date by explicitly naming the field they are
+correcting, even if the bot had asked for a DIFFERENT date field. In such
+cases the user's explicit label ALWAYS takes priority over the active_field
+context.
 
 Field name mappings for user corrections:
 

@@ -649,3 +649,4 @@ class TestStageSpecificConfirmationCards:
         state: dict[str, Any] = {"collected_data": data, "workflow_stage": "RDD_REVIEW"}
         result = await confirmation_node(state)
         assert result == {}
+

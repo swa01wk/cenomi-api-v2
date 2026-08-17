@@ -46,14 +46,25 @@ HANDOVER_FIELD_QUESTIONS: dict[str, str] = {
         "If they provide the time here, no separate time question will be needed."
     ),
     "endDate": (
-        "Ask the user when the inspection should end — date and optionally time. "
-        "Instruct them to use DD/MM/YYYY format, e.g. '21/08/2026' or '21/08/2026 6:00 PM'. "
-        "If no time is given the same inspection time as the start will be used."
+        "Ask the user when the inspection should end — date AND time together. "
+        "Instruct them to use DD/MM/YYYY format and include the time, "
+        "e.g. '21/08/2026 6:00 PM'. "
+        "Do NOT tell them the time is optional and do NOT say the start time "
+        "will be reused — if they omit the time they will be asked for it next."
     ),
     "inspectionTime": (
-        "Ask the user what time the inspection should start (e.g. '10:00 AM', '14:30'). "
-        "Only ask this if the user did not already provide a time with the start date. "
-        "Accept 'skip' or 'none' to use 9:00 AM as the default."
+        "The user gave a start date but no time. Ask what time the inspection "
+        "should start on that date (e.g. '10:00 AM', '14:30'). "
+        "Ask ONLY for the time — do not re-ask for the date, and do not move on "
+        "to any other field. "
+        "Mention they can reply 'skip' to use 9:00 AM as the default."
+    ),
+    "inspectionEndTime": (
+        "The user gave an end date but no time. Ask what time the inspection "
+        "should end on that date (e.g. '6:00 PM', '18:30'). "
+        "Ask ONLY for the time — do not re-ask for the date, and do not move on "
+        "to any other field. "
+        "Mention they can reply 'skip' to reuse the inspection start time."
     ),
     "inspection_done_by": (
         "Ask the user who will perform the inspection. "

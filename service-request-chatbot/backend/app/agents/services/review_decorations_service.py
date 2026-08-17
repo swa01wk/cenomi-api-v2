@@ -89,7 +89,18 @@ def payload_to_collected_data(payload: dict[str, Any]) -> dict[str, Any]:
         "title", "description", "startDate", "endDate", "inspection_done_by",
         "unit_readiness_date", "expected_handover_date", "actual_handover_date",
         "fitout_start_date", "fitout_end_date", "trading_date", "comments",
+        "notes",
         "guideLineLink", "document_status",
+        # ── Path B (Already Trading / HANDED_OVER) ─────────────────────────────
+        # payload_builder_service.build_handed_over_payload sends all four of
+        # these; without them here an opened Path B SR loses the shop handover
+        # and fitout end dates from its preview card, and ``already_handovered``
+        # — the discriminator HandoverAgenticBridge reads to switch between the
+        # HANDOVER and HANDED_OVER form skeletons — never reaches the frontend.
+        # ``actual_fitout_start_date`` and ``actual_trading_date`` are already
+        # mapped below as part of the Fitout Confirmation block.
+        "already_handovered",
+        "actual_shop_handover_date", "actual_fitout_end_date",
         "lease_code", "brand", "mall", "city", "unit_codes", "contracted_area",
         "lease_id", "brand_id", "property_id", "tenant_profile_id", "contract_id",
         # ── Fitout Confirmation workflow fields ────────────────────────────────

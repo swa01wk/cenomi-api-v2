@@ -22,6 +22,7 @@ submission are concerns of graph nodes and domain services.
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -65,6 +66,45 @@ from app.db.repositories.chat_session_repo import ChatSessionRepository
 from app.observability.trace_manager import TraceManager
 
 log = structlog.get_logger(__name__)
+
+# ---------------------------------------------------------------------------
+# Per-session turn serialisation
+# ---------------------------------------------------------------------------
+# A turn is read-modify-write over the whole draft: load_session reads
+# collected_data, the graph mutates it, save_state writes the entire blob back.
+# Two turns for one session running concurrently therefore lose one side's
+# work — the last writer wins. Verified live: four parallel requests reduced a
+# fully populated draft (lease, dates, title, notes, comments) to a single
+# field. Users reach this by double-clicking send, a client retry, or two open
+# tabs. Turns within one conversation are logically sequential, so serialising
+# them costs nothing semantically.
+#
+# Scope: this lock is per-process. It fully covers a single uvicorn worker
+# (how this service runs today). Across multiple workers or replicas a
+# Postgres advisory lock keyed on session_id would be required; the
+# StateLoadError guard in ConversationStateService is the cross-process
+# backstop that prevents a failed read from destroying data.
+_SESSION_LOCKS: dict[UUID, asyncio.Lock] = {}
+_SESSION_LOCKS_GUARD = asyncio.Lock()
+
+
+async def _acquire_session_lock(session_id: UUID) -> asyncio.Lock:
+    """Return (creating if needed) the lock guarding *session_id*'s turns."""
+    async with _SESSION_LOCKS_GUARD:
+        lock = _SESSION_LOCKS.get(session_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            _SESSION_LOCKS[session_id] = lock
+        return lock
+
+
+async def _release_session_lock_if_idle(session_id: UUID) -> None:
+    """Drop the lock once no turn holds or awaits it, so the map cannot grow
+    without bound over a long-lived process."""
+    async with _SESSION_LOCKS_GUARD:
+        lock = _SESSION_LOCKS.get(session_id)
+        if lock is not None and not lock.locked():
+            _SESSION_LOCKS.pop(session_id, None)
 
 
 def resolve_turn_sr_id(
@@ -138,6 +178,61 @@ class ChatOrchestrationService:
     # ------------------------------------------------------------------
 
     async def process_turn(
+        self,
+        *,
+        session_id: UUID | None,
+        user_id: UUID,
+        message: str,
+        attachments: list[dict[str, Any]],
+        action: str | None = None,
+        selected_lease_id: str | None = None,
+        corrected_fields: dict[str, Any] | None = None,
+        auth_context: AuthContext | None = None,
+        sr_id: str | None = None,
+        language: str | None = None,
+        msp_context: dict[str, Any] | None = None,
+    ) -> ChatTurnResult:
+        """Run one turn, serialised against other turns for the same session.
+
+        See ``_SESSION_LOCKS``: a turn is a read-modify-write over the entire
+        draft, so overlapping turns silently discard each other's work.
+        A brand-new session (no id yet) has nothing to contend with.
+        """
+        kwargs = dict(
+            session_id=session_id,
+            user_id=user_id,
+            message=message,
+            attachments=attachments,
+            action=action,
+            selected_lease_id=selected_lease_id,
+            corrected_fields=corrected_fields,
+            auth_context=auth_context,
+            sr_id=sr_id,
+            language=language,
+            msp_context=msp_context,
+        )
+        if session_id is None:
+            return await self._process_turn_serialised(**kwargs)
+
+        lock = await _acquire_session_lock(session_id)
+        if lock.locked():
+            log.info("chat.turn_queued_behind_concurrent_turn",
+                     session_id=str(session_id))
+        async with lock:
+            try:
+                result = await self._process_turn_serialised(**kwargs)
+                # Commit inside the lock. The repositories only flush(); the
+                # commit normally happens at request teardown, which runs after
+                # the lock is released — so the next queued turn would read
+                # pre-commit state and overwrite this one's work. Holding the
+                # lock across the commit is what actually makes the turns
+                # sequential rather than merely non-overlapping.
+                await self._db.commit()
+                return result
+            finally:
+                await _release_session_lock_if_idle(session_id)
+
+    async def _process_turn_serialised(
         self,
         *,
         session_id: UUID | None,

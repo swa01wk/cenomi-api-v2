@@ -161,10 +161,22 @@ def _should_open_existing_sr(state: dict[str, Any]) -> bool:
 # ---------------------------------------------------------------------------
 
 
+# Fields whose answer is arbitrary prose. While one of these is being
+# collected the user's message is CONTENT, so it must never be re-read as a
+# new intent — ``_PREVIEW_PHRASES`` matches bare substrings like "review",
+# and a comment such as "Please review the details and approve it" was being
+# routed to the supervisor, classified as an approve intent, and RBAC-denied
+# instead of being stored as the comment.
+_FREE_TEXT_ANSWER_FIELDS: frozenset[str] = frozenset(
+    {"title", "description", "notes", "comments"}
+)
+
+
 def _route_after_load(state: dict[str, Any]) -> str:
     """Route to sr_status_sync when an SR ID exists; otherwise to agent/supervisor."""
     user_message = state.get("user_message") or ""
-    if _user_wants_preview(user_message):
+    _awaiting_free_text = state.get("active_field") in _FREE_TEXT_ANSWER_FIELDS
+    if not _awaiting_free_text and _user_wants_preview(user_message):
         return "supervisor"
 
     sr_id = (state.get("backend_refs") or {}).get("sr_id")
@@ -337,6 +349,14 @@ def _route_after_validation(state: dict[str, Any]) -> str:
     else:
         from app.agents.schemas.handover_schema import OPTIONAL_FIELDS
 
+    # A pending "change field X" redirect must reach missing_field_node, which
+    # owns the re-ask. Without this the routing below sends a fully-collected
+    # draft straight to confirmation, the signal is never consumed, and the
+    # user's correction request is silently dropped — precisely when they are
+    # reviewing the finished draft and most want to fix something.
+    if state.get("correction_pending_field"):
+        return "missing_field"
+
     already_confirmed = state.get("confirmation_status") == "CONFIRMED"
 
     # When the user has already explicitly confirmed (e.g. via confirm_fm_approve
@@ -426,6 +446,67 @@ def _route_after_validation(state: dict[str, Any]) -> str:
     return confirmation_nodes.get(original_stage, "confirmation")
 
 
+# Chip actions that write directly into
+# ``collected_data`` inside handover_entry_node (see
+# _HANDOVER_TYPE_ACTIONS / _INSPECTION_DONE_BY_ACTIONS) — the value is already
+# final, so routing through field_extraction is not just redundant, it is
+# actively wrong: the LLM re-extraction pass usually finds nothing new in the
+# chip's label text, and field_extraction's "correction re-arm" safety net
+# then reads "field already has a value + nothing extracted this turn" as a
+# failed correction attempt and re-asks the question the user just answered.
+_DIRECT_SET_CHIP_ACTIONS: frozenset[str] = frozenset(
+    {
+        "select_handover_type_already_trading",
+        "select_handover_type_initiate_handover",
+        "select_inspection_done_by_fm_manager",
+        "select_inspection_done_by_operations",
+    }
+)
+
+# Same idea for the RDD_REVIEW stage — rdd_review_entry_node writes
+# ``document_status`` straight into collected_data for these two chips.
+_RDD_DIRECT_SET_CHIP_ACTIONS: frozenset[str] = frozenset(
+    {
+        "select_rdd_status_approved",
+        "select_rdd_status_approved_with_changes",
+    }
+)
+
+
+def _waiting_short_circuit_target(state: dict[str, Any]) -> str:
+    """Where a turn goes when the persisted ``status`` is WAITING_FOR_USER.
+
+    Every question the bot asks saves WAITING_FOR_USER, so that value is present
+    on the *next* turn — the one carrying the user's reply. Short-circuiting
+    straight to response_generation therefore swallows the two messages that
+    most need to reach the graph:
+
+    - a correction request ("i want to edit the fitout start date"), and
+    - the answer to the question that status belongs to (``active_field``).
+
+    response_generation cannot write ``collected_data``, so the LLM just
+    improvises from the values already there — observed live in RDD_REVIEW as
+    "I see you want to change the fitout start date to 28/08/2026" (quoting the
+    *current* value back), after which every date the user typed was discarded
+    and the same question returned forever.
+
+    Anything else — a genuine idle wait such as the MM optional-upload offer,
+    which leaves ``active_field`` None — still short-circuits as before.
+    """
+    from app.agents.services.field_correction_service import detect_correction_intent
+
+    if detect_correction_intent(
+        state.get("user_message") or "",
+        state.get("collected_data") or {},
+        state.get("active_field"),
+        state.get("workflow_stage"),
+    ):
+        return "field_extraction"
+    if state.get("active_field"):
+        return "field_extraction"
+    return "response_generation"
+
+
 def _route_after_handover_entry(state: dict[str, Any]) -> str:
     # Check confirmation_status BEFORE stale WAITING_FOR_USER so that a confirm
     # action set this turn is never shadowed by a persisted WAITING_FOR_USER value
@@ -434,6 +515,8 @@ def _route_after_handover_entry(state: dict[str, Any]) -> str:
         return "merge_state"
     if state.get("action_override") == "continue_milestone":
         return "merge_state"
+    if state.get("action_override") in _DIRECT_SET_CHIP_ACTIONS:
+        return "merge_state"
     # When REJECTED (e.g. after cancel+edit), always route through field_extraction
     # to process the correction, bypassing a stale WAITING_FOR_USER saved from the
     # prior turn's "what would you like to change?" message.
@@ -441,7 +524,7 @@ def _route_after_handover_entry(state: dict[str, Any]) -> str:
         return "field_extraction"
     # Optional MM upload offer/wait and other WAITING short-circuits.
     if state.get("status") == "WAITING_FOR_USER":
-        return "response_generation"
+        return _waiting_short_circuit_target(state)
     if state.get("action_override") == "cancel":
         return "merge_state"
     return "field_extraction"
@@ -457,16 +540,28 @@ def _route_after_fm_entry(state: dict[str, Any]) -> str:
     if backend_refs.get("fm_action"):
         return "merge_state"
     if state.get("status") == "WAITING_FOR_USER":
-        return "response_generation"
+        return _waiting_short_circuit_target(state)
     return "field_extraction"
 
 
 def _route_after_rdd_entry(state: dict[str, Any]) -> str:
-    if state.get("status") == "WAITING_FOR_USER":
-        return "response_generation"
+    # Confirmation / action checks come BEFORE the stale-status short circuit,
+    # so an action set this turn is never shadowed by the WAITING_FOR_USER value
+    # persisted by the previous save_state. Same ordering as _route_after_fm_entry
+    # and _route_after_handover_entry.
+    #
     # Single-turn confirm already set CONFIRMED — skip extraction and go
     # straight through merge → validation → rdd_confirmation → payload builder.
     if state.get("confirmation_status") == "CONFIRMED":
+        return "merge_state"
+    # Status chips write document_status into collected_data directly (see
+    # rdd_review_entry_node._STATUS_ACTIONS), so the value is already final.
+    # Same reasoning as _DIRECT_SET_CHIP_ACTIONS on the handover entry node:
+    # re-running extraction over the chip label finds nothing, and
+    # field_extraction's correction re-arm then reads "field has a value +
+    # nothing extracted" as a failed correction and re-asks the question the
+    # user just answered.
+    if state.get("action_override") in _RDD_DIRECT_SET_CHIP_ACTIONS:
         return "merge_state"
     backend_refs = state.get("backend_refs") or {}
     if backend_refs.get("rdd_action"):
@@ -475,6 +570,8 @@ def _route_after_rdd_entry(state: dict[str, Any]) -> str:
     # not re-enter field collection / submit confirmation.
     if backend_refs.get("rdd_status") == "REPORT_SUBMITTED":
         return "response_generation"
+    if state.get("status") == "WAITING_FOR_USER":
+        return _waiting_short_circuit_target(state)
     return "field_extraction"
 
 
