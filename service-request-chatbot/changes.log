@@ -1,0 +1,63 @@
+# Changes Log — fix/handover-agent-remaining-gaps
+
+Date: 2026-08-04
+Branch: `fix/handover-agent-remaining-gaps` (from `fix/staging`)
+Scope: Service Request Chatbot — Handover AI agent remaining functional gaps
+
+## Summary
+
+Closes agent-owned defects from UAT around lease revalidation, inspection
+assignee single-select enforcement, document-delete lease hydration, and soft
+FM cancel. Portal Formik sync, Handover Type, platform Reject / Ask-for-more /
+CREATE Save-as-Draft remain out of scope (need MSP UI and/or product API contracts).
+
+## Changes
+
+### 1. Lease code revalidation after intentional change
+- **Files:** `backend/app/agents/graph/nodes/shared/merge_state_node.py`,
+  `backend/app/agents/graph/nodes/handover/confirmation_node.py`
+- On explicit lease change (confirmation-card edit, `active_field=lease_code`,
+  or change/switch phrasing), clear `lease_id` and derived enrichment so
+  `lease_lookup` re-runs.
+- Hallucinated lease_code overwrites after resolve remain blocked.
+- CREATE confirmation card: `lease_code` is editable.
+
+### 2. Inspection assignee single-select + invalid input rejection
+- **Files:** `confirmation_node.py`, `merge_state_node.py`
+- Confirmation card emits `options: [FM_MANAGER, OPERATIONS]` for
+  `inspection_done_by` (chat FE already renders `<select>` when options present).
+- Merge normalizes aliases (`ops` → `OPERATIONS`) and rejects invalid values
+  (e.g. `mall manager`) and low-confidence enum guesses.
+
+### 3. Document delete lease_id hydration
+- **Files:** `backend/app/api/routes/upload.py`,
+  `frontend/lib/api/upload-client.ts`,
+  `frontend/components/chatbot/DocumentUploadPanel.tsx`
+- DELETE `/upload` now resolves `lease_id` from draft (`lease_id` /
+  `contract_id`) and, when missing, hydrates via GET SR (same path as upload).
+- Hydrated refs are persisted on the draft for subsequent deletes.
+- Chat FE passes `lease_id` / `contract_id` on delete when known.
+
+### 4. FM Review soft cancel (no workflow reload wipe)
+- **File:** `backend/app/agents/graph/nodes/handover/fm_review_entry_node.py`
+- Cancel / cancel_update clears only pending confirmation + staged `fm_action`.
+- Collected data, documents, `sr_id`, and stage are preserved.
+- Reject remains an explicit stub until platform reject PATCH contract exists.
+
+## Tests added / updated
+
+| Suite | Coverage |
+|-------|----------|
+| `tests/unit/test_merge_state_node.py` | Lease revalidation, enum reject/normalize, `_route_after_merge` re-lookup |
+| `tests/unit/test_confirmation_node.py` | Editable `lease_code`, `inspection_done_by` options |
+| `tests/unit/test_fm_nodes.py` | Soft cancel preserves progress; reject stub messaging |
+| `tests/unit/test_upload_delete_hydrate.py` | **New** — delete lease_id / contract_id / platform hydrate / draft cleanup |
+
+## Not in this PR (handoff)
+
+| Item | Owner |
+|------|-------|
+| Bind `draft_preview` → MSP Formik left form | Portal UI |
+| Lock form on `stage_complete` / `workflow_complete` | Portal UI |
+| Handover Type (Already Trading / Initiate Handover) | Product + platform API, then agent + portal |
+| Real FM Reject / Ask for More Info / CREATE Save as Draft | Product + platform API, then agent + chatbot FE |

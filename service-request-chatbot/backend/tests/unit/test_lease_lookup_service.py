@@ -470,6 +470,40 @@ class TestMockLookupCustomRecords:
 
 
 # ---------------------------------------------------------------------------
+# TestMockLookupEligibilityReasons
+# ---------------------------------------------------------------------------
+
+
+class TestMockLookupEligibilityReasons:
+    """Mock must surface handover_exists / activation_pending for eval fixtures."""
+
+    @pytest.mark.asyncio
+    async def test_handover_exists_fixture(self) -> None:
+        svc = MockLeaseLookupService()
+        result = await svc.lookup(LeaseLookupQuery(lease_code="t0028568"))
+        assert result.matches == []
+        assert result.reason == "handover_exists"
+        assert result.existing_handover_sr_id == "10473"
+        assert result.response_payload is not None
+        assert result.response_payload["reason"] == "handover_exists"
+
+    @pytest.mark.asyncio
+    async def test_activation_pending_fixture(self) -> None:
+        svc = MockLeaseLookupService()
+        result = await svc.lookup(LeaseLookupQuery(lease_code="t0999999"))
+        assert result.matches == []
+        assert result.reason == "activation_pending"
+        assert result.existing_handover_sr_id is None
+
+    @pytest.mark.asyncio
+    async def test_unknown_code_has_no_eligibility_reason(self) -> None:
+        svc = MockLeaseLookupService()
+        result = await svc.lookup(LeaseLookupQuery(lease_code="DOES_NOT_EXIST"))
+        assert result.matches == []
+        assert result.reason is None
+
+
+# ---------------------------------------------------------------------------
 # TestHttpLeaseLookupServiceSuccess
 # ---------------------------------------------------------------------------
 
@@ -564,6 +598,57 @@ class TestHttpLeaseLookupServiceSuccess:
             result = await svc.lookup(LeaseLookupQuery(lease_code="t0105712"))
         assert result.matches == []
         assert result.error is None
+
+    @pytest.mark.asyncio
+    async def test_200_handover_exists_parses_eligibility(self) -> None:
+        body = {
+            "success": True,
+            "data": {
+                "leases": [],
+                "count": 0,
+                "reason": "handover_exists",
+                "existing_handover_sr_id": "10473",
+            },
+        }
+        resp = _make_http_response(200, body)
+        svc = HttpLeaseLookupService(base_url="http://api.example.com")
+        with patch("httpx.AsyncClient", return_value=self._make_client_ctx(resp)):
+            result = await svc.lookup(LeaseLookupQuery(lease_code="t0028568"))
+        assert result.matches == []
+        assert result.reason == "handover_exists"
+        assert result.existing_handover_sr_id == "10473"
+        assert result.error is None
+
+    @pytest.mark.asyncio
+    async def test_200_activation_pending_parses_reason(self) -> None:
+        body = {
+            "success": True,
+            "data": {
+                "leases": [],
+                "count": 0,
+                "reason": "activation_pending",
+            },
+        }
+        resp = _make_http_response(200, body)
+        svc = HttpLeaseLookupService(base_url="http://api.example.com")
+        with patch("httpx.AsyncClient", return_value=self._make_client_ctx(resp)):
+            result = await svc.lookup(LeaseLookupQuery(lease_code="t0999999"))
+        assert result.matches == []
+        assert result.reason == "activation_pending"
+        assert result.existing_handover_sr_id is None
+
+    @pytest.mark.asyncio
+    async def test_200_empty_reason_normalised_to_none(self) -> None:
+        body = {
+            "success": True,
+            "data": {"leases": [_UA_RECORD], "reason": "", "count": 1},
+        }
+        resp = _make_http_response(200, body)
+        svc = HttpLeaseLookupService(base_url="http://api.example.com")
+        with patch("httpx.AsyncClient", return_value=self._make_client_ctx(resp)):
+            result = await svc.lookup(LeaseLookupQuery(lease_code="t0105712"))
+        assert len(result.matches) == 1
+        assert result.reason is None
 
     @pytest.mark.asyncio
     async def test_latency_ms_is_populated(self) -> None:

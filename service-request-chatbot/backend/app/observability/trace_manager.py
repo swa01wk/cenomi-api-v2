@@ -17,6 +17,7 @@ from uuid import UUID
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.observability.cost_calculator import calculate_llm_cost
 from app.observability.repositories.llm_call_repo import LLMCallRepository
 from app.observability.repositories.run_repo import RunRepository
 from app.observability.repositories.state_diff_repo import StateDiffRepository
@@ -51,6 +52,10 @@ class TraceManager:
         self._run_start_times: dict[UUID, float] = {}
         # Maps trace_id → monotonic start time for end-to-end trace latency.
         self._trace_start_times: dict[UUID, float] = {}
+        # Per-trace token and cost accumulators — keyed by trace_id UUID.
+        # Initialized in start_trace(), cleared by pop() in finish_trace()/fail_trace().
+        self._trace_token_totals: dict[UUID, int] = {}
+        self._trace_cost_totals: dict[UUID, Decimal] = {}
 
     # ------------------------------------------------------------------
     # Trace lifecycle
@@ -79,6 +84,9 @@ class TraceManager:
             )
             self._active_trace_id = row.id
             self._trace_start_times[row.id] = time.monotonic()
+            # Initialize per-trace accumulators for this turn
+            self._trace_token_totals[row.id] = 0
+            self._trace_cost_totals[row.id] = Decimal("0")
             log.info("trace.started", trace_id=str(row.id))
             return row.id
         except Exception:
@@ -104,6 +112,10 @@ class TraceManager:
         try:
             start = self._trace_start_times.pop(trace_id, None)
             latency_ms = int((time.monotonic() - start) * 1000) if start is not None else None
+            # Read and clear per-trace accumulators built up by capture_llm_call()
+            accumulated_tokens = self._trace_token_totals.pop(trace_id, 0) or None
+            accumulated_cost = self._trace_cost_totals.pop(trace_id, Decimal("0"))
+            accumulated_cost = accumulated_cost if accumulated_cost > Decimal("0") else None
             await self._trace_repo.complete(
                 trace_id,
                 status=status,
@@ -115,8 +127,9 @@ class TraceManager:
                 workflow_stage_before=workflow_stage_before,
                 workflow_stage_after=workflow_stage_after,
                 total_latency_ms=latency_ms,
-                total_token_count=total_token_count,
-                estimated_cost=estimated_cost,
+                # Explicit caller values take precedence; fall back to accumulators
+                total_token_count=total_token_count or accumulated_tokens,
+                estimated_cost=estimated_cost or accumulated_cost,
             )
             if final_state:
                 await self.capture_state_snapshot(
@@ -147,6 +160,9 @@ class TraceManager:
         try:
             start = self._trace_start_times.pop(trace_id, None)
             latency_ms = int((time.monotonic() - start) * 1000) if start is not None else None
+            # Clean up accumulators — cost is not written for failed traces
+            self._trace_token_totals.pop(trace_id, None)
+            self._trace_cost_totals.pop(trace_id, None)
             await self._trace_repo.complete(
                 trace_id,
                 status="FAILED",
@@ -354,8 +370,25 @@ class TraceManager:
         parse_success: bool | None = None,
         parse_error: str | None = None,
     ) -> None:
-        """Record a single LLM API call with token and cost accounting."""
+        """Record a single LLM API call with token and cost accounting.
+
+        If ``estimated_cost`` is not provided by the caller, it is computed
+        automatically via ``calculate_llm_cost()`` using LiteLLM's bundled
+        pricing data.  This is a pure per-call computation — no startup
+        registration, no global state — making it safe with dynamic
+        provider/model switching at runtime.
+        """
         try:
+            # ── Auto-compute cost via litellm if caller did not provide it ──
+            if estimated_cost is None and provider and model:
+                if input_tokens is not None and output_tokens is not None:
+                    estimated_cost = calculate_llm_cost(
+                        provider=provider,
+                        model=model,
+                        input_tokens=input_tokens,
+                        output_tokens=output_tokens,
+                    )
+
             await self._llm_repo.create(
                 trace_id=trace_id,
                 run_id=run_id,
@@ -373,6 +406,17 @@ class TraceManager:
                 parse_success=parse_success,
                 parse_error=parse_error,
             )
+
+            # ── Accumulate into per-trace totals for finish_trace() rollup ──
+            if total_tokens:
+                self._trace_token_totals[trace_id] = (
+                    self._trace_token_totals.get(trace_id, 0) + total_tokens
+                )
+            if estimated_cost is not None:
+                self._trace_cost_totals[trace_id] = (
+                    self._trace_cost_totals.get(trace_id, Decimal("0")) + estimated_cost
+                )
+
         except Exception:
             log.exception(
                 "trace_manager.capture_llm_call.failed",

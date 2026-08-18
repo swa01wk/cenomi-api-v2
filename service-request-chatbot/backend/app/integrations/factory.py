@@ -29,6 +29,7 @@ def get_embedding_provider() -> EmbeddingProvider | None:
     Provider selection is driven by ``EMBEDDING_PROVIDER`` env var:
     - ``"openai"`` (default) — ``OpenAIEmbeddingProvider`` using ``OPENAI_API_KEY``
     - ``"azure_openai"`` — ``AzureOpenAIEmbeddingProvider`` using ``AZURE_AI_*`` vars
+    - ``"vertex_ai"`` — ``VertexAIEmbeddingProvider`` using ``VERTEX_AI_*`` vars
 
     Returns ``None`` when required credentials are absent so ``faq_node``
     falls back to the static prompt without error.
@@ -37,39 +38,15 @@ def get_embedding_provider() -> EmbeddingProvider | None:
     if _embedding_provider is not None:
         return _embedding_provider
 
+    from app.integrations.embeddings.registry import EmbeddingProviderRegistry
+
     provider = settings.embedding_provider.lower()
-
-    if provider == "azure_openai":
-        if not settings.azure_ai_endpoint or not settings.azure_ai_api_key:
-            log.debug(
-                "integrations.factory.embed_skip",
-                reason="AZURE_AI_ENDPOINT or AZURE_AI_API_KEY not set",
-            )
-            return None
-        from app.integrations.embeddings.azure_openai_embed import AzureOpenAIEmbeddingProvider
-        _embedding_provider = AzureOpenAIEmbeddingProvider(
-            azure_endpoint=settings.azure_ai_endpoint,
-            api_key=settings.azure_ai_api_key,
-            model=settings.embedding_model,
-            api_version=settings.azure_ai_api_version,
-        )
-        log.info("integrations.factory.embed_created", provider="azure_openai")
-
-    else:
-        # Default: standard OpenAI (reuses existing OPENAI_API_KEY)
-        if not settings.openai_api_key:
-            log.debug(
-                "integrations.factory.embed_skip",
-                reason="OPENAI_API_KEY not set",
-            )
-            return None
-        from app.integrations.embeddings.openai_embed import OpenAIEmbeddingProvider
-        _embedding_provider = OpenAIEmbeddingProvider(
-            api_key=settings.openai_api_key,
-            model=settings.embedding_model,
-            base_url=settings.embedding_base_url,
-        )
-        log.info("integrations.factory.embed_created", provider="openai")
+    try:
+        _embedding_provider = EmbeddingProviderRegistry.get_provider(provider)
+        log.info("integrations.factory.embed_created", provider=provider)
+    except (ValueError, RuntimeError) as exc:
+        log.debug("integrations.factory.embed_skip", provider=provider, reason=str(exc))
+        return None
 
     return _embedding_provider
 
@@ -139,6 +116,6 @@ async def close_integrations() -> None:
             log.warning("integrations.factory.close_error", error=str(exc))
         _search_repository = None
 
-    # Embedding providers use the openai SDK's own client — no explicit close needed.
+    # Embedding providers manage their own SDK clients — no explicit close needed.
     _embedding_provider = None
     log.info("integrations.factory.closed")

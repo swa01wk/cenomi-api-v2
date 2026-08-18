@@ -247,7 +247,7 @@ async def field_extraction_node(state: ServiceRequestState) -> dict[str, Any]:
             await tm.capture_llm_call(
                 trace_id=trace_id,
                 run_id=llm_run_id,
-                provider="openai",
+                provider=getattr(gateway, "provider_name", "openai"),
                 model=gateway.model,
                 temperature=Decimal("0"),
                 prompt_name="handover_extraction_prompt",

@@ -90,95 +90,55 @@ S236–S244 added, one per defect, plus S245–S246 covering the correction mech
 
 ### What's new
 
-#### Path B — Already Trading Fast-Path (`CREATE_HANDED_OVER_SR`)
+#### Multi-Provider LLM Adapter
 
-A second SR creation path for tenants that are already trading in their unit, requiring no FM or RDD review:
+The gateway layer is now fully provider-agnostic. A new `LLMProviderRegistry` dispatches to any registered provider at startup; changing provider requires only an env-var change — no code change.
 
-- `CREATE_HANDED_OVER_SR` intent added to `SupervisorDecision`
-- Single-phase collection: abbreviated field set (no FM/RDD dates required)
-- Auto-approved in the same transaction — no confirmation loop waiting for FM/DD
-- Routed via `rdd_handover_agent` under sub-category `HANDED_OVER`
-- Covered by eval tiers 4 (Happy) and 5 (Edge + Battle) — 100% pass rate
-
-#### Work Permit Agent
-
-`work_permit_agent` registered for `WORK_PERMIT` service category:
-
-- Single-stage SR creation (no multi-phase lifecycle)
-- Uses shared pipeline nodes: `field_extraction → merge_state → validation → confirmation → api_submission`
-- Registered in `SERVICE_REQUEST_AGENT_REGISTRY`
-
-#### FOS / END / TRADING Sub-Category Support
-
-`rdd_handover_agent` extended to handle three additional Fit Out sub-categories:
-
-| Sub-category | Eval tiers | Status |
+| Provider | Class | Env var |
 |---|---|---|
-| `FOS` (Fit Out Services) | 6a–6d, 6alc–6clc | ✅ 100% pass |
-| `END` | 6e–6g, 6elc–6flc | ✅ 100% pass |
-| `TRADING` | 6h–6j, 6hlc–6jlc | ✅ 100% pass |
+| OpenAI | `OpenAIGateway` | `LLM_PROVIDER=openai` |
+| Azure OpenAI | `AzureOpenAIGateway` | `LLM_PROVIDER=azure_openai` |
+| Vertex AI (Gemini) | `VertexAIGateway` | `LLM_PROVIDER=vertex_ai` |
 
-#### Expanded Eval Suite — 27 Tiers
+- `LLMProviderProtocol` + `BaseLLMGateway` define the contract — future providers implement one interface
+- `LLMResult` dataclass carries `content`, `model`, `usage` (prompt/completion/total tokens), and `provider` name
+- `supervisor_node` and `field_extraction_node` now read `provider_name` from the gateway instead of hardcoding `"openai"`
 
-The eval suite has grown from 7 tiers (99 scenarios) to **27 tiers** covering the full agent scope:
+#### Pluggable Embedding Registry
 
-| Tier | Description | Scenarios | Pass % |
-|------|-------------|-----------|--------|
-| 0 | Smoke-Agent | 6 | 100% |
-| 0fm | Smoke FM lifecycle | 1 | 100% |
-| 0p | Smoke-Pipeline | 2 | 100% |
-| 1 | CREATE_SR Happy | 17 | 98.0% |
-| 2 | CREATE_SR Edge | 20 | 98.4% |
-| 3 | CREATE_SR Battle | 22 | 98.6% |
-| 3a | FM_REVIEW Happy | 2 | 100% |
-| 3b | FM_REVIEW Edge | 3 | 100% |
-| 3c | FM_REVIEW Battle+RBAC | 1 | 100% |
-| 3d | RDD_REVIEW Happy | 2 | 100% |
-| 3e | RDD_REVIEW Edge | 3 | 100% |
-| 3f | RDD_REVIEW Battle+RBAC | 1 | 100% |
-| 3g | Full LC Happy | 1 | 100% |
-| 3h | Full LC Edge | 3 | 100% |
-| 3i | Full LC Battle | 23 | 100% |
-| 4 | Handover B Happy (Path B) | 2 | 100% |
-| 5 | Handover B Edge+Battle | 8 | 100% |
-| 6a–6d | FOS Happy/Edge/Battle/LC | 12 | 100% |
-| 6e–6g | END Happy/Edge/LC | 8 | 100% |
-| 6h–6j | TRADING Happy/Edge/Battle/LC | 8 | 100% |
-| 8 | FAQ + RBAC | 6 | 100% |
+`EmbeddingProviderRegistry` replaces the inline if/else in `integrations/factory.py`. Each existing provider (`OpenAIEmbeddingProvider`, `AzureOpenAIEmbeddingProvider`) gains a `from_settings()` classmethod. Vertex AI embeddings added as a new provider (`VertexAIEmbeddingProvider`, `google-genai` backed).
 
-Remaining failures (6 scenarios — LLM variability, not bugs):
+#### Dynamic Cost Tracking
 
-| Scenario | Tier | Root cause |
+`cost_calculator.py` delegates to `litellm.completion_cost()` — tracks token spend without vendoring pricing tables. `trace_manager.py` automatically calls `calculate_llm_cost()` at the end of every trace turn and accumulates per-trace `total_tokens` and `total_cost_usd` counters.
+
+#### New dependencies
+
+| Package | Version constraint | Extra |
 |---|---|---|
-| S4 | 1 | Mall-name-only partial search routing edge case |
-| S8 | 1 | Ambiguous opening delays confirmation card |
-| S23 | 2 | Brand single-match auto-resolve misroutes |
-| S32 | 2 | Multiple SRs in same session (known open gap) |
-| S37 | 3 | Cancel from confirmation card — change-mind vs cancel-SR |
-| S64 | 1 | Already-handovered field in confirmed payload |
+| `litellm` | `>=1.40.0,<2.0.0` | core |
+| `google-genai` | `>=1.0.0` | `[vertex_ai]` optional |
 
-#### Eval Runner Script
+Install with Vertex AI support: `pip install '.[vertex_ai]'`
 
-`run_agent_eval.sh` — wraps both `run_eval.py` and `run_lifecycle_eval.py` across all 27 tiers:
+#### New env vars (`.env.example` updated)
 
-```bash
-./run_agent_eval.sh                    # all tiers
-./run_agent_eval.sh --tier 1           # single tier
-./run_agent_eval.sh --tier 3a,3b,3c   # multiple tiers
+```
+LLM_PROVIDER=openai                  # openai | azure_openai | vertex_ai
+AZURE_OPENAI_LLM_DEPLOYMENT=...      # Azure deployment name for the chat model
+VERTEX_AI_PROJECT=...
+VERTEX_AI_LOCATION=us-central1
+VERTEX_AI_MODEL=gemini-1.5-pro
+EMBEDDING_PROVIDER=openai            # openai | azure_openai | vertex_ai
 ```
 
-Generates timestamped results folder under `results/eval_YYYYMMDD_HHMMSS/` with `REPORT.md` and per-scenario log files.
+### Known issues (non-blocking)
 
-#### Full Lifecycle Eval Improvements
-
-| Tier | July 18 | July 31 | Change |
-|---|---|---|---|
-| 3g — Full LC Happy | 75.8%* | 100% | +24.2pp |
-| 3h — Full LC Edge | 36.8% | 100% | +63.2pp |
-| 3i — Full LC Battle | 98.1% | 100% | +1.9pp |
-| 5 — Handover B Edge+Battle | 93.1% | 100% | +6.9pp |
-
-*July 18 figures reflect the previous 7-tier structure; direct comparison is approximate.
+| # | Location | Issue |
+|---|---|---|
+| 1 | `azure_openai_provider.py`, `openai_provider.py` | `stream=True` flag accepted but response read as non-stream — `AttributeError` if any caller passes `stream=True` (currently no callers do) |
+| 2 | `vertex_ai_provider.py` | `tools` kwarg silently ignored |
+| 3 | `azure_openai_provider.py` | `AZURE_AI_ENDPOINT` / `AZURE_AI_API_KEY` shared with embedding provider — no separate config for LLM vs embedding Azure resources |
 
 ---
 
@@ -186,38 +146,44 @@ Generates timestamped results folder under `results/eval_YYYYMMDD_HHMMSS/` with 
 
 ```
 Added
-  service-request-chatbot/docs/eval-setup-guide.md      ← full eval infrastructure reference
-  service-request-chatbot/docs/testing-strategy.md      ← test pyramid + node import paths
-  service-request-chatbot/docs/rdd-handover-agent.md    ← RDD agent lifecycle (replaces rdd-agent.md)
+  service-request-chatbot/backend/app/agents/llm/base.py
+  service-request-chatbot/backend/app/agents/llm/registry.py
+  service-request-chatbot/backend/app/agents/llm/providers/__init__.py
+  service-request-chatbot/backend/app/agents/llm/providers/openai_provider.py
+  service-request-chatbot/backend/app/agents/llm/providers/azure_openai_provider.py
+  service-request-chatbot/backend/app/agents/llm/providers/vertex_ai_provider.py
+  service-request-chatbot/backend/app/observability/cost_calculator.py
+  service-request-chatbot/backend/app/integrations/embeddings/registry.py
+  service-request-chatbot/backend/app/integrations/embeddings/vertex_ai_embed.py
+  service-request-chatbot/backend/tests/unit/test_llm_adapters.py
+  service-request-chatbot/backend/tests/unit/test_embedding_adapters.py
 
 Modified
-  HANDOVER.md                                           ← sections 1, 6, 11, 12, 13, 16 updated
-  RELEASE_NOTES.md                                      ← this file
-  backend/tests/eval/scenarios.py                       ← expanded to 64+ CREATE_SR scenarios
-  backend/tests/eval/lifecycle_scenarios.py             ← full lifecycle + Path B + FOS/END/TRADING
-  backend/tests/eval/run_eval.py                        ← 27 tier structure
-  backend/tests/eval/run_lifecycle_eval.py              ← FM/RDD/LC runner updated
-  backend/app/agents/registries/service_request_registry.py ← Path B + work_permit entries
-  backend/app/agents/graph/nodes/supervisor_node.py     ← CREATE_HANDED_OVER_SR intent
-  backend/app/agents/prompts/supervisor_prompt.py       ← Path B / work permit classification
-  service-request-chatbot/run_agent_eval.sh             ← 27-tier eval runner script
+  backend/app/agents/llm/gateway.py              ← dispatches via LLMProviderRegistry
+  backend/app/core/config.py                     ← LLM_PROVIDER, VERTEX_AI_*, EMBEDDING_PROVIDER
+  backend/app/observability/trace_manager.py     ← per-trace token/cost accumulators
+  backend/app/integrations/factory.py            ← delegates to EmbeddingProviderRegistry
+  backend/app/integrations/embeddings/openai_embed.py     ← from_settings() classmethod
+  backend/app/integrations/embeddings/azure_openai_embed.py ← from_settings() classmethod
+  backend/app/agents/graph/nodes/supervisor_node.py       ← provider_name from gateway
+  backend/app/agents/graph/nodes/shared/field_extraction_node.py ← same provider_name fix
+  backend/app/main.py                            ← duplicate obs_metrics router removed
+  backend/pyproject.toml                         ← litellm + google-genai dependencies
+  backend/.env.example                           ← new env vars documented
 ```
 
 ---
 
-### Open items
+## v1.4.1 — July 22, 2026 (Unreleased)
 
-| Item | Priority | Notes |
-|------|----------|-------|
-| Gap 6 — `sr_status_sync_node` field name verification | High | 30-minute check once live platform credentials available |
-| S32 — Multiple SRs in same session | Medium | `sr_status_sync_node` routes to FM_REVIEW after first SR completed |
-| S4, S8, S23, S37, S64 — LLM variability | Low | Routing edge cases; all other tiers at 100% |
-| CI/CD pipeline | Medium | `./run-live-tests.sh` is the manual gate |
-| Redis session caching | Low | Performance optimisation — not a functional gap |
-| True SSE token streaming | Low | Requires LangGraph/gateway changes — deferred |
-| 7 frontend UI contract bindings | Medium | Agent emits correct signals; frontend binding only |
+> **Theme:** Lease eligibility reasons (`handover_exists` / `activation_pending`) + multi-file document uploads.
 
----
+### What's new
+
+- Empty lease-lookup responses honour platform `reason` instead of always saying “not found”
+- `ui.type = existing_handover` with SR deep link when a handover already exists
+- Multi-file document upload with coalesced chat refresh
+- Eval tracking: **S63**, **S64** (Tier 2), **L173** (Tier 6) — see `docs/CHANGELOG.md` and `docs/fix-notes/lease_eligibility_and_multifile_upload.md`
 
 ---
 

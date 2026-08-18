@@ -95,11 +95,19 @@ def _make_result(
     latency_ms: int = 15,
     reason: str | None = None,
 ) -> LeaseLookupResult:
+    payload: dict[str, Any] = {
+        "leases": [m.model_dump() for m in matches],
+        "count": len(matches),
+    }
+    if reason is not None:
+        payload["reason"] = reason
+    if existing_handover_sr_id is not None:
+        payload["existing_handover_sr_id"] = existing_handover_sr_id
     return LeaseLookupResult(
         matches=matches,
         endpoint="mock://lease-tenant-api/leases",
         request_payload={"endpoint": "mock://lease-tenant-api/leases"},
-        response_payload={"leases": [m.model_dump() for m in matches]},
+        response_payload=payload,
         latency_ms=latency_ms,
         status_code=status_code,
         error=error,
@@ -367,6 +375,95 @@ class TestZeroMatches:
         svc = _MockService(_make_result([]))
         result = await lease_lookup_node(state, service=svc)
         assert result["status"] == "WAITING_FOR_USER"
+
+
+# ---------------------------------------------------------------------------
+# TestZeroMatchEligibilityReasons
+# ---------------------------------------------------------------------------
+
+
+class TestZeroMatchEligibilityReasons:
+    """Empty leases[] must honour data.reason — never collapse to not_found."""
+
+    @pytest.mark.asyncio
+    async def test_handover_exists_does_not_say_not_found(self) -> None:
+        state = _state(collected_data={"lease_code": "t0028568"})
+        svc = _MockService(
+            _make_result(
+                [],
+                reason="handover_exists",
+                existing_handover_sr_id="10473",
+            )
+        )
+        result = await lease_lookup_node(state, service=svc)
+        assert result["status"] == "WAITING_FOR_USER"
+        assert result["response_ui"]["type"] == "existing_handover"
+        assert result["response_ui"]["srId"] == "10473"
+        ui_msg = result["response_ui"]["message"]
+        assert "10473" in ui_msg
+        assert ui_msg != _NO_MATCH_MESSAGE
+        assert "already exists" in ui_msg.lower()
+        assert "couldn't find" not in ui_msg.lower()
+        # Must not create / reopen — no enrichment path
+        assert "collected_data" not in result or not result.get("collected_data", {}).get(
+            "lease_id"
+        )
+
+    @pytest.mark.asyncio
+    async def test_handover_exists_includes_details_url(self) -> None:
+        state = _state(collected_data={"lease_code": "T0028568"})
+        svc = _MockService(
+            _make_result(
+                [],
+                reason="handover_exists",
+                existing_handover_sr_id="10473",
+            )
+        )
+        result = await lease_lookup_node(state, service=svc)
+        url = result["response_ui"]["detailsUrl"]
+        assert "sr_number=10473" in url
+        assert "/dashboard/servicerequest/servicedetails" in url
+        assert result["response_ui"]["leaseCode"] == "t0028568"
+        assert url in result["response_ui"]["message"]
+
+    @pytest.mark.asyncio
+    async def test_handover_exists_without_sr_id_still_not_not_found(self) -> None:
+        state = _state(collected_data={"lease_code": "t0028568"})
+        svc = _MockService(_make_result([], reason="handover_exists"))
+        result = await lease_lookup_node(state, service=svc)
+        assert result["response_ui"]["type"] == "message"
+        ui_msg = result["response_ui"]["message"]
+        assert ui_msg != _NO_MATCH_MESSAGE
+        assert "already exists" in ui_msg.lower()
+
+    @pytest.mark.asyncio
+    async def test_activation_pending_does_not_say_not_found(self) -> None:
+        state = _state(collected_data={"lease_code": "t0999999"})
+        svc = _MockService(_make_result([], reason="activation_pending"))
+        result = await lease_lookup_node(state, service=svc)
+        assert result["status"] == "WAITING_FOR_USER"
+        assert result["response_ui"]["type"] == "text_question"
+        ui_msg = result["response_ui"]["message"]
+        assert ui_msg != _NO_MATCH_MESSAGE
+        msg = ui_msg.lower()
+        assert "activation" in msg or "start date" in msg
+        assert "was found" in msg
+        assert "couldn't find" not in msg
+
+    @pytest.mark.asyncio
+    async def test_explicit_not_found_keeps_no_match_message(self) -> None:
+        state = _state(collected_data={"lease_code": "unknown-999"})
+        svc = _MockService(_make_result([], reason="not_found"))
+        result = await lease_lookup_node(state, service=svc)
+        assert result["response_ui"]["type"] == "text_question"
+        assert result["response_message"] == _NO_MATCH_MESSAGE
+
+    @pytest.mark.asyncio
+    async def test_missing_reason_treated_as_not_found(self) -> None:
+        state = _state(collected_data={"lease_code": "unknown-999"})
+        svc = _MockService(_make_result([]))
+        result = await lease_lookup_node(state, service=svc)
+        assert result["response_message"] == _NO_MATCH_MESSAGE
 
 
 # ---------------------------------------------------------------------------
