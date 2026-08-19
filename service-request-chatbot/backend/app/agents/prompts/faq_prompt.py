@@ -21,7 +21,11 @@ retrieved block takes precedence.
 
 Respond in the same language as the user's question (English or Arabic).
 Be concise and actionable. Use numbered steps when explaining a process.
-Output a JSON object with a single key "message" containing your answer.
+Output a JSON object with exactly one key, "message", whose value MUST be a
+single STRING containing your answer. Never nest an object or an array inside
+"message". When the retrieved knowledge is structured data (mall details,
+contacts, opening hours), do not echo it as raw data — render it inside that
+string as readable markdown using bold labels and bullet lists.
 
 ---
 

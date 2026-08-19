@@ -8,12 +8,15 @@ Responsibilities
        base chunks (``cenomi-help-index``).
     2. Prepending the retrieved context block to the user message before calling
        the LLM with the FAQ system prompt.
-    3. Returning the answer plus structured ``faq_sources`` citations for the
-       API layer and frontend.
 - Falls back gracefully to the static ``FAQ_SYSTEM_PROMPT`` if:
     - No search credentials are configured (``get_search_repository()`` → ``None``)
     - Any exception occurs during embed, search, or formatting
-  In all fallback cases ``faq_sources`` is returned as an empty list.
+
+Citations are NOT surfaced.  Retrieved chunks ground the answer but their
+titles are never shown to the user: no inline ``[Source: ...]`` markers, and
+``faq_sources`` is always returned empty so the MSP ``sources`` array, the SSE
+``source`` events, and the ``/api/chat/service-request`` ``faq_sources`` field
+all stay empty.  Retrieved titles are logged for RAG-quality debugging.
 
 Non-responsibilities
 --------------------
@@ -87,6 +90,39 @@ def _format_rag_context(results: list[SearchResult]) -> tuple[str, list[dict]]:
     return "\n".join(lines), sources
 
 
+def _render_structured(value: Any, depth: int = 0) -> str:
+    """Render a non-string ``message`` value as readable markdown.
+
+    The LLM is asked for ``{"message": "<string>"}``, but on "give me all the
+    details of X" queries it sometimes answers with the knowledge-base chunk's
+    own structure instead — ``{"message": {"Mall Name": ..., "Floors": ...}}``.
+    The old code did ``str(parsed["message"])``, which stringifies a dict to its
+    Python repr and shipped ``{'Mall Name': 'Mall Of Arabia', ...}`` — single
+    quotes and all — straight to the user.  Coerce it to markdown instead so a
+    stray structured answer still reads as prose.
+    """
+    indent = "  " * depth
+
+    if isinstance(value, dict):
+        lines: list[str] = []
+        for key, val in value.items():
+            label = str(key).replace("_", " ").strip()
+            if isinstance(val, (dict, list)):
+                lines.append(f"{indent}- **{label}:**")
+                lines.append(_render_structured(val, depth + 1))
+            else:
+                lines.append(f"{indent}- **{label}:** {val}")
+        return "\n".join(lines)
+
+    if isinstance(value, list):
+        # A list of scalars reads better inline than as one bullet per item.
+        if all(not isinstance(v, (dict, list)) for v in value):
+            return f"{indent}{', '.join(str(v) for v in value)}"
+        return "\n".join(_render_structured(v, depth) for v in value)
+
+    return f"{indent}{value}"
+
+
 def _build_faq_user_content(state: ServiceRequestState, rag_block: str) -> str:
     """Build the user-facing prompt content for the FAQ node.
 
@@ -124,14 +160,14 @@ async def faq_node(state: ServiceRequestState) -> dict[str, Any]:
     """LangGraph node: answer a platform FAQ question via RAG + LLM.
 
     Attempts hybrid Azure AI Search retrieval, falls back to the static
-    ``FAQ_SYSTEM_PROMPT`` on any error.  Always returns ``faq_sources`` as a
-    list (empty when RAG is unavailable or fails).
+    ``FAQ_SYSTEM_PROMPT`` on any error.  Always returns ``faq_sources`` empty —
+    retrieval grounds the answer, but citations are not shown to the user.
     """
     user_message: str = state.get("user_message") or ""
     gateway = get_default_gateway()
 
     rag_block = ""
-    faq_sources: list[dict] = []
+    retrieved_sources: list[dict] = []
 
     search_repo = get_search_repository()
 
@@ -165,7 +201,7 @@ async def faq_node(state: ServiceRequestState) -> dict[str, Any]:
                 lang=lang,
             )
 
-            rag_block, faq_sources = _format_rag_context(results)
+            rag_block, retrieved_sources = _format_rag_context(results)
 
         except Exception as exc:
             log.warning(
@@ -174,7 +210,7 @@ async def faq_node(state: ServiceRequestState) -> dict[str, Any]:
                 error=str(exc),
             )
             rag_block = ""
-            faq_sources = []
+            retrieved_sources = []
     else:
         log.debug("faq_node.rag_fallback", reason="no_repo")
 
@@ -187,14 +223,16 @@ async def faq_node(state: ServiceRequestState) -> dict[str, Any]:
             user_message=user_content,
         )
         if isinstance(parsed, dict) and parsed.get("message"):
-            answer = str(parsed["message"]).strip()
-
-            # Embed inline source markers so response_generation_node preserves them.
-            if faq_sources:
-                source_label = ", ".join(
-                    f"[Source: {s['title']}]" for s in faq_sources[:3]
+            raw_message = parsed["message"]
+            if isinstance(raw_message, str):
+                answer = raw_message.strip()
+            else:
+                # Model ignored the string contract and nested structured data.
+                log.warning(
+                    "faq_node.structured_message_coerced",
+                    message_type=type(raw_message).__name__,
                 )
-                answer = f"{answer}\n\n{source_label}"
+                answer = _render_structured(raw_message).strip() or _FALLBACK_MESSAGE
         else:
             log.warning("faq_node.unexpected_llm_shape", parsed=parsed)
     except json.JSONDecodeError as exc:
@@ -206,11 +244,17 @@ async def faq_node(state: ServiceRequestState) -> dict[str, Any]:
         "faq_node.answered",
         answer_length=len(answer),
         rag_used=bool(rag_block),
-        sources_count=len(faq_sources),
+        retrieved_count=len(retrieved_sources),
     )
 
+    # Citations are deliberately not surfaced.  ``faq_sources`` is the single
+    # producer for the MSP ``sources`` array, the SSE ``source`` events, and the
+    # ``/api/chat/service-request`` ``faq_sources`` field — returning an empty
+    # list here suppresses the source chips on every surface at once.  Retrieval
+    # itself is unaffected: ``rag_block`` still grounds the answer, and the
+    # retrieved titles are still logged above for RAG-quality debugging.
     return {
         "response_message": answer,
         "status": "WAITING_FOR_USER",
-        "faq_sources": faq_sources,
+        "faq_sources": [],
     }
