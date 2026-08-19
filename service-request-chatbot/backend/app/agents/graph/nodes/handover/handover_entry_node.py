@@ -199,6 +199,13 @@ def _clear_all_state(*, cancelled_banner: bool = True) -> dict:
         "lease_matches": [],
         "backend_refs": {},
         "documents": [],
+        # Cancelling wipes the draft, so any per-turn pointer into it is stale.
+        # Leaving active_field set sent the very next turn to field_extraction
+        # (see _waiting_short_circuit_target), which discarded the "request has
+        # been cleared" reply and re-asked for the lease code — the draft really
+        # was cleared, but the user only saw the question come back.
+        "active_field": None,
+        "correction_pending_field": None,
         "response_ui": (
             {"cancelled": True} if cancelled_banner else {"type": "message", "verbatim": True}
         ),
