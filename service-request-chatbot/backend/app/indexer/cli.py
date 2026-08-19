@@ -66,6 +66,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Build documents and log counts; write nothing.",
     )
+    parser.add_argument(
+        "--dump-dir",
+        default=None,
+        help=(
+            "Write the rows fetched from Postgres and the documents built from "
+            "them to JSONL files in this directory, for inspection and for "
+            "generating ground-truth questions. Vectors are omitted."
+        ),
+    )
     args = parser.parse_args(argv)
 
     # --source alone implies --full.
@@ -84,6 +93,36 @@ def _parse_since(value: str) -> datetime:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=UTC)
     return parsed
+
+
+def _dump_records(dump_dir: str, source_type: str, kind: str, records: list[dict]) -> None:
+    """Write *records* to ``{dump_dir}/{source_type}.{kind}.jsonl``.
+
+    Used to capture exactly what came out of Postgres and exactly what was
+    indexed, so retrieval answers can be checked against ground truth.
+    ``content_vector`` is stripped — 1536 floats per document would dwarf the
+    readable content and is not useful for writing questions.
+    """
+    import json
+    import os
+    from datetime import date, datetime
+    from decimal import Decimal
+
+    def _default(o):
+        if isinstance(o, (datetime, date)):
+            return o.isoformat()
+        if isinstance(o, Decimal):
+            return float(o)
+        return str(o)
+
+    os.makedirs(dump_dir, exist_ok=True)
+    path = os.path.join(dump_dir, f"{source_type}.{kind}.jsonl")
+    with open(path, "w", encoding="utf-8") as fh:
+        for record in records:
+            slim = {k: v for k, v in record.items() if k != "content_vector"}
+            fh.write(json.dumps(slim, ensure_ascii=False, default=_default) + "\n")
+    log.info("indexer.dumped", source=source_type, kind=kind,
+             count=len(records), path=path)
 
 
 def _cap_rows(rows: list[dict], cap: int) -> tuple[list[dict], datetime | None]:
@@ -118,6 +157,7 @@ async def _run_source_full(
     search_client: Any,
     *,
     dry_run: bool,
+    dump_dir: str | None = None,
 ) -> tuple[int, int]:
     """Full rebuild of one source.  Returns (upserted, deleted)."""
     from app.indexer.index import writer
@@ -125,7 +165,11 @@ async def _run_source_full(
     rows = await source.fetch_rows(reader, since=None)
     log.info("indexer.source_start", source=source.source_type, mode="full",
              candidate_rows=len(rows))
+    if dump_dir:
+        _dump_records(dump_dir, source.source_type, "rows", rows)
     docs = await source.build_documents(rows, provider, reader)
+    if dump_dir:
+        _dump_records(dump_dir, source.source_type, "docs", docs)
 
     if dry_run:
         log.info("indexer.dry_run_docs", source=source.source_type, docs=len(docs))
@@ -146,6 +190,7 @@ async def _run_source_incremental(
     *,
     since: datetime,
     dry_run: bool,
+    dump_dir: str | None = None,
 ) -> tuple[int, int, datetime | None]:
     """Incremental run.  Returns (upserted, deleted, capped_at)."""
     from app.indexer.index import writer
@@ -156,8 +201,12 @@ async def _run_source_incremental(
     log.info("indexer.source_start", source=source.source_type, mode="incremental",
              candidate_rows=len(rows), deleted_ids=len(deleted_ids),
              since=str(since))
+    if dump_dir:
+        _dump_records(dump_dir, source.source_type, "rows", rows)
 
     docs = await source.build_documents(rows, provider, reader)
+    if dump_dir:
+        _dump_records(dump_dir, source.source_type, "docs", docs)
 
     if dry_run:
         log.info("indexer.dry_run_docs", source=source.source_type,
@@ -304,13 +353,15 @@ async def async_main(argv: list[str] | None = None) -> int:
 
                 if run_full:
                     upserted, deleted = await _run_source_full(
-                        source, reader, provider, search_client, dry_run=dry_run
+                        source, reader, provider, search_client, dry_run=dry_run,
+                        dump_dir=args.dump_dir,
                     )
                     capped_at = None
                 else:
                     upserted, deleted, capped_at = await _run_source_incremental(
                         source, reader, provider, search_client,
                         since=effective_since, dry_run=dry_run,
+                        dump_dir=args.dump_dir,
                     )
 
                 if not dry_run:
