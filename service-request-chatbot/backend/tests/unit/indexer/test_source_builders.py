@@ -6,9 +6,11 @@ from app.indexer.documents import build_doc, make_null_doc
 from app.indexer.sources.event import build_event_docs
 from app.indexer.sources.help_content import pending_chunks_from_row
 from app.indexer.sources.key_contact import (
-    build_manager_doc,
-    build_role_group_doc,
-    group_role_rows,
+    build_contact_doc,
+    build_property_docs,
+    dedupe_members,
+    group_contacts_by_role,
+    member_from_contact_row,
     split_manager_emails,
 )
 from app.indexer.sources.mall_info import build_mall_docs
@@ -115,54 +117,193 @@ class TestMallInfoBuilder:
         assert docs[0]["content"].startswith("Property 5\n")
 
 
-class TestKeyContactBuilder:
+class TestKeyContactAllowlist:
+    """Only the seven allowlisted roles may ever become documents."""
+
+    def _row(self, role_name: str, prop: int = 1, **over) -> dict:
+        row = {
+            "unique_property_id": prop, "role_name": role_name,
+            "first_name": "A", "last_name": "B",
+            "email": f"{role_name.lower()}@x.com", "phone": "0500",
+        }
+        row.update(over)
+        return row
+
+    def test_all_seven_roles_indexed(self) -> None:
+        rows = [
+            self._row(r) for r in (
+                "MALL_MANAGER", "OPERATIONS", "SALES_MANAGER", "DD_ENGINEER",
+                "DD_ARCH", "DD_MEP", "DD_ELEC_ENGINEER",
+            )
+        ]
+        docs = build_property_docs(
+            1, "Tala Mall", json_manager_members=[], contact_rows=rows
+        )
+        assert len(docs) == 7
+
+    def test_non_allowlisted_roles_dropped(self) -> None:
+        rows = [
+            self._row("MALL_ADMIN"), self._row("FM_MANAGER"),
+            self._row("MARKETING"), self._row("AREA_MANAGER"),
+            self._row("REGIONAL_HEAD"), self._row("CUSTOMER_RELATIONS_TEAM"),
+        ]
+        assert build_property_docs(
+            1, "M", json_manager_members=[], contact_rows=rows
+        ) == []
+
+    def test_hidden_roles_never_surface(self) -> None:
+        """LEASING_MANAGER / LEGAL / COLLECTOR must never be indexed."""
+        for role in ("LEASING_MANAGER", "LEGAL", "COLLECTOR"):
+            docs = build_property_docs(
+                1, "M", json_manager_members=[], contact_rows=[self._row(role)]
+            )
+            assert docs == [], f"{role} leaked into the index"
+
+    def test_regional_dd_engineer_excluded_despite_dd_prefix(self) -> None:
+        docs = build_property_docs(
+            1, "M", json_manager_members=[],
+            contact_rows=[self._row("REGIONAL_DD_ENGINEER")],
+        )
+        assert docs == []
+
+    def test_role_match_is_case_sensitive(self) -> None:
+        for variant in ("dd_engineer", "Dd_Engineer", "DD_Engineer"):
+            docs = build_property_docs(
+                1, "M", json_manager_members=[], contact_rows=[self._row(variant)]
+            )
+            assert docs == [], f"{variant} matched but should not"
+
+    def test_no_allowlisted_contact_yields_no_document(self) -> None:
+        """Never substitute a non-allowlisted role as a fallback."""
+        rows = [self._row("LEASING_MANAGER"), self._row("LEGAL")]
+        assert build_property_docs(
+            1, "M", json_manager_members=[], contact_rows=rows
+        ) == []
+
+
+class TestKeyContactPresentation:
+    def test_display_label_not_raw_role_name(self) -> None:
+        doc = build_contact_doc(
+            2, "Mall Of Arabia", "DD_ENGINEER",
+            [{"name": "A B", "email": "a@x", "phone": "05"}],
+        )
+        assert doc["content"].splitlines()[0] == (
+            "RDD Project Manager contacts for Mall Of Arabia:"
+        )
+        assert doc["title"] == "RDD Project Manager — Mall Of Arabia"
+        assert "DD_ENGINEER" not in doc["content"]
+
+    def test_label_comes_from_map_not_db_column(self) -> None:
+        """The DB label carries a trailing space; ours must not."""
+        rows = [{
+            "unique_property_id": 1, "role_name": "DD_ELEC_ENGINEER",
+            "role_name_en": "RDD Electrical Engineer ",  # dirty source value
+            "first_name": "A", "last_name": "B", "email": "a@x", "phone": "",
+        }]
+        docs = build_property_docs(
+            1, "M", json_manager_members=[], contact_rows=rows
+        )
+        assert docs[0]["content"].startswith("RDD Electrical Engineer contacts for M:")
+        assert "Engineer  contacts" not in docs[0]["content"]
+
+    def test_id_uses_role_name(self) -> None:
+        doc = build_contact_doc(
+            9, "M", "DD_MEP", [{"name": "N", "email": "n@x", "phone": ""}]
+        )
+        assert doc["id"] == "key_contact_9_DD_MEP"
+
+    def test_role_key_from_own_group_not_leaked(self) -> None:
+        """Legacy leaked-loop-var bug: each group must use ITS own role."""
+        rows = [
+            {"unique_property_id": 1, "role_name": "DD_ARCH", "first_name": "A",
+             "last_name": "B", "email": "a@x", "phone": ""},
+            {"unique_property_id": 1, "role_name": "OPERATIONS", "first_name": "C",
+             "last_name": "D", "email": "c@x", "phone": ""},
+        ]
+        ids = {d["id"] for d in build_property_docs(
+            1, "M", json_manager_members=[], contact_rows=rows)}
+        assert ids == {"key_contact_1_DD_ARCH", "key_contact_1_OPERATIONS"}
+
+    def test_members_omit_blank_fields(self) -> None:
+        doc = build_contact_doc(
+            1, "M", "OPERATIONS", [{"name": "N", "email": "", "phone": ""}]
+        )
+        assert doc["content"].splitlines()[1] == "- N"
+
+    def test_empty_members_returns_none(self) -> None:
+        assert build_contact_doc(1, "M", "OPERATIONS", []) is None
+
+    def test_disallowed_role_returns_none_directly(self) -> None:
+        assert build_contact_doc(
+            1, "M", "LEGAL", [{"name": "N", "email": "n@x", "phone": ""}]
+        ) is None
+
+
+class TestMallManagerMerge:
+    """MALL_MANAGER has two sources sharing one document id — they must merge."""
+
+    def test_json_and_tenant_contacts_merge_into_one_doc(self) -> None:
+        json_members = [{"name": "Sara Ali", "email": "sara@x.com", "phone": "0501"}]
+        rows = [{
+            "unique_property_id": 3, "role_name": "MALL_MANAGER",
+            "first_name": "Omar", "last_name": "Zaid",
+            "email": "omar@x.com", "phone": "0502",
+        }]
+        docs = build_property_docs(
+            3, "Nakheel Mall", json_manager_members=json_members, contact_rows=rows
+        )
+        managers = [d for d in docs if d["id"] == "key_contact_3_MALL_MANAGER"]
+        assert len(managers) == 1, "collision — one source overwrote the other"
+        content = managers[0]["content"]
+        assert "Sara Ali" in content and "Omar Zaid" in content
+
+    def test_duplicate_email_deduped_across_sources(self) -> None:
+        json_members = [{"name": "Sara Ali", "email": "sara@x.com", "phone": "0501"}]
+        rows = [{
+            "unique_property_id": 3, "role_name": "MALL_MANAGER",
+            "first_name": "Sara", "last_name": "Ali",
+            "email": "SARA@x.com", "phone": "0501",
+        }]
+        docs = build_property_docs(
+            3, "M", json_manager_members=json_members, contact_rows=rows
+        )
+        body = docs[0]["content"].splitlines()
+        assert len([ln for ln in body if ln.startswith("- ")]) == 1
+
+    def test_json_only_still_works(self) -> None:
+        docs = build_property_docs(
+            3, "M",
+            json_manager_members=[{"name": "S", "email": "s@x", "phone": ""}],
+            contact_rows=[],
+        )
+        assert docs[0]["id"] == "key_contact_3_MALL_MANAGER"
+        assert docs[0]["content"].startswith("Mall Manager contacts for M:")
+
+
+class TestKeyContactHelpers:
     def test_split_manager_emails(self) -> None:
         assert split_manager_emails(" A@x.com , b@y.com,,") == ["a@x.com", "b@y.com"]
         assert split_manager_emails(None) == []
 
-    def test_manager_doc(self) -> None:
-        doc = build_manager_doc(
-            3, "Nakheel Mall",
-            [{"full_name": "Sara Ali", "email": "sara@x.com", "phone": "0501"}],
-        )
-        assert doc["id"] == "key_contact_3_MALL_MANAGER"
-        lines = doc["content"].splitlines()
-        assert lines[0] == "Mall Manager contacts for Nakheel Mall:"
-        assert lines[1] == "- Sara Ali | sara@x.com | 0501"
-
-    def test_manager_doc_omits_blank_email_phone(self) -> None:
-        doc = build_manager_doc(3, "M", [{"full_name": "N", "email": "", "phone": ""}])
-        assert doc["content"].splitlines()[1] == "- N"
-
-    def test_role_key_from_own_group_not_leaked(self) -> None:
-        """The legacy leaked-loop-var bug: each group must use ITS role."""
+    def test_group_contacts_by_role_keys_on_role_name(self) -> None:
         rows = [
-            {"unique_property_id": 1, "role_name": "FM_MANAGER",
-             "role_name_en": "FM Manager", "role_name_ar": "",
-             "first_name": "A", "last_name": "B", "email": "a@x", "phone": ""},
-            {"unique_property_id": 1, "role_name": "AREA_MANAGER",
-             "role_name_en": "Area Manager", "role_name_ar": "",
-             "first_name": "C", "last_name": "D", "email": "c@x", "phone": ""},
+            {"unique_property_id": 1, "role_name": "DD_MEP"},
+            {"unique_property_id": 1, "role_name": "LEGAL"},
         ]
-        groups = group_role_rows(rows)
-        docs = {
-            build_role_group_doc(pid, "Mall", members)["id"]
-            for (pid, _), members in groups.items()
-        }
-        assert docs == {"key_contact_1_FM_MANAGER", "key_contact_1_AREA_MANAGER"}
+        assert set(group_contacts_by_role(rows)) == {(1, "DD_MEP")}
 
-    def test_role_group_content_header(self) -> None:
-        doc = build_role_group_doc(
-            2, "Mall Of Arabia",
-            [{"role_name": "FM_MANAGER", "role_name_en": "FM Manager",
-              "first_name": "A", "last_name": "B", "email": "a@x", "phone": "05"}],
+    def test_dedupe_keeps_members_without_email(self) -> None:
+        members = [
+            {"name": "A", "email": "", "phone": ""},
+            {"name": "B", "email": "", "phone": ""},
+        ]
+        assert len(dedupe_members(members)) == 2
+
+    def test_member_from_contact_row(self) -> None:
+        m = member_from_contact_row(
+            {"first_name": "A", "last_name": "B", "email": "a@x", "phone": "05"}
         )
-        assert doc["content"].splitlines()[0] == "FM Manager contacts for Mall Of Arabia:"
-        assert doc["content"].splitlines()[1] == "- A B | a@x | 05"
-
-    def test_empty_members_returns_none(self) -> None:
-        assert build_manager_doc(1, "M", []) is None
-        assert build_role_group_doc(1, "M", []) is None
+        assert m == {"name": "A B", "email": "a@x", "phone": "05"}
 
 
 def _event_row(**over):

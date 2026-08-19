@@ -11,10 +11,11 @@ from __future__ import annotations
 
 import sys
 
+from app.indexer.config import KEY_CONTACT_ROLES
 from app.indexer.documents import INDEX_FIELDS, make_null_doc
 from app.indexer.sources.event import build_event_docs
 from app.indexer.sources.help_content import pending_chunks_from_row
-from app.indexer.sources.key_contact import build_role_group_doc, group_role_rows
+from app.indexer.sources.key_contact import build_property_docs
 from app.indexer.sources.mall_info import build_mall_docs
 from app.indexer.transform.chunker import chunk_text
 from app.indexer.transform.html_cleaner import clean_html
@@ -93,26 +94,50 @@ def main() -> int:
     check("mall id shape", mall_docs[0]["id"] == "mall_info_9_overview")
     check("mall name prefix", mall_docs[0]["content"].startswith("Tala Mall\n"))
 
-    # ── key_contact role_key fix ──────────────────────────────────────────
-    groups = group_role_rows(
-        [
-            {"unique_property_id": 1, "role_name": "FM_MANAGER",
-             "role_name_en": "FM Manager", "first_name": "A", "last_name": "B",
-             "email": "a@x", "phone": ""},
-            {"unique_property_id": 1, "role_name": "AREA_MANAGER",
-             "role_name_en": "Area Manager", "first_name": "C", "last_name": "D",
-             "email": "c@x", "phone": ""},
-        ]
-    )
-    ids = {
-        build_role_group_doc(pid, "M", members)["id"]
-        for (pid, _), members in groups.items()
-    }
-    check(
-        "role_key from own group (leak fixed)",
-        ids == {"key_contact_1_FM_MANAGER", "key_contact_1_AREA_MANAGER"},
-        str(ids),
-    )
+    # ── key_contact allowlist ─────────────────────────────────────────────
+    def _contact(role, prop=1):
+        return {"unique_property_id": prop, "role_name": role, "first_name": "A",
+                "last_name": "B", "email": f"{role.lower()}@x", "phone": ""}
+
+    check("exactly 7 allowlisted roles", len(KEY_CONTACT_ROLES) == 7,
+          str(sorted(KEY_CONTACT_ROLES)))
+
+    all_seven = build_property_docs(
+        1, "M", json_manager_members=[],
+        contact_rows=[_contact(r) for r in KEY_CONTACT_ROLES])
+    check("all 7 roles produce a card", len(all_seven) == 7, str(len(all_seven)))
+
+    ids = {d["id"] for d in all_seven}
+    check("role_key from own group (leak fixed)",
+          ids == {f"key_contact_1_{r}" for r in KEY_CONTACT_ROLES}, str(ids))
+
+    for hidden in ("LEASING_MANAGER", "LEGAL", "COLLECTOR"):
+        check(f"hidden role {hidden} never indexed",
+              build_property_docs(1, "M", json_manager_members=[],
+                                  contact_rows=[_contact(hidden)]) == [])
+
+    check("REGIONAL_DD_ENGINEER excluded despite DD_ prefix",
+          build_property_docs(1, "M", json_manager_members=[],
+                              contact_rows=[_contact("REGIONAL_DD_ENGINEER")]) == [])
+
+    check("role match is case-sensitive",
+          build_property_docs(1, "M", json_manager_members=[],
+                              contact_rows=[_contact("dd_engineer")]) == [])
+
+    elec = build_property_docs(1, "M", json_manager_members=[],
+                               contact_rows=[_contact("DD_ELEC_ENGINEER")])
+    check("display label used, no trailing space",
+          elec[0]["content"].startswith("RDD Electrical Engineer contacts for M:"),
+          elec[0]["content"].splitlines()[0])
+
+    merged = build_property_docs(
+        3, "M",
+        json_manager_members=[{"name": "S", "email": "s@x.com", "phone": ""}],
+        contact_rows=[_contact("MALL_MANAGER", prop=3)])
+    mm = [d for d in merged if d["id"] == "key_contact_3_MALL_MANAGER"]
+    check("MALL_MANAGER sources merge, not collide", len(mm) == 1, str(len(mm)))
+    check("merged card keeps both members",
+          "S" in mm[0]["content"] and "A B" in mm[0]["content"])
 
     # ── event contract ────────────────────────────────────────────────────
     event_docs = build_event_docs(
