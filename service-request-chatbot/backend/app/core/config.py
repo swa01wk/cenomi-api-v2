@@ -240,6 +240,86 @@ class Settings(BaseSettings):
         description="Azure AI Search index name (e.g. cenomi-help-index).",
     )
 
+    # ── RAG Knowledge Indexer job (ticket 3547) ──────────────────────────────
+    # All optional/defaulted — the API process must start without any of them.
+    # The indexer reads the Cenomi platform DB (read-only, raw SQL) and writes
+    # to the same Azure AI Search index the read path queries.  Note the job
+    # needs an ADMIN search key, unlike the query key the API uses.
+    cenomi_database_url: str | None = Field(
+        default=None,
+        validation_alias="CENOMI_DATABASE_URL",
+        description=(
+            "Read-only Cenomi platform Postgres DSN, e.g. "
+            "postgresql+asyncpg://ro_user:...@host:5432/cenomi?ssl=require. "
+            "NOT the chatbot DATABASE_URL."
+        ),
+    )
+    indexer_chunk_max_tokens: int = Field(
+        default=500,
+        validation_alias="INDEXER_CHUNK_MAX_TOKENS",
+        description="Maximum tokens per indexed chunk (tiktoken cl100k_base).",
+    )
+    indexer_chunk_overlap: int = Field(
+        default=50,
+        validation_alias="INDEXER_CHUNK_OVERLAP",
+        description="Token overlap between consecutive chunks; must be < max tokens.",
+    )
+    indexer_embed_batch_size: int = Field(
+        default=50,
+        validation_alias="INDEXER_EMBED_BATCH_SIZE",
+        description="Texts per embed_batch call.",
+    )
+    indexer_upload_batch_size: int = Field(
+        default=1000,
+        validation_alias="INDEXER_UPLOAD_BATCH_SIZE",
+        description="Documents per Azure Search upload batch.",
+    )
+    indexer_max_concurrency: int = Field(
+        default=4,
+        validation_alias="INDEXER_MAX_CONCURRENCY",
+        description="Concurrent embed batch calls (semaphore).",
+    )
+    indexer_dry_run: bool = Field(
+        default=False,
+        validation_alias="INDEXER_DRY_RUN",
+        description="Build + log documents; no Search writes; no watermark advance.",
+    )
+    indexer_enable_user_guides: bool = Field(
+        default=False,
+        validation_alias="INDEXER_ENABLE_USER_GUIDES",
+        description="Enable the user_guide PDF source.",
+    )
+    indexer_enable_download_center: bool = Field(
+        default=False,
+        validation_alias="INDEXER_ENABLE_DOWNLOAD_CENTER",
+        description="Enable the download_center PDF source.",
+    )
+    indexer_watermark_lag: int = Field(
+        default=300,
+        validation_alias="INDEXER_WATERMARK_LAG",
+        description="Seconds subtracted from run start when advancing a watermark.",
+    )
+    indexer_max_docs_per_run: int = Field(
+        default=5000,
+        validation_alias="INDEXER_MAX_DOCS_PER_RUN",
+        description="Incremental row cap per source per run.",
+    )
+    indexer_mall_info_full_on_incremental: bool = Field(
+        default=False,
+        validation_alias="INDEXER_MALL_INFO_FULL_ON_INCREMENTAL",
+        description="Force mall_info full rebuild on incremental runs (updated_at unmaintained).",
+    )
+    indexer_blob_connection_string: str | None = Field(
+        default=None,
+        validation_alias="INDEXER_BLOB_CONNECTION_STRING",
+        description="Azure Blob connection string for PDF sources.",
+    )
+    indexer_blob_container: str | None = Field(
+        default=None,
+        validation_alias="INDEXER_BLOB_CONTAINER",
+        description="Blob container for PDF sources; blob name = str(document_id).",
+    )
+
     @computed_field  # type: ignore[prop-decorator]
     @property
     def cors_origins_list(self) -> list[str]:

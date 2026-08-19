@@ -16,3 +16,13 @@ class EmbeddingProvider(Protocol):
     async def embed(self, text: str) -> list[float] | None:
         """Embed *text* and return the vector, or ``None`` on error."""
         ...
+
+    async def embed_batch(self, texts: list[str]) -> list[list[float]] | None:
+        """Embed *texts* and return vectors preserving input order.
+
+        Contract (indexer ticket 3547):
+        - Empty input list → ``[]``.
+        - Any failure → ``None`` for the whole batch — never a partial result,
+          so callers can retry the batch without diffing which texts succeeded.
+        """
+        ...
