@@ -106,6 +106,30 @@ class ServiceRequestChatRequest(BaseModel):
         ),
         examples=["SR-2026-00741"],
     )
+    viewing_notification_id: str | None = Field(
+        default=None,
+        description=(
+            "Notification ID for the page the user is currently viewing. "
+            "Enables deictic chat ('explain this', 'mark this as read') without repeating the ID. "
+            "UI will send this from the notifications detail page."
+        ),
+        examples=["NTF-000012"],
+    )
+    viewing_service_request_id: str | None = Field(
+        default=None,
+        description=(
+            "Service request ID for the page the user is currently viewing. "
+            "Often sent together with viewing_notification_id when a notification wraps an SR."
+        ),
+        examples=["11711"],
+    )
+    viewing_notification: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Optional notification snapshot (id, title, body, related_sr_id, status). "
+            "Used until a platform notifications API is wired; the UI may send this with the turn."
+        ),
+    )
 
 
 class ChatStatePayload(BaseModel):
@@ -195,10 +219,10 @@ async def post_service_request_chat(
     # OR a session_id is present (silent refresh — e.g. after a document upload
     # the FE calls refreshAfterUpload with an empty message so the graph re-emits
     # the current stage's UI with the new document row).
-    if not body.message and not body.sr_id and not body.action and not body.session_id:
+    if not body.message and not body.sr_id and not body.action and not body.session_id and not body.viewing_notification_id:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="Either 'message', 'sr_id', 'action', or 'session_id' must be provided.",
+            detail="Either 'message', 'sr_id', 'action', 'session_id', or 'viewing_notification_id' must be provided.",
         )
 
     # Resolve user_id: JWT subject_id takes precedence over request body user_id
@@ -231,6 +255,9 @@ async def post_service_request_chat(
             corrected_fields=body.corrected_fields,
             auth_context=auth,
             sr_id=body.sr_id,
+            viewing_notification_id=body.viewing_notification_id,
+            viewing_service_request_id=body.viewing_service_request_id,
+            viewing_notification=body.viewing_notification,
         )
     except Exception as exc:
         bound_log.exception("api.chat.service_request.unhandled_error", error=str(exc))

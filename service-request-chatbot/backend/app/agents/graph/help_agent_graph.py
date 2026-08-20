@@ -28,6 +28,7 @@ START
 Agent taxonomy
 --------------
 - help_agent           : this graph — supervisor (intent routing) + faq_node (Q&A)
+- notification_agent   : list / explain / mark-read notifications via viewing context
 - rdd_handover_agent           : handles the full RDD lifecycle (CREATE_SR → FM_REVIEW → RDD_REVIEW)
 - work_permit_agent            : single-stage work permit SR creation (CREATE_WORK_PERMIT)
 - rdd_fitout_start_agent       : fitout start confirmation (FIT_OUT_CONFIRM_FOS)
@@ -64,6 +65,14 @@ from app.agents.registries.workflow_config import WORKFLOW_CONFIG_REGISTRY, get_
 
 # ── FAQ agent nodes ───────────────────────────────────────────────────────────
 from app.agents.graph.nodes.faq.faq_node import faq_node
+from app.agents.graph.nodes.notification.notification_entry_node import (
+    notification_entry_node,
+)
+from app.agents.services.notification_intent import (
+    NOTIFICATION_INTENTS,
+    classify_notification_intent_from_state,
+    should_bypass_for_notification_context,
+)
 
 # ── Work Permit agent nodes (CREATE_WORK_PERMIT workflow) ─────────────────────
 from app.agents.graph.nodes.work_permit.work_permit_entry_node import work_permit_entry_node
@@ -153,6 +162,8 @@ def _should_open_existing_sr(state: dict[str, Any]) -> bool:
     intent = state.get("intent") or ""
     if intent in _CREATE_NEW_SR_INTENTS:
         return False
+    if intent in NOTIFICATION_INTENTS:
+        return False
     return True
 
 
@@ -165,6 +176,12 @@ def _route_after_load(state: dict[str, Any]) -> str:
     """Route to sr_status_sync when an SR ID exists; otherwise to agent/supervisor."""
     user_message = state.get("user_message") or ""
     if _user_wants_preview(user_message):
+        return "supervisor"
+    if should_bypass_for_notification_context(state):
+        # Notification list/detail/mark-read (including deictic viewing context)
+        # must not be swallowed by an already-active SR agent.
+        if classify_notification_intent_from_state(state) is not None:
+            return "notification"
         return "supervisor"
 
     sr_id = (state.get("backend_refs") or {}).get("sr_id")
@@ -265,6 +282,9 @@ def _route_after_supervisor(state: dict[str, Any]) -> str:
     """
     intent: str = state.get("intent") or "UNKNOWN"
     status: str = state.get("status") or ""
+
+    if intent in NOTIFICATION_INTENTS:
+        return "notification"
 
     if _should_open_existing_sr(state):
         return "sr_status_sync"
@@ -557,6 +577,7 @@ def build_help_agent_graph():
     graph.add_node("sr_status_sync", sr_status_sync_node)
     graph.add_node("supervisor", supervisor_node)
     graph.add_node("faq_node", faq_node)
+    graph.add_node("notification", notification_entry_node)
     graph.add_node("preview", preview_node)
     graph.add_node("registry", registry_node)
     graph.add_node("handover_entry", handover_entry_node)
@@ -606,6 +627,7 @@ def build_help_agent_graph():
             "handover_entry": "handover_entry",
             "work_permit_entry": "work_permit_entry",
             "fitout_confirm_entry": "fitout_confirm_entry",
+            "notification": "notification",
         },
     )
     graph.add_conditional_edges(
@@ -634,11 +656,13 @@ def build_help_agent_graph():
             "preview": "preview",
             "registry": "registry",
             "response_generation": "response_generation",
+            "notification": "notification",
         },
     )
     # FAQ answers are self-contained — skip the SR-workflow rewrite step to
     # save one LLM call (~200–400 ms) and preserve inline [Source: ...] markers.
     graph.add_edge("faq_node", "save_state")
+    graph.add_edge("notification", "save_state")
     graph.add_edge("preview", "response_generation")
     graph.add_conditional_edges(
         "registry",

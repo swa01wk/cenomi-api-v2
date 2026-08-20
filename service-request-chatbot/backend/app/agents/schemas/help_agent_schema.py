@@ -8,6 +8,7 @@ This module defines:
 Agent taxonomy
 --------------
 - help_agent  : supervisor classification + FAQ Q&A
+- notification_agent : list / explain / mark-read using page viewing context
 - rdd_agent   : full RDD lifecycle (CREATE_SR → FM_REVIEW → RDD_REVIEW)
 
 Design principle
@@ -34,6 +35,9 @@ _SR_READ_INTENTS: frozenset[str] = frozenset(
         "ASK_HELP",
         "CHECK_SERVICE_REQUEST_STATUS",
         "PREVIEW_SERVICE_REQUEST",
+        "LIST_NOTIFICATIONS",
+        "GET_NOTIFICATION_DETAIL",
+        "MARK_NOTIFICATION_READ",
         "UNKNOWN",
     }
 )

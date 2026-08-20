@@ -120,6 +120,20 @@ class _MSPChatContext(BaseModel):
         description="Help subcategory, e.g. 'How to Submit'.",
         examples=["How to Submit"],
     )
+    viewing_notification_id: str | None = Field(
+        default=None,
+        description="Notification currently open in the UI (deictic 'this notification').",
+        examples=["NTF-000012"],
+    )
+    viewing_service_request_id: str | None = Field(
+        default=None,
+        description="Service request currently open in the UI (deictic 'this SR').",
+        examples=["11711"],
+    )
+    viewing_notification: dict[str, Any] | None = Field(
+        default=None,
+        description="Optional notification snapshot {id, title, body, related_sr_id, status}.",
+    )
 
 
 class MSPChatRequest(BaseModel):

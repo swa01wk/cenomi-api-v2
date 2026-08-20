@@ -406,6 +406,45 @@ async def test_no_trace_id_when_tracing_unavailable() -> None:
     assert resp.json()["trace_id"] is None
 
 
+async def test_viewing_notification_id_accepted_with_empty_message() -> None:
+    """UI may open a notification page and send viewing context without chat text."""
+    result = _make_result(message="You're viewing notification NTF-000012.")
+    client = _make_client_and_patch()
+    captured: dict = {}
+
+    async def _mock_process_turn(self, **kwargs):  # noqa: ANN001
+        captured.update(kwargs)
+        return result
+
+    try:
+        with patch(
+            "app.services.chat_orchestration_service.ChatOrchestrationService.process_turn",
+            new=_mock_process_turn,
+        ):
+            async with client as c:
+                resp = await c.post(
+                    _ENDPOINT,
+                    json={
+                        "user_id": _USER_ID,
+                        "message": "",
+                        "viewing_notification_id": "NTF-000012",
+                        "viewing_service_request_id": "11711",
+                        "viewing_notification": {
+                            "id": "NTF-000012",
+                            "title": "Handover awaiting FM review",
+                            "related_sr_id": "11711",
+                        },
+                    },
+                )
+    finally:
+        _restore_overrides()
+
+    assert resp.status_code == 200
+    assert captured["viewing_notification_id"] == "NTF-000012"
+    assert captured["viewing_service_request_id"] == "11711"
+    assert captured["viewing_notification"]["title"] == "Handover awaiting FM review"
+
+
 # ---------------------------------------------------------------------------
 # Health endpoint smoke test (regression guard)
 # ---------------------------------------------------------------------------
