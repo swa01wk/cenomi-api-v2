@@ -11,7 +11,6 @@ from app.indexer.sources.key_contact import (
     dedupe_members,
     group_contacts_by_role,
     member_from_contact_row,
-    split_manager_emails,
 )
 from app.indexer.sources.mall_info import build_mall_docs
 
@@ -137,7 +136,7 @@ class TestKeyContactAllowlist:
             )
         ]
         docs = build_property_docs(
-            1, "Tala Mall", json_manager_members=[], contact_rows=rows
+            1, "Tala Mall", contact_rows=rows
         )
         assert len(docs) == 7
 
@@ -148,28 +147,27 @@ class TestKeyContactAllowlist:
             self._row("REGIONAL_HEAD"), self._row("CUSTOMER_RELATIONS_TEAM"),
         ]
         assert build_property_docs(
-            1, "M", json_manager_members=[], contact_rows=rows
+            1, "M", contact_rows=rows
         ) == []
 
     def test_hidden_roles_never_surface(self) -> None:
         """LEASING_MANAGER / LEGAL / COLLECTOR must never be indexed."""
         for role in ("LEASING_MANAGER", "LEGAL", "COLLECTOR"):
             docs = build_property_docs(
-                1, "M", json_manager_members=[], contact_rows=[self._row(role)]
+                1, "M", contact_rows=[self._row(role)]
             )
             assert docs == [], f"{role} leaked into the index"
 
     def test_regional_dd_engineer_excluded_despite_dd_prefix(self) -> None:
         docs = build_property_docs(
-            1, "M", json_manager_members=[],
-            contact_rows=[self._row("REGIONAL_DD_ENGINEER")],
+            1, "M",             contact_rows=[self._row("REGIONAL_DD_ENGINEER")],
         )
         assert docs == []
 
     def test_role_match_is_case_sensitive(self) -> None:
         for variant in ("dd_engineer", "Dd_Engineer", "DD_Engineer"):
             docs = build_property_docs(
-                1, "M", json_manager_members=[], contact_rows=[self._row(variant)]
+                1, "M", contact_rows=[self._row(variant)]
             )
             assert docs == [], f"{variant} matched but should not"
 
@@ -177,7 +175,7 @@ class TestKeyContactAllowlist:
         """Never substitute a non-allowlisted role as a fallback."""
         rows = [self._row("LEASING_MANAGER"), self._row("LEGAL")]
         assert build_property_docs(
-            1, "M", json_manager_members=[], contact_rows=rows
+            1, "M", contact_rows=rows
         ) == []
 
 
@@ -201,7 +199,7 @@ class TestKeyContactPresentation:
             "first_name": "A", "last_name": "B", "email": "a@x", "phone": "",
         }]
         docs = build_property_docs(
-            1, "M", json_manager_members=[], contact_rows=rows
+            1, "M", contact_rows=rows
         )
         assert docs[0]["content"].startswith("RDD Electrical Engineer contacts for M:")
         assert "Engineer  contacts" not in docs[0]["content"]
@@ -221,7 +219,7 @@ class TestKeyContactPresentation:
              "last_name": "D", "email": "c@x", "phone": ""},
         ]
         ids = {d["id"] for d in build_property_docs(
-            1, "M", json_manager_members=[], contact_rows=rows)}
+            1, "M", contact_rows=rows)}
         assert ids == {"key_contact_1_DD_ARCH", "key_contact_1_OPERATIONS"}
 
     def test_members_omit_blank_fields(self) -> None:
@@ -239,52 +237,44 @@ class TestKeyContactPresentation:
         ) is None
 
 
-class TestMallManagerMerge:
-    """MALL_MANAGER has two sources sharing one document id — they must merge."""
+class TestMallManagerSource:
+    """MALL_MANAGER comes from tenant_contacts only — never the JSON blob.
 
-    def test_json_and_tenant_contacts_merge_into_one_doc(self) -> None:
-        json_members = [{"name": "Sara Ali", "email": "sara@x.com", "phone": "0501"}]
+    ``unique_properties.mall_information -> overview.mall_manager`` is stale:
+    for Yasmeen Mall it names ahmed.alshmrani while the assigned MALL_MANAGER
+    in tenant_contacts is bandar.alharbi, and the production index contains
+    only the latter. Reading the blob produced two-person cards.
+    """
+
+    def test_card_built_from_tenant_contacts(self) -> None:
         rows = [{
-            "unique_property_id": 3, "role_name": "MALL_MANAGER",
-            "first_name": "Omar", "last_name": "Zaid",
-            "email": "omar@x.com", "phone": "0502",
+            "unique_property_id": 3691, "role_name": "MALL_MANAGER",
+            "first_name": "Bandar", "last_name": "Alharbi",
+            "email": "bandar.alharbi@cenomi.com", "phone": "",
         }]
-        docs = build_property_docs(
-            3, "Nakheel Mall", json_manager_members=json_members, contact_rows=rows
-        )
-        managers = [d for d in docs if d["id"] == "key_contact_3_MALL_MANAGER"]
-        assert len(managers) == 1, "collision — one source overwrote the other"
-        content = managers[0]["content"]
-        assert "Sara Ali" in content and "Omar Zaid" in content
+        docs = build_property_docs(3691, "Yasmeen Mall", contact_rows=rows)
+        assert len(docs) == 1
+        assert docs[0]["id"] == "key_contact_3691_MALL_MANAGER"
+        body = [ln for ln in docs[0]["content"].splitlines() if ln.startswith("- ")]
+        assert body == ["- Bandar Alharbi | bandar.alharbi@cenomi.com"]
 
-    def test_duplicate_email_deduped_across_sources(self) -> None:
-        json_members = [{"name": "Sara Ali", "email": "sara@x.com", "phone": "0501"}]
-        rows = [{
-            "unique_property_id": 3, "role_name": "MALL_MANAGER",
-            "first_name": "Sara", "last_name": "Ali",
-            "email": "SARA@x.com", "phone": "0501",
-        }]
-        docs = build_property_docs(
-            3, "M", json_manager_members=json_members, contact_rows=rows
-        )
-        body = docs[0]["content"].splitlines()
-        assert len([ln for ln in body if ln.startswith("- ")]) == 1
+    def test_no_mall_manager_contacts_means_no_card(self) -> None:
+        """With the blob gone there is no second source to fall back on."""
+        assert build_property_docs(3691, "Yasmeen Mall", contact_rows=[]) == []
 
-    def test_json_only_still_works(self) -> None:
-        docs = build_property_docs(
-            3, "M",
-            json_manager_members=[{"name": "S", "email": "s@x", "phone": ""}],
-            contact_rows=[],
-        )
-        assert docs[0]["id"] == "key_contact_3_MALL_MANAGER"
-        assert docs[0]["content"].startswith("Mall Manager contacts for M:")
+    def test_duplicate_rows_collapse_by_email(self) -> None:
+        row = {
+            "unique_property_id": 3691, "role_name": "MALL_MANAGER",
+            "first_name": "Bandar", "last_name": "Alharbi",
+            "email": "bandar.alharbi@cenomi.com", "phone": "",
+        }
+        docs = build_property_docs(3691, "Yasmeen Mall",
+                                   contact_rows=[row, dict(row), dict(row)])
+        body = [ln for ln in docs[0]["content"].splitlines() if ln.startswith("- ")]
+        assert len(body) == 1
 
 
 class TestKeyContactHelpers:
-    def test_split_manager_emails(self) -> None:
-        assert split_manager_emails(" A@x.com , b@y.com,,") == ["a@x.com", "b@y.com"]
-        assert split_manager_emails(None) == []
-
     def test_group_contacts_by_role_keys_on_role_name(self) -> None:
         rows = [
             {"unique_property_id": 1, "role_name": "DD_MEP"},

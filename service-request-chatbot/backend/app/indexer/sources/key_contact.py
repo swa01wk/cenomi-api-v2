@@ -5,12 +5,15 @@ is enforced HERE, at index time, so a non-allowlisted contact cannot be
 retrieved, summarised, or cited as a fallback later — the answering layer
 never sees them because they were never indexed.
 
-Two contact populations feed the MALL_MANAGER card:
-(a) emails in the mall's ``overview.mall_manager`` JSON value, resolved
-    against ``cenomi.users``;
-(b) ``tenant_contacts`` rows whose role_name is MALL_MANAGER.
-Both produce id ``key_contact_{prop}_MALL_MANAGER``, so they are MERGED and
-deduplicated by email rather than allowed to overwrite one another.
+All seven roles, MALL_MANAGER included, come from ``tenant_contacts`` joined
+to roles/users/properties — one uniform source.
+
+The mall's ``overview.mall_manager`` JSON value is deliberately NOT used. It
+is stale: for Yasmeen Mall it names ahmed.alshmrani while the assigned
+MALL_MANAGER in tenant_contacts is bandar.alharbi, and the legacy index that
+production serves contains only the latter. Reading the blob as a second
+source resurrected the stale name and produced two-person Mall Manager cards
+where production correctly shows one.
 
 Matching rules (see app/indexer/config.py):
 - role_name only, exact and case-sensitive; never the display label, never
@@ -47,14 +50,6 @@ log = structlog.get_logger(__name__)
 
 MALL_MANAGER_ROLE = "MALL_MANAGER"
 
-_MANAGER_USERS_SQL = """
-SELECT LOWER(email) AS email_lower,
-       COALESCE(NULLIF(TRIM(CONCAT_WS(' ', first_name, last_name)), ''), '') AS full_name,
-       COALESCE(phone, '') AS phone
-FROM cenomi.users
-WHERE LOWER(email) IN :emails
-"""
-
 # role_name_en / role_name_ar are deliberately NOT selected: display labels
 # come from KEY_CONTACT_ROLES, never from the database.
 _ROLE_CONTACTS_SQL = """
@@ -90,8 +85,7 @@ WHERE is_primary = true AND updated_at > :since
 """
 
 _ALL_PROPS_SQL = """
-SELECT up.unique_property_id, up.marketing_name,
-       TRIM((up.mall_information::jsonb) -> 'overview' ->> 'mall_manager') AS mall_manager
+SELECT up.unique_property_id, up.marketing_name
 FROM cenomi.unique_properties up
 WHERE up.is_primary = true
 """
@@ -106,21 +100,9 @@ SELECT unique_property_id FROM cenomi.unique_properties WHERE is_primary = true
 # ---------------------------------------------------------------------------
 
 
-def split_manager_emails(raw: str | None) -> list[str]:
-    """Comma-separated emails → cleaned, lowercased list."""
-    if not raw:
-        return []
-    return [e.strip().lower() for e in raw.split(",") if e.strip()]
-
-
 def _member(name: str, email: str, phone: str) -> dict[str, str]:
     return {"name": (name or "").strip(), "email": (email or "").strip(),
             "phone": (phone or "").strip()}
-
-
-def member_from_user_row(row: dict, email: str) -> dict[str, str]:
-    """Normalize a cenomi.users row (mall-manager JSON path)."""
-    return _member(row.get("full_name", ""), email, row.get("phone", ""))
 
 
 def member_from_contact_row(row: dict) -> dict[str, str]:
@@ -202,19 +184,10 @@ def build_property_docs(
     prop_id: int,
     mall_name: str,
     *,
-    json_manager_members: list[dict[str, str]],
     contact_rows: list[dict],
 ) -> list[dict[str, Any]]:
-    """All Key Contact cards for one mall.  Pure builder.
-
-    The MALL_MANAGER card merges the JSON-blob population with any
-    tenant_contacts MALL_MANAGER rows — both map to the same document id, so
-    merging is what prevents one silently overwriting the other.
-    """
+    """All Key Contact cards for one mall.  Pure builder."""
     by_role: dict[str, list[dict[str, str]]] = {}
-
-    if json_manager_members:
-        by_role[MALL_MANAGER_ROLE] = list(json_manager_members)
 
     for (_prop, role_name), rows in group_contacts_by_role(contact_rows).items():
         by_role.setdefault(role_name, []).extend(
@@ -285,18 +258,7 @@ class KeyContactSource:
             for r in rows
         }
 
-        # (a) Mall-manager emails from the mall JSON blob → cenomi.users.
-        all_emails: set[str] = set()
-        for row in rows:
-            all_emails.update(split_manager_emails(row.get("mall_manager")))
-        users_by_email: dict[str, dict] = {}
-        if all_emails:
-            user_rows = await reader.fetch_all(
-                _MANAGER_USERS_SQL, {"emails": tuple(sorted(all_emails))}
-            )
-            users_by_email = {u["email_lower"]: u for u in user_rows}
-
-        # (b) Allowlisted tenant contacts for every property in this batch.
+        # Allowlisted tenant contacts for every property in this batch.
         contact_rows = await reader.fetch_all(
             _ROLE_CONTACTS_SQL, {"prop_ids": prop_ids, "roles": KEY_ROLES}
         )
@@ -307,16 +269,10 @@ class KeyContactSource:
         pending: list[dict[str, Any]] = []
         for row in rows:
             prop_id = row["unique_property_id"]
-            json_members = [
-                member_from_user_row(users_by_email[e], e)
-                for e in split_manager_emails(row.get("mall_manager"))
-                if e in users_by_email
-            ]
             pending.extend(
                 build_property_docs(
                     prop_id,
                     prop_names[prop_id],
-                    json_manager_members=json_members,
                     contact_rows=contacts_by_prop.get(prop_id, []),
                 )
             )
