@@ -53,6 +53,7 @@ class AzureSearchRepository:
         self._endpoint = endpoint.rstrip("/")
         self._index_name = index_name
         self._embedding_provider = embedding_provider
+        self._mall_names_cache: list[str] | None = None
         self._client = httpx.AsyncClient(
             headers={
                 "api-key": api_key,
@@ -124,6 +125,71 @@ class AzureSearchRepository:
         )
 
         return merged[:top_k]
+
+    async def list_mall_names(self) -> list[str]:
+        """All indexed mall marketing names (cached for the client's lifetime).
+
+        Used to tell whether the user already named a mall, so page context is
+        not layered on top of an explicit choice.
+        """
+        if self._mall_names_cache is not None:
+            return self._mall_names_cache
+        url = (
+            f"{self._endpoint}/indexes/{self._index_name}"
+            f"/docs/search?api-version=2023-11-01"
+        )
+        body = {
+            "search": "*",
+            "filter": "source_type eq 'mall_info'",
+            "select": "mall_name",
+            "top": 200,
+        }
+        try:
+            resp = await self._client.post(url, json=body)
+            resp.raise_for_status()
+            names = {
+                (d.get("mall_name") or "").strip()
+                for d in resp.json().get("value", [])
+            }
+            self._mall_names_cache = sorted(n for n in names if n)
+        except Exception as exc:
+            log.warning("azure_search.mall_names_failed", error=str(exc))
+            self._mall_names_cache = []
+        return self._mall_names_cache
+
+    async def lookup_mall_name(self, property_id: int) -> str | None:
+        """Return the marketing name for a ``unique_property_id``, or None.
+
+        Lets the chat widget send only ``property_id`` (which it always has
+        from the page URL) and still have the agent resolve which mall the
+        user means. Cheap: one filtered keyword query, no embedding.
+        """
+        url = (
+            f"{self._endpoint}/indexes/{self._index_name}"
+            f"/docs/search?api-version=2023-11-01"
+        )
+        body = {
+            "search": "*",
+            "filter": (
+                f"source_type eq 'mall_info' and unique_property_id eq {int(property_id)}"
+            ),
+            "select": "mall_name",
+            "top": 1,
+        }
+        try:
+            resp = await self._client.post(url, json=body)
+            resp.raise_for_status()
+            values = resp.json().get("value", [])
+        except Exception as exc:
+            log.warning(
+                "azure_search.mall_lookup_failed",
+                property_id=property_id,
+                error=str(exc),
+            )
+            return None
+        name = values[0].get("mall_name") if values else None
+        log.info("azure_search.mall_lookup", property_id=property_id, mall_name=name)
+        return name or None
 
     async def close(self) -> None:
         """Close the underlying ``httpx.AsyncClient``."""

@@ -123,6 +123,63 @@ def _render_structured(value: Any, depth: int = 0) -> str:
     return f"{indent}{value}"
 
 
+async def _mentions_a_mall(message: str, search_repo: Any) -> bool:
+    """True when the question already names an indexed mall.
+
+    An explicit mall must win over page context, in retrieval as well as in
+    the answer — so the caller skips query biasing when this returns True.
+    """
+    lister = getattr(search_repo, "list_mall_names", None)
+    if lister is None:
+        return False
+    try:
+        names = await lister()
+    except Exception:
+        return False
+    lowered = message.lower()
+    return any(n.lower() in lowered for n in names)
+
+
+def _context_mall_name(state: ServiceRequestState) -> str:
+    """Mall name supplied directly by the widget, if any."""
+    msp_context: dict = state.get("msp_context") or {}  # type: ignore[assignment]
+    return str(msp_context.get("mall_name") or "").strip()
+
+
+async def _resolve_active_mall(state: ServiceRequestState, search_repo: Any) -> str:
+    """Mall the user is currently looking at, from the widget's page context.
+
+    Without this, "who is the mall manager" is unanswerable — there are 20
+    malls and nothing in the question says which.  Two ways in, in order:
+
+    1. ``mall_name`` sent by the widget — free, no lookup.
+    2. ``property_id`` from the page URL (/propertydetails?propertyId=3691),
+       resolved against the index. The frontend always has the id, so this
+       path works even when it cannot supply the name.
+    """
+    name = _context_mall_name(state)
+    if name:
+        return name
+
+    msp_context: dict = state.get("msp_context") or {}  # type: ignore[assignment]
+    raw_id = msp_context.get("property_id")
+    if raw_id in (None, "") or search_repo is None:
+        return ""
+    try:
+        property_id = int(raw_id)
+    except (TypeError, ValueError):
+        return ""
+
+    lookup = getattr(search_repo, "lookup_mall_name", None)
+    if lookup is None:
+        return ""
+    try:
+        return (await lookup(property_id)) or ""
+    except Exception as exc:
+        log.warning("faq_node.mall_lookup_failed", error=str(exc))
+        return ""
+
+
 def _build_faq_user_content(state: ServiceRequestState, rag_block: str) -> str:
     """Build the user-facing prompt content for the FAQ node.
 
@@ -134,6 +191,17 @@ def _build_faq_user_content(state: ServiceRequestState, rag_block: str) -> str:
 
     if rag_block:
         parts.append(rag_block)
+
+    # Page context: resolves "the mall" / "this mall" to the one on screen.
+    # An explicitly named mall in the question still takes precedence.
+    active_mall = str(state.get("_active_mall") or "") or _context_mall_name(state)
+    if active_mall:
+        parts.append(
+            f"Page context: the user is currently viewing **{active_mall}**. "
+            f"If the question refers to 'the mall', 'this mall', or names no "
+            f"mall at all, it is about {active_mall}. If the question names a "
+            f"different mall, answer about the mall they named instead."
+        )
 
     parts.append(f"User question: {message}")
 
@@ -184,14 +252,23 @@ async def faq_node(state: ServiceRequestState) -> dict[str, Any]:
             # Pass url_pattern as a keyword argument; SearchRepository
             # implementations that do not support it will silently ignore it
             # because the Protocol does not declare it as a required param.
-            search_kwargs: dict = {"query": user_message, "lang": lang}
+            # Bias retrieval toward the mall being viewed — but ONLY when the
+            # user has not named a mall themselves. Layering "(Yasmeen Mall)"
+            # onto "who is the mall manager of Tala Mall" makes a query that
+            # matches neither well, and buries the card the user asked for.
+            active_mall = await _resolve_active_mall(state, search_repo)
+            state["_active_mall"] = active_mall  # reused when building the prompt
+            search_text = user_message
+            if active_mall and not await _mentions_a_mall(user_message, search_repo):
+                search_text = f"{user_message} ({active_mall})"
+            search_kwargs: dict = {"query": search_text, "lang": lang}
             if url_pattern:
                 search_kwargs["url_filter"] = url_pattern
             try:
                 results = await search_repo.search(**search_kwargs)
             except TypeError:
                 # Fallback: implementation doesn't accept url_filter — retry without it.
-                results = await search_repo.search(query=user_message, lang=lang)
+                results = await search_repo.search(query=search_text, lang=lang)
             search_total_ms = int((time.monotonic() - t_search) * 1000)
 
             log.info(
