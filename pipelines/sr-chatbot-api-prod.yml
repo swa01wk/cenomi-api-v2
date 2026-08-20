@@ -17,23 +17,38 @@ trigger:
     include:
       - 'release-prod-ai-v2-api-*'
 
+pr: none
+
 pool:
   name: Azure Pipelines
 
 variables:
-- group: v2-ai-prod-vars
-
-- name: SHORT_HASH
-  value: ''
-
-- name: COMMIT_VER
-  value: ''
+  - group: v2-ai-prod-vars
+  - name: SHORT_HASH
+    value: ''
+  - name: COMMIT_VER
+    value: ''
+  - name: IMAGE_BRANCH
+    value: ''
+  - name: IMAGE_TAG
+    value: ''
 
 parameters:
-- name: ForceImagePushImageWithVulnerability
-  type: boolean
-  default: true
-  displayName: Force Image Push Even With Vulnerability
+  - name: SourceBranch
+    displayName: 'Source Branch (e.g. main, release, hotfix/x)'
+    type: string
+    default: 'main'
+
+  # Do NOT use default: '' — ADO Run UI marks empty string as Required
+  - name: CommitSHA
+    displayName: 'Commit SHA (Optional — type "none" to deploy latest from SourceBranch)'
+    type: string
+    default: 'none'
+
+  - name: ForceImagePushImageWithVulnerability
+    type: boolean
+    default: true
+    displayName: Force Image Push Even With Vulnerability
 
 stages:
 
@@ -44,13 +59,145 @@ stages:
     steps:
 
     - checkout: self
+      clean: true
+      fetchDepth: 0
+      persistCredentials: true
 
-    - task: CmdLine@2
-      displayName: Set SHORT_HASH
-      inputs:
-        script: |
-          SHORT_HASH=$(echo $(Build.SourceVersion) | cut -c1-8)
-          echo "##vso[task.setvariable variable=SHORT_HASH]$SHORT_HASH"
+    - bash: |
+        set -euo pipefail
+        echo "Fetching remotes..."
+        git fetch origin +refs/heads/*:refs/remotes/origin/* --prune
+        git fetch origin --tags --force
+      displayName: Fetch Remotes
+
+    - bash: |
+        set -euo pipefail
+
+        echo "========================================="
+        echo "Deployment Request"
+        echo "========================================="
+        echo "Build.Reason : $BUILD_REASON"
+        echo "SourceBranch : $PARAM_SOURCE_BRANCH"
+        echo "CommitSHA    : $PARAM_COMMIT_SHA"
+
+        # Normalize — NO $(), NO $$, NO ${var#prefix} (ADO-safe)
+        SOURCE_BRANCH=`echo "$PARAM_SOURCE_BRANCH" | sed 's|^refs/heads/||' | xargs`
+        COMMIT_SHA=`echo "$PARAM_COMMIT_SHA" | xargs | tr '[:upper:]' '[:lower:]'`
+
+        echo "Normalized SourceBranch : $SOURCE_BRANCH"
+        echo "Normalized CommitSHA    : $COMMIT_SHA"
+
+        #################################################################
+        # Mode A — Automatic TAG trigger
+        #################################################################
+        if [[ "$BUILD_REASON" == "IndividualCI" || "$BUILD_REASON" == "BatchedCI" ]] && [[ "$BUILD_SOURCE_BRANCH" == refs/tags/* ]]; then
+          MODE="tag"
+          TARGET_SHA="$BUILD_SOURCE_VERSION"
+          TAG_NAME=`echo "$BUILD_SOURCE_BRANCH" | sed 's|^refs/tags/||'`
+          IMAGE_BRANCH=`echo "$TAG_NAME" | sed 's|/|-|g'`
+
+          echo ""
+          echo "Mode: Automatic Tag Trigger"
+          echo "Tag : $TAG_NAME"
+          echo "SHA : $TARGET_SHA"
+
+          git cat-file -e "${TARGET_SHA}^{commit}" \
+            || { echo "ERROR: Tagged commit not found: $TARGET_SHA"; exit 1; }
+
+          git checkout "$TARGET_SHA"
+
+        #################################################################
+        # Mode B/C — Manual run using parameters
+        #################################################################
+        else
+          if [ -z "$SOURCE_BRANCH" ]; then
+            echo "ERROR: SourceBranch cannot be empty."
+            exit 1
+          fi
+
+          echo ""
+          echo "Validating branch origin/$SOURCE_BRANCH ..."
+          if ! git show-ref --verify --quiet "refs/remotes/origin/$SOURCE_BRANCH"; then
+            echo "ERROR: Branch '$SOURCE_BRANCH' not found on origin."
+            exit 1
+          fi
+
+          IMAGE_BRANCH=`echo "$SOURCE_BRANCH" | sed 's|/|-|g'`
+
+          if [ -z "$COMMIT_SHA" ] || [ "$COMMIT_SHA" = "none" ] || [ "$COMMIT_SHA" = "latest" ] || [ "$COMMIT_SHA" = "-" ]; then
+            MODE="branch-latest"
+            TARGET_SHA=`git rev-parse "origin/$SOURCE_BRANCH"`
+
+            echo ""
+            echo "Mode  : Latest commit on branch"
+            echo "Branch: $SOURCE_BRANCH"
+            echo "SHA   : $TARGET_SHA"
+
+            git checkout -B "$SOURCE_BRANCH" "origin/$SOURCE_BRANCH"
+
+          else
+            MODE="branch-commit"
+            TARGET_SHA="$COMMIT_SHA"
+
+            echo ""
+            echo "Mode  : Specific commit on branch"
+            echo "Branch: $SOURCE_BRANCH"
+            echo "SHA   : $TARGET_SHA"
+
+            echo "Checking commit exists..."
+            git cat-file -e "${TARGET_SHA}^{commit}" \
+              || { echo "ERROR: Commit '$TARGET_SHA' does not exist."; exit 1; }
+
+            echo "Checking commit belongs to origin/$SOURCE_BRANCH ..."
+            if ! git merge-base --is-ancestor "$TARGET_SHA" "origin/$SOURCE_BRANCH"; then
+              echo "ERROR: Commit '$TARGET_SHA' is NOT an ancestor of branch '$SOURCE_BRANCH'."
+              echo "Refusing to deploy a commit from another branch."
+              exit 1
+            fi
+
+            echo "SUCCESS: commit belongs to branch."
+            git checkout "$TARGET_SHA"
+          fi
+        fi
+
+        RESOLVED_SHA=`git rev-parse HEAD`
+        SHORT_HASH=`echo "$RESOLVED_SHA" | cut -c1-8`
+        AUTHOR=`git log -1 --pretty=%an`
+        MESSAGE=`git log -1 --pretty=%s`
+        IMAGE_TAG="$IMAGE_BRANCH-$SHORT_HASH"
+
+        echo ""
+        echo "===== Deployment Summary ====="
+        echo "Mode       : $MODE"
+        echo "Branch     : $SOURCE_BRANCH"
+        echo "Target SHA : $RESOLVED_SHA"
+        echo "SHORT_HASH : $SHORT_HASH"
+        echo "IMAGE_TAG  : $IMAGE_TAG"
+        echo "Author     : $AUTHOR"
+        echo "Message    : $MESSAGE"
+        echo "=============================="
+
+        echo "##vso[task.setvariable variable=DEPLOY_MODE]$MODE"
+        echo "##vso[task.setvariable variable=SOURCE_BRANCH]$SOURCE_BRANCH"
+        echo "##vso[task.setvariable variable=TARGET_SHA]$RESOLVED_SHA"
+        echo "##vso[task.setvariable variable=SHORT_HASH]$SHORT_HASH"
+        echo "##vso[task.setvariable variable=IMAGE_BRANCH]$IMAGE_BRANCH"
+        echo "##vso[task.setvariable variable=IMAGE_TAG]$IMAGE_TAG"
+
+        echo "##vso[task.setvariable variable=DEPLOY_MODE;isOutput=true]$MODE"
+        echo "##vso[task.setvariable variable=SOURCE_BRANCH;isOutput=true]$SOURCE_BRANCH"
+        echo "##vso[task.setvariable variable=TARGET_SHA;isOutput=true]$RESOLVED_SHA"
+        echo "##vso[task.setvariable variable=SHORT_HASH;isOutput=true]$SHORT_HASH"
+        echo "##vso[task.setvariable variable=IMAGE_BRANCH;isOutput=true]$IMAGE_BRANCH"
+        echo "##vso[task.setvariable variable=IMAGE_TAG;isOutput=true]$IMAGE_TAG"
+      name: SelectSource
+      displayName: Checkout Branch / Commit
+      env:
+        BUILD_REASON: $(Build.Reason)
+        BUILD_SOURCE_BRANCH: $(Build.SourceBranch)
+        BUILD_SOURCE_VERSION: $(Build.SourceVersion)
+        PARAM_SOURCE_BRANCH: ${{ parameters.SourceBranch }}
+        PARAM_COMMIT_SHA: ${{ parameters.CommitSHA }}
 
     - task: CmdLine@2
       displayName: Prepare Version
@@ -73,7 +220,7 @@ stages:
         Dockerfile: 'service-request-chatbot/backend/Dockerfile'
         buildContext: 'service-request-chatbot/backend'
         tags: |
-          $(Build.SourceBranchName)-$(SHORT_HASH)
+          $(IMAGE_TAG)
         arguments: >
           --platform linux/amd64
           --build-arg VERSION=$(COMMIT_VER)
@@ -94,6 +241,13 @@ stages:
 - stage: DeployAPI
   displayName: Deploy to Container App
   dependsOn: DockerBuildAPI
+  variables:
+    SHORT_HASH: $[ stageDependencies.DockerBuildAPI.Build.outputs['SelectSource.SHORT_HASH'] ]
+    TARGET_SHA: $[ stageDependencies.DockerBuildAPI.Build.outputs['SelectSource.TARGET_SHA'] ]
+    IMAGE_TAG: $[ stageDependencies.DockerBuildAPI.Build.outputs['SelectSource.IMAGE_TAG'] ]
+    IMAGE_BRANCH: $[ stageDependencies.DockerBuildAPI.Build.outputs['SelectSource.IMAGE_BRANCH'] ]
+    SOURCE_BRANCH: $[ stageDependencies.DockerBuildAPI.Build.outputs['SelectSource.SOURCE_BRANCH'] ]
+    DEPLOY_MODE: $[ stageDependencies.DockerBuildAPI.Build.outputs['SelectSource.DEPLOY_MODE'] ]
   jobs:
   - deployment: Deploy
     environment: CenomiProd
@@ -106,13 +260,28 @@ stages:
           - checkout: self
 
           - task: CmdLine@2
+            displayName: Verify Deploy Inputs
+            inputs:
+              script: |
+                set -e
+                echo "Deploy Mode   : $(DEPLOY_MODE)"
+                echo "Source Branch : $(SOURCE_BRANCH)"
+                echo "Target SHA    : $(TARGET_SHA)"
+                echo "Short Hash    : $(SHORT_HASH)"
+                echo "Image Tag     : $(IMAGE_TAG)"
+                if [ -z "$(IMAGE_TAG)" ]; then
+                  echo "ERROR: IMAGE_TAG is empty — build stage output missing"
+                  exit 1
+                fi
+
+          - task: CmdLine@2
             displayName: Deploy Image
             inputs:
               script: |
                 set -e
 
-                SHORT_HASH=$(echo $(Build.SourceVersion) | cut -c1-8)
-                IMAGE=$(docker_registry)/$(api_repository):$(Build.SourceBranchName)-$SHORT_HASH
+                # Use EXACT same IMAGE_TAG from Build (do NOT recalculate)
+                IMAGE=$(docker_registry)/$(api_repository):$(IMAGE_TAG)
 
                 echo "Deploying image: $IMAGE"
 
