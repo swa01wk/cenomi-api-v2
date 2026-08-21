@@ -65,6 +65,7 @@ ROLE_PERMITTED_INTENTS: dict[str, frozenset[str]] = {
             "CREATE_RDD_SERVICE_REQUEST",
             "UPDATE_RDD_SERVICE_REQUEST",
             "CREATE_WORK_PERMIT_SR",
+            "APPROVE_WORK_PERMIT_SR",
             "CREATE_HANDED_OVER_SR",
             "CREATE_FITOUT_CONFIRM_TRADING",
             "APPROVE_FITOUT_CONFIRM_TRADING",
@@ -76,6 +77,7 @@ ROLE_PERMITTED_INTENTS: dict[str, frozenset[str]] = {
         {
             "UPDATE_RDD_SERVICE_REQUEST",
             "APPROVE_RDD_SERVICE_REQUEST",
+            "APPROVE_WORK_PERMIT_SR",
         }
     ),
     # Phase 2 support — same FM review actions as FM_MANAGER.
@@ -87,6 +89,7 @@ ROLE_PERMITTED_INTENTS: dict[str, frozenset[str]] = {
             "APPROVE_RDD_SERVICE_REQUEST",
             "CREATE_FITOUT_CONFIRM_TRADING",
             "APPROVE_FITOUT_CONFIRM_TRADING",
+            "APPROVE_WORK_PERMIT_SR",
         }
     ),
     # Phase 3 actor — RDD review is triggered by sr_status_sync, not supervisor intent.
@@ -98,10 +101,13 @@ ROLE_PERMITTED_INTENTS: dict[str, frozenset[str]] = {
             "CREATE_FITOUT_CONFIRM_END",
             "APPROVE_FITOUT_CONFIRM_FOS",
             "APPROVE_FITOUT_CONFIRM_END",
+            "APPROVE_WORK_PERMIT_SR",
         }
     ),
     # Unrestricted
     "ADMIN": ALL_INTENTS,
+    # Cold L2 Work Permit hop (workflow 6).
+    "OPERATION_EXECUTIVES": _SR_READ_INTENTS | frozenset({"APPROVE_WORK_PERMIT_SR"}),
 }
 
 

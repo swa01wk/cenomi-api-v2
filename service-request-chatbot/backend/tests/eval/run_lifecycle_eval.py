@@ -79,6 +79,10 @@ from tests.eval.lifecycle_scenarios import (
     TIER6I_TRADING_EDGE_LC,
     TIER6J_TRADING_BATTLE_LC,
     TIER7_LIFECYCLE_SCENARIOS,
+    TIER9_LIFECYCLE_SCENARIOS,
+    TIER9_WP_HAPPY,
+    TIER9_WP_EDGE,
+    TIER9_WP_BATTLE,
     LifecycleScenario,
     PhaseConfig,
 )
@@ -113,6 +117,10 @@ _TIER_MAP: dict[int | str, list[LifecycleScenario]] = {
     "6i":  TIER6I_TRADING_EDGE_LC,
     "6j":  TIER6J_TRADING_BATTLE_LC,
     7:     TIER7_LIFECYCLE_SCENARIOS,
+    9:     TIER9_LIFECYCLE_SCENARIOS,
+    "9a":  TIER9_WP_HAPPY,
+    "9b":  TIER9_WP_EDGE,
+    "9c":  TIER9_WP_BATTLE,
 }
 
 # ─── ANSI colours ─────────────────────────────────────────────────────────────

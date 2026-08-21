@@ -173,8 +173,9 @@ WORKFLOW_CONFIG_REGISTRY: dict[str, WorkflowConfig] = {}
 def _build_work_permit_config() -> WorkflowConfig:
     """Build the ``WorkflowConfig`` for the Work Permit Agent.
 
-    Single-stage workflow: the Mall Manager creates a work permit SR.
-    There is no FM_REVIEW or RDD_REVIEW phase for work permits.
+    Create is ``CREATE_WORK_PERMIT``. Review hops are subtype-specific
+    (DD → FM → MM, or Cold MM/Ops, or Operations MM-only) and are opened
+    via ``sr_status_sync`` mapping of V1 ``service_request_operations``.
     """
     from app.agents.prompts.work_permit_extraction_prompt import (
         WORK_PERMIT_EXTRACTION_SYSTEM_PROMPT,
@@ -200,10 +201,29 @@ def _build_work_permit_config() -> WorkflowConfig:
         agent_name="work_permit_agent",
         extraction_prompt=WORK_PERMIT_EXTRACTION_SYSTEM_PROMPT,
         field_questions=field_questions,
-        stage_sync_nodes={},
-        collection_stages=frozenset({"CREATE_WORK_PERMIT"}),
-        confirmation_nodes={"CREATE_WORK_PERMIT": "work_permit_confirmation"},
-        terminal_stages=frozenset({"WP_CREATED"}),
+        stage_sync_nodes={
+            "WP_DD_REVIEW": "work_permit_entry",
+            "WP_FM_REVIEW": "work_permit_entry",
+            "WP_MM_REVIEW": "work_permit_entry",
+            "WP_MM_OPS_REVIEW": "work_permit_entry",
+        },
+        collection_stages=frozenset(
+            {
+                "CREATE_WORK_PERMIT",
+                "WP_DD_REVIEW",
+                "WP_FM_REVIEW",
+                "WP_MM_REVIEW",
+                "WP_MM_OPS_REVIEW",
+            }
+        ),
+        confirmation_nodes={
+            "CREATE_WORK_PERMIT": "work_permit_confirmation",
+            "WP_DD_REVIEW": "work_permit_confirmation",
+            "WP_FM_REVIEW": "work_permit_confirmation",
+            "WP_MM_REVIEW": "work_permit_confirmation",
+            "WP_MM_OPS_REVIEW": "work_permit_confirmation",
+        },
+        terminal_stages=frozenset({"WP_CREATED", "WP_APPROVED", "WP_REJECTED"}),
         backend_fields=frozenset(
             {
                 "lease_id",
@@ -219,7 +239,7 @@ def _build_work_permit_config() -> WorkflowConfig:
         ),
         auto_generated_fields=frozenset(),
         lease_trigger_fields=("lease_code", "company", "lease_brand_mall"),
-        action_intents=frozenset({"CREATE_WORK_PERMIT_SR"}),
+        action_intents=frozenset({"CREATE_WORK_PERMIT_SR", "APPROVE_WORK_PERMIT_SR"}),
     )
 
 

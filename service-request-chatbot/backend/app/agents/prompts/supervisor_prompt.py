@@ -10,7 +10,7 @@ Intent taxonomy follows the agent taxonomy:
   - rdd_fitout_start_agent       : fitout start confirmation (FIT_OUT_CONFIRM_FOS)
   - rdd_fitout_end_agent         : fitout end confirmation (FIT_OUT_CONFIRM_END)
   - rdd_trading_confirmation_agent : trading confirmation (FIT_OUT_CONFIRM_TRADING)
-  - work_permit_agent            : single-stage work permit SR creation
+  - work_permit_agent            : work permit SR creation + subtype review hops
 
 ``CONFIDENCE_THRESHOLD`` is the minimum confidence below which the supervisor
 requests clarification instead of routing.
@@ -130,6 +130,13 @@ VALID INTENTS
       Keywords: work permit, hot work, cold work, roof access, construction permit,
                 maintenance permit, operations permit, permit for work, I need a permit
 
+  APPROVE_WORK_PERMIT_SR
+      User wants to approve or reject an existing Work Permit service request
+      (DD Engineer, FM Manager, Mall Manager, or Operations depending on subtype hop).
+      Keywords: approve work permit, reject work permit, review work permit,
+                sign off permit, open work permit SR
+      Routing: opening an existing WP SR by id is enough — status sync maps the hop.
+
   CHECK_SERVICE_REQUEST_STATUS
       User wants to know the current status of a service request.
       Keywords: status, progress, where is, track, check, what happened to
@@ -206,6 +213,11 @@ When intent = APPROVE_FITOUT_CONFIRM_TRADING:
     target_agent     = "rdd_trading_confirmation_agent"
 
 When intent = CREATE_WORK_PERMIT_SR:
+    service_category = "WORK_PERMIT"
+    sub_category     = "WORK_PERMIT"
+    target_agent     = "work_permit_agent"
+
+When intent = APPROVE_WORK_PERMIT_SR:
     service_category = "WORK_PERMIT"
     sub_category     = "WORK_PERMIT"
     target_agent     = "work_permit_agent"

@@ -95,6 +95,18 @@ class TestWorkPermitRoleMap:
     def test_admin_can_raise_wp(self) -> None:
         assert "CAN_RAISE_WORK_PERMIT_SR" in ROLE_PERMISSION_MAP.get("ADMIN", frozenset())
 
+    def test_operation_executives_can_view_wp(self) -> None:
+        assert "VIEW_WORK_PERMIT" in ROLE_PERMISSION_MAP.get("OPERATION_EXECUTIVES", frozenset())
+
+    def test_operation_executives_cannot_raise_wp(self) -> None:
+        assert "CAN_RAISE_WORK_PERMIT_SR" not in ROLE_PERMISSION_MAP.get(
+            "OPERATION_EXECUTIVES", frozenset()
+        )
+
+    def test_approve_work_permit_not_in_action_map(self) -> None:
+        """Platform has no APPROVE_SR_WORK_PERMIT — hop gate is assigned_role."""
+        assert "APPROVE_WORK_PERMIT_SR" not in ACTION_PERMISSION_MAP
+
 
 # ===========================================================================
 # TestPermissionServiceWP
@@ -149,6 +161,21 @@ class TestPermissionServiceWP:
         with pytest.raises(PermissionDeniedError) as exc_info:
             svc.check("CREATE_WORK_PERMIT_SR", _auth("FM_MANAGER"))
         assert exc_info.value.action == "CREATE_WORK_PERMIT_SR"
+
+    def test_dd_can_approve_dd_hop(self) -> None:
+        PermissionService().ensure_can_approve_work_permit(
+            AuthContext(subject_id="dd", tenant_id=None, roles=frozenset({"DD_ENGINEER"})),
+            workflow_stage="WP_DD_REVIEW",
+            in_progress_roles={"DD_ENGINEER"},
+        )
+
+    def test_fm_cannot_approve_dd_hop(self) -> None:
+        with pytest.raises(PermissionDeniedError):
+            PermissionService().ensure_can_approve_work_permit(
+                AuthContext(subject_id="fm", tenant_id=None, roles=frozenset({"FM_MANAGER"})),
+                workflow_stage="WP_DD_REVIEW",
+                in_progress_roles={"DD_ENGINEER"},
+            )
 
 
 # ===========================================================================

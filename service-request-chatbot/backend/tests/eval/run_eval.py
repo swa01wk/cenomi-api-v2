@@ -61,6 +61,7 @@ from tests.eval.scenarios import (
     TIER6I_TRADING_EDGE,
     TIER6J_TRADING_BATTLE,
     TIER8_SCENARIOS,
+    TIER9_SCENARIOS,
     Scenario,
     Turn,
 )
@@ -82,6 +83,7 @@ _TIER_MAP: dict[int | str, list[Scenario]] = {
     "6i": TIER6I_TRADING_EDGE,
     "6j": TIER6J_TRADING_BATTLE,
     8: TIER8_SCENARIOS,
+    9: TIER9_SCENARIOS,
 }
 
 # ── ANSI colours ─────────────────────────────────────────────────────────────
@@ -752,7 +754,8 @@ def main() -> None:
         help=(
             "Run only scenarios in tier N: "
             "0=smoke, 1=Handover A happy, 2=Handover A edge, 3=Handover A battle, "
-            "6=Fitout happy (all), 7=Fitout edge+battle (all), 8=FAQ+RBAC. "
+            "6=Fitout happy (all), 7=Fitout edge+battle (all), 8=FAQ+RBAC, "
+            "9=Work Permit create/RBAC. "
             "Fitout per-agent sub-tiers: "
             "6a=FOS happy, 6b=FOS edge, 6c=FOS battle, "
             "6e=END happy, 6f=END edge, "

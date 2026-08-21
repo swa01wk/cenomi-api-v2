@@ -2145,11 +2145,344 @@ TIER6_SCENARIOS: list[LifecycleScenario] = [
     _S73,                                  # Multi-file FM upload (doc_upload_fix)
 ]
 
+
+# ─── Work Permit V1 review hops (L240–L245) — item 3638 ──────────────────────
+
+def _create_wp_phase(permit_type: str, phrase: str) -> PhaseConfig:
+    """Mall Manager packed CREATE_WORK_PERMIT → WP_CREATED."""
+    return PhaseConfig(
+        user_email=_MALL[0], user_password=_MALL[1], role=_MALL[2],
+        stage="CREATE_WORK_PERMIT",
+        turns=[
+            Turn(
+                message=(
+                    f"I need a {phrase} work permit for lease t0105712. "
+                    f"Description: Eval {permit_type}. "
+                    f"Start {_d(7)}, end {_d(7)}. Contractor ABC Contractors. No comments."
+                ),
+                note=f"Packed WP create ({permit_type}); confirmation card expected",
+                expect_ui_type="confirmation_card",
+            ),
+            Turn(
+                message="Confirm",
+                action="confirm",
+                note="Submit WP → WP_CREATED; sr_id captured for review hops",
+                expect_workflow_stage="WP_CREATED",
+                expect_keywords=["submitted", "reference"],
+            ),
+        ],
+    )
+
+
+_L240 = LifecycleScenario(
+    id=240,
+    name="WP Hot — CREATE → DD → FM → MM → WP_APPROVED",
+    goal=(
+        "CONSTRUCTION_HOT workflow 5: Mall Manager creates, DD Engineer approves L1, "
+        "FM Manager approves L2, Mall Manager approves L3."
+    ),
+    tags=["work-permit", "happy-path", "construction-hot", "tier9"],
+    phases=[
+        _create_wp_phase("CONSTRUCTION_HOT", "construction hot"),
+        PhaseConfig(
+            user_email=_DD[0], user_password=_DD[1], role=_DD[2],
+            stage="WP_DD_REVIEW",
+            open_existing_sr=True,
+            turns=[
+                Turn(
+                    message="Open this work permit for DD review.",
+                    note="GET operations: DD_ENGINEER IN_PROGRESS → WP_DD_REVIEW (not RDD_REVIEW)",
+                    expect_workflow_stage="WP_DD_REVIEW",
+                    expect_keywords=["work permit", "review", "approve"],
+                ),
+                Turn(
+                    message="",
+                    action="confirm_approve_wp",
+                    note="DD PATCH APPROVED → next hop FM_REVIEW",
+                    expect_workflow_stage="WP_FM_REVIEW",
+                    expect_keywords=["approval", "fm", "recorded"],
+                ),
+            ],
+        ),
+        PhaseConfig(
+            user_email=_FM[0], user_password=_FM[1], role=_FM[2],
+            stage="WP_FM_REVIEW",
+            open_existing_sr=True,
+            turns=[
+                Turn(
+                    message="Open this work permit for FM review.",
+                    expect_workflow_stage="WP_FM_REVIEW",
+                    expect_keywords=["work permit", "review"],
+                ),
+                Turn(
+                    message="",
+                    action="confirm_approve_wp",
+                    note="FM PATCH APPROVED → MM_REVIEW",
+                    expect_workflow_stage="WP_MM_REVIEW",
+                    expect_keywords=["approval", "mall"],
+                ),
+            ],
+        ),
+        PhaseConfig(
+            user_email=_MALL[0], user_password=_MALL[1], role=_MALL[2],
+            stage="WP_MM_REVIEW",
+            open_existing_sr=True,
+            turns=[
+                Turn(
+                    message="Open this work permit for mall manager review.",
+                    expect_workflow_stage="WP_MM_REVIEW",
+                    expect_keywords=["work permit", "review"],
+                ),
+                Turn(
+                    message="",
+                    action="confirm_approve_wp",
+                    note="Last hop PATCH APPROVED → WP_APPROVED",
+                    expect_workflow_stage="WP_APPROVED",
+                    expect_keywords=["approved"],
+                ),
+            ],
+        ),
+    ],
+)
+
+
+_L241 = LifecycleScenario(
+    id=241,
+    name="WP Cold — CREATE → DD → OPERATIONS (same-level L2) → WP_APPROVED",
+    goal=(
+        "CONSTRUCTION_COLD workflow 6: DD L1 then any of MM / OE / OPERATIONS at L2. "
+        "OPERATIONS can PATCH APPROVED; siblings are not deleted."
+    ),
+    tags=["work-permit", "construction-cold", "mm-ops-review", "tier9"],
+    phases=[
+        _create_wp_phase("CONSTRUCTION_COLD", "construction cold"),
+        PhaseConfig(
+            user_email=_DD[0], user_password=_DD[1], role=_DD[2],
+            stage="WP_DD_REVIEW",
+            open_existing_sr=True,
+            turns=[
+                Turn(
+                    message="Open this cold work permit.",
+                    expect_workflow_stage="WP_DD_REVIEW",
+                ),
+                Turn(
+                    message="",
+                    action="confirm_approve_wp",
+                    expect_workflow_stage="WP_MM_OPS_REVIEW",
+                    expect_keywords=["approval", "operations", "mall"],
+                ),
+            ],
+        ),
+        PhaseConfig(
+            user_email=_OPS[0], user_password=_OPS[1], role=_OPS[2],
+            stage="WP_MM_OPS_REVIEW",
+            open_existing_sr=True,
+            turns=[
+                Turn(
+                    message="Open this cold work permit for operations review.",
+                    expect_workflow_stage="WP_MM_OPS_REVIEW",
+                ),
+                Turn(
+                    message="",
+                    action="confirm_approve_wp",
+                    note="Cold L2 is last hop → WP_APPROVED",
+                    expect_workflow_stage="WP_APPROVED",
+                    expect_keywords=["approved"],
+                ),
+            ],
+        ),
+    ],
+)
+
+
+_L242 = LifecycleScenario(
+    id=242,
+    name="WP Maintenance Hot — CREATE → FM → MM → WP_APPROVED",
+    goal="MAINTENANCE_HOT workflow 7: FM L1 then Mall Manager L2.",
+    tags=["work-permit", "maintenance-hot", "tier9"],
+    phases=[
+        _create_wp_phase("MAINTENANCE_HOT", "maintenance hot"),
+        PhaseConfig(
+            user_email=_FM[0], user_password=_FM[1], role=_FM[2],
+            stage="WP_FM_REVIEW",
+            open_existing_sr=True,
+            turns=[
+                Turn(
+                    message="Open this maintenance work permit.",
+                    expect_workflow_stage="WP_FM_REVIEW",
+                ),
+                Turn(
+                    message="",
+                    action="confirm_approve_wp",
+                    expect_workflow_stage="WP_MM_REVIEW",
+                ),
+            ],
+        ),
+        PhaseConfig(
+            user_email=_MALL[0], user_password=_MALL[1], role=_MALL[2],
+            stage="WP_MM_REVIEW",
+            open_existing_sr=True,
+            turns=[
+                Turn(
+                    message="Open this maintenance work permit for mall manager review.",
+                    expect_workflow_stage="WP_MM_REVIEW",
+                ),
+                Turn(
+                    message="",
+                    action="confirm_approve_wp",
+                    expect_workflow_stage="WP_APPROVED",
+                    expect_keywords=["approved"],
+                ),
+            ],
+        ),
+    ],
+)
+
+
+_L243 = LifecycleScenario(
+    id=243,
+    name="WP Operations — CREATE → MM_REVIEW → WP_APPROVED",
+    goal="OPERATIONS workflow 8: single Mall Manager hop (Fitout-like).",
+    tags=["work-permit", "operations", "tier9"],
+    phases=[
+        _create_wp_phase("OPERATIONS", "operations"),
+        PhaseConfig(
+            user_email=_MALL[0], user_password=_MALL[1], role=_MALL[2],
+            stage="WP_MM_REVIEW",
+            open_existing_sr=True,
+            turns=[
+                Turn(
+                    message="Open this operations work permit for review.",
+                    note="L1 is MALL_MANAGER IN_PROGRESS → WP_MM_REVIEW",
+                    expect_workflow_stage="WP_MM_REVIEW",
+                ),
+                Turn(
+                    message="",
+                    action="confirm_approve_wp",
+                    expect_workflow_stage="WP_APPROVED",
+                    expect_keywords=["approved"],
+                ),
+            ],
+        ),
+    ],
+)
+
+
+_L244 = LifecycleScenario(
+    id=244,
+    name="WP Hot — DD reject → WP_REJECTED",
+    goal="DD Engineer can reject the L1 hop; SR status becomes REJECTED.",
+    tags=["work-permit", "reject", "tier9"],
+    phases=[
+        _create_wp_phase("CONSTRUCTION_HOT", "construction hot"),
+        PhaseConfig(
+            user_email=_DD[0], user_password=_DD[1], role=_DD[2],
+            stage="WP_DD_REVIEW",
+            open_existing_sr=True,
+            turns=[
+                Turn(
+                    message="Open this work permit.",
+                    expect_workflow_stage="WP_DD_REVIEW",
+                ),
+                Turn(
+                    message="",
+                    action="reject_wp",
+                    note="PATCH REJECTED → WP_REJECTED",
+                    expect_workflow_stage="WP_REJECTED",
+                    expect_keywords=["rejected"],
+                ),
+            ],
+        ),
+    ],
+)
+
+
+_L245 = LifecycleScenario(
+    id=245,
+    name="WP Hot — FM denied on DD hop",
+    goal="FM_MANAGER cannot PATCH approve while DD_ENGINEER is the IN_PROGRESS assigned_role.",
+    tags=["work-permit", "rbac", "wrong-hop", "tier9"],
+    phases=[
+        _create_wp_phase("CONSTRUCTION_HOT", "construction hot"),
+        PhaseConfig(
+            user_email=_FM[0], user_password=_FM[1], role=_FM[2],
+            stage="WP_DD_REVIEW",
+            open_existing_sr=True,
+            turns=[
+                Turn(
+                    message="Open this work permit.",
+                    note="Stage is still WP_DD_REVIEW; FM is not the assigned role",
+                    expect_workflow_stage="WP_DD_REVIEW",
+                ),
+                Turn(
+                    message="",
+                    action="confirm_approve_wp",
+                    note="Permission denied — hop assigned_role is DD_ENGINEER",
+                    expect_keywords=["permission", "not have permission", "approve"],
+                ),
+            ],
+        ),
+    ],
+)
+
+
+#: Tier 9 — Work Permit review hops
+TIER9_WP_HAPPY: list[LifecycleScenario] = [_L240, _L241, _L242, _L243]
+TIER9_WP_EDGE: list[LifecycleScenario] = [_L244]
+TIER9_WP_BATTLE: list[LifecycleScenario] = [_L245]
+TIER9_LIFECYCLE_SCENARIOS: list[LifecycleScenario] = (
+    TIER9_WP_HAPPY + TIER9_WP_EDGE + TIER9_WP_BATTLE
+)
+
+
+# ─── Aliases expected by run_lifecycle_eval.py ────────────────────────────────
+
+#: Pipeline smoke (L298–L299) is not present on this branch.
+TIER0P_SCENARIOS: list[LifecycleScenario] = []
+
+TIER3A_FM_HAPPY: list[LifecycleScenario] = [_S34, _S35]
+TIER3B_FM_EDGE: list[LifecycleScenario] = [_S36, _S37, _S39]
+TIER3C_FM_BATTLE: list[LifecycleScenario] = [_S38]
+TIER3D_RDD_HAPPY: list[LifecycleScenario] = [_S40, _S41]
+TIER3E_RDD_EDGE: list[LifecycleScenario] = [_S42, _S43, _S44]
+TIER3F_RDD_BATTLE: list[LifecycleScenario] = [_S45]
+TIER3G_LIFECYCLE_HAPPY: list[LifecycleScenario] = [_S46]
+TIER3H_LIFECYCLE_EDGE: list[LifecycleScenario] = [_S47, _S48, _S49]
+TIER3I_LIFECYCLE_BATTLE: list[LifecycleScenario] = [
+    _S50, _S51, _S52, _S53, _S54, _S55,
+    _S56, _S57, _S58, _S59, _S60, _S61, _S62,
+    _S63, _S64, _S65, _S66, _S67, _S68,
+    _S69, _S70, _S71, _S72, _S73,
+]
+TIER3_LIFECYCLE_SCENARIOS: list[LifecycleScenario] = (
+    TIER3A_FM_HAPPY
+    + TIER3B_FM_EDGE
+    + TIER3C_FM_BATTLE
+    + TIER3D_RDD_HAPPY
+    + TIER3E_RDD_EDGE
+    + TIER3F_RDD_BATTLE
+    + TIER3G_LIFECYCLE_HAPPY
+    + TIER3H_LIFECYCLE_EDGE
+    + TIER3I_LIFECYCLE_BATTLE
+)
+
+# Fitout lifecycle scenarios (L170–L182) are not on this branch; keep empty
+# lists so run_lifecycle_eval.py imports succeed.
+TIER6_LIFECYCLE_SCENARIOS: list[LifecycleScenario] = []
+TIER6A_FOS_HAPPY_LC: list[LifecycleScenario] = []
+TIER6B_FOS_EDGE_LC: list[LifecycleScenario] = []
+TIER6C_FOS_BATTLE_LC: list[LifecycleScenario] = []
+TIER6D_FOS_LIFECYCLE: list[LifecycleScenario] = []
+TIER6E_END_HAPPY_LC: list[LifecycleScenario] = []
+TIER6F_END_EDGE_LC: list[LifecycleScenario] = []
+TIER6G_END_LIFECYCLE: list[LifecycleScenario] = []
+TIER6H_TRADING_HAPPY_LC: list[LifecycleScenario] = []
+TIER6I_TRADING_EDGE_LC: list[LifecycleScenario] = []
+TIER6J_TRADING_BATTLE_LC: list[LifecycleScenario] = []
+TIER7_LIFECYCLE_SCENARIOS: list[LifecycleScenario] = []
+
 #: Backward-compatible master list (all lifecycle scenarios)
 LIFECYCLE_SCENARIOS: list[LifecycleScenario] = (
     TIER3_LIFECYCLE_SCENARIOS
-    + TIER4_SCENARIOS
-    + TIER5_SCENARIOS
-    + TIER6_LIFECYCLE_SCENARIOS
-    + TIER7_LIFECYCLE_SCENARIOS
+    + TIER9_LIFECYCLE_SCENARIOS
 )

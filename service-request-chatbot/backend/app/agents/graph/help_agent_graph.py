@@ -29,7 +29,7 @@ Agent taxonomy
 --------------
 - help_agent           : this graph — supervisor (intent routing) + faq_node (Q&A)
 - rdd_handover_agent           : handles the full RDD lifecycle (CREATE_SR → FM_REVIEW → RDD_REVIEW)
-- work_permit_agent            : single-stage work permit SR creation (CREATE_WORK_PERMIT)
+- work_permit_agent            : work permit create (CREATE_WORK_PERMIT) + review hops
 - rdd_fitout_start_agent       : fitout start confirmation (FIT_OUT_CONFIRM_FOS)
 - rdd_fitout_end_agent         : fitout end confirmation (FIT_OUT_CONFIRM_END)
 - rdd_trading_confirmation_agent : trading confirmation (FIT_OUT_CONFIRM_TRADING)
@@ -305,10 +305,17 @@ def _route_after_registry(state: dict[str, Any]) -> str:
 def _route_after_merge(state: dict[str, Any]) -> str:
     if state.get("selected_lease"):
         return "lease_lookup"
-    # FM_REVIEW, RDD_REVIEW, and APPROVE_SR: lease was resolved during CREATE_SR.
-    # Skip re-lookup; an sr_id in backend_refs confirms the SR exists.
+    # Review / approve stages: lease was resolved at create time.
     workflow_stage = state.get("workflow_stage") or ""
-    if workflow_stage in ("FM_REVIEW", "RDD_REVIEW", "APPROVE_SR"):
+    if workflow_stage in (
+        "FM_REVIEW",
+        "RDD_REVIEW",
+        "APPROVE_SR",
+        "WP_DD_REVIEW",
+        "WP_FM_REVIEW",
+        "WP_MM_REVIEW",
+        "WP_MM_OPS_REVIEW",
+    ):
         return "validation"
     collected = state.get("collected_data") or {}
     if not collected.get("lease_id"):
@@ -334,6 +341,8 @@ def _route_after_validation(state: dict[str, Any]) -> str:
     )
     if active_agent_for_optional in _FITOUT_AGENTS:
         from app.agents.schemas.fitout_confirm_schema import OPTIONAL_FIELDS
+    elif active_agent_for_optional == "work_permit_agent":
+        from app.agents.schemas.work_permit_schema import OPTIONAL_FIELDS
     else:
         from app.agents.schemas.handover_schema import OPTIONAL_FIELDS
 
@@ -495,9 +504,23 @@ def _route_after_rdd_confirmation(state: dict[str, Any]) -> str:
 
 
 def _route_after_work_permit_entry(state: dict[str, Any]) -> str:
+    # Mirror fitout/handover: CONFIRMED must win over a stale WAITING_FOR_USER
+    # left from the confirmation-card turn.
+    if state.get("confirmation_status") == "CONFIRMED":
+        return "merge_state"
+    if state.get("confirmation_status") == "REJECTED":
+        return "field_extraction"
     if state.get("status") == "WAITING_FOR_USER":
         return "response_generation"
     if state.get("action_override") == "cancel":
+        return "merge_state"
+    workflow_stage = state.get("workflow_stage") or ""
+    if workflow_stage in (
+        "WP_DD_REVIEW",
+        "WP_FM_REVIEW",
+        "WP_MM_REVIEW",
+        "WP_MM_OPS_REVIEW",
+    ):
         return "merge_state"
     return "field_extraction"
 
@@ -616,6 +639,7 @@ def build_help_agent_graph():
             "fm_review_entry": "fm_review_entry",
             "rdd_review_entry": "rdd_review_entry",
             "fitout_confirm_entry": "fitout_confirm_entry",
+            "work_permit_entry": "work_permit_entry",
             "preview": "preview",
             "supervisor": "supervisor",
             # Sync GET failure sets sync_error and returns response_generation
