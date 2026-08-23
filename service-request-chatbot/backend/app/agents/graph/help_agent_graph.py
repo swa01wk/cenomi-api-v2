@@ -80,6 +80,26 @@ from app.agents.graph.nodes.fitout_confirm.fitout_confirm_confirmation_node impo
 from app.agents.graph.nodes.fitout_confirm.fitout_confirm_payload_builder_node import fitout_confirm_payload_builder_node
 from app.agents.graph.nodes.fitout_confirm.fitout_confirm_api_submission_node import fitout_confirm_api_submission_node
 
+# ── Sales Data agent nodes ────────────────────────────────────────────────────
+from app.agents.graph.nodes.sales_data.sales_data_entry_node import sales_data_entry_node
+from app.agents.graph.nodes.sales_data.csv_validation_node import csv_validation_node
+from app.agents.graph.nodes.sales_data.csv_field_correction_node import csv_field_correction_node
+from app.agents.graph.nodes.sales_data.lease_validation_node import lease_validation_node
+from app.agents.graph.nodes.sales_data.stale_notification_node import stale_notification_node
+from app.agents.graph.nodes.sales_data.sales_data_confirmation_node import sales_data_confirmation_node
+from app.agents.graph.nodes.sales_data.sales_data_payload_builder_node import sales_data_payload_builder_node
+from app.agents.graph.nodes.sales_data.sales_data_api_submission_node import sales_data_api_submission_node
+from app.agents.graph.nodes.sales_data.submission_success_node import submission_success_node
+from app.agents.graph.nodes.sales_data.submission_error_node import submission_error_node
+from app.agents.graph.nodes.sales_data.manual_entry_extraction_node import manual_entry_extraction_node
+from app.agents.graph.nodes.sales_data.manual_entry_lease_validation_node import manual_entry_lease_validation_node
+from app.agents.graph.nodes.sales_data.manual_entry_missing_field_node import manual_entry_missing_field_node
+from app.agents.graph.nodes.sales_data.manual_entry_confirmation_node import manual_entry_confirmation_node
+from app.agents.graph.nodes.sales_data.manual_entry_submission_node import manual_entry_submission_node
+from app.agents.graph.nodes.sales_data.tenant_status_lookup_node import tenant_status_lookup_node
+from app.agents.graph.nodes.sales_data.admin_review_entry_node import admin_review_entry_node
+from app.agents.graph.nodes.sales_data.admin_status_update_node import admin_status_update_node
+
 # ── RDD agent nodes (CREATE_SR / FM_REVIEW / RDD_REVIEW workflow phases) ──────
 from app.agents.graph.nodes.handover.handover_entry_node import handover_entry_node
 from app.agents.graph.nodes.handover.fm_review_entry_node import fm_review_entry_node
@@ -109,6 +129,7 @@ _AGENT_ENTRY_NODES: dict[str, str] = {
     "rdd_fitout_start_agent": "fitout_confirm_entry",
     "rdd_fitout_end_agent": "fitout_confirm_entry",
     "rdd_trading_confirmation_agent": "fitout_confirm_entry",
+    "sales_data_agent": "sales_data_entry",
 }
 
 # Intents that route to the FAQ node (Q&A path — no SR workflow activation)
@@ -129,6 +150,12 @@ _CREATE_NEW_SR_INTENTS: frozenset[str] = frozenset(
         "CREATE_FITOUT_CONFIRM_FOS",
         "CREATE_FITOUT_CONFIRM_END",
         "CREATE_FITOUT_CONFIRM_TRADING",
+        # Sales data intents never open an existing platform SR
+        "UPLOAD_SALES_DATA",
+        "ENTER_SALES_DATA_MANUAL",
+        "CHECK_SALES_DATA_STATUS",
+        "REVIEW_SALES_DATA",
+        "APPROVE_SALES_DATA",
     }
 )
 
@@ -536,6 +563,129 @@ def _route_after_fitout_confirm_confirmation(state: dict[str, Any]) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Sales Data Agent routing
+# ---------------------------------------------------------------------------
+
+
+def _route_after_sales_data_entry(state: dict[str, Any]) -> str:
+    """Route after the sales_data_entry_node based on workflow_stage."""
+    workflow_stage: str = state.get("workflow_stage") or ""
+    status: str = state.get("status") or ""
+
+    if status == "WAITING_FOR_USER":
+        return "response_generation"
+
+    route_map = {
+        "CSV_LAYER1_VALIDATION": "csv_validation",
+        "CSV_CORRECTION": "csv_field_correction",  # user is providing missing sales_amt values
+        "MANUAL_ENTRY": "manual_entry_extraction",
+        "STATUS_LOOKUP": "tenant_status_lookup",
+        "ADMIN_REVIEW": "admin_review_entry",
+        "ADMIN_CONFIRM": "admin_review_entry",
+        "SUBMITTING": "sales_data_payload_builder",
+        "AWAITING_TABLE_CONFIRM": "sales_data_confirmation",
+        "AWAITING_MANUAL_CONFIRM": "manual_entry_confirmation",
+    }
+    return route_map.get(workflow_stage, "response_generation")
+
+
+def _route_after_csv_validation(state: dict[str, Any]) -> str:
+    if state.get("status") == "WAITING_FOR_USER":
+        # CSV_CORRECTION is a WAITING_FOR_USER state that needs a special node on next turn
+        workflow_stage = state.get("workflow_stage") or ""
+        if workflow_stage == "CSV_CORRECTION":
+            return "response_generation"  # just show the message, correction happens on next turn
+        return "response_generation"
+    workflow_stage = state.get("workflow_stage") or ""
+    if workflow_stage == "CSV_LAYER2_VALIDATION":
+        return "lease_validation"
+    return "response_generation"
+
+
+def _route_after_csv_field_correction(state: dict[str, Any]) -> str:
+    if state.get("status") == "WAITING_FOR_USER":
+        return "response_generation"
+    workflow_stage = state.get("workflow_stage") or ""
+    if workflow_stage == "CSV_LAYER2_VALIDATION":
+        return "lease_validation"
+    return "response_generation"
+
+
+def _route_after_lease_validation(state: dict[str, Any]) -> str:
+    workflow_stage = state.get("workflow_stage") or ""
+    if workflow_stage == "STALE_NOTIFICATION":
+        return "stale_notification"
+    if workflow_stage == "AWAITING_TABLE_CONFIRM":
+        return "sales_data_confirmation"
+    return "response_generation"
+
+
+def _route_after_sales_data_confirmation(state: dict[str, Any]) -> str:
+    if state.get("confirmation_status") == "CONFIRMED":
+        return "sales_data_payload_builder"
+    return "response_generation"
+
+
+def _route_after_sales_data_payload_builder(state: dict[str, Any]) -> str:
+    if state.get("status") == "WAITING_FOR_USER":
+        return "response_generation"
+    return "sales_data_api_submission"
+
+
+def _route_after_sales_data_api_submission(state: dict[str, Any]) -> str:
+    workflow_stage = state.get("workflow_stage") or ""
+    if workflow_stage == "SALES_DATA_COMPLETE":
+        return "submission_success"
+    if workflow_stage == "SUBMISSION_ERROR":
+        return "submission_error"
+    return "response_generation"
+
+
+def _route_after_manual_entry_extraction(state: dict[str, Any]) -> str:
+    collected: dict = state.get("collected_data") or {}
+    required = ["lease_code", "sales_period_start", "sales_period_end", "sales_amt"]
+    if all(collected.get(f) for f in required):
+        return "manual_entry_lease_validation"
+    return "manual_entry_missing_field"
+
+
+def _route_after_manual_entry_lease_validation(state: dict[str, Any]) -> str:
+    workflow_stage = state.get("workflow_stage") or ""
+    if state.get("status") == "WAITING_FOR_USER":
+        return "response_generation"
+    if workflow_stage == "AWAITING_MANUAL_CONFIRM":
+        return "manual_entry_confirmation"
+    return "response_generation"
+
+
+def _route_after_manual_entry_confirmation(state: dict[str, Any]) -> str:
+    if state.get("confirmation_status") == "CONFIRMED" or state.get("workflow_stage") == "SUBMITTING":
+        return "manual_entry_submission"
+    return "response_generation"
+
+
+def _route_after_manual_entry_submission(state: dict[str, Any]) -> str:
+    workflow_stage = state.get("workflow_stage") or ""
+    if workflow_stage == "SALES_DATA_COMPLETE":
+        return "submission_success"
+    if workflow_stage == "SUBMISSION_ERROR":
+        return "submission_error"
+    return "response_generation"
+
+
+def _route_after_admin_review(state: dict[str, Any]) -> str:
+    workflow_stage = state.get("workflow_stage") or ""
+    status = state.get("status") or ""
+    confirmation_status = state.get("confirmation_status") or ""
+
+    if confirmation_status == "CONFIRMED" or workflow_stage == "ADMIN_SUBMITTING":
+        return "admin_status_update"
+    if status == "WAITING_FOR_USER":
+        return "response_generation"
+    return "response_generation"
+
+
+# ---------------------------------------------------------------------------
 # Graph builder
 # ---------------------------------------------------------------------------
 
@@ -586,6 +736,25 @@ def build_help_agent_graph():
     graph.add_node("fitout_confirm_confirmation", fitout_confirm_confirmation_node)
     graph.add_node("fitout_confirm_payload_builder", fitout_confirm_payload_builder_node)
     graph.add_node("fitout_confirm_api_submission", fitout_confirm_api_submission_node)
+    # ── Sales Data agent nodes ─────────────────────────────────────────────────
+    graph.add_node("sales_data_entry", sales_data_entry_node)
+    graph.add_node("csv_validation", csv_validation_node)
+    graph.add_node("lease_validation", lease_validation_node)
+    graph.add_node("stale_notification", stale_notification_node)
+    graph.add_node("sales_data_confirmation", sales_data_confirmation_node)
+    graph.add_node("sales_data_payload_builder", sales_data_payload_builder_node)
+    graph.add_node("sales_data_api_submission", sales_data_api_submission_node)
+    graph.add_node("submission_success", submission_success_node)
+    graph.add_node("submission_error", submission_error_node)
+    graph.add_node("csv_field_correction", csv_field_correction_node)
+    graph.add_node("manual_entry_extraction", manual_entry_extraction_node)
+    graph.add_node("manual_entry_lease_validation", manual_entry_lease_validation_node)
+    graph.add_node("manual_entry_missing_field", manual_entry_missing_field_node)
+    graph.add_node("manual_entry_confirmation", manual_entry_confirmation_node)
+    graph.add_node("manual_entry_submission", manual_entry_submission_node)
+    graph.add_node("tenant_status_lookup", tenant_status_lookup_node)
+    graph.add_node("admin_review_entry", admin_review_entry_node)
+    graph.add_node("admin_status_update", admin_status_update_node)
     graph.add_node("response_generation", response_generation_node)
     graph.add_node("save_state", save_state_node)
 
@@ -606,6 +775,7 @@ def build_help_agent_graph():
             "handover_entry": "handover_entry",
             "work_permit_entry": "work_permit_entry",
             "fitout_confirm_entry": "fitout_confirm_entry",
+            "sales_data_entry": "sales_data_entry",
         },
     )
     graph.add_conditional_edges(
@@ -647,6 +817,7 @@ def build_help_agent_graph():
             "handover_entry": "handover_entry",
             "work_permit_entry": "work_permit_entry",
             "fitout_confirm_entry": "fitout_confirm_entry",
+            "sales_data_entry": "sales_data_entry",
             "response_generation": "response_generation",
         },
     )
@@ -778,6 +949,122 @@ def build_help_agent_graph():
     graph.add_edge("work_permit_api_submission", "response_generation")
     graph.add_edge("fitout_confirm_payload_builder", "fitout_confirm_api_submission")
     graph.add_edge("fitout_confirm_api_submission", "response_generation")
+
+    # ── Sales Data agent edges ─────────────────────────────────────────────────
+    graph.add_conditional_edges(
+        "sales_data_entry",
+        _route_after_sales_data_entry,
+        {
+            "csv_validation": "csv_validation",
+            "csv_field_correction": "csv_field_correction",
+            "manual_entry_extraction": "manual_entry_extraction",
+            "tenant_status_lookup": "tenant_status_lookup",
+            "admin_review_entry": "admin_review_entry",
+            "sales_data_payload_builder": "sales_data_payload_builder",
+            "sales_data_confirmation": "sales_data_confirmation",
+            "manual_entry_confirmation": "manual_entry_confirmation",
+            "response_generation": "response_generation",
+        },
+    )
+    graph.add_conditional_edges(
+        "csv_validation",
+        _route_after_csv_validation,
+        {
+            "lease_validation": "lease_validation",
+            "response_generation": "response_generation",
+        },
+    )
+    graph.add_conditional_edges(
+        "csv_field_correction",
+        _route_after_csv_field_correction,
+        {
+            "lease_validation": "lease_validation",
+            "response_generation": "response_generation",
+        },
+    )
+    graph.add_conditional_edges(
+        "lease_validation",
+        _route_after_lease_validation,
+        {
+            "stale_notification": "stale_notification",
+            "sales_data_confirmation": "sales_data_confirmation",
+            "response_generation": "response_generation",
+        },
+    )
+    graph.add_edge("stale_notification", "response_generation")
+    graph.add_conditional_edges(
+        "sales_data_confirmation",
+        _route_after_sales_data_confirmation,
+        {
+            "sales_data_payload_builder": "sales_data_payload_builder",
+            "response_generation": "response_generation",
+        },
+    )
+    graph.add_conditional_edges(
+        "sales_data_payload_builder",
+        _route_after_sales_data_payload_builder,
+        {
+            "sales_data_api_submission": "sales_data_api_submission",
+            "response_generation": "response_generation",
+        },
+    )
+    graph.add_conditional_edges(
+        "sales_data_api_submission",
+        _route_after_sales_data_api_submission,
+        {
+            "submission_success": "submission_success",
+            "submission_error": "submission_error",
+            "response_generation": "response_generation",
+        },
+    )
+    graph.add_edge("submission_success", "response_generation")
+    graph.add_edge("submission_error", "response_generation")
+    # Manual entry pipeline
+    graph.add_conditional_edges(
+        "manual_entry_extraction",
+        _route_after_manual_entry_extraction,
+        {
+            "manual_entry_lease_validation": "manual_entry_lease_validation",
+            "manual_entry_missing_field": "manual_entry_missing_field",
+        },
+    )
+    graph.add_edge("manual_entry_missing_field", "response_generation")
+    graph.add_conditional_edges(
+        "manual_entry_lease_validation",
+        _route_after_manual_entry_lease_validation,
+        {
+            "manual_entry_confirmation": "manual_entry_confirmation",
+            "response_generation": "response_generation",
+        },
+    )
+    graph.add_conditional_edges(
+        "manual_entry_confirmation",
+        _route_after_manual_entry_confirmation,
+        {
+            "manual_entry_submission": "manual_entry_submission",
+            "response_generation": "response_generation",
+        },
+    )
+    graph.add_conditional_edges(
+        "manual_entry_submission",
+        _route_after_manual_entry_submission,
+        {
+            "submission_success": "submission_success",
+            "submission_error": "submission_error",
+            "response_generation": "response_generation",
+        },
+    )
+    # Status lookup and admin
+    graph.add_edge("tenant_status_lookup", "response_generation")
+    graph.add_conditional_edges(
+        "admin_review_entry",
+        _route_after_admin_review,
+        {
+            "admin_status_update": "admin_status_update",
+            "response_generation": "response_generation",
+        },
+    )
+    graph.add_edge("admin_status_update", "response_generation")
 
     # ── Turn finalisation — always runs ───────────────────────────────────────
     graph.add_edge("response_generation", "save_state")

@@ -130,6 +130,40 @@ VALID INTENTS
       Keywords: work permit, hot work, cold work, roof access, construction permit,
                 maintenance permit, operations permit, permit for work, I need a permit
 
+  UPLOAD_SALES_DATA
+      User (tenant) wants to upload or submit monthly/quarterly sales data figures.
+      Keywords: upload sales data, submit sales, sales figures, sales for Q3,
+                "I want to submit sales data", "upload my sales", sales CSV,
+                "sales for August", sales report, monthly sales, revenue figures,
+                "submit sales for lease", "upload sales for", "I have sales to submit"
+      NOTE: TENANT_CSV_UPLOADER or TENANT_DOC_UPLOADER roles only.
+
+  ENTER_SALES_DATA_MANUAL
+      User (tenant) wants to type/enter sales figures directly in chat rather than uploading a file.
+      Keywords: "sales for August is X", "my sales amount is", "enter sales manually",
+                "type my sales", "sales for LC-1001 is 85000", "I made SAR 100,000 in August",
+                "sales amount for this month", notification-driven single entry
+      Examples: "Sales for August 2026, lease LC-1001, amount SAR 85,000"
+      NOTE: Use this when user provides specific figures inline without mentioning file upload.
+
+  CHECK_SALES_DATA_STATUS
+      User wants to check the status of their sales data submissions.
+      Keywords: "check my sales status", "what is the status of my sales data",
+                "has my sales been approved", "pending sales", "sales data status",
+                "show my submissions", "what sales do I need to submit"
+
+  REVIEW_SALES_DATA
+      Admin or SALES_DATA_TEAM wants to review pending sales data submissions.
+      Keywords: "review sales data", "pending approvals", "sales data to review",
+                "show submitted sales", "review tenant sales"
+      NOTE: SALES_DATA_APPROVER or ADMIN roles only.
+
+  APPROVE_SALES_DATA
+      Admin wants to approve, reject, or take action on a specific sales data submission.
+      Keywords: "approve sales for LC-1001", "approve sales data", "reject sales",
+                "request reupload", "need supporting document", "approve submission"
+      NOTE: SALES_DATA_APPROVER or ADMIN roles only.
+
   CHECK_SERVICE_REQUEST_STATUS
       User wants to know the current status of a service request.
       Keywords: status, progress, where is, track, check, what happened to
@@ -209,6 +243,31 @@ When intent = CREATE_WORK_PERMIT_SR:
     service_category = "WORK_PERMIT"
     sub_category     = "WORK_PERMIT"
     target_agent     = "work_permit_agent"
+
+When intent = UPLOAD_SALES_DATA:
+    service_category = "SALES_DATA"
+    sub_category     = "BULK_UPLOAD"
+    target_agent     = "sales_data_agent"
+
+When intent = ENTER_SALES_DATA_MANUAL:
+    service_category = "SALES_DATA"
+    sub_category     = "MANUAL_ENTRY"
+    target_agent     = "sales_data_agent"
+
+When intent = CHECK_SALES_DATA_STATUS:
+    service_category = "SALES_DATA"
+    sub_category     = "STATUS_CHECK"
+    target_agent     = "sales_data_agent"
+
+When intent = REVIEW_SALES_DATA:
+    service_category = "SALES_DATA"
+    sub_category     = "ADMIN_REVIEW"
+    target_agent     = "sales_data_agent"
+
+When intent = APPROVE_SALES_DATA:
+    service_category = "SALES_DATA"
+    sub_category     = "ADMIN_REVIEW"
+    target_agent     = "sales_data_agent"
 
 When intent = CHECK_SERVICE_REQUEST_STATUS:
     service_category = null

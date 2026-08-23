@@ -20,7 +20,12 @@ class SupervisorDecision(BaseModel):
     """
 
     intent: Literal[
+        # ── Generic ──────────────────────────────────────────────────────────
         "ASK_HELP",
+        "CHECK_SERVICE_REQUEST_STATUS",
+        "PREVIEW_SERVICE_REQUEST",
+        "UNKNOWN",
+        # ── RDD / Fit-out ─────────────────────────────────────────────────────
         "CREATE_RDD_SERVICE_REQUEST",
         "CREATE_HANDED_OVER_SR",
         "UPDATE_RDD_SERVICE_REQUEST",
@@ -31,9 +36,12 @@ class SupervisorDecision(BaseModel):
         "APPROVE_FITOUT_CONFIRM_FOS",
         "APPROVE_FITOUT_CONFIRM_END",
         "APPROVE_FITOUT_CONFIRM_TRADING",
-        "CHECK_SERVICE_REQUEST_STATUS",
-        "PREVIEW_SERVICE_REQUEST",
-        "UNKNOWN",
+        # ── Sales Data ────────────────────────────────────────────────────────
+        "UPLOAD_SALES_DATA",
+        "ENTER_SALES_DATA_MANUAL",
+        "CHECK_SALES_DATA_STATUS",
+        "REVIEW_SALES_DATA",
+        "APPROVE_SALES_DATA",
     ] = Field(description="Classified user intent")
 
     confidence: float = Field(

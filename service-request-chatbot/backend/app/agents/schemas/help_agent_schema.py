@@ -55,6 +55,22 @@ ALL_INTENTS: frozenset[str] = _build_all_intents()
 # Role → permitted intents
 # ---------------------------------------------------------------------------
 
+_SALES_DATA_TENANT_INTENTS: frozenset[str] = frozenset(
+    {
+        "UPLOAD_SALES_DATA",
+        "ENTER_SALES_DATA_MANUAL",
+        "CHECK_SALES_DATA_STATUS",
+    }
+)
+
+_SALES_DATA_ADMIN_INTENTS: frozenset[str] = frozenset(
+    {
+        "REVIEW_SALES_DATA",
+        "APPROVE_SALES_DATA",
+        "CHECK_SALES_DATA_STATUS",
+    }
+)
+
 ROLE_PERMITTED_INTENTS: dict[str, frozenset[str]] = {
     # Phase 1 actor — can create/update RDD SRs, create work permit SRs, and
     # create Already Trading (HANDED_OVER) SRs.
@@ -100,6 +116,13 @@ ROLE_PERMITTED_INTENTS: dict[str, frozenset[str]] = {
             "APPROVE_FITOUT_CONFIRM_END",
         }
     ),
+    # ── Sales Data roles ──────────────────────────────────────────────────
+    # Tenant uploading CSV sales data
+    "TENANT_CSV_UPLOADER": _SR_READ_INTENTS | _SALES_DATA_TENANT_INTENTS,
+    # Tenant uploading supporting documents
+    "TENANT_DOC_UPLOADER": _SR_READ_INTENTS | _SALES_DATA_TENANT_INTENTS,
+    # Sales data team member who reviews and approves
+    "SALES_DATA_APPROVER": _SR_READ_INTENTS | _SALES_DATA_ADMIN_INTENTS,
     # Unrestricted
     "ADMIN": ALL_INTENTS,
 }
