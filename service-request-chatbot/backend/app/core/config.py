@@ -1,8 +1,9 @@
 """Application configuration via environment variables."""
 
 from functools import lru_cache
+from typing import Any
 
-from pydantic import Field, computed_field
+from pydantic import Field, computed_field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -145,6 +146,89 @@ class Settings(BaseSettings):
         default=None,
         validation_alias="LLM_BASE_URL",
         description="Optional custom base URL for the OpenAI-compatible endpoint.",
+    )
+    @model_validator(mode="before")
+    @classmethod
+    def _blank_optional_to_none(cls, data: Any) -> Any:
+        """Treat a whitespace-only value as unset, for every optional setting.
+
+        Azure Key Vault cannot store an empty secret value, so "this one has no
+        value" gets saved as a single space. A space is truthy in Python, so it
+        sails straight past the ``value or default`` guards these settings rely
+        on and is handed to clients as though it were real configuration.
+
+        That took production down on 2026-08-23: LLM_BASE_URL=' ' became
+        URL('%20/') inside the OpenAI client, every LLM call failed with
+        UnsupportedProtocol, and EMBEDDING_BASE_URL=' ' did the same to RAG —
+        while the app booted, /ready passed and requests returned 200 OK.
+
+        Dropping the key here lets the field's own default apply, which is what
+        "unset" already means when the variable is simply absent. That also
+        rescues the non-URL settings: LLM_PROVIDER=' ' would otherwise reach the
+        registry as an unknown provider and raise instead of defaulting to
+        "openai". Required settings are left alone so a genuinely missing value
+        still fails loudly.
+        """
+        if not isinstance(data, dict):
+            return data
+
+        optional: set[str] = set()
+        for name, field in cls.model_fields.items():
+            # Anything with a default: blank is indistinguishable from absent,
+            # so give it the same meaning. Fields with no default stay put, so a
+            # genuinely required setting still fails validation rather than
+            # silently acquiring a value nobody chose.
+            if field.is_required():
+                continue
+            optional.add(name)
+            alias = field.validation_alias
+            if isinstance(alias, str):
+                optional.add(alias)
+
+        return {
+            key: value
+            for key, value in data.items()
+            if not (isinstance(value, str) and not value.strip() and key in optional)
+        }
+
+    @field_validator("llm_base_url", "embedding_base_url")
+    @classmethod
+    def _require_url_scheme(cls, value: str | None, info: Any) -> str | None:
+        """Reject a base URL with no scheme; normalise blank to None.
+
+        These are optional — empty means "use the provider's own default
+        endpoint" — so a non-empty value without http:// or https:// can only be
+        an operator error. Left unchecked it reaches httpx as-is and raises
+        UnsupportedProtocol on every call, which surfaces as a bare
+        "Connection error." after the OpenAI SDK's retries.
+
+        That failure is invisible where it matters: the app boots, /ready passes,
+        requests return 200 OK, and every LLM call fails, so users get fallback
+        text indefinitely while the service looks healthy. Refusing to start
+        makes the mistake immediate and names the fix.
+        """
+        if value is None:
+            return None
+        stripped = value.strip()
+        if not stripped:
+            return None
+        if not stripped.startswith(("http://", "https://")):
+            env_var = info.field_name.upper()
+            raise ValueError(
+                f"{env_var} must start with http:// or https:// (got {stripped!r}). "
+                f"Leave {env_var} empty to use the provider's default endpoint."
+            )
+        return stripped
+
+    handover_lease_picker_enabled: bool = Field(
+        default=False,
+        validation_alias="HANDOVER_LEASE_PICKER_ENABLED",
+        description=(
+            "Offer browsable eligible-lease chips when the Handover CREATE flow "
+            "has no lease identifiers yet. Disabled by default: the picker lists "
+            "leases the user has not asked for, and the plain 'what is the lease "
+            "code?' question is the expected prompt. Set true to restore it."
+        ),
     )
     llm_confidence_threshold: float = Field(
         default=0.6,
