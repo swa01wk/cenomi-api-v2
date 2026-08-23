@@ -28,7 +28,12 @@
 #   ./run_agent_eval.sh --no-start --tier 6h,6i,6j     # TRADING full suite
 #   ./run_agent_eval.sh --no-start --tier 6a,6b,6c,6d,6e,6f,6g,6h,6i,6j  # all Fitout per-agent
 #   ./run_agent_eval.sh --no-start --tier 8        # FAQ + RBAC
-#   ./run_agent_eval.sh --no-start --tier all      # all tiers
+#   ./run_agent_eval.sh --no-start --tier sd0      # Sales Data smoke (~2 min)
+#   ./run_agent_eval.sh --no-start --tier sd1      # Sales Data happy path
+#   ./run_agent_eval.sh --no-start --tier sd2      # Sales Data edge cases
+#   ./run_agent_eval.sh --no-start --tier sd3      # Sales Data admin + RBAC
+#   ./run_agent_eval.sh --no-start --tier sd       # all Sales Data tiers
+#   ./run_agent_eval.sh --no-start --tier all      # all tiers (incl. Sales Data)
 #   ./run_agent_eval.sh --no-start --verbose       # verbose turn-by-turn output
 #   ./run_agent_eval.sh --no-start --no-obs        # skip observability export
 #
@@ -82,9 +87,12 @@ while [[ $# -gt 0 ]]; do
   shift
 done
 
-# Expand "all" to every tier in sequence
+# Expand tier aliases
 if [[ "$TIERS" == "all" ]]; then
-  TIERS="0,0p,1,2,3,3a,3b,3c,3d,3e,3f,3g,3h,3i,4,5,6a,6b,6c,6d,6e,6f,6g,6h,6i,6j,8"
+  TIERS="0,0p,1,2,3,3a,3b,3c,3d,3e,3f,3g,3h,3i,4,5,6a,6b,6c,6d,6e,6f,6g,6h,6i,6j,8,sd0,sd1,sd2,sd3"
+fi
+if [[ "$TIERS" == "sd" ]]; then
+  TIERS="sd0,sd1,sd2,sd3"
 fi
 
 # ── Results dir ───────────────────────────────────────────────────────────────
@@ -164,7 +172,7 @@ if [[ $NO_START -eq 0 ]]; then
     (cd "$BACKEND_DIR" && alembic upgrade head)
 
     echo "  Seeding users..."
-    (cd "$BACKEND_DIR" && python scripts/seed_users.py)
+    (cd "$BACKEND_DIR" && python3 scripts/seed_users.py)
 
     echo "  Starting uvicorn backend..."
     (cd "$BACKEND_DIR" && uvicorn app.main:app \
@@ -220,7 +228,7 @@ _run_scenarios_tier() {
     [[ -n "$VERBOSE" ]] && args+=("$VERBOSE")
     [[ -n "$TAGS"    ]] && args+=(--tags "$TAGS")
 
-    (cd "$BACKEND_DIR" && PYTHONUNBUFFERED=1 python -u -m tests.eval.run_eval "${args[@]}") \
+    (cd "$BACKEND_DIR" && PYTHONUNBUFFERED=1 python3 -u -m tests.eval.run_eval "${args[@]}") \
         2>&1 | tee "$log_file"
     local exit_code="${PIPESTATUS[0]}"
     _tier_set_exit "$tier" "$exit_code"
@@ -250,7 +258,7 @@ _run_lifecycle_tier() {
     [[ -n "$VERBOSE" ]] && args+=("$VERBOSE")
     [[ -n "$TAGS"    ]] && args+=(--tags "$TAGS")
 
-    (cd "$BACKEND_DIR" && PYTHONUNBUFFERED=1 python -u -m tests.eval.run_lifecycle_eval "${args[@]}") \
+    (cd "$BACKEND_DIR" && PYTHONUNBUFFERED=1 python3 -u -m tests.eval.run_lifecycle_eval "${args[@]}") \
         2>&1 | tee "$log_file"
     local exit_code="${PIPESTATUS[0]}"
     _tier_set_exit "$tier" "$exit_code"
@@ -259,6 +267,35 @@ _run_lifecycle_tier() {
         _ok "Lifecycle tier ${tier} PASSED"
     else
         _warn "Lifecycle tier ${tier} FAILED (exit ${exit_code}) — continuing"
+    fi
+}
+
+_run_sales_data_tier() {
+    local tier="$1"
+    local label="$2"
+    local log_name="$3"
+
+    _step "SALES DATA TIER ${tier} — ${label}"
+
+    local log_file="$RESULTS/${log_name}.log"
+    local json_file="$RESULTS/${log_name}.json"
+
+    local args=(
+        --base-url "$BASE_URL"
+        --tier "$tier"
+        --json "$json_file"
+    )
+    [[ -n "$VERBOSE" ]] && args+=("$VERBOSE")
+
+    (cd "$BACKEND_DIR" && PYTHONUNBUFFERED=1 python3 -u -m tests.eval.run_sales_data_eval "${args[@]}") \
+        2>&1 | tee "$log_file"
+    local exit_code="${PIPESTATUS[0]}"
+    _tier_set_exit "$tier" "$exit_code"
+
+    if [[ $exit_code -eq 0 ]]; then
+        _ok "Sales Data tier ${tier} PASSED"
+    else
+        _warn "Sales Data tier ${tier} FAILED (exit ${exit_code}) — continuing"
     fi
 }
 
@@ -363,6 +400,19 @@ for tier in "${TIER_LIST[@]}"; do
     8)
       _run_scenarios_tier 8 "FAQ + RBAC — help queries, status, RBAC denials (S201, S208–S212)" "tier_8_faq_rbac"
       ;;
+    # ── Sales Data Agent tiers ────────────────────────────────────────────────
+    sd0)
+      _run_sales_data_tier "sd0" "Sales Data Smoke — upload intent + RBAC (SD200–SD201)" "tier_sd0_smoke"
+      ;;
+    sd1)
+      _run_sales_data_tier "sd1" "Sales Data Happy — manual entry, status, admin review (SD210–SD212)" "tier_sd1_happy"
+      ;;
+    sd2)
+      _run_sales_data_tier "sd2" "Sales Data Edge — future date, zero amt, cancel, missing fields (SD220–SD223)" "tier_sd2_edge"
+      ;;
+    sd3)
+      _run_sales_data_tier "sd3" "Sales Data Admin RBAC — tenant-approve denied, admin-upload denied (SD230–SD231)" "tier_sd3_rbac"
+      ;;
     *)
       _warn "Unknown tier '${tier}' — skipped"
       ;;
@@ -379,7 +429,7 @@ _ok "Final metrics captured → metrics_final.json"
 
 if [[ $NO_OBS -eq 0 ]]; then
     echo "  Exporting session observability traces (last 120 minutes)..."
-    (cd "$BACKEND_DIR" && python scripts/export_session_observability.py \
+    (cd "$BACKEND_DIR" && python3 scripts/export_session_observability.py \
         --recent 120 \
         --eval \
         --out "$RESULTS/obs/" \
@@ -536,6 +586,11 @@ TIER_INFO = [
     ("6jlc", "TRADING Battle+RBAC LC",   "tier_6j_trading_battle_lc", True),
     # FAQ + RBAC
     ("8",    "FAQ + RBAC",               "tier_8_faq_rbac",           False),
+    # ── Sales Data Agent ──────────────────────────────────────────────────────
+    ("sd0",  "Sales Data Smoke",         "tier_sd0_smoke",            False),
+    ("sd1",  "Sales Data Happy",         "tier_sd1_happy",            False),
+    ("sd2",  "Sales Data Edge",          "tier_sd2_edge",             False),
+    ("sd3",  "Sales Data Admin RBAC",    "tier_sd3_rbac",             False),
 ]
 
 lines = [
@@ -634,6 +689,11 @@ _STEM_MAP = {
     "6j":   "tier_6j_trading_battle",
     "6jlc": "tier_6j_trading_battle_lc",
     "8":    "tier_8_faq_rbac",
+    # Sales Data Agent
+    "sd0":  "tier_sd0_smoke",
+    "sd1":  "tier_sd1_happy",
+    "sd2":  "tier_sd2_edge",
+    "sd3":  "tier_sd3_rbac",
 }
 
 # Cache parsed tier log lines keyed by stem

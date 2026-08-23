@@ -17,6 +17,7 @@ cenomi-api-v2/
 ```
 
 ### Core Design Principles
+
 1. **LLMs Understand and Propose — Code Validates, Authorises, Persists, and Submits:**
    - LLMs are strictly used for **intent classification**, **unstructured-to-structured field extraction**, and **conversational response generation / Q&A**.
    - All business logic—field validation, required-field gating, RBAC permission checks, lease resolution, API payload building, and HTTP submission—is executed by **deterministic application code**.
@@ -56,7 +57,7 @@ sequenceDiagram
     ORCH->>PG: Insert User Message (created_at=NOW)
     ORCH->>PG: ConversationStateService.load() (Hydrate graph state)
     ORCH->>LG: get_compiled_help_graph().ainvoke(initial_state)
-    
+  
     note over LG,PLAT: LangGraph Multi-Agent Pipeline Execution
     LG->>LG: load_session -> document_upload -> supervisor / sync -> agent entry -> extraction -> merge -> lease -> validation -> confirmation -> payload -> submission -> response_generation
     LG->>PLAT: Lease lookup / Document PUT / Service Request POST/PATCH
@@ -69,6 +70,7 @@ sequenceDiagram
 ```
 
 ### The 12-Step Turn Lifecycle in `ChatOrchestrationService`
+
 1. **Session Load/Create:** Loads existing `ChatSession` by UUID or creates a fresh session.
 2. **Start Observability Trace:** Creates an `AgentTrace` record in PostgreSQL via `TraceManager`.
 3. **Audit Log & Security Scan:**
@@ -180,6 +182,7 @@ flowchart TD
 ```
 
 ### Key Node Responsibilities
+
 - **`load_session_node`**: Hydrates `ServiceRequestGraphState` from `ConversationStateService`.
 - **`document_upload_node`**: Partitions uploaded attachments into FM and RDD document buckets in `state["documents"]`.
 - **`sr_status_sync_node`**: When `sr_id` is present, fetches platform status via `ServiceRequestPlatformClient` and synchronises the workflow stage.
@@ -201,19 +204,20 @@ flowchart TD
 ## 4. Agent Taxonomy & Registry Architecture
 
 Routing is fully decoupled from hardcoded logic via two registries:
+
 1. **`SERVICE_REQUEST_AGENT_REGISTRY`** (`app/agents/registry.py`): Maps `(service_category, sub_category)` to `AgentConfig`.
 2. **`WORKFLOW_CONFIG_REGISTRY`** (`app/agents/registries/workflow_config.py`): Maps each canonical `agent_name` to its supported intents, stages, and node targets.
 
 ### Currently Registered Agents (`feat/llm-adapters` branch)
 
-| `agent_name` | `service_category` | `sub_category` | Schema Key | Purpose & Workflow Stages |
-| :--- | :--- | :--- | :--- | :--- |
-| **`help_agent`** | *(Supervisor / Root)* | *(N/A)* | *(N/A)* | Intent classification, RBAC filtering, and FAQ RAG answering (`ASK_HELP`, `UNKNOWN`). |
-| **`rdd_handover_agent`** | `FIT_OUT_AND_HANDOVER` | `HANDOVER` / `HANDED_OVER` | `handover_service_request_schema` | Full RDD Handover lifecycle (`CREATE_SR` → `FM_REVIEW` → `RDD_REVIEW` → `SR_COMPLETED`). |
-| **`work_permit_agent`** | `WORK_PERMIT` | `WORK_PERMIT` | `work_permit_service_request_schema` | Single-stage Work Permit Service Request creation (`CREATE_WORK_PERMIT`). |
-| **`rdd_fitout_start_agent`** | `FIT_OUT_AND_HANDOVER` | `FIT_OUT_CONFIRM_FOS` | `fitout_confirm_schema` | Fit-out Start (FOS) confirmation flow. |
-| **`rdd_fitout_end_agent`** | `FIT_OUT_AND_HANDOVER` | `FIT_OUT_CONFIRM_END` | `fitout_confirm_schema` | Fit-out End confirmation flow. |
-| **`rdd_trading_confirmation_agent`** | `FIT_OUT_AND_HANDOVER` | `FIT_OUT_CONFIRM_TRADING` | `fitout_confirm_schema` | Trading confirmation flow. |
+| `agent_name`                               | `service_category`     | `sub_category`               | Schema Key                             | Purpose & Workflow Stages                                                                           |
+| :------------------------------------------- | :----------------------- | :----------------------------- | :------------------------------------- | :-------------------------------------------------------------------------------------------------- |
+| **`help_agent`**                     | *(Supervisor / Root)*  | *(N/A)*                      | *(N/A)*                              | Intent classification, RBAC filtering, and FAQ RAG answering (`ASK_HELP`, `UNKNOWN`).           |
+| **`rdd_handover_agent`**             | `FIT_OUT_AND_HANDOVER` | `HANDOVER` / `HANDED_OVER` | `handover_service_request_schema`    | Full RDD Handover lifecycle (`CREATE_SR` → `FM_REVIEW` → `RDD_REVIEW` → `SR_COMPLETED`). |
+| **`work_permit_agent`**              | `WORK_PERMIT`          | `WORK_PERMIT`                | `work_permit_service_request_schema` | Single-stage Work Permit Service Request creation (`CREATE_WORK_PERMIT`).                         |
+| **`rdd_fitout_start_agent`**         | `FIT_OUT_AND_HANDOVER` | `FIT_OUT_CONFIRM_FOS`        | `fitout_confirm_schema`              | Fit-out Start (FOS) confirmation flow.                                                              |
+| **`rdd_fitout_end_agent`**           | `FIT_OUT_AND_HANDOVER` | `FIT_OUT_CONFIRM_END`        | `fitout_confirm_schema`              | Fit-out End confirmation flow.                                                                      |
+| **`rdd_trading_confirmation_agent`** | `FIT_OUT_AND_HANDOVER` | `FIT_OUT_CONFIRM_TRADING`    | `fitout_confirm_schema`              | Trading confirmation flow.                                                                          |
 
 ---
 
@@ -267,6 +271,7 @@ erDiagram
 ```
 
 ### State Storage Strategy
+
 - **`chat_sessions`**: Stores top-level routing pointers (`active_agent`, `intent`, `workflow_stage`, `status`).
 - **`service_request_drafts`**: Stores domain data (`collected_data` JSONB, `missing_fields` JSONB, `documents` JSONB, `sr_id`, `ready_to_submit`).
 - **`ConversationStateService`**:
@@ -279,6 +284,7 @@ erDiagram
 ## 6. Frontend/Backend Contract & UI Signal System
 
 ### Strict Boundary Rules
+
 - **Frontend Allowed Payload (`POST /api/chat/service-request`)**:
   - `session_id` (UUID), `user_id` (UUID/string), `message` (string), `attachments` (list of metadata dicts).
   - `action` (`"confirm"`, `"cancel"`, `"reject"`, or omitted).
@@ -289,15 +295,16 @@ erDiagram
   - `active_agent`, `intent`, `service_category`, `sub_category`, `workflow_stage`.
 
 ### UI Signals Emitted in `response_ui`
+
 The backend emits structured signals in `response.ui` so the frontend shell can bind UI states without parsing natural language:
 
-| UI Property / Signal | Condition / Meaning | Frontend Action / Binding |
-| :--- | :--- | :--- |
-| **`ui.type = "confirmation_card"`** | All required fields collected; waiting for confirmation | Render confirmation card with `Confirm` / `Cancel` buttons and editable fields. |
-| **`ui.type = "sr_preview_card"`** | Emitted in `draft_preview` on every turn | Render live SR draft summary sidebar/card (`title`, `notes`, `unit_codes`). |
-| **`ui.stage_complete = true`** | Current lifecycle stage completed (e.g. FM approval saved) | Hide FM Update/Save action buttons. |
-| **`ui.workflow_complete = true`** | Terminal state reached (`SR_COMPLETED`) | Hide all action buttons on the SR card. |
-| **`ui.cancelled = true`** | User cancelled the SR workflow | Close SR form / display cancellation acknowledgement. |
+| UI Property / Signal                        | Condition / Meaning                                        | Frontend Action / Binding                                                          |
+| :------------------------------------------ | :--------------------------------------------------------- | :--------------------------------------------------------------------------------- |
+| **`ui.type = "confirmation_card"`** | All required fields collected; waiting for confirmation    | Render confirmation card with`Confirm` / `Cancel` buttons and editable fields. |
+| **`ui.type = "sr_preview_card"`**   | Emitted in`draft_preview` on every turn                  | Render live SR draft summary sidebar/card (`title`, `notes`, `unit_codes`).  |
+| **`ui.stage_complete = true`**      | Current lifecycle stage completed (e.g. FM approval saved) | Hide FM Update/Save action buttons.                                                |
+| **`ui.workflow_complete = true`**   | Terminal state reached (`SR_COMPLETED`)                  | Hide all action buttons on the SR card.                                            |
+| **`ui.cancelled = true`**           | User cancelled the SR workflow                             | Close SR form / display cancellation acknowledgement.                              |
 
 ---
 
@@ -306,6 +313,7 @@ The backend emits structured signals in `response.ui` so the frontend shell can 
 When using AI to add a new Service Request workflow, new agent, or new lifecycle stage, follow this exact 5-step implementation checklist:
 
 ### Step 1: Define Schema & Validation Rules (`app/agents/schemas/`)
+
 - Create or update the schema file (e.g., `app/agents/schemas/my_new_workflow_schema.py`).
 - Define:
   - Required and optional field lists (`REQUIRED_FIELDS`, `OPTIONAL_FIELDS`).
@@ -313,6 +321,7 @@ When using AI to add a new Service Request workflow, new agent, or new lifecycle
   - Domain validation logic for dates, enums, or string formats.
 
 ### Step 2: Register Agent & Workflow Config
+
 - **In `app/agents/registry.py`**: Add your entry to `SERVICE_REQUEST_AGENT_REGISTRY` mapping `(service_category, sub_category)` to your new `agent_name` and `schema_key`.
 - **In `app/agents/registries/workflow_config.py`**: Add a new `WorkflowConfig` entry in `WORKFLOW_CONFIG_REGISTRY`:
   ```python
@@ -329,6 +338,7 @@ When using AI to add a new Service Request workflow, new agent, or new lifecycle
   ```
 
 ### Step 3: Create Dedicated Nodes (`app/agents/graph/nodes/`)
+
 - Implement:
   - **Entry Node**: Handles HITL `confirm`/`cancel` actions for your workflow.
   - **Confirmation Node**: Emits `confirmation_card` when `get_missing_fields` returns empty.
@@ -337,12 +347,14 @@ When using AI to add a new Service Request workflow, new agent, or new lifecycle
 - *Note:* You can reuse shared `field_extraction_node`, `merge_state_node`, `lease_lookup_node`, and `validation_node`.
 
 ### Step 4: Wire Nodes & Edges in `build_help_agent_graph()`
+
 - In `app/agents/graph/help_agent_graph.py`:
   1. Add your node names to `_AGENT_ENTRY_NODES` dictionary.
   2. Register your nodes with `graph.add_node(...)`.
   3. Add conditional routing edges in `_route_after_validation`, `_route_after_confirmation`, and connect payload builder → api submission → `response_generation`.
 
 ### Step 5: Test and Evaluate
+
 - **Unit/Integration Tests**: Run `pytest` across `service-request-chatbot/backend`.
 - **Lifecycle Evaluation**: Add eval scenarios to `tests/eval/` and execute:
   ```bash
@@ -353,6 +365,7 @@ When using AI to add a new Service Request workflow, new agent, or new lifecycle
 ---
 
 ## 8. Summary Checklist for AI Coding Assistants
+
 - [ ] Always check KIs and documentation in `service-request-chatbot/docs/` first.
 - [ ] Never put domain validation or submission logic inside prompts—use deterministic Python service classes.
 - [ ] Never accept routing fields (`active_agent`, `workflow_stage`, `intent`) from frontend request payloads.

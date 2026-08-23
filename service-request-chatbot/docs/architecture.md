@@ -2,32 +2,24 @@
 
 ## High-Level Architecture
 
-The Service Request Chatbot is a full-stack application that allows Cenomi mall tenants to submit service requests through a conversational interface. The frontend is a **generic conversational shell** — it does not select or invoke backend agents directly. A LangGraph-based multi-agent backend owns the full pipeline: intent identification, agent routing, data collection, validation, and API submission.
+The Service Request Chatbot is a full-stack application that allows Cenomi mall tenants to submit handover service requests through a conversational interface. A LangGraph-based multi-agent backend orchestrates the conversation, collects required data, validates it, and submits it to the Cenomi Service Request API.
 
 ```mermaid
 graph TB
     subgraph Browser
-        FE[Next.js Chat UI<br/>Generic Conversational Shell]
+        FE[Next.js 15 App Router<br/>React 19 + Tailwind 3]
     end
 
     subgraph Backend["Backend (FastAPI + Python)"]
         API[API Layer<br/>FastAPI Routers]
-        GUARD[Injection Guard]
         ORCH[ChatOrchestrationService]
-
-        subgraph Runtime["Agent Runtime / LangGraph"]
-            LOAD[Load Session State]
-            INTENT[Intent Identification<br/>Supervisor Agent]
-            ROUTER[Agent Router / Registry]
-            SR_AGENT[Service Request Agent<br/>Handover / FM / RDD]
-            RESP[Response Generation]
-        end
-
+        GUARD[Injection Guard]
+        GRAPH[LangGraph Graph]
         OBS[TraceManager<br/>Observability]
     end
 
     subgraph Infra
-        PG[(PostgreSQL 16<br/>Conversation + Draft State)]
+        PG[(PostgreSQL 16<br/>Primary Store)]
         REDIS[(Redis 7<br/>Cache / Future)]
     end
 
@@ -38,55 +30,40 @@ graph TB
         UPLOAD[File Upload API]
     end
 
-    FE -->|POST chat turn| API
+    FE -->|POST /api/chat/service-request| API
+    FE -->|GET /api/observability/traces| API
     API --> GUARD
     GUARD --> ORCH
-    ORCH --> LOAD
-    LOAD --> INTENT
-    INTENT -->|intent + service_category + sub_category| ROUTER
-    ROUTER -->|resolved active_agent| SR_AGENT
-    SR_AGENT --> RESP
-    RESP -->|assistant message + response_ui| FE
-
-    INTENT -->|classification call| LLM
-    SR_AGENT -->|field extraction / response generation| LLM
-    SR_AGENT -->|lease lookup| LEASE
-    SR_AGENT -->|submit/update request| SR
-
-    LOAD -.->|load state| PG
-    RESP -.->|save state| PG
+    ORCH --> GRAPH
+    GRAPH -->|LLM calls| LLM
+    GRAPH -->|Lease lookup| LEASE
+    GRAPH -->|Submit SR| SR
     ORCH --> OBS
     OBS --> PG
+    ORCH --> PG
+    GRAPH -.->|state reload| PG
 ```
 
 **Key design decisions:**
 
-- **Generic frontend shell** — the frontend sends only the chat turn and UI interaction metadata (`session_id`, `message`, `attachment_ids`, `selected_lease_id`, `corrected_fields`, `action`). It does not send or control `active_agent`, `intent`, `service_category`, `sub_category`, or `workflow_stage`. The backend owns all routing decisions.
-- **Backend-owned intent identification** — the Supervisor Agent performs LLM-based intent classification on every new turn. The Agent Registry maps `(service_category, sub_category)` to a concrete agent deterministically; any LLM-provided `target_agent` hint is advisory only — the registry result wins.
-- **Workflow continuation** — on subsequent turns where `active_agent` was already resolved and persisted by the backend, `load_session_node` can route directly to the active agent's entry node, bypassing the Supervisor. This is backend-driven continuation, not frontend-selected routing.
 - **No LangGraph interrupt/resume** — each HTTP turn runs the full graph from scratch; conversation state is reloaded from PostgreSQL at the start of every turn via `ConversationStateService.load`.
 - **Stateless graph, stateful DB** — the LangGraph `ServiceRequestGraphState` is populated from the database at `load_session_node` and persisted at `save_state_node`.
 - **Pre-graph injection guard** — prompt injection scanning happens before the user message is persisted or the graph is invoked.
-- **Extensible agent routing** — the current product scope is Service Request / Handover, but the Agent Registry and Supervisor are designed to support additional agents in future without any changes to the frontend contract.
 
 ---
 
 ## Frontend Architecture
 
-The frontend is a **generic conversational shell**. It does not know which backend agent is active, does not select an agent, and does not drive workflow routing. All routing and agent lifecycle decisions belong to the backend.
-
 ```mermaid
 graph TD
-    Root["app/page.tsx<br/>(redirects → /login or /service-request-chat)"]
-    Login["app/login/page.tsx<br/>(username + password → JWT)"]
+    Root["app/page.tsx<br/>(redirects → /service-request-chat)"]
     Chat["app/service-request-chat/page.tsx"]
     Admin["app/admin/agent-observability/page.tsx"]
 
-    Root --> Login
-    Login --> Chat
+    Root --> Chat
     Root --> Admin
 
-    Chat --> SRC["ServiceRequestChat.tsx<br/>(generic chat orchestrator)"]
+    Chat --> SRC["ServiceRequestChat.tsx<br/>(main orchestrator)"]
     SRC --> MB["MessageBubble"]
     SRC --> CI["ChatInput"]
     SRC --> LC["LeaseCard"]
@@ -105,31 +82,9 @@ graph TD
 
 **State management:** Local React `useState` / `useCallback` in `ServiceRequestChat`. No Redux or Zustand. State tracked per component: `messages`, `sessionId`, `latestUI`, `workflowSteps`.
 
-**Frontend / Backend contract:**
-
-The frontend sends only the chat turn and UI interaction metadata. It **must not** send or attempt to control backend routing fields.
-
-| Field | Direction | Notes |
-|---|---|---|
-| `session_id` | FE → BE | Identifies the conversation |
-| `user_id` | FE → BE | Caller's user identifier (POC fallback when no JWT; JWT sub takes precedence) |
-| `message` | FE → BE | Raw user text |
-| `attachments` | FE → BE | List of file attachment metadata dicts |
-| `selected_lease_id` | FE → BE | User-selected lease from disambiguation card |
-| `corrected_fields` | FE → BE | Inline field edits from a confirmation card |
-| `action` | FE → BE | UI action: `"confirm"`, `"cancel"`, or omitted |
-| `sr_id` | FE → BE | Platform SR ID — triggers `sr_status_sync` for FM/DD opening existing SR |
-
-The following fields are **owned exclusively by the backend** and must never be sent from the frontend:
-
-- `active_agent` — resolved by the Agent Registry; persisted and reloaded by the backend.
-- `intent` — classified by the Supervisor Agent.
-- `service_category` / `sub_category` — extracted by the Supervisor; used by the registry for routing.
-- `workflow_stage` — advanced by backend nodes; never set by the frontend.
-
 **API clients:**
 
-- `frontend/lib/api/chat-client.ts` — `postServiceRequestChat` sends `fetch` to `${NEXT_PUBLIC_API_BASE_URL}${NEXT_PUBLIC_API_V1_PREFIX}/chat/service-request` with the permitted fields above: `session_id`, `message`, `attachment_ids`, `selected_lease_id`, `corrected_fields`, `action`.
+- `frontend/lib/api/chat-client.ts` — `postServiceRequestChat` sends `fetch` to `${NEXT_PUBLIC_API_BASE_URL}${NEXT_PUBLIC_API_V1_PREFIX}/chat/service-request` with fields: `session_id`, `message`, `attachment_ids`, `selected_lease_id`, `corrected_fields`, `action`.
 - `frontend/lib/api/observability-client.ts` — `listTraces`, `getTrace` (at `/api/observability/...`), metrics at `/api/v1/observability/metrics/summary`.
 
 **URL prefix mismatch:** The frontend default `NEXT_PUBLIC_API_V1_PREFIX=/api/v1` targets `/api/v1/chat/service-request`, but the backend mounts the chat route at `/api/chat/service-request` (no v1 prefix). Set `NEXT_PUBLIC_API_V1_PREFIX=""` or adjust to match the backend. E2E tests use `/api/chat/service-request`.
@@ -171,53 +126,25 @@ graph TD
 **Application factory** (`app/main.py`):
 
 - `CORSMiddleware` from `settings.cors_origins_list`.
-- App version: `2.0.0`
-- Route mounts (v1 — backward compat):
-  - `GET /api/v1/health`, `GET /api/v1/ready`
-  - `POST /api/auth/login`, `GET /api/auth/me`
-  - `POST /api/chat/service-request` (primary RDD chat — legacy unversioned path)
+- Route mounts:
+  - `GET {api_v1_prefix}/health`
+  - `POST /api/chat/service-request` (no v1 prefix)
   - `POST /api/v1/chat/turn` (deprecated stub)
   - `POST /api/v1/upload`
-  - `GET /api/observability/traces`, `GET /api/observability/traces/{id}`
-  - `GET /api/observability/sessions/{session_id}/replay`
-  - `POST /api/observability/traces/{trace_id}/feedback`
-  - `GET /api/v1/observability/metrics/summary`
-  - `POST /api/v1/chat` — **MSP Platform help chat (sync)** — contractually pinned to v1
-  - `POST /api/v1/chat/stream` — **MSP Platform help chat (SSE)** — contractually pinned to v1
-- Route mounts (v2 — current, new callers should use these):
-  - `GET /api/v2/health`, `GET /api/v2/ready`
-  - `POST /api/v2/auth/login`, `GET /api/v2/auth/me`
-  - `POST /api/v2/chat/service-request`
-  - `POST /api/v2/chat/turn`
-  - `POST /api/v2/upload`
-  - `GET /api/v2/observability/traces`, etc.
-  - `GET /api/v2/observability/metrics/summary`
+  - `GET /api/observability/...`
+  - `GET /api/v1/observability/metrics/...`
 
-**`ChatOrchestrationService`** (`app/services/chat_orchestration_service.py`) is the central coordinator. It owns the full pipeline — from receiving the raw chat turn to returning a response — without delegating any routing decisions to the frontend:
+**`ChatOrchestrationService`** (`app/services/chat_orchestration_service.py`) is the central coordinator:
 
 1. Load or create `ChatSession` via `ChatSessionRepository`.
 2. `TraceManager.start_trace` — creates `AgentTrace` row.
 3. Audit `turn.started` via `AuditLogRepository`.
 4. `scan_message` — short-circuits to refusal response on high-risk injection.
 5. `ChatMessageRepository.create` — persist user message.
-6. Build initial `ServiceRequestGraphState` with session fields (`active_agent`, `intent`, `workflow_stage`, `service_category`, `sub_category`) loaded from `ConversationStateService.load`. These routing fields are **loaded from the database**, not accepted from the frontend request.
-7. `get_compiled_graph().ainvoke(initial_state)` — runs the LangGraph pipeline: Load Session State → Supervisor (intent identification) → Agent Registry (routing) → Service Request Agent → Response Generation → Save State.
+6. Build initial `ServiceRequestGraphState` with session fields (`active_agent`, `intent`, `workflow_stage`) from `ConversationStateService.load`.
+7. `get_compiled_graph().ainvoke(initial_state)`.
 8. `TraceManager.finish_trace` with `final_state`.
 9. Persist assistant message, `_sync_session` updates `ChatSession`, audit `turn.completed`.
-
-**Backend ownership summary:**
-
-| Responsibility | Owner |
-|---|---|
-| Intent identification | Supervisor Agent (LLM classification) |
-| `service_category` / `sub_category` extraction | Supervisor Agent |
-| Agent routing | Agent Registry (deterministic lookup) |
-| `active_agent` lifecycle | Backend — resolved by registry, persisted to DB, reloaded on next turn |
-| Workflow continuation | Backend — `load_session_node` routes to active agent when `active_agent` is already set |
-| Field validation | `ValidationService` (code, not LLM) |
-| Confirmation gating | `handover_entry_node` (keyword matching + UI action) |
-| Payload construction | `PayloadBuilderService` |
-| API submission | `api_submission_node` |
 
 **Config** (`app/core/config.py`): `Settings` reads from `.env` / `.env.local`. Key fields: `database_url`, `redis_url`, `openai_api_key`, `llm_model`, `service_request_api_base_url`, `lease_tenant_api_base_url`, `file_upload_api_base_url`, `jwt_secret_key`, `llm_confidence_threshold` (default `0.6`).
 
@@ -225,80 +152,47 @@ graph TD
 
 ## LangGraph Architecture
 
-The main graph is defined in `app/agents/graph/help_agent_graph.py` and compiled once as a singleton (`get_compiled_help_graph()`).
-
-The helper graph adds a **FAQ path** (ASK_HELP / UNKNOWN intent → `faq_node` → `response_generation`) and **RBAC enforcement** in `supervisor_node` on top of the core SR workflow nodes.
+The graph is defined in `app/agents/graph/service_request_graph.py` and compiled once as a singleton (`get_compiled_graph()`).
 
 ```mermaid
 flowchart TD
     START([START]) --> load_session
+    load_session -->|active_agent set| handover_entry
+    load_session -->|no active_agent| supervisor
 
-    load_session -->|"preview intent detected"| supervisor
-    load_session -->|"sr_id in backend_refs"| sr_status_sync
-    load_session -->|"active_agent set (no sr_id)"| handover_entry
-    load_session -->|"no active_agent"| supervisor
+    supervisor -->|WAITING_FOR_USER| response_generation
+    supervisor -->|intent classified| registry
 
-    sr_status_sync -->|"FM_REVIEW"| fm_review_entry
-    sr_status_sync -->|"RDD_REVIEW"| rdd_review_entry
-    sr_status_sync -->|"SR_CREATED / SR_COMPLETED"| supervisor
-    sr_status_sync -->|"CREATE_SR"| handover_entry
+    registry -->|WAITING_FOR_USER| response_generation
+    registry -->|agent resolved| handover_entry
 
-    supervisor -->|"PREVIEW_SERVICE_REQUEST"| preview
-    supervisor -->|"WAITING_FOR_USER"| response_generation
-    supervisor -->|"intent classified"| registry
-
-    preview --> response_generation
-
-    registry -->|"WAITING_FOR_USER"| response_generation
-    registry -->|"agent resolved"| handover_entry
-
-    handover_entry -->|"workflow restarted"| response_generation
-    handover_entry -->|"action_override=cancel"| merge_state
-    handover_entry -->|"normal turn"| field_extraction
-
-    fm_review_entry -->|"WAITING_FOR_USER"| response_generation
-    fm_review_entry -->|"fm_action set"| merge_state
-    fm_review_entry -->|"normal turn"| field_extraction
-
-    rdd_review_entry -->|"WAITING_FOR_USER"| response_generation
-    rdd_review_entry -->|"rdd_action set"| merge_state
-    rdd_review_entry -->|"normal turn"| field_extraction
+    handover_entry -->|workflow restart: active_agent cleared + WAITING_FOR_USER| response_generation
+    handover_entry -->|action_override=cancel| merge_state
+    handover_entry -->|normal turn| field_extraction
 
     field_extraction --> merge_state
 
-    merge_state -->|"lease_id missing"| lease_lookup
-    merge_state -->|"lease_id present"| validation
+    merge_state -->|selected_lease set or lease_id missing| lease_lookup
+    merge_state -->|lease_id present| validation
 
-    lease_lookup -->|"WAITING_FOR_USER"| response_generation
-    lease_lookup -->|"lease resolved"| validation
+    lease_lookup -->|WAITING_FOR_USER| response_generation
+    lease_lookup -->|lease resolved| validation
 
-    validation -->|"blocking errors or missing fields"| missing_field
-    validation -->|"CREATE_SR all valid"| confirmation
-    validation -->|"FM_REVIEW all valid"| fm_confirmation
-    validation -->|"RDD_REVIEW all valid"| rdd_confirmation
-    validation -->|"terminal stage"| response_generation
+    validation -->|blocking errors| missing_field
+    validation -->|fields incomplete| missing_field
+    validation -->|all valid + complete| confirmation
+
+    confirmation -->|CONFIRMED| payload_builder
+    confirmation -->|not CONFIRMED| response_generation
+
+    payload_builder --> api_submission
+
+    api_submission --> response_generation
 
     missing_field --> response_generation
 
-    confirmation -->|"CONFIRMED"| payload_builder
-    confirmation -->|"not CONFIRMED"| response_generation
-
-    fm_confirmation -->|"CONFIRMED"| fm_payload_builder
-    fm_confirmation -->|"not CONFIRMED"| response_generation
-
-    rdd_confirmation -->|"CONFIRMED"| rdd_payload_builder
-    rdd_confirmation -->|"not CONFIRMED"| response_generation
-
-    payload_builder --> api_submission
-    api_submission --> response_generation
-
-    fm_payload_builder --> fm_api_submission
-    fm_api_submission --> response_generation
-
-    rdd_payload_builder --> rdd_api_submission
-    rdd_api_submission --> response_generation
-
     response_generation --> save_state
+
     save_state --> END([END])
 ```
 
@@ -416,9 +310,6 @@ erDiagram
 
 - `001_initial_schema.py` — domain tables: `chat_sessions`, `chat_messages`, `service_request_drafts`, `service_request_chat_audit_logs`, and legacy observability stubs.
 - `002_agent_observability.py` — agent observability tables: `agent_traces`, `agent_runs`, `agent_state_snapshots`, `agent_state_diffs`, `agent_llm_calls`, `agent_tool_calls`, `agent_feedback`.
-- `003_users.py` — `users` table for JWT-based local auth: `username`, `email`, `password_hash` (bcrypt), `role`, `unique_property_ids`, `mall_names`, `is_global_admin`, `is_active`.
-- `004_rename_rdd_agent.py` — renames RDD agent references in schema.
-- `005_rename_agents.py` — renames fitout confirm agent identifiers.
 
 **ORM:** Async SQLAlchemy with asyncpg driver (`DATABASE_URL` must use `postgresql+asyncpg://...`).
 
@@ -435,26 +326,20 @@ graph LR
     end
 
     subgraph Backend Services
-        AUTH_CLIENT["ServiceRequestPlatformClient<br/>(S2S auth, 401 reactive refresh)"]
         LL["LeaseLookupService<br/>(lease_lookup_node)"]
         SRA["ServiceRequestAPIService<br/>(api_submission_node)"]
-        FU["DocumentUploadService<br/>(upload route)"]
+        FU["UploadRoute<br/>(stub)"]
     end
 
-    AUTH_CLIENT -->|POST /cenomi-ai/login| SR_API
-    LL -->|GET /leases?lease_code=...| LEASE
-    SRA -->|POST/PATCH /service-requests| SR_API
-    FU -->|PUT /files| SR_API
+    LL -->|GET tenant leases by user_id| LEASE
+    SRA -->|POST create service request| SR_API
+    FU -->|POST upload binary| FILE
 ```
 
-**Lease lookup:** `HttpLeaseLookupService` calls `GET {LEASE_TENANT_API_BASE_URL}/leases` with `lease_code`, `brand`, `mall`, and optional `property_ids` (from JWT `unique_property_ids`) as query params. Handles 0-match (ask user), 1-match (auto-enrich), N-match (lease selection card). Enriches `collected_data` with all backend-derived fields including `lease` display label.
+**Lease lookup:** Called when `selected_lease` is set or `lease_id` is missing from `collected_data`. Resolves from the Cenomi Lease-Tenant API, handles multi-lease disambiguation by surfacing a `LeaseSelectionUI` component to the user.
 
-**Service Request submission:** `HttpServiceRequestAPIService.create_service_request` delegates to `ServiceRequestPlatformClient` which first calls `ensure_authenticated()` (TTL-based + 401 reactive re-auth). The payload is built by `build_create_handover_payload()` and verified against the Postman collection shape.
+**Service Request submission:** `ServiceRequestAPIService.create_service_request` posts the payload built by `PayloadBuilderService.build_create_handover_payload`. On success, sets `workflow_stage = "SR_CREATED"` and `status = SUBMITTED`.
 
-**File Upload:** `POST /api/v1/upload` → `DocumentUploadService.upload_document()` → `ServiceRequestPlatformClient.upload_file()` → `PUT {SERVICE_REQUEST_API_BASE_URL}/files`. Returns real `document_id`, `file_path`, `signed_url` from platform. MIME allowlist (PDF/JPEG/PNG) and document-type RBAC enforced before upload.
+**File Upload:** Route stub at `POST /api/v1/upload`. Enforces MIME allowlist (PDF/JPEG/PNG) and `PermissionService.ensure_can_create_request`. Does not yet persist bytes.
 
-**Authentication (user-facing):** `POST /api/auth/login` issues HS256 JWT after bcrypt password verification. JWT payload contains `roles`, `unique_property_ids`, `mall_names`, `is_global_admin`. `get_auth_context()` in `core/security.py` decodes and validates the Bearer token. `RBAC_ENFORCE=false` (default) runs in shadow mode — unauthenticated requests pass through as anonymous. Set `RBAC_ENFORCE=true` to enforce.
-
-**Authentication (platform S2S):** `ServiceRequestPlatformClient` logs into the Cenomi platform via `POST /cenomi-ai/login` using `PLATFORM_INTERNAL_API_TOKEN` + `PLATFORM_LOGIN_EMAIL`. Token is cached for 1 hour (TTL) and refreshed reactively on 401 responses.
-
-**Config** (`app/core/config.py`): Key env vars — `DATABASE_URL`, `REDIS_URL`, `SERVICE_REQUEST_API_BASE_URL`, `LEASE_TENANT_API_BASE_URL`, `PLATFORM_AUTH_BASE_URL`, `PLATFORM_INTERNAL_API_TOKEN`, `PLATFORM_LOGIN_EMAIL`, `JWT_SECRET_KEY`, `RBAC_ENFORCE`, `OPENAI_API_KEY`, `LLM_MODEL`, `LLM_CONFIDENCE_THRESHOLD`. Leave the platform URLs empty to run in mock mode (in-memory lease data + fake SR IDs).
+**Authentication:** `HTTPBearer` optional header. Default `AuthContext` is `"anonymous"` with empty roles. `PermissionService` maps actions to required role strings; unknown actions currently fail-open.
