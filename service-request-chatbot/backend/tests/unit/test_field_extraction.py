@@ -743,3 +743,404 @@ class TestFieldExtractionWorkflowConfig:
 
         assert captured, "complete_json was never called"
         assert captured[0] == HANDOVER_EXTRACTION_SYSTEM_PROMPT
+
+
+# ---------------------------------------------------------------------------
+# field_extraction_node — correction-intent redirect
+# ---------------------------------------------------------------------------
+
+
+class TestFieldExtractionNodeCorrectionRedirect:
+    @pytest.mark.asyncio
+    async def test_correction_without_inline_value_skips_llm_call(self) -> None:
+        """Bare 'I want to change the title' must not call the LLM at all."""
+        from app.agents.graph.nodes.handover.field_extraction_node import field_extraction_node
+
+        state = _base_state(
+            user_message="I want to change the title",
+            active_field="description",
+            collected_data={"title": "handover-t0031259", "description": "old desc"},
+        )
+
+        gateway_mock = _make_gateway_mock(_llm_response(fields={}))
+        with patch(
+            "app.agents.graph.nodes.shared.field_extraction_node.get_default_gateway",
+            return_value=gateway_mock,
+        ):
+            result = await field_extraction_node(state)
+
+        assert result["extracted_fields"] == {}
+        assert result["active_field"] == "title"
+        assert result["correction_pending_field"] == "title"
+        gateway_mock.complete_json.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_correction_with_inline_value_reorders_hint_and_calls_llm(self) -> None:
+        """'change the title to Foo' must extract via LLM with title as active_field."""
+        from app.agents.graph.nodes.handover.field_extraction_node import field_extraction_node
+
+        response = _llm_response(
+            fields={"title": {"value": "Foo", "confidence": 0.95}}
+        )
+        state = _base_state(
+            user_message="I want to change the title to Foo",
+            active_field="description",
+            collected_data={"title": "handover-t0031259", "description": "old desc"},
+        )
+
+        with patch(
+            "app.agents.graph.nodes.shared.field_extraction_node.get_default_gateway",
+            return_value=_make_gateway_mock(response),
+        ):
+            result = await field_extraction_node(state)
+
+        assert result["extracted_fields"]["title"]["value"] == "Foo"
+        assert result["active_field"] == "title"
+        assert "correction_pending_field" not in result
+
+    @pytest.mark.asyncio
+    async def test_no_redirect_when_message_is_normal_answer(self) -> None:
+        """A normal answer to the active field must not trigger a redirect."""
+        from app.agents.graph.nodes.handover.field_extraction_node import field_extraction_node
+
+        response = _llm_response(
+            fields={"description": {"value": "New description", "confidence": 0.9}}
+        )
+        state = _base_state(
+            user_message="New description",
+            active_field="description",
+            collected_data={"title": "handover-t0031259"},
+        )
+
+        with patch(
+            "app.agents.graph.nodes.shared.field_extraction_node.get_default_gateway",
+            return_value=_make_gateway_mock(response),
+        ):
+            result = await field_extraction_node(state)
+
+        assert "correction_pending_field" not in result
+        assert "active_field" not in result
+
+
+# ---------------------------------------------------------------------------
+# field_extraction_node — relative date guard
+# ---------------------------------------------------------------------------
+
+
+class TestFieldExtractionNodeRelativeDateGuard:
+    @pytest.mark.asyncio
+    async def test_bare_tomorrow_skips_llm_and_keeps_active_field(self) -> None:
+        from app.agents.graph.nodes.handover.field_extraction_node import field_extraction_node
+
+        state = _base_state(user_message="tomorrow", active_field="endDate")
+
+        gateway_mock = _make_gateway_mock(_llm_response(fields={}))
+        with patch(
+            "app.agents.graph.nodes.shared.field_extraction_node.get_default_gateway",
+            return_value=gateway_mock,
+        ):
+            result = await field_extraction_node(state)
+
+        assert result == {"extracted_fields": {}, "active_field": "endDate"}
+        gateway_mock.complete_json.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_typo_tommorow_also_rejected(self) -> None:
+        from app.agents.graph.nodes.handover.field_extraction_node import field_extraction_node
+
+        state = _base_state(user_message="tommorow", active_field="startDate")
+
+        gateway_mock = _make_gateway_mock(_llm_response(fields={}))
+        with patch(
+            "app.agents.graph.nodes.shared.field_extraction_node.get_default_gateway",
+            return_value=gateway_mock,
+        ):
+            result = await field_extraction_node(state)
+
+        assert result["extracted_fields"] == {}
+        gateway_mock.complete_json.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_explicit_date_with_digits_not_blocked(self) -> None:
+        """A message containing digits (an actual date) must reach the LLM
+        even if it happens to also mention a relative-date word."""
+        from app.agents.graph.nodes.handover.field_extraction_node import field_extraction_node
+
+        response = _llm_response(
+            fields={"endDate": {"value": "2026-08-21", "confidence": 0.9}}
+        )
+        state = _base_state(user_message="21/08/2026 7:00 PM", active_field="endDate")
+
+        with patch(
+            "app.agents.graph.nodes.shared.field_extraction_node.get_default_gateway",
+            return_value=_make_gateway_mock(response),
+        ):
+            result = await field_extraction_node(state)
+
+        assert result["extracted_fields"]["endDate"]["value"] == "2026-08-21"
+
+    @pytest.mark.asyncio
+    async def test_relative_date_ignored_for_non_date_field(self) -> None:
+        """The guard only applies to date fields — 'tomorrow' as free text for
+        e.g. notes/comments must still reach the LLM normally."""
+        from app.agents.graph.nodes.handover.field_extraction_node import field_extraction_node
+
+        response = _llm_response(
+            fields={"notes": {"value": "tomorrow", "confidence": 0.8}}
+        )
+        state = _base_state(user_message="tomorrow", active_field="notes")
+
+        gateway_mock = _make_gateway_mock(response)
+        with patch(
+            "app.agents.graph.nodes.shared.field_extraction_node.get_default_gateway",
+            return_value=gateway_mock,
+        ):
+            result = await field_extraction_node(state)
+
+        assert result["extracted_fields"]["notes"]["value"] == "tomorrow"
+        gateway_mock.complete_json.assert_awaited()
+
+
+class TestRelativeDateReArmsCorrection:
+    """B2: a relative date during a correction must re-ask, not silently drop it."""
+
+    @pytest.mark.asyncio
+    async def test_relative_date_rearms_correction_when_field_has_value(self) -> None:
+        from app.agents.graph.nodes.handover.field_extraction_node import field_extraction_node
+
+        state = _base_state(
+            user_message="tomorrow",
+            active_field="startDate",
+            collected_data={"startDate": "2026-08-20"},
+        )
+        gateway_mock = _make_gateway_mock(_llm_response(fields={}))
+        with patch(
+            "app.agents.graph.nodes.shared.field_extraction_node.get_default_gateway",
+            return_value=gateway_mock,
+        ):
+            result = await field_extraction_node(state)
+
+        assert result["correction_pending_field"] == "startDate"
+        gateway_mock.complete_json.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_relative_date_on_empty_field_leaves_normal_flow(self) -> None:
+        """Field still missing → the normal missing-field flow re-asks it, so no
+        correction signal is needed (and would word the question oddly)."""
+        from app.agents.graph.nodes.handover.field_extraction_node import field_extraction_node
+
+        state = _base_state(
+            user_message="tomorrow",
+            active_field="startDate",
+            collected_data={},
+        )
+        with patch(
+            "app.agents.graph.nodes.shared.field_extraction_node.get_default_gateway",
+            return_value=_make_gateway_mock(_llm_response(fields={})),
+        ):
+            result = await field_extraction_node(state)
+
+        assert "correction_pending_field" not in result
+
+
+class TestFreeTextFallback:
+    """B12: answers containing the field's own name ("Post description") were
+    extracted as an EMPTY value, wiping the field and looping the question."""
+
+    @pytest.mark.asyncio
+    async def test_empty_extraction_falls_back_to_raw_message(self) -> None:
+        from app.agents.graph.nodes.handover.field_extraction_node import field_extraction_node
+
+        response = _llm_response(fields={"description": {"value": "", "confidence": 1.0}})
+        state = _base_state(
+            user_message="Post description",
+            active_field="description",
+            collected_data={"description": "old text"},
+        )
+        with patch(
+            "app.agents.graph.nodes.shared.field_extraction_node.get_default_gateway",
+            return_value=_make_gateway_mock(response),
+        ):
+            result = await field_extraction_node(state)
+
+        assert result["extracted_fields"]["description"]["value"] == "Post description"
+
+    @pytest.mark.asyncio
+    async def test_skip_answer_is_not_overridden(self) -> None:
+        """'none' must still clear an optional field, not be stored literally."""
+        from app.agents.graph.nodes.handover.field_extraction_node import field_extraction_node
+
+        response = _llm_response(fields={"notes": {"value": "", "confidence": 1.0}})
+        state = _base_state(
+            user_message="none",
+            active_field="notes",
+            collected_data={"notes": "old"},
+        )
+        with patch(
+            "app.agents.graph.nodes.shared.field_extraction_node.get_default_gateway",
+            return_value=_make_gateway_mock(response),
+        ):
+            result = await field_extraction_node(state)
+
+        assert result["extracted_fields"]["notes"]["value"] == ""
+
+    @pytest.mark.asyncio
+    async def test_real_extraction_not_overwritten(self) -> None:
+        from app.agents.graph.nodes.handover.field_extraction_node import field_extraction_node
+
+        response = _llm_response(
+            fields={"title": {"value": "Proper Title", "confidence": 0.9}}
+        )
+        state = _base_state(
+            user_message="the title should be Proper Title",
+            active_field="title",
+            collected_data={},
+        )
+        with patch(
+            "app.agents.graph.nodes.shared.field_extraction_node.get_default_gateway",
+            return_value=_make_gateway_mock(response),
+        ):
+            result = await field_extraction_node(state)
+
+        assert result["extracted_fields"]["title"]["value"] == "Proper Title"
+
+    @pytest.mark.asyncio
+    async def test_date_field_not_affected(self) -> None:
+        from app.agents.graph.nodes.handover.field_extraction_node import field_extraction_node
+
+        response = _llm_response(fields={})
+        state = _base_state(
+            user_message="sometime soonish",
+            active_field="startDate",
+            collected_data={},
+        )
+        with patch(
+            "app.agents.graph.nodes.shared.field_extraction_node.get_default_gateway",
+            return_value=_make_gateway_mock(response),
+        ):
+            result = await field_extraction_node(state)
+
+        assert "startDate" not in result["extracted_fields"]
+
+
+# ---------------------------------------------------------------------------
+# field_extraction_node — free-text answers containing a correction verb
+# ---------------------------------------------------------------------------
+
+
+class TestFreeTextAnswerIsNotACorrectionRequest:
+    """Prose answers must not be re-read as "I want to change something".
+
+    Notes and comments are where users write sentences about the unit, and
+    those sentences routinely contain a correction verb ("please update the
+    flooring before handover"). No field is named, so there is nothing to
+    redirect to — treating them as correction requests discarded the answer
+    and re-asked the same question, and retyping the note failed identically,
+    so the flow could never move past notes/comments.
+    """
+
+    @pytest.mark.parametrize("field_name", ["notes", "comments", "description", "title"])
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "please update the flooring before handover",
+            "we need to change the shutters",
+            "i want to change the storefront lighting",
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_prose_answer_is_extracted_not_discarded(
+        self, field_name: str, message: str
+    ) -> None:
+        from app.agents.graph.nodes.handover.field_extraction_node import (
+            field_extraction_node,
+        )
+
+        response = _llm_response(
+            fields={field_name: {"value": message, "confidence": 1.0}}
+        )
+        state = _base_state(
+            user_message=message,
+            active_field=field_name,
+            collected_data={"lease_code": "t0033388"},
+        )
+        with patch(
+            "app.agents.graph.nodes.shared.field_extraction_node.get_default_gateway",
+            return_value=_make_gateway_mock(response),
+        ):
+            result = await field_extraction_node(state)
+
+        assert result["extracted_fields"][field_name]["value"] == message
+        assert "correction_pending_field" not in result
+
+    @pytest.mark.asyncio
+    async def test_prose_answer_to_correction_reask_does_not_reloop(self) -> None:
+        """The re-ask ("Current Notes: X. What would you like to change it to?")
+        answered with prose must store the new value, not re-arm the re-ask."""
+        from app.agents.graph.nodes.handover.field_extraction_node import (
+            field_extraction_node,
+        )
+
+        message = "please update the notes to say FM team can proceed"
+        response = _llm_response(
+            fields={"notes": {"value": "FM team can proceed", "confidence": 1.0}}
+        )
+        state = _base_state(
+            user_message=message,
+            active_field="notes",
+            collected_data={"notes": "No additional notes provided for lease t0033388."},
+        )
+        with patch(
+            "app.agents.graph.nodes.shared.field_extraction_node.get_default_gateway",
+            return_value=_make_gateway_mock(response),
+        ):
+            result = await field_extraction_node(state)
+
+        assert result["extracted_fields"]["notes"]["value"] == "FM team can proceed"
+        assert "correction_pending_field" not in result
+
+    @pytest.mark.asyncio
+    async def test_unspecified_correction_still_guarded_for_non_prose_fields(self) -> None:
+        """A date field keeps the original behaviour — "can you fix it" there is
+        a correction request, not a value."""
+        from app.agents.graph.nodes.handover.field_extraction_node import (
+            field_extraction_node,
+        )
+
+        gateway_mock = _make_gateway_mock(_llm_response(fields={}))
+        state = _base_state(
+            user_message="can you fix it",
+            active_field="endDate",
+            collected_data={"endDate": "2026-08-21"},
+        )
+        with patch(
+            "app.agents.graph.nodes.shared.field_extraction_node.get_default_gateway",
+            return_value=gateway_mock,
+        ):
+            result = await field_extraction_node(state)
+
+        assert result["extracted_fields"] == {}
+        assert result["correction_pending_field"] == "endDate"
+        gateway_mock.complete_json.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_named_redirect_from_a_prose_field_still_works(self) -> None:
+        """Guarding prose must not disable explicit redirects to another field."""
+        from app.agents.graph.nodes.handover.field_extraction_node import (
+            field_extraction_node,
+        )
+
+        gateway_mock = _make_gateway_mock(_llm_response(fields={}))
+        state = _base_state(
+            user_message="i want to change the inspection end date",
+            active_field="notes",
+            collected_data={"endDate": "2026-08-21", "notes": "some note"},
+        )
+        with patch(
+            "app.agents.graph.nodes.shared.field_extraction_node.get_default_gateway",
+            return_value=gateway_mock,
+        ):
+            result = await field_extraction_node(state)
+
+        assert result["correction_pending_field"] == "endDate"
+        gateway_mock.complete_json.assert_not_called()

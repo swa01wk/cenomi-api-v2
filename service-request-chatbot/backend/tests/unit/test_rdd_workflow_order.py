@@ -76,22 +76,24 @@ class TestDocumentStatusConditional:
         missing = get_missing_fields("RDD_REVIEW", collected)
         assert "document_status" in missing
 
-    def test_document_status_not_required_for_other(self) -> None:
+    def test_document_status_required_after_guideline_link(self) -> None:
+        """The Meeting Report outcome is collected before the handover dates."""
         collected = {
             "guideLineLink": "https://guidelines.com",
-            "rdd_upload_doc_type": "SR_HANDOVER_OTHER",
             "actual_handover_date": "2026-08-10",
             "fitout_start_date": "2026-08-11",
             "fitout_end_date": "2026-08-20",
             "comments": "",
         }
         missing = get_missing_fields("RDD_REVIEW", collected)
-        assert "document_status" not in missing
+        assert missing == ["document_status"]
 
-    def test_document_status_not_required_for_rejected(self) -> None:
+    def test_document_status_not_required_once_rejected_auto_set(self) -> None:
+        """A Rejected upload makes merge_state_node write DISAPPROVED, so the
+        question is already answered and must not be asked."""
         collected = {
             "guideLineLink": "https://guidelines.com",
-            "rdd_upload_doc_type": "SR_REJECTED_HANDOVER_REPORT",
+            "document_status": "DISAPPROVED",
             "actual_handover_date": "2026-08-10",
             "fitout_start_date": "2026-08-11",
             "fitout_end_date": "2026-08-20",
@@ -104,10 +106,13 @@ class TestDocumentStatusConditional:
         missing = get_missing_fields("RDD_REVIEW", {})
         assert missing[0] == "guideLineLink"
 
-    def test_rdd_upload_doc_type_asked_second(self) -> None:
+    def test_document_status_asked_second(self) -> None:
+        """rdd_upload_doc_type is retired — uploads moved to the
+        document_requirement card, and the Meeting Report outcome took its place
+        as the second RDD question."""
         collected = {"guideLineLink": "https://guidelines.com"}
         missing = get_missing_fields("RDD_REVIEW", collected)
-        assert missing[0] == "rdd_upload_doc_type"
+        assert missing[0] == "document_status"
 
 
 # ---------------------------------------------------------------------------

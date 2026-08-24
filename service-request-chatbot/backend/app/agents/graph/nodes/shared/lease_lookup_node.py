@@ -67,6 +67,11 @@ _LEASE_ENRICHMENT_FIELDS: frozenset[str] = frozenset(
         "base_fitout_start_date",
         "base_fitout_end_date",
         "base_trading_date",
+        "actual_handover_date",
+        "actual_shop_handover_date",
+        "actual_fitout_start_date",
+        "actual_fitout_end_date",
+        "actual_trading_date",
     }
 )
 
@@ -83,6 +88,12 @@ _NO_MATCH_ACCESS_MESSAGE = (
     "user to double-check the lease code, or try a lease at one of their malls. "
     "Trading Confirmation is available to Mall Managers and Operations for leases "
     "in their property scope."
+)
+_HANDOVER_EXISTS_MESSAGE = (
+    "The lease already has an active Handover Service Request in progress. "
+    "A new Handover SR cannot be created until the existing one is completed or cancelled. "
+    "Please check the existing Handover SR, or contact your team to resolve it first. "
+    "Ask the user to provide a different lease code if they want to create a new Handover SR."
 )
 _MULTI_MATCH_MESSAGE = (
     "Multiple leases matched the search. Ask the user to select the correct one "
@@ -104,8 +115,114 @@ _BASE_DATE_ENRICHMENT_FIELDS: frozenset[str] = frozenset(
         "base_fitout_start_date",
         "base_fitout_end_date",
         "base_trading_date",
+        "actual_handover_date",
+        "actual_shop_handover_date",
+        "actual_fitout_start_date",
+        "actual_fitout_end_date",
+        "actual_trading_date",
     }
 )
+
+_MILESTONE_ACK_KEY = "_milestone_confirmed_ack"
+
+_MILESTONE_BY_AGENT: dict[str, tuple[tuple[str, ...], str]] = {
+    "rdd_handover_agent": (
+        ("actual_shop_handover_date", "actual_handover_date"),
+        "Shop Handover",
+    ),
+    "rdd_fitout_start_agent": (("actual_fitout_start_date",), "Fitout Start"),
+    "rdd_fitout_end_agent": (("actual_fitout_end_date",), "Fitout End"),
+    "rdd_trading_confirmation_agent": (("actual_trading_date",), "Trading"),
+}
+
+_MILESTONE_CHIPS: dict[str, Any] = {
+    "kind": "labeled_options",
+    "options": [
+        {"label": "Cancel", "value": "cancel", "action": "cancel_milestone"},
+        {"label": "Continue", "value": "continue", "action": "continue_milestone"},
+    ],
+}
+
+
+def _display_date(raw: str) -> str:
+    """Format an ISO YYYY-MM-DD (or datetime) value as DD/MM/YYYY for the user."""
+    text = str(raw or "").strip()
+    if not text:
+        return ""
+    date_only = text.split("T", 1)[0]
+    parts = date_only.split("-")
+    if len(parts) == 3 and len(parts[0]) == 4:
+        year, month, day = parts
+        return f"{day}/{month}/{year}"
+    return text
+
+
+def _first_filled_date(record: LeaseRecord, fields: tuple[str, ...]) -> str:
+    for field_name in fields:
+        value = str(getattr(record, field_name, "") or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _handover_exists_block() -> dict[str, Any]:
+    return {
+        "status": "WAITING_FOR_USER",
+        "response_message": _HANDOVER_EXISTS_MESSAGE,
+        "response_ui": {
+            "type": "text_question",
+            "field": "lease_code",
+            "message": _HANDOVER_EXISTS_MESSAGE,
+        },
+    }
+
+
+def _milestone_pending_response(
+    record: LeaseRecord,
+    collected: dict[str, Any],
+    label: str,
+    actual_iso: str,
+) -> dict[str, Any]:
+    """Pause after lease resolve: milestone already confirmed, Cancel / Continue."""
+    enriched = _enrich_collected_data(collected, record)
+    display = _display_date(actual_iso) or actual_iso
+    message = (
+        f"The Actual {label} Date for this lease is already confirmed on {display}. "
+        "Do you want to continue and revise it, or pick a different lease?"
+    )
+    return {
+        "collected_data": enriched,
+        "lease_matches": [],
+        "selected_lease": None,
+        "confirmation_status": "MILESTONE_PENDING",
+        "status": "WAITING_FOR_USER",
+        "response_message": message,
+        "response_ui": {"type": "message", "verbatim": True, "message": message},
+        "response_decorations": {"suggestions": _MILESTONE_CHIPS},
+    }
+
+
+def _maybe_pause_for_milestone(
+    state: ServiceRequestState,
+    record: LeaseRecord,
+    collected: dict[str, Any],
+    *,
+    handover_exists: bool,
+) -> dict[str, Any] | None:
+    """Return a waiting patch when the user must ack an already-confirmed date.
+
+    Returns the hard-block patch when a Handover SR exists and no actual date
+    is present. Returns None to proceed with normal enrichment.
+    """
+    if collected.get(_MILESTONE_ACK_KEY):
+        return None
+    spec = _MILESTONE_BY_AGENT.get(state.get("active_agent") or "")
+    actual = _first_filled_date(record, spec[0]) if spec else ""
+    if actual and spec:
+        return _milestone_pending_response(record, collected, spec[1], actual)
+    if handover_exists:
+        return _handover_exists_block()
+    return None
 
 
 def _enrich_collected_data(
@@ -131,6 +248,12 @@ def _enrich_collected_data(
     # to lease_code so confirmation and submission flows can reference it by
     # that key without any further user input.
     updated["lease"] = record.lease_code
+    # Search-trigger alias used by missing_field_node. Copy the display name
+    # from the lease so we never re-ask for tenant/company after a hit.
+    # Do not write this into ``company_name`` — the classic form binds that
+    # key to tenant_profile_id.
+    if record.company_name and not str(updated.get("company") or "").strip():
+        updated["company"] = record.company_name
     # New lease selection → user must re-confirm yes/no in chat even if the
     # form already has a radio value synced from a previous pick.
     updated["_approve_radio_confirmed"] = False
@@ -211,6 +334,11 @@ async def lease_lookup_node(
                 }
 
         if record is not None:
+            pause = _maybe_pause_for_milestone(
+                state, record, collected, handover_exists=False
+            )
+            if pause is not None:
+                return pause
             enriched = _enrich_collected_data(collected, record)
             log.info(
                 "lease_lookup.selected_lease.merged",
@@ -363,6 +491,10 @@ async def lease_lookup_node(
                 reason=result.reason,
                 active_agent=active_agent,
             )
+        # Handover agent: lease exists but already has an active Handover SR
+        # and the platform did not return the lease row (legacy empty matches).
+        if not purpose and result.reason == "handover_exists":
+            return _handover_exists_block()
         no_match_msg = (
             _NO_MATCH_ACCESS_MESSAGE
             if purpose == "trading_confirm"
@@ -381,6 +513,12 @@ async def lease_lookup_node(
     # ── 1 match: auto-enrich collected_data + offer optional MM upload ────────
     if match_count == 1:
         record = result.matches[0]
+        handover_exists = (not purpose) and result.reason == "handover_exists"
+        pause = _maybe_pause_for_milestone(
+            state, record, collected, handover_exists=handover_exists
+        )
+        if pause is not None:
+            return pause
         enriched = _enrich_collected_data(collected, record)
         log.info(
             "lease_lookup.auto_enriched",

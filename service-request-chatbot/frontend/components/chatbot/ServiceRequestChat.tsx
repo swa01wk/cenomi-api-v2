@@ -234,7 +234,7 @@ export function ServiceRequestChat() {
   );
 
   const handleCancel = useCallback(() => {
-    sendTurn("Let me make some changes.", { action: "cancel" });
+    sendTurn("Cancel this request", { action: "cancel_sr" });
   }, [sendTurn]);
 
   const handleCorrections = useCallback(

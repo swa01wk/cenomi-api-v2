@@ -179,3 +179,145 @@ class TestPayloadBuilderWithInspectionTime:
         # Both must contain the same time component
         assert "11:00" in start_lt or "11:00 AM" in start_lt
         assert "11:00" in end_lt or "11:00 AM" in end_lt
+
+    def test_create_payload_utc_iso_matches_portal_format(self) -> None:
+        """10:56 AM Riyadh → 07:56 UTC so the FE hydrates the real time, not 9 AM."""
+        data = dict(_REQUIRED_DATA)
+        data["startDate"] = "2026-08-13"
+        data["endDate"] = "2026-08-13"
+        data["inspectionTime"] = "10:56"
+        payload = build_create_handover_payload(data)
+        inner = payload["payload"]
+        assert inner["startDate"] == "2026-08-13T07:56:00.000Z"
+        assert inner["endDate"] == "2026-08-13T07:56:00.000Z"
+        assert inner["startDateLT"] == "13/08/2026 10:56 AM"
+        assert inner["endDateLT"] == "13/08/2026 10:56 AM"
+
+    def test_end_lt_time_is_independent_of_start(self) -> None:
+        data = dict(_REQUIRED_DATA)
+        data["startDate"] = "2026-08-20"
+        data["endDate"] = "2026-08-21"
+        data["inspectionTime"] = "14:00"
+        data["startDateLT"] = "20/08/2026 2:00 PM"
+        data["endDateLT"] = "21/08/2026 6:00 PM"
+        inner = build_create_handover_payload(data)["payload"]
+        assert inner["startDate"] == "2026-08-20T11:00:00.000Z"
+        assert inner["endDate"] == "2026-08-21T15:00:00.000Z"
+        assert inner["startDateLT"] == "20/08/2026 2:00 PM"
+        assert inner["endDateLT"] == "21/08/2026 6:00 PM"
+
+
+# ---------------------------------------------------------------------------
+# Time salvage / message parse / draft_preview
+# ---------------------------------------------------------------------------
+
+
+class TestInspectionTimeSalvage:
+    @pytest.mark.asyncio
+    async def test_iso_datetime_start_date_salvages_time(self) -> None:
+        state = _state(
+            extracted_fields={"startDate": _ext("2026-08-13T10:56:00")},
+            user_message="inspection on 13/08/2026",
+        )
+        result = await merge_state_node(state)
+        cd = result["collected_data"]
+        assert cd["startDate"] == "2026-08-13"
+        assert cd["inspectionTime"] == "10:56"
+
+    @pytest.mark.asyncio
+    async def test_utc_iso_start_date_converts_to_riyadh_hhmm(self) -> None:
+        state = _state(
+            extracted_fields={"startDate": _ext("2026-08-13T07:56:00.000Z")},
+            user_message="13 August",
+        )
+        result = await merge_state_node(state)
+        assert result["collected_data"]["inspectionTime"] == "10:56"
+
+    @pytest.mark.asyncio
+    async def test_message_time_wins_over_llm_nine_am_default(self) -> None:
+        state = _state(
+            extracted_fields={
+                "startDate": _ext("2026-08-13"),
+                "inspectionTime": _ext("09:00"),
+            },
+            user_message="13/08/2026 10:56 AM",
+        )
+        result = await merge_state_node(state)
+        cd = result["collected_data"]
+        assert cd["startDate"] == "2026-08-13"
+        assert cd["inspectionTime"] == "10:56"
+        assert cd["startDateLT"] == "13/08/2026 10:56 AM"
+
+    @pytest.mark.asyncio
+    async def test_two_pm_in_message_stored_as_14_00(self) -> None:
+        state = _state(
+            extracted_fields={"startDate": _ext("2026-08-13")},
+            user_message="please set inspect date 13 Aug 2:00 PM",
+        )
+        result = await merge_state_node(state)
+        assert result["collected_data"]["inspectionTime"] == "14:00"
+
+    @pytest.mark.asyncio
+    async def test_end_date_time_does_not_overwrite_start_time(self) -> None:
+        first = _state(
+            extracted_fields={"startDate": _ext("2026-08-20")},
+            user_message="20 Aug 2:00 PM",
+            active_field="startDate",
+        )
+        after_start = await merge_state_node(first)
+        cd = after_start["collected_data"]
+        assert cd["inspectionTime"] == "14:00"
+        assert "2:00 PM" in cd["startDateLT"]
+
+        second = _state(
+            extracted_fields={
+                "endDate": _ext("2026-08-21"),
+                "inspectionTime": _ext("18:00"),
+            },
+            collected_data=cd,
+            user_message="21/08/2026 6:00 PM",
+            active_field="endDate",
+        )
+        after_end = await merge_state_node(second)
+        out = after_end["collected_data"]
+        assert out["startDate"] == "2026-08-20"
+        assert out["endDate"] == "2026-08-21"
+        assert out["inspectionTime"] == "14:00"
+        assert out["startDateLT"] == "20/08/2026 2:00 PM"
+        assert out["endDateLT"] == "21/08/2026 6:00 PM"
+
+
+class TestDraftPreviewInspectionDatetime:
+    def test_fields_emit_utc_iso_and_lt(self) -> None:
+        from app.agents.graph.nodes.handover.preview_node import _fields_from_collected
+
+        rows = _fields_from_collected(
+            {
+                "startDate": "2026-08-13",
+                "endDate": "2026-08-13",
+                "inspectionTime": "10:56",
+            }
+        )
+        by_key = {row["key"]: row["value"] for row in rows}
+        assert by_key["startDate"] == "2026-08-13T07:56:00.000Z"
+        assert by_key["endDate"] == "2026-08-13T07:56:00.000Z"
+        assert by_key["startDateLT"] == "13/08/2026 10:56 AM"
+        assert by_key["endDateLT"] == "13/08/2026 10:56 AM"
+
+    def test_end_keeps_own_time_in_preview(self) -> None:
+        from app.agents.graph.nodes.handover.preview_node import _fields_from_collected
+
+        rows = _fields_from_collected(
+            {
+                "startDate": "2026-08-20",
+                "endDate": "2026-08-21",
+                "inspectionTime": "14:00",
+                "startDateLT": "20/08/2026 2:00 PM",
+                "endDateLT": "21/08/2026 6:00 PM",
+            }
+        )
+        by_key = {row["key"]: row["value"] for row in rows}
+        assert by_key["startDate"] == "2026-08-20T11:00:00.000Z"
+        assert by_key["endDate"] == "2026-08-21T15:00:00.000Z"
+        assert by_key["startDateLT"] == "20/08/2026 2:00 PM"
+        assert by_key["endDateLT"] == "21/08/2026 6:00 PM"

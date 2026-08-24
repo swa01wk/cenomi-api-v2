@@ -125,6 +125,13 @@ class ChatStatePayload(BaseModel):
             "'failed' after FAILED, null for field-collection / waiting turns."
         ),
     )
+    confirmation_status: str | None = Field(
+        default=None,
+        description=(
+            "HITL confirmation marker. CANCEL_PENDING means the agent asked "
+            "are-you-sure before cancelling; the UI should show Yes/No."
+        ),
+    )
 
 
 class ServiceRequestChatResponse(BaseModel):
@@ -255,6 +262,7 @@ async def post_service_request_chat(
             fm_status=result.state.fm_status,
             sr_id=result.state.sr_id,
             action_result=result.state.action_result,
+            confirmation_status=result.state.confirmation_status,
         ),
         trace_id=str(result.trace_id) if result.trace_id else None,
     )

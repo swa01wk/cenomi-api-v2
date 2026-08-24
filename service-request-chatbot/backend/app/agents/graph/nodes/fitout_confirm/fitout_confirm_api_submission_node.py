@@ -169,11 +169,19 @@ async def fitout_confirm_api_submission_node(state: ServiceRequestState) -> dict
 
     # CREATE path — SR created, workflow complete
     sr_ref = result.sr_id
-    success_message = (
-        f"Your {_sub_category_label(sub_category)} Service Request has been submitted "
-        f"— reference **{sr_ref}**. "
-        "It will be routed to the approver for review."
-    )
+    label = _sub_category_label(sub_category)
+    if _was_auto_approved(result, state, sub_category):
+        success_message = (
+            f"Your {label} Service Request has been submitted "
+            f"— reference **{sr_ref}**. "
+            "It was approved automatically, so no further review is needed."
+        )
+    else:
+        success_message = (
+            f"Your {label} Service Request has been submitted "
+            f"— reference **{sr_ref}**. "
+            "It will be routed to the approver for review."
+        )
     return {
         "backend_refs": backend_refs,
         "status": "WAITING_FOR_USER",
@@ -188,6 +196,53 @@ async def fitout_confirm_api_submission_node(state: ServiceRequestState) -> dict
             "workflow_stage": "SR_CREATED",
         },
     }
+
+
+# Platform statuses that mean the SR needs no further approval step.
+_APPROVED_STATUSES: frozenset[str] = frozenset(
+    {"APPROVED", "FINISHED", "COMPLETED", "DONE"}
+)
+
+
+def _created_sr_status(result: Any) -> str:
+    """Return the SR status the platform reported on create, upper-cased."""
+    body = getattr(result, "response_payload", None)
+    if not isinstance(body, dict):
+        return ""
+    for container in (body, body.get("data")):
+        if not isinstance(container, dict):
+            continue
+        for key in ("status", "sr_status", "_sr_status", "current_sr_status"):
+            value = container.get(key)
+            if value:
+                return str(value).strip().upper()
+    return ""
+
+
+def _was_auto_approved(result: Any, state: ServiceRequestState, sub_category: str) -> bool:
+    """True when this create needs no separate approval step.
+
+    All three fitout confirmations are single-level workflows whose only
+    approver is the role that normally raises them — DD_ENGINEER for FOS and
+    END, MALL_MANAGER / OPERATIONS for TRADING. When that role creates the SR
+    the platform approves it in the same transaction (Path B1 in the frontend
+    spec ``fitout-confirmation-service-requests.md``), so telling the user it
+    "will be routed to the approver for review" promises a step that never
+    happens. A non-approver creating one (Path B2) genuinely does route.
+
+    The status the platform returned is authoritative, so it wins. It is only
+    when the create response carries no status that the caller's role is used
+    to decide — that inference is the fallback, never the primary signal.
+    """
+    platform_status = _created_sr_status(result)
+    if platform_status:
+        return platform_status in _APPROVED_STATUSES
+
+    from app.agents.schemas.fitout_confirm_schema import role_can_approve
+    from app.agents.services.review_decorations_service import derive_user_role
+
+    role = derive_user_role(state.get("auth_context"))
+    return bool(role and role_can_approve(role, sub_category))
 
 
 def _sub_category_label(sub_category: str) -> str:

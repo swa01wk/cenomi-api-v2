@@ -32,31 +32,74 @@ def _rdd_base_collected(**extra: object) -> dict:
 
 
 class TestRddMissingFieldStatusBranching:
-    def test_other_skips_document_status(self) -> None:
-        collected = _rdd_base_collected(rdd_upload_doc_type=RDD_DOC_TYPE_OTHER)
-        missing = get_missing_fields("RDD_REVIEW", collected)
-        assert "document_status" not in missing
-        assert "rdd_upload_doc_type" not in missing
+    def test_other_upload_never_reaches_the_status_question(self) -> None:
+        """An "Other" upload does not satisfy the mandatory report pair, so
+        missing_field_node returns the upload card and the status question is
+        never surfaced — the gate is the uploaded documents, not the retired
+        rdd_upload_doc_type chip."""
+        import asyncio
+
+        from app.agents.graph.nodes.shared.missing_field_node import (
+            _has_rdd_mandatory_upload,
+            missing_field_node,
+        )
+
+        docs = [{"document_type_id": RDD_DOC_TYPE_OTHER, "document_id": "d-other"}]
+        assert _has_rdd_mandatory_upload(docs) is False
+
+        result = asyncio.run(
+            missing_field_node(  # type: ignore[arg-type]
+                {
+                    "workflow_stage": "RDD_REVIEW",
+                    "active_agent": "rdd_handover_agent",
+                    "collected_data": _rdd_base_collected(),
+                    "documents": docs,
+                    "validation_errors": [],
+                }
+            )
+        )
+        assert (result.get("response_ui") or {}).get("field") != "document_status"
+
+    def test_meeting_report_upload_asks_for_status_with_chips(self) -> None:
+        import asyncio
+
+        from app.agents.graph.nodes.shared.missing_field_node import missing_field_node
+
+        result = asyncio.run(
+            missing_field_node(  # type: ignore[arg-type]
+                {
+                    "workflow_stage": "RDD_REVIEW",
+                    "active_agent": "rdd_handover_agent",
+                    "collected_data": {"guideLineLink": "https://example.com/guidelines"},
+                    "documents": [
+                        {"document_type_id": RDD_DOC_TYPE_MEETING, "document_id": "d1"}
+                    ],
+                    "validation_errors": [],
+                }
+            )
+        )
+        assert (result.get("response_ui") or {}).get("field") == "document_status"
+        options = result["response_decorations"]["suggestions"]["options"]
+        assert [o["value"] for o in options] == ["APPROVED", "APPROVED_WITH_CHANGES"]
+        assert [o["action"] for o in options] == [
+            "select_rdd_status_approved",
+            "select_rdd_status_approved_with_changes",
+        ]
 
     def test_rejected_skips_document_status_question(self) -> None:
-        # Status is auto-set elsewhere; missing check must not ask for it.
-        collected = _rdd_base_collected(
-            rdd_upload_doc_type=RDD_DOC_TYPE_REJECTED,
-            document_status=RDD_REJECTED_STATUS,
-        )
+        # merge_state_node auto-sets DISAPPROVED on a Rejected upload, so the
+        # field is already answered and must not be asked.
+        collected = _rdd_base_collected(document_status=RDD_REJECTED_STATUS)
         missing = get_missing_fields("RDD_REVIEW", collected)
         assert "document_status" not in missing
 
     def test_meeting_report_requires_document_status(self) -> None:
-        collected = _rdd_base_collected(rdd_upload_doc_type=RDD_DOC_TYPE_MEETING)
+        collected = _rdd_base_collected()
         missing = get_missing_fields("RDD_REVIEW", collected)
         assert "document_status" in missing
 
     def test_meeting_report_with_status_complete(self) -> None:
-        collected = _rdd_base_collected(
-            rdd_upload_doc_type=RDD_DOC_TYPE_MEETING,
-            document_status="APPROVED",
-        )
+        collected = _rdd_base_collected(document_status="APPROVED")
         missing = get_missing_fields("RDD_REVIEW", collected)
         assert missing == []
 

@@ -22,6 +22,7 @@ submission are concerns of graph nodes and domain services.
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -66,6 +67,65 @@ from app.observability.trace_manager import TraceManager
 
 log = structlog.get_logger(__name__)
 
+# ---------------------------------------------------------------------------
+# Per-session turn serialisation
+# ---------------------------------------------------------------------------
+# A turn is read-modify-write over the whole draft: load_session reads
+# collected_data, the graph mutates it, save_state writes the entire blob back.
+# Two turns for one session running concurrently therefore lose one side's
+# work — the last writer wins. Verified live: four parallel requests reduced a
+# fully populated draft (lease, dates, title, notes, comments) to a single
+# field. Users reach this by double-clicking send, a client retry, or two open
+# tabs. Turns within one conversation are logically sequential, so serialising
+# them costs nothing semantically.
+#
+# Scope: this lock is per-process. It fully covers a single uvicorn worker
+# (how this service runs today). Across multiple workers or replicas a
+# Postgres advisory lock keyed on session_id would be required; the
+# StateLoadError guard in ConversationStateService is the cross-process
+# backstop that prevents a failed read from destroying data.
+_SESSION_LOCKS: dict[UUID, asyncio.Lock] = {}
+_SESSION_LOCKS_GUARD = asyncio.Lock()
+
+
+async def _acquire_session_lock(session_id: UUID) -> asyncio.Lock:
+    """Return (creating if needed) the lock guarding *session_id*'s turns."""
+    async with _SESSION_LOCKS_GUARD:
+        lock = _SESSION_LOCKS.get(session_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            _SESSION_LOCKS[session_id] = lock
+        return lock
+
+
+async def _release_session_lock_if_idle(session_id: UUID) -> None:
+    """Drop the lock once no turn holds or awaits it, so the map cannot grow
+    without bound over a long-lived process."""
+    async with _SESSION_LOCKS_GUARD:
+        lock = _SESSION_LOCKS.get(session_id)
+        if lock is not None and not lock.locked():
+            _SESSION_LOCKS.pop(session_id, None)
+
+
+def resolve_turn_sr_id(
+    *,
+    session_id: UUID | None,
+    sr_id: str | None,
+    message: str,
+) -> str | None:
+    """Drop a stale sr_id when the client starts a new conversation with a message.
+
+    Opening an existing SR uses a new session, empty message, and sr_id.
+    Create another resets the FE session then immediately sends a seed
+    message; React has not flushed ``activeSrId`` yet so the previous SR
+    is still attached. Binding that id loads FM_REVIEW and Mall Managers
+    see a permission error plus FM document cards.
+    """
+    if session_id is None and sr_id and str(message or "").strip():
+        log.info("chat.drop_stale_sr_id_on_new_session", sr_id=sr_id)
+        return None
+    return sr_id
+
 
 # ---------------------------------------------------------------------------
 # Result type
@@ -82,6 +142,7 @@ class ChatTurnState:
     fm_status: str | None = None
     sr_id: str | None = None
     action_result: str | None = None  # "success" | "failed" | None
+    confirmation_status: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -131,7 +192,66 @@ class ChatOrchestrationService:
         language: str | None = None,
         msp_context: dict[str, Any] | None = None,
     ) -> ChatTurnResult:
+        """Run one turn, serialised against other turns for the same session.
+
+        See ``_SESSION_LOCKS``: a turn is a read-modify-write over the entire
+        draft, so overlapping turns silently discard each other's work.
+        A brand-new session (no id yet) has nothing to contend with.
+        """
+        kwargs = dict(
+            session_id=session_id,
+            user_id=user_id,
+            message=message,
+            attachments=attachments,
+            action=action,
+            selected_lease_id=selected_lease_id,
+            corrected_fields=corrected_fields,
+            auth_context=auth_context,
+            sr_id=sr_id,
+            language=language,
+            msp_context=msp_context,
+        )
+        if session_id is None:
+            return await self._process_turn_serialised(**kwargs)
+
+        lock = await _acquire_session_lock(session_id)
+        if lock.locked():
+            log.info("chat.turn_queued_behind_concurrent_turn",
+                     session_id=str(session_id))
+        async with lock:
+            try:
+                result = await self._process_turn_serialised(**kwargs)
+                # Commit inside the lock. The repositories only flush(); the
+                # commit normally happens at request teardown, which runs after
+                # the lock is released — so the next queued turn would read
+                # pre-commit state and overwrite this one's work. Holding the
+                # lock across the commit is what actually makes the turns
+                # sequential rather than merely non-overlapping.
+                await self._db.commit()
+                return result
+            finally:
+                await _release_session_lock_if_idle(session_id)
+
+    async def _process_turn_serialised(
+        self,
+        *,
+        session_id: UUID | None,
+        user_id: UUID,
+        message: str,
+        attachments: list[dict[str, Any]],
+        action: str | None = None,
+        selected_lease_id: str | None = None,
+        corrected_fields: dict[str, Any] | None = None,
+        auth_context: AuthContext | None = None,
+        sr_id: str | None = None,
+        language: str | None = None,
+        msp_context: dict[str, Any] | None = None,
+    ) -> ChatTurnResult:
         """Execute one complete chat turn and return structured result."""
+
+        sr_id = resolve_turn_sr_id(
+            session_id=session_id, sr_id=sr_id, message=message
+        )
 
         # 1. Load or create session ----------------------------------------
         chat_session = await self._load_or_create_session(session_id, user_id)
@@ -272,7 +392,10 @@ class ChatOrchestrationService:
             user_role = derive_user_role(auth_context)
             if user_role:
                 backend_refs["user_role"] = user_role
-            if not sr_id:
+            if not sr_id and not chat_session.active_agent:
+                # Only show the Handover reviewer inbox when there is no active
+                # workflow.  Fitout/Trading confirmation agents in CREATE_SR stage
+                # have no sr_id yet but must not see the Handover SR picker.
                 inbox_deco = build_inbox_decorations(auth_context)
                 if inbox_deco:
                     initial_state["response_decorations"] = inbox_deco
@@ -447,6 +570,7 @@ class ChatOrchestrationService:
                 fm_status=fm_status,
                 sr_id=sr_id,
                 action_result=action_result,
+                confirmation_status=result_state.get("confirmation_status"),
             ),
             trace_id=trace_id,
             draft_preview=draft_preview,

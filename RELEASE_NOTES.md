@@ -2,9 +2,91 @@
 
 ---
 
-## v1.5.0 — August 12, 2026 (Unreleased)
+## v1.5.1 — August 17, 2026
 
-> **Theme:** Multi-provider LLM adapter, pluggable embedding registry, and dynamic per-trace cost tracking.
+> **Theme:** Mid-flow field corrections and concurrent-turn safety, plus nine live-testing defects across the handover, Already Trading and fitout confirmation flows — most of them variations on "the bot discarded my answer and asked again".
+
+### New
+
+#### Mid-flow field corrections
+
+Users can now say "I want to change the title" at any point — mid-collection or
+while reviewing the finished draft — and the bot re-asks that specific field
+with its current value:
+
+> Current Inspection End Date: 21/08/2026. What would you like to change it to?
+
+Enum fields (inspector, handover type, document status) come back with their
+original chips. An inline value works in one turn ("change the mall to Riyadh
+Park"). Fields that come from the lease record are refused with an explanation
+rather than accepting an edit that would be silently discarded.
+
+Detection is deterministic (regex, ahead of the extraction LLM) rather than left
+to the model, which is primed toward the field currently being collected and
+mis-binds correction phrases to it.
+
+#### Concurrent-turn safety
+
+Turns for the same session are now serialised. A turn is a read-modify-write
+over the whole draft, so two overlapping requests lost one side's work — four
+parallel requests were observed reducing a fully populated draft to a single
+field. Reachable by double-clicking send, a client retry, or two open tabs.
+
+> Per-process, which covers a single uvicorn worker. Multi-worker deployments
+> need a Postgres advisory lock on `session_id`.
+
+### Fixed
+
+#### Correction loops
+
+| Symptom | Cause |
+|---|---|
+| Notes and comments re-asked forever | Prose answers carrying a correction verb ("please update the flooring before handover") were read as "I want to change something" requests, which return an empty extraction by design |
+| Corrections ignored in FM / RDD review | A stale `WAITING_FOR_USER` short-circuited the turn to `response_generation`, which cannot write `collected_data` — the LLM improvised from the current values and every answer was dropped |
+| Path B edits went nowhere | Three of the four Already Trading dates resolved to the standard-path field names, which that flow never collects |
+| "guidline link" answered with a date question | The misspelling and the bare plural `guidelines` matched no field, re-arming whichever field was active |
+
+Synonym matching is now whole-word and plural-tolerant, and stage-aware for Path B. The `WAITING_FOR_USER` guard that CREATE_SR already had is now shared by all three entry routes.
+
+#### RDD review
+
+- The **document status** question (Approve / Approve with changes) is now reachable. Its gate keyed on `rdd_upload_doc_type`, retired when uploads moved to the document card, so the chips, handler and payload consumer were all present but dead.
+- The question text travels with the chips (`verbatim`), instead of relying on an LLM rewrite that could drop it.
+- Correction chips carry the same `action` as their first-ask twins, so a correction click no longer round-trips through re-extraction.
+
+#### Already Trading (Path B)
+
+- The flow now **asks for comments** instead of silently shipping "No additional comments provided for lease X."
+- A reopened SR shows all four actual dates — `actual_shop_handover_date` and `actual_fitout_end_date` were never mapped back out of the platform payload. `already_handovered` and `notes` were added at the same time.
+
+#### Fitout confirmation (FOS / FOE / Trading)
+
+- The **Comments** row is hidden on the confirmation and preview cards — the chat never collects it, so it could only render blank. The FOS/FOE API payload is unchanged.
+- Milestone questions read correctly: "Has the fitout started?" and "Has the fitout been completed?" replace "Has fitout start started?" and "Has fitout complete started?".
+- The submission message no longer promises "It will be routed to the approver for review" when the SR was auto-approved. These are single-level workflows whose only approver is the role that raises them, so the message now follows the status the platform actually returned.
+
+#### Wording
+
+- A confirmation card keeps its own text. With `response_message = None` the LLM had no hint and improvised from conversation history — on one RDD card it quoted a date the user had just replaced, while the card below showed the new value.
+
+#### Frontend (`cenomi-frontend-2`)
+
+- **Handover Meeting Report section missing until a manual reload.** The `meetingReports` memo depended on `[!!sr_attachments, …]` — a boolean that only changes when the list flips between null and non-null — so a soft refresh that swapped in a new array left it frozen.
+- **Chips rendering with no question above them.** A silent form-bridge patch published its chips but suppressed the assistant bubble; it now shows the bubble when the turn actually asked something.
+
+### Eval suite
+
+S236–S244 added, one per defect, plus S245–S246 covering the correction mechanism itself (bare redirect and the unspecified-request guard; S17 already covered a correction carrying an inline value). All eleven are grouped in an `EVAL_2026_08_17` bucket, runnable as `--tier aug17`. Total flat scenarios: 125.
+
+### Known issues
+
+58 backend tests and 8 frontend tests were already failing before this release (RDD workflow ordering, validation service, workflow config, several e2e lifecycles) and remain open — unrelated to the changes above. Two of the original 60 backend failures were fixed in passing.
+
+---
+
+## v1.5.0 — July 31, 2026
+
+> **Theme:** Expanded eval suite (27 tiers), Path B (Already Trading fast-path), Work Permit agent, FOS/END/TRADING sub-category support, and full lifecycle eval at 100% on Battle tier.
 
 ### What's new
 
