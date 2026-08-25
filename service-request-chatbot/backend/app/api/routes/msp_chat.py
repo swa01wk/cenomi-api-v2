@@ -34,7 +34,6 @@ LLM gateway changes and is deferred.
 from __future__ import annotations
 
 import json
-import logging
 import re
 from collections.abc import AsyncIterator
 from typing import Any
@@ -119,6 +118,23 @@ class _MSPChatContext(BaseModel):
         default=None,
         description="Help subcategory, e.g. 'How to Submit'.",
         examples=["How to Submit"],
+    )
+    property_id: int | None = Field(
+        default=None,
+        description=(
+            "unique_property_id of the mall the user is currently viewing "
+            "(e.g. from /propertydetails?propertyId=3691). Lets 'who is the "
+            "mall manager' resolve without the user naming the mall."
+        ),
+        examples=[3691],
+    )
+    mall_name: str | None = Field(
+        default=None,
+        description=(
+            "marketing_name of the mall being viewed. Sent alongside "
+            "property_id so the agent needs no extra lookup to ground the answer."
+        ),
+        examples=["Yasmeen Mall"],
     )
 
 

@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.routes import health, upload
+from app.api.routes import health, indexer, upload
 from app.api.routes.auth import router as auth_router
 from app.api.routes.chat import router as chat_router
 from app.api.routes.chat import service_request_router
@@ -57,6 +57,8 @@ def create_app() -> FastAPI:
     # MSP Platform-compatible help endpoints — contractually pinned to /api/v1 by cenomi-ai-backend
     application.include_router(msp_chat_router, prefix=settings.api_v1_prefix, tags=["msp-chat"])
     application.include_router(upload.router, prefix=settings.api_v1_prefix, tags=["upload-v1"])
+    # RAG indexer status / re-index request (admin-only)
+    application.include_router(indexer.router, prefix=settings.api_v1_prefix, tags=["indexer-v1"])
     # Observability (unversioned legacy paths)
     application.include_router(obs_traces.router, prefix="/api", tags=["observability"])
     application.include_router(obs_feedback.router, prefix="/api", tags=["observability"])
@@ -70,6 +72,7 @@ def create_app() -> FastAPI:
     application.include_router(service_request_router, prefix=settings.api_v2_prefix, tags=["chat-v2"])
     application.include_router(chat_router, prefix=settings.api_v2_prefix, tags=["chat-v2"])
     application.include_router(upload.router, prefix=settings.api_v2_prefix, tags=["upload-v2"])
+    application.include_router(indexer.router, prefix=settings.api_v2_prefix, tags=["indexer-v2"])
     application.include_router(obs_traces.router, prefix=settings.api_v2_prefix, tags=["observability-v2"])
     application.include_router(obs_feedback.router, prefix=settings.api_v2_prefix, tags=["observability-v2"])
     application.include_router(obs_sessions.router, prefix=settings.api_v2_prefix, tags=["observability-v2"])

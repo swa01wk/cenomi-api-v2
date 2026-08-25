@@ -1,0 +1,150 @@
+# Service Request Chatbot — RAG Knowledge Indexer job (ticket 3547).
+# Production build & deploy, modelled on sr-chatbot-api-prod.yml.
+# Build context is service-request-chatbot/backend (Dockerfile.indexer lives there).
+#
+# Requires the Azure DevOps variable group "v2-ai-prod-vars" with the API
+# pipeline's variables PLUS:
+#   indexer_repository — container registry repository name for this image
+#   indexer_job_name   — Azure Container App JOB name to update
+#
+# Infra expectations (documented, not provisioned here):
+#   - scheduled job: cron "*/15 * * * *", args --incremental
+#   - separate manual job: args ["--full"] (weekly backstop / cutover)
+#   - replicaTimeout 3600, parallelism 1, replicaRetryLimit 1
+#   - the pg advisory lock (3547,1) prevents full ∩ incremental overlap
+
+trigger:
+  branches:
+    exclude:
+      - '*'
+  tags:
+    include:
+      - 'release-prod-ai-v2-indexer-*'
+
+pool:
+  name: Azure Pipelines
+
+variables:
+- group: v2-ai-prod-vars
+
+- name: SHORT_HASH
+  value: ''
+
+- name: COMMIT_VER
+  value: ''
+
+stages:
+
+- stage: DockerBuildIndexer
+  displayName: Build & Push Indexer Image
+  jobs:
+  - job: Build
+    steps:
+
+    - checkout: self
+
+    - task: CmdLine@2
+      displayName: Set SHORT_HASH
+      inputs:
+        script: |
+          SHORT_HASH=$(echo $(Build.SourceVersion) | cut -c1-8)
+          echo "##vso[task.setvariable variable=SHORT_HASH]$SHORT_HASH"
+
+    - task: CmdLine@2
+      displayName: Prepare Version
+      inputs:
+        script: |
+          version_arg=$(git describe --tags --long --dirty 2>/dev/null)
+          if [[ $version_arg =~ -[0-9]+-g[0-9a-f]{7,}$ ]]; then
+            COMMIT_VER="$version_arg"
+          else
+            COMMIT_VER="UNKNOWN"
+          fi
+          echo "##vso[task.setvariable variable=COMMIT_VER]$COMMIT_VER"
+
+    - task: Docker@2
+      displayName: Build & Push Image
+      inputs:
+        containerRegistry: 'CenomiRegistry'
+        repository: $(indexer_repository)
+        command: 'buildAndPush'
+        Dockerfile: 'service-request-chatbot/backend/Dockerfile.indexer'
+        buildContext: 'service-request-chatbot/backend'
+        tags: |
+          $(Build.SourceBranchName)-$(SHORT_HASH)
+        arguments: >
+          --platform linux/amd64
+          --build-arg VERSION=$(COMMIT_VER)
+          --build-arg GIT_SHA=$(SHORT_HASH)
+
+    - task: CmdLine@2
+      displayName: Docker Cleanup
+      inputs:
+        script: |
+          disk_usage=$(df -h / | awk 'NR==2 {print $5}' | sed 's/%//')
+          if [ $disk_usage -gt 80 ]; then
+            echo "Cleaning Docker..."
+            docker system prune -a -f
+          else
+            echo "Disk usage OK: $disk_usage%"
+          fi
+
+- stage: DeployIndexer
+  displayName: Update Container App Job
+  dependsOn: DockerBuildIndexer
+  jobs:
+  - deployment: Deploy
+    environment: CenomiProd
+
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+
+          - checkout: self
+
+          - task: CmdLine@2
+            displayName: Update Job Image
+            inputs:
+              script: |
+                set -e
+
+                SHORT_HASH=$(echo $(Build.SourceVersion) | cut -c1-8)
+                IMAGE=$(docker_registry)/$(indexer_repository):$(Build.SourceBranchName)-$SHORT_HASH
+
+                echo "Updating job image: $IMAGE"
+
+                az login --service-principal \
+                  -u $(AZURE_CLIENT_ID) \
+                  -p $(AZURE_CLIENT_SECRET) \
+                  -t $(AZURE_TENANT_ID)
+
+                az account set --subscription $(AZURE_SUBSCRIPTION_ID)
+
+                az containerapp job update \
+                  --name $(indexer_job_name) \
+                  --resource-group $(AZURE_RG) \
+                  --image "$IMAGE"
+
+          - task: CmdLine@2
+            displayName: Verify Job Image
+            inputs:
+              script: |
+                set -e
+
+                SHORT_HASH=$(echo $(Build.SourceVersion) | cut -c1-8)
+                EXPECTED=$(docker_registry)/$(indexer_repository):$(Build.SourceBranchName)-$SHORT_HASH
+
+                ACTUAL=$(az containerapp job show \
+                  --name $(indexer_job_name) \
+                  --resource-group $(AZURE_RG) \
+                  --query "properties.template.containers[0].image" -o tsv)
+
+                echo "Expected: $EXPECTED"
+                echo "Actual:   $ACTUAL"
+
+                if [ "$ACTUAL" != "$EXPECTED" ]; then
+                  echo "Job image mismatch"
+                  exit 1
+                fi
+                echo "Job image verified"

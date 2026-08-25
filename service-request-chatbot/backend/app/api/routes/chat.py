@@ -19,7 +19,6 @@ claim in production.
 
 from __future__ import annotations
 
-import logging
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -35,7 +34,6 @@ from app.services.chat_orchestration_service import (
     user_id_to_uuid,
 )
 from app.types.chat import AuthContext
-from fastapi import Depends
 
 log = structlog.get_logger(__name__)
 
@@ -97,6 +95,19 @@ class ServiceRequestChatRequest(BaseModel):
     corrected_fields: dict[str, Any] | None = Field(
         default=None,
         description="Inline field edits submitted from the confirmation card.",
+    )
+    language: str | None = Field(
+        default=None,
+        description="Response language hint: 'en' or 'ar'.",
+    )
+    context: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Page context from the widget: current_url_pattern, help_category, "
+            "help_subcategory, property_id, mall_name. The frontend has always "
+            "sent this; it was previously dropped because the field was not "
+            "declared here."
+        ),
     )
     sr_id: str | None = Field(
         default=None,
@@ -238,6 +249,8 @@ async def post_service_request_chat(
             corrected_fields=body.corrected_fields,
             auth_context=auth,
             sr_id=body.sr_id,
+            language=body.language,
+            msp_context=body.context,
         )
     except Exception as exc:
         bound_log.exception("api.chat.service_request.unhandled_error", error=str(exc))
