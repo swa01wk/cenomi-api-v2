@@ -77,8 +77,7 @@ SELECT DISTINCT p.unique_property_id
 FROM cenomi.tenant_contacts tc
 JOIN cenomi.properties p ON p.property_id = tc.property_id
 JOIN cenomi.users u ON u.user_id = tc.tenant_contact_user_id
-JOIN cenomi.roles r ON r.role_id = tc.role_id
-WHERE tc.updated_at > :since OR u.updated_at > :since OR r.updated_at > :since
+WHERE tc.updated_at > :since OR u.updated_at > :since
 UNION
 SELECT unique_property_id FROM cenomi.unique_properties
 WHERE is_primary = true AND updated_at > :since

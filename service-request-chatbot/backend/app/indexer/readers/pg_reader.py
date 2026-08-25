@@ -7,6 +7,7 @@ database is ever copied into the chatbot Postgres.  The engine is built from
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any
 
 import structlog
@@ -16,6 +17,20 @@ from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 log = structlog.get_logger(__name__)
 
 
+def _strip_tzinfo(value: Any) -> Any:
+    """Convert an aware datetime to naive UTC.
+
+    Every ``cenomi.*`` timestamp column is ``timestamp without time zone``.
+    asyncpg raises ``DataError: can't subtract offset-naive and
+    offset-aware datetimes`` when a tz-aware Python datetime is bound
+    against one — this reader only ever targets those columns, so aware
+    datetimes are always converted here rather than per call site.
+    """
+    if isinstance(value, datetime) and value.tzinfo is not None:
+        return value.astimezone(UTC).replace(tzinfo=None)
+    return value
+
+
 def _prepare(sql: str, params: dict[str, Any]):
     """Build a text() clause, marking tuple/list params as expanding.
 
@@ -23,6 +38,7 @@ def _prepare(sql: str, params: dict[str, Any]):
     (e.g. ``WHERE LOWER(email) IN :emails``) — SQLAlchemy expands them to
     ``IN (:p1, :p2, ...)`` at execution time.
     """
+    params = {k: _strip_tzinfo(v) for k, v in params.items()}
     clause = text(sql)
     expanding = [
         bindparam(key, expanding=True)
