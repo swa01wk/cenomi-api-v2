@@ -37,6 +37,7 @@ import structlog
 from app.agents.graph.state import ServiceRequestState
 from app.agents.llm.gateway import get_default_gateway
 from app.agents.prompts.faq_prompt import FAQ_SYSTEM_PROMPT
+from app.agents.services.context_builder import build_agent_context, format_context_for_prompt
 from app.integrations.factory import get_search_repository
 from app.integrations.search.base import SearchResult
 from app.observability.decorators import trace_node
@@ -204,6 +205,15 @@ def _build_faq_user_content(state: ServiceRequestState, rag_block: str) -> str:
         )
 
     parts.append(f"User question: {message}")
+
+    context = build_agent_context(state)
+    if context.get("viewing_notification_id"):
+        parts.append(f"Viewing notification ID: {context['viewing_notification_id']}")
+    if context.get("viewing_service_request_id"):
+        parts.append(f"Viewing service request ID: {context['viewing_service_request_id']}")
+    snapshot = context.get("viewing_notification") or {}
+    if snapshot.get("title") or snapshot.get("body"):
+        parts.append(format_context_for_prompt({"viewing_notification": snapshot}))
 
     history: list[dict] = state.get("conversation_history") or []  # type: ignore[assignment]
     recent = history[-4:]

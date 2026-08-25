@@ -469,6 +469,8 @@ class TestServiceRequestGraphState:
         "trace_manager", "conversation_state_service", "auth_context",
         # MSP Platform integration (injected by MSP adapter; absent on SR turns)
         "language", "msp_context",
+        # Page viewing context (per-turn, never persisted)
+        "viewing_notification_id", "viewing_service_request_id", "viewing_notification",
     }
 
     def test_all_keys_declared(self) -> None:

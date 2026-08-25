@@ -79,6 +79,14 @@ class ServiceRequestGraphState(TypedDict, total=False):
     language: str             # "en" | "ar" — from request or auto-detected
     msp_context: dict         # {current_url_pattern?, help_category?, help_subcategory?}
 
+    # ── Page viewing context (injected per turn, never persisted) ─────────────
+    # Sent by the UI when the user is on a notification or SR detail page so
+    # deictic phrases ("this notification", "what's the status?") resolve
+    # without repeating the ID in chat.  See mosaic-poc viewing context.
+    viewing_notification_id: str | None
+    viewing_service_request_id: str | None
+    viewing_notification: dict  # optional snapshot {id, title, body, related_sr_id, ...}
+
     # ── Overall turn status ───────────────────────────────────────────────────
     status: Literal[
         "IN_PROGRESS",

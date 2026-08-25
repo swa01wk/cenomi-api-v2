@@ -57,6 +57,7 @@ from app.agents.services.review_decorations_service import (
     derive_user_role,
 )
 from app.agents.services.conversation_state_service import ConversationStateService
+from app.agents.services.notification_intent import NOTIFICATION_INTENTS
 from app.services.response_ui_finalize import finalize_response_ui
 from app.core.injection_guard import scan_message
 from app.db.models import ChatSession
@@ -191,6 +192,9 @@ class ChatOrchestrationService:
         sr_id: str | None = None,
         language: str | None = None,
         msp_context: dict[str, Any] | None = None,
+        viewing_notification_id: str | None = None,
+        viewing_service_request_id: str | None = None,
+        viewing_notification: dict[str, Any] | None = None,
     ) -> ChatTurnResult:
         """Run one turn, serialised against other turns for the same session.
 
@@ -409,6 +413,27 @@ class ChatOrchestrationService:
             initial_state["language"] = language
         if msp_context is not None:
             initial_state["msp_context"] = msp_context
+
+        ctx = dict(msp_context or {})
+        snapshot = viewing_notification or ctx.get("viewing_notification")
+        notif_id = (
+            viewing_notification_id
+            or ctx.get("viewing_notification_id")
+            or (snapshot.get("id") if isinstance(snapshot, dict) else None)
+            or (snapshot.get("notification_id") if isinstance(snapshot, dict) else None)
+        )
+        sr_view_id = (
+            viewing_service_request_id
+            or ctx.get("viewing_service_request_id")
+            or (snapshot.get("related_sr_id") if isinstance(snapshot, dict) else None)
+            or (snapshot.get("sr_id") if isinstance(snapshot, dict) else None)
+        )
+        if notif_id:
+            initial_state["viewing_notification_id"] = str(notif_id)
+        if sr_view_id:
+            initial_state["viewing_service_request_id"] = str(sr_view_id)
+        if isinstance(snapshot, dict) and snapshot:
+            initial_state["viewing_notification"] = snapshot
 
         # 6. Invoke graph -------------------------------------------------------
         result_state: dict[str, Any]
@@ -631,7 +656,8 @@ class ChatOrchestrationService:
         # (handover_entry_node writes intent=None), which is handled by the
         # new_agent != chat_session.active_agent guard above flushing that state.
         is_unknown = (new_intent or "").upper() == "UNKNOWN"
-        if new_intent != chat_session.intent and not is_unknown:
+        is_transient = is_unknown or (new_intent or "") in NOTIFICATION_INTENTS
+        if new_intent != chat_session.intent and not is_transient:
             updates["intent"] = new_intent
 
         new_stage = result_state.get("workflow_stage")
