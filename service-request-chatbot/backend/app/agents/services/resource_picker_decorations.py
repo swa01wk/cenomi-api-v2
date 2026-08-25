@@ -58,6 +58,14 @@ def should_browse_leases(state: dict[str, Any]) -> bool:
     confirmation agents use purpose-scoped lease lookups and must not show the
     generic Handover SR picker.
     """
+    from app.core.config import settings
+
+    # Off by default — see HANDOVER_LEASE_PICKER_ENABLED. Suggesting arbitrary
+    # leases the user never asked for is noise in front of a question they can
+    # simply answer; disabling falls through to the plain lease-code prompt.
+    if not settings.handover_lease_picker_enabled:
+        return False
+
     active_agent = state.get("active_agent") or ""
     if active_agent not in ("rdd_handover_agent", ""):
         return False

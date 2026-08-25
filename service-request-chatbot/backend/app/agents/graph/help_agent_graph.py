@@ -210,6 +210,20 @@ def _route_after_load(state: dict[str, Any]) -> str:
 
     agent = state.get("active_agent")
     if agent:
+        # A help question asked mid-collection must not be swallowed by the
+        # open field. Observed live: "Help me with Dashboard" was bound to
+        # active_field=lease_code and answered "Sorry, I couldn't find a lease
+        # matching that information", and the session could only be recovered by
+        # deleting it. faq_node writes only response_message/status, so the
+        # draft survives and collection resumes on the next turn.
+        from app.agents.services.help_interrupt_service import detect_help_interrupt
+
+        if detect_help_interrupt(
+            user_message,
+            active_agent=agent,
+            active_field=state.get("active_field"),
+        ):
+            return "faq_node"
         return _AGENT_ENTRY_NODES.get(agent, "supervisor")
     return "supervisor"
 
@@ -707,6 +721,9 @@ def build_help_agent_graph():
             "handover_entry": "handover_entry",
             "work_permit_entry": "work_permit_entry",
             "fitout_confirm_entry": "fitout_confirm_entry",
+            # Help question asked mid-collection — answered without disturbing
+            # the draft (see detect_help_interrupt).
+            "faq_node": "faq_node",
         },
     )
     graph.add_conditional_edges(

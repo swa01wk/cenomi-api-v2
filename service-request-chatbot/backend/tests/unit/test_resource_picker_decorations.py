@@ -8,6 +8,7 @@ from app.agents.services.resource_picker_decorations import (
     build_resource_picker,
     should_browse_leases,
 )
+from app.core.config import settings
 
 
 def test_build_resource_picker_shape() -> None:
@@ -33,12 +34,22 @@ def test_build_create_lease_picker() -> None:
     assert spec["selection"]["mode"] == "select_lease"
 
 
-def test_should_browse_leases_create_sr_unresolved() -> None:
+def test_should_browse_leases_create_sr_unresolved(monkeypatch) -> None:
+    """The stage/lease conditions still hold — but only when the picker is
+    enabled. It is off by default now (HANDOVER_LEASE_PICKER_ENABLED): the
+    browse chips listed leases the user had not asked for, in front of a
+    question they can simply answer."""
     state = {"workflow_stage": "CREATE_SR", "collected_data": {}}
+    assert should_browse_leases(state) is False
+
+    monkeypatch.setattr(settings, "handover_lease_picker_enabled", True)
     assert should_browse_leases(state) is True
 
 
-def test_should_browse_leases_defaults_stage_to_create_sr() -> None:
+def test_should_browse_leases_defaults_stage_to_create_sr(monkeypatch) -> None:
+    assert should_browse_leases({"collected_data": {}}) is False
+
+    monkeypatch.setattr(settings, "handover_lease_picker_enabled", True)
     assert should_browse_leases({"collected_data": {}}) is True
 
 

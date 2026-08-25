@@ -125,6 +125,13 @@ def _dump_records(dump_dir: str, source_type: str, kind: str, records: list[dict
              count=len(records), path=path)
 
 
+def _as_aware_utc(value: datetime | None) -> datetime | None:
+    """Cenomi DB timestamp columns are naive (assumed UTC) — see pg_reader._strip_tzinfo."""
+    if value is not None and value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value
+
+
 def _cap_rows(rows: list[dict], cap: int) -> tuple[list[dict], datetime | None]:
     """Apply INDEXER_MAX_DOCS_PER_RUN, oldest first.
 
@@ -136,10 +143,10 @@ def _cap_rows(rows: list[dict], cap: int) -> tuple[list[dict], datetime | None]:
         return rows, None
     ordered = sorted(
         rows,
-        key=lambda r: r.get("row_updated_at") or datetime.min.replace(tzinfo=UTC),
+        key=lambda r: _as_aware_utc(r.get("row_updated_at")) or datetime.min.replace(tzinfo=UTC),
     )
     kept = ordered[:cap]
-    capped_at = kept[-1].get("row_updated_at")
+    capped_at = _as_aware_utc(kept[-1].get("row_updated_at"))
     log.warning(
         "indexer.rows_capped",
         cap=cap,

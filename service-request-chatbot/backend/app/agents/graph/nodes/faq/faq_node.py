@@ -330,6 +330,17 @@ async def faq_node(state: ServiceRequestState) -> dict[str, Any]:
     # list here suppresses the source chips on every surface at once.  Retrieval
     # itself is unaffected: ``rag_block`` still grounds the answer, and the
     # retrieved titles are still logged above for RAG-quality debugging.
+    # Answered mid-collection: restate the open question so the user is not left
+    # wondering whether their service request survived. It did — this node writes
+    # only response_message/status, so collected_data and active_field are intact
+    # and the next turn continues where it left off.
+    active_field = state.get("active_field")
+    if active_field:
+        from app.agents.graph.nodes.handover.confirmation_node import _FIELD_LABELS
+
+        label = _FIELD_LABELS.get(active_field, str(active_field).replace("_", " "))
+        answer = f"{answer}\n\n---\n\nBack to your service request — please provide the {label}."
+
     return {
         "response_message": answer,
         "status": "WAITING_FOR_USER",
