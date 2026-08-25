@@ -15,6 +15,10 @@ from app.agents.graph.nodes.notification.notification_entry_node import (
     notification_entry_node,
 )
 from app.agents.graph.nodes.supervisor_node import supervisor_node
+from app.agents.services.notification_inbox_service import (
+    MockNotificationInboxService,
+    NotificationInboxResult,
+)
 from app.types.chat import AuthContext
 
 
@@ -66,13 +70,138 @@ async def test_detail_without_snapshot_still_resolves_id() -> None:
     assert "NTF-000012" in result["response_message"]
 
 
+_NODE_MODULE = "app.agents.graph.nodes.notification.notification_entry_node"
+
+
+def _mock_inbox_service() -> MockNotificationInboxService:
+    return MockNotificationInboxService()
+
+
 @pytest.mark.asyncio
-async def test_list_emits_notification_list_card() -> None:
+async def test_list_without_auth_asks_to_sign_in() -> None:
     result = await notification_entry_node(
         _state(user_message="Show my notifications")
     )
     assert result["intent"] == "LIST_NOTIFICATIONS"
-    assert result["response_ui"]["type"] == "notification_list_card"
+    assert result["response_ui"]["type"] == "message"
+    assert "sign" in result["response_message"].lower()
+
+
+@pytest.mark.asyncio
+async def test_list_emits_grouped_notification_list() -> None:
+    with patch(
+        f"{_NODE_MODULE}.get_notification_inbox_service",
+        return_value=_mock_inbox_service(),
+    ):
+        result = await notification_entry_node(
+            _state(
+                user_message="Show my notifications",
+                auth_context=AuthContext(
+                    subject_id="123", roles=frozenset({"DD_ENGINEER"})
+                ),
+            )
+        )
+    ui = result["response_ui"]
+    assert result["intent"] == "LIST_NOTIFICATIONS"
+    assert ui["type"] == "notification_list"
+    subs = [g["sub_category"] for g in ui["groups"]]
+    assert subs == [
+        "HANDOVER",
+        "FIT_OUT_CONFIRM_HO",
+        "FIT_OUT_CONFIRM_FOS",
+        "FIT_OUT_CONFIRM_END",
+        "FIT_OUT_CONFIRM_TRADING",
+    ]
+    handover = ui["groups"][0]
+    assert handover["total_count"] == 2
+    assert handover["notifications"][0]["sr_id"] == "11711"
+    assert "action-required" in result["response_message"]
+
+
+@pytest.mark.asyncio
+async def test_list_respects_role_audience() -> None:
+    """Mall Manager only has the HANDOVER tool audience."""
+    with patch(
+        f"{_NODE_MODULE}.get_notification_inbox_service",
+        return_value=_mock_inbox_service(),
+    ):
+        result = await notification_entry_node(
+            _state(
+                user_message="Show my notifications",
+                auth_context=AuthContext(
+                    subject_id="55", roles=frozenset({"MALL_MANAGER"})
+                ),
+            )
+        )
+    subs = [g["sub_category"] for g in result["response_ui"]["groups"]]
+    assert subs == ["HANDOVER"]
+
+
+@pytest.mark.asyncio
+async def test_list_applies_unread_and_category_filters() -> None:
+    with patch(
+        f"{_NODE_MODULE}.get_notification_inbox_service",
+        return_value=_mock_inbox_service(),
+    ):
+        result = await notification_entry_node(
+            _state(
+                user_message="show unread handover notifications",
+                auth_context=AuthContext(
+                    subject_id="55", roles=frozenset({"MALL_MANAGER"})
+                ),
+            )
+        )
+    ui = result["response_ui"]
+    assert ui["filters"] == {"unread": True, "sub_categories": ["HANDOVER"]}
+    assert len(ui["groups"]) == 1
+    # The read HANDOVER fixture (11712) is filtered out.
+    sr_ids = [n["sr_id"] for n in ui["groups"][0]["notifications"]]
+    assert sr_ids == ["11711"]
+
+
+@pytest.mark.asyncio
+async def test_list_total_failure_returns_graceful_message() -> None:
+    failed = AsyncMock()
+    failed.fetch_inbox = AsyncMock(
+        return_value=NotificationInboxResult(success=False, error="HTTP 502")
+    )
+    with patch(
+        f"{_NODE_MODULE}.get_notification_inbox_service",
+        return_value=failed,
+    ):
+        result = await notification_entry_node(
+            _state(
+                user_message="Show my notifications",
+                auth_context=AuthContext(
+                    subject_id="123", roles=frozenset({"DD_ENGINEER"})
+                ),
+            )
+        )
+    assert result["response_ui"]["type"] == "message"
+    assert "couldn't load" in result["response_message"]
+
+
+@pytest.mark.asyncio
+async def test_list_empty_inbox_message() -> None:
+    empty = AsyncMock()
+    empty.fetch_inbox = AsyncMock(
+        return_value=NotificationInboxResult(success=True, groups=[])
+    )
+    with patch(
+        f"{_NODE_MODULE}.get_notification_inbox_service",
+        return_value=empty,
+    ):
+        result = await notification_entry_node(
+            _state(
+                user_message="Show my notifications",
+                auth_context=AuthContext(
+                    subject_id="123", roles=frozenset({"DD_ENGINEER"})
+                ),
+            )
+        )
+    assert result["response_ui"]["type"] == "notification_list"
+    assert result["response_ui"]["groups"] == []
+    assert "caught up" in result["response_message"]
 
 
 @pytest.mark.asyncio
@@ -155,3 +284,47 @@ async def test_supervisor_viewing_sr_status_skips_llm() -> None:
     mock_llm.assert_not_called()
     assert result["intent"] == "CHECK_SERVICE_REQUEST_STATUS"
     assert result["backend_refs"]["sr_id"] == "11711"
+
+
+# ---------------------------------------------------------------------------
+# OPEN_NOTIFICATION — seeded handoff routing
+# ---------------------------------------------------------------------------
+
+
+def _seeded_open_state(**kwargs: Any) -> dict[str, Any]:
+    base = _state(
+        user_message="",
+        intent="OPEN_NOTIFICATION",
+        action_override="open_notification",
+        backend_refs={"sr_id": "11711", "opened_from_notification": True},
+    )
+    base.update(kwargs)
+    return base
+
+
+def test_seeded_open_turn_routes_to_sr_status_sync() -> None:
+    assert _route_after_load(_seeded_open_state()) == "sr_status_sync"
+
+
+def test_seeded_open_turn_bypasses_notification_node_even_with_viewing_context() -> None:
+    state = _seeded_open_state(viewing_notification_id="NTF-000012")
+    assert _route_after_load(state) == "sr_status_sync"
+
+
+def test_legacy_open_action_without_seed_still_hits_notification_node() -> None:
+    state = _state(
+        user_message="",
+        action_override="open_notification",
+        viewing_notification_id="NTF-000012",
+    )
+    assert _route_after_load(state) == "notification"
+
+
+def test_free_text_answer_not_hijacked_by_list_pattern() -> None:
+    """An SR description mentioning alerts must stay with the open field."""
+    state = _state(
+        user_message="check the fire alerts on level 2",
+        active_agent="rdd_handover_agent",
+        active_field="description",
+    )
+    assert _route_after_load(state) == "handover_entry"

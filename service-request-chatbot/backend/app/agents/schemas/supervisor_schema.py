@@ -36,6 +36,7 @@ class SupervisorDecision(BaseModel):
         "LIST_NOTIFICATIONS",
         "GET_NOTIFICATION_DETAIL",
         "MARK_NOTIFICATION_READ",
+        "OPEN_NOTIFICATION",
         "UNKNOWN",
     ] = Field(description="Classified user intent")
 

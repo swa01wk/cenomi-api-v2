@@ -150,6 +150,14 @@ class _MSPChatContext(BaseModel):
         default=None,
         description="Optional notification snapshot {id, title, body, related_sr_id, status}.",
     )
+    active_notification_id: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Open-notification reference {id: <SR id>, sub_category}. Seeds the "
+            "SR workflow handoff (OPEN_NOTIFICATION) — id is the SR id from the "
+            "notification's text_content.id, not the notification row id."
+        ),
+    )
 
 
 class MSPChatRequest(BaseModel):

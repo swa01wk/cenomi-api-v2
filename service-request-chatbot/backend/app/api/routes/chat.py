@@ -24,7 +24,7 @@ from uuid import UUID, uuid4
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from app.core.security import get_auth_context
 from app.db.session import DbSession
@@ -51,6 +51,28 @@ service_request_router = APIRouter()
 # ---------------------------------------------------------------------------
 # Request / Response models — POST /api/chat/service-request
 # ---------------------------------------------------------------------------
+
+
+class ActiveNotificationRef(BaseModel):
+    """Notification the user tapped "Open" on — carries the SR reference.
+
+    ``id`` is the platform SR id (``text_content.id`` on the notification
+    payload), NOT the notification row id.  ``sub_category`` lets the backend
+    seed the correct agent up front; when absent or unmapped, sr_status_sync
+    re-derives it from the SR payload.
+    """
+
+    id: str = Field(description="Service request id from the notification payload.")
+    sub_category: str | None = Field(
+        default=None,
+        description="SR sub-category, e.g. HANDOVER / FIT_OUT_CONFIRM_FOS.",
+        examples=["HANDOVER"],
+    )
+
+    @field_validator("id", mode="before")
+    @classmethod
+    def _coerce_id(cls, value: Any) -> str:
+        return str(value).strip()
 
 
 class ServiceRequestChatRequest(BaseModel):
@@ -139,6 +161,14 @@ class ServiceRequestChatRequest(BaseModel):
         description=(
             "Optional notification snapshot (id, title, body, related_sr_id, status). "
             "Used until a platform notifications API is wired; the UI may send this with the turn."
+        ),
+    )
+    active_notification_id: ActiveNotificationRef | None = Field(
+        default=None,
+        description=(
+            "Sent when the user taps Open on a notification. Seeds the SR id "
+            "(and agent, when sub_category maps) and routes straight into "
+            "sr_status_sync — the OPEN_NOTIFICATION flow."
         ),
     )
 
@@ -237,10 +267,20 @@ async def post_service_request_chat(
     # OR a session_id is present (silent refresh — e.g. after a document upload
     # the FE calls refreshAfterUpload with an empty message so the graph re-emits
     # the current stage's UI with the new document row).
-    if not body.message and not body.sr_id and not body.action and not body.session_id and not body.viewing_notification_id:
+    if (
+        not body.message
+        and not body.sr_id
+        and not body.action
+        and not body.session_id
+        and not body.viewing_notification_id
+        and not body.active_notification_id
+    ):
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="Either 'message', 'sr_id', 'action', 'session_id', or 'viewing_notification_id' must be provided.",
+            detail=(
+                "Either 'message', 'sr_id', 'action', 'session_id', "
+                "'viewing_notification_id', or 'active_notification_id' must be provided."
+            ),
         )
 
     # Resolve user_id: JWT subject_id takes precedence over request body user_id
@@ -278,6 +318,11 @@ async def post_service_request_chat(
             viewing_notification_id=body.viewing_notification_id,
             viewing_service_request_id=body.viewing_service_request_id,
             viewing_notification=body.viewing_notification,
+            active_notification_id=(
+                body.active_notification_id.model_dump()
+                if body.active_notification_id
+                else None
+            ),
         )
     except Exception as exc:
         bound_log.exception("api.chat.service_request.unhandled_error", error=str(exc))

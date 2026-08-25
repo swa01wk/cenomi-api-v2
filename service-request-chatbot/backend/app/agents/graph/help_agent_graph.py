@@ -189,9 +189,10 @@ def _route_after_load(state: dict[str, Any]) -> str:
     _awaiting_free_text = state.get("active_field") in _FREE_TEXT_ANSWER_FIELDS
     if not _awaiting_free_text and _user_wants_preview(user_message):
         return "supervisor"
-    if should_bypass_for_notification_context(state):
+    if not _awaiting_free_text and should_bypass_for_notification_context(state):
         # Notification list/detail/mark-read (including deictic viewing context)
-        # must not be swallowed by an already-active SR agent.
+        # must not be swallowed by an already-active SR agent.  Free-text answers
+        # (e.g. an SR description mentioning "alerts") stay with the open field.
         if classify_notification_intent_from_state(state) is not None:
             return "notification"
         return "supervisor"

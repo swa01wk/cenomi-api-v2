@@ -1,12 +1,12 @@
-"""Notification agent — list / explain / mark-read using page viewing context.
+"""Notification agent — list / explain / mark-read.
 
-There is no platform notifications API in this service yet.  This node is the
-AI contract the UI repo will integrate against:
-
-- ``response_ui.type = notification_list_card`` — UI fetches the inbox list
+- ``response_ui.type = notification_list`` — action-required inbox fetched from
+  the platform's TC-3520 agent endpoints, grouped by SR sub-category.  Each row
+  carries ``sr_id`` so the UI can open it via ``active_notification_id``.
 - ``response_ui.type = notification_detail_card`` — explain the viewed item
+  (page viewing context).
 - ``response_ui.type = notification_action`` / ``action = mark_read`` — UI
-  performs the mutation
+  performs the mutation (no platform mark-read endpoint on the agent mux).
 
 The backend resolves *which* notification the user means (explicit ID vs
 ``viewing_notification_id``) and composes the assistant reply.  It does not
@@ -20,8 +20,14 @@ from typing import Any
 import structlog
 
 from app.agents.graph.state import ServiceRequestState
+from app.agents.services.notification_inbox_service import (
+    SUB_CATEGORY_LABELS,
+    NotificationInboxResult,
+    get_notification_inbox_service,
+)
 from app.agents.services.notification_intent import (
     classify_notification_intent_from_state,
+    parse_notification_list_filters,
     resolved_notification_id_from_state,
 )
 from app.agents.services.review_decorations_service import build_inbox_decorations
@@ -68,18 +74,100 @@ def _summarize_snapshot(notification_id: str, snapshot: dict[str, Any]) -> str:
     return " ".join(parts)
 
 
-def _list_response(state: ServiceRequestState) -> dict[str, Any]:
+def _group_summary(result: NotificationInboxResult) -> str:
+    parts = [
+        f"{group.total_count} {SUB_CATEGORY_LABELS.get(group.sub_category, group.sub_category)}"
+        for group in result.groups
+    ]
+    return ", ".join(parts)
+
+
+def _serialize_groups(result: NotificationInboxResult) -> list[dict[str, Any]]:
+    return [
+        {
+            "sub_category": group.sub_category,
+            "label": SUB_CATEGORY_LABELS.get(group.sub_category, group.sub_category),
+            "total_count": group.total_count,
+            "notifications": [
+                {
+                    "notification_id": item.notification_id,
+                    "sr_id": item.sr_id,
+                    "message": item.message,
+                    "created_at": item.created_at,
+                    "read": bool(item.read_at),
+                    "action_required": item.action_required,
+                    "lease_id": item.lease_id,
+                    "unique_property_id": item.unique_property_id,
+                }
+                for item in group.items
+            ],
+        }
+        for group in result.groups
+    ]
+
+
+async def _list_response(state: ServiceRequestState) -> dict[str, Any]:
     auth: AuthContext | None = state.get("auth_context")  # type: ignore[assignment]
     decorations = build_inbox_decorations(auth) if auth is not None else {}
+
+    user_id = (auth.subject_id if auth is not None else "") or ""
+    if not user_id or user_id in ("anonymous", "unauthenticated", "chat_user"):
+        return {
+            "intent": "LIST_NOTIFICATIONS",
+            "response_message": (
+                "I can't load your notifications without a signed-in platform "
+                "account. Please sign in and try again."
+            ),
+            "response_ui": {"type": "message"},
+            "status": "WAITING_FOR_USER",
+        }
+
+    filters = parse_notification_list_filters(state.get("user_message") or "")
+    service = get_notification_inbox_service()
+    roles = auth.roles if auth is not None else frozenset()
+    inbox = await service.fetch_inbox(user_id=user_id, roles=roles, filters=filters)
+
+    if not inbox.success:
+        log.warning("notification_entry.list_failed", error=inbox.error)
+        return {
+            "intent": "LIST_NOTIFICATIONS",
+            "response_message": (
+                "Sorry — I couldn't load your notifications right now. "
+                "Please try again in a moment."
+            ),
+            "response_ui": {"type": "message"},
+            "status": "WAITING_FOR_USER",
+        }
+
+    applied_filters: dict[str, Any] = {}
+    if filters.unread is not None:
+        applied_filters["unread"] = filters.unread
+    if filters.sub_categories:
+        applied_filters["sub_categories"] = list(filters.sub_categories)
+
+    if not inbox.groups:
+        message = (
+            "You have no action-required notifications matching that filter."
+            if applied_filters
+            else "You're all caught up — no action-required notifications."
+        )
+    else:
+        message = (
+            f"You have {inbox.total} action-required "
+            f"notification{'s' if inbox.total != 1 else ''}: {_group_summary(inbox)}. "
+            "Open one to continue its workflow."
+        )
+    if inbox.partial_errors:
+        message += " (Some notification sources were unavailable.)"
+
     result: dict[str, Any] = {
         "intent": "LIST_NOTIFICATIONS",
-        "response_message": (
-            "Here are your notifications. Open one to inspect it, or tell me "
-            "which notification you'd like me to explain."
-        ),
+        "response_message": message,
         "response_ui": {
-            "type": "notification_list_card",
-            "message": "Your latest notifications.",
+            "type": "notification_list",
+            "message": message,
+            "filters": applied_filters,
+            "groups": _serialize_groups(inbox),
         },
         "status": "WAITING_FOR_USER",
     }
@@ -186,7 +274,7 @@ async def notification_entry_node(state: ServiceRequestState) -> dict[str, Any]:
     )
 
     if intent == "LIST_NOTIFICATIONS":
-        return _list_response(state)
+        return await _list_response(state)
     if intent == "MARK_NOTIFICATION_READ":
         return _mark_read_response(state)
     return _detail_response(state)

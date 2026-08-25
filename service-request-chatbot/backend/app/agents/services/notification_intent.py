@@ -10,6 +10,7 @@ from __future__ import annotations
 import re
 from typing import Any, Literal
 
+from app.agents.services.notification_inbox_service import NotificationListFilters
 from app.agents.services.viewing_context import (
     extract_notification_id,
     references_viewing_notification,
@@ -104,8 +105,18 @@ def classify_notification_intent(
     return None
 
 
+def _is_seeded_open_turn(state: dict[str, Any]) -> bool:
+    """True when orchestration seeded an OPEN_NOTIFICATION → sr_status_sync turn."""
+    backend_refs = state.get("backend_refs") or {}
+    return bool(backend_refs.get("opened_from_notification"))
+
+
 def classify_notification_intent_from_state(state: dict[str, Any]) -> NotificationIntent | None:
     """Classify from graph state, including UI ``action_override`` and viewing IDs."""
+    if _is_seeded_open_turn(state):
+        # OPEN_NOTIFICATION turns carry an authoritative SR seed and must reach
+        # sr_status_sync — never the notification side-path.
+        return None
     action = (state.get("action_override") or "").strip()
     viewing_notification_id, _viewing_sr = viewing_ids_from_state(state)
     if action in {"mark_notification_read", "mark_read"}:
@@ -125,6 +136,8 @@ def should_bypass_for_notification_context(state: dict[str, Any]) -> bool:
     when the UI sends viewing context, instead of swallowing the turn in the
     active SR agent.
     """
+    if _is_seeded_open_turn(state):
+        return False
     if classify_notification_intent_from_state(state) is not None:
         return True
     viewing_notification_id, viewing_sr_id = viewing_ids_from_state(state)
@@ -138,6 +151,62 @@ def should_bypass_for_notification_context(state: dict[str, Any]) -> bool:
             return True
         return True
     return False
+
+
+# ---------------------------------------------------------------------------
+# NL list filters
+# ---------------------------------------------------------------------------
+
+_UNREAD_PATTERN = re.compile(r"\bunread\b|\bnot\s+read\b|\bnew\s+notifications?\b", re.IGNORECASE)
+
+# Sub-category keyword cues.  Bare "end" / "ho" are collision-prone, so they
+# require a fit-out cue in the same message; the long forms match on their own.
+_SUB_CATEGORY_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("HANDOVER", re.compile(r"\bhand[\s-]?over\b", re.IGNORECASE)),
+    (
+        "FIT_OUT_CONFIRM_FOS",
+        re.compile(r"\bfos\b|\bfit[\s-]?out\s+start\b", re.IGNORECASE),
+    ),
+    (
+        "FIT_OUT_CONFIRM_END",
+        re.compile(r"\bfit[\s-]?out\s+(end|complet\w*)\b", re.IGNORECASE),
+    ),
+    ("FIT_OUT_CONFIRM_TRADING", re.compile(r"\btrading\b", re.IGNORECASE)),
+    (
+        "FIT_OUT_CONFIRM_HO",
+        re.compile(
+            r"\bhandover\s+confirm\w*\b|\bconfirm\w*\s+handover\b|\bfit[\s-]?out\s+ho\b",
+            re.IGNORECASE,
+        ),
+    ),
+)
+
+
+def parse_notification_list_filters(message: str) -> NotificationListFilters:
+    """Derive inbox filters from a LIST_NOTIFICATIONS message.
+
+    Returns ``sub_categories=None`` (all eligible) when no category keyword is
+    present.  "Handover confirmation" wins over plain "handover".
+    """
+    text = (message or "").strip()
+    if not text:
+        return NotificationListFilters()
+
+    unread = True if _UNREAD_PATTERN.search(text) else None
+
+    matched: list[str] = []
+    for sub, pattern in _SUB_CATEGORY_PATTERNS:
+        if pattern.search(text):
+            matched.append(sub)
+    # "handover confirmation" also matches the plain handover cue — prefer the
+    # more specific HO tool when both hit.
+    if "FIT_OUT_CONFIRM_HO" in matched and "HANDOVER" in matched:
+        matched.remove("HANDOVER")
+
+    return NotificationListFilters(
+        sub_categories=tuple(matched) or None,
+        unread=unread,
+    )
 
 
 def resolved_notification_id_from_state(state: dict[str, Any]) -> str | None:

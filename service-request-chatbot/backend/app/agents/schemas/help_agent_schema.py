@@ -38,6 +38,7 @@ _SR_READ_INTENTS: frozenset[str] = frozenset(
         "LIST_NOTIFICATIONS",
         "GET_NOTIFICATION_DETAIL",
         "MARK_NOTIFICATION_READ",
+        "OPEN_NOTIFICATION",
         "UNKNOWN",
     }
 )

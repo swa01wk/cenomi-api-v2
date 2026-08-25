@@ -58,6 +58,7 @@ from app.agents.services.review_decorations_service import (
 )
 from app.agents.services.conversation_state_service import ConversationStateService
 from app.agents.services.notification_intent import NOTIFICATION_INTENTS
+from app.agents.registry import lookup_agent
 from app.services.response_ui_finalize import finalize_response_ui
 from app.core.injection_guard import scan_message
 from app.db.models import ChatSession
@@ -128,6 +129,29 @@ def resolve_turn_sr_id(
     return sr_id
 
 
+def build_open_notification_seed(
+    notification_ref: dict[str, Any],
+    *,
+    session_active_agent: str | None,
+) -> dict[str, Any]:
+    """State updates for an OPEN_NOTIFICATION turn (UI sent active_notification_id).
+
+    Maps the notification's ``sub_category`` to an agent via the registry when
+    possible; unmapped sub-categories (e.g. FIT_OUT_CONFIRM_HO) seed nothing
+    extra — ``sr_status_sync`` re-derives sub_category from the SR payload, and
+    a state-level value would incorrectly win its cascade.  A live session's
+    ``active_agent`` is never clobbered.
+    """
+    updates: dict[str, Any] = {"intent": "OPEN_NOTIFICATION"}
+    sub = str(notification_ref.get("sub_category") or "").strip().upper()
+    agent_cfg = lookup_agent("FIT_OUT_AND_HANDOVER", sub) if sub else None
+    if agent_cfg and not session_active_agent:
+        updates["active_agent"] = agent_cfg["agent_name"]
+        updates["service_category"] = "FIT_OUT_AND_HANDOVER"
+        updates["sub_category"] = sub
+    return updates
+
+
 # ---------------------------------------------------------------------------
 # Result type
 # ---------------------------------------------------------------------------
@@ -195,6 +219,7 @@ class ChatOrchestrationService:
         viewing_notification_id: str | None = None,
         viewing_service_request_id: str | None = None,
         viewing_notification: dict[str, Any] | None = None,
+        active_notification_id: dict[str, Any] | None = None,
     ) -> ChatTurnResult:
         """Run one turn, serialised against other turns for the same session.
 
@@ -214,6 +239,10 @@ class ChatOrchestrationService:
             sr_id=sr_id,
             language=language,
             msp_context=msp_context,
+            viewing_notification_id=viewing_notification_id,
+            viewing_service_request_id=viewing_service_request_id,
+            viewing_notification=viewing_notification,
+            active_notification_id=active_notification_id,
         )
         if session_id is None:
             return await self._process_turn_serialised(**kwargs)
@@ -250,12 +279,25 @@ class ChatOrchestrationService:
         sr_id: str | None = None,
         language: str | None = None,
         msp_context: dict[str, Any] | None = None,
+        viewing_notification_id: str | None = None,
+        viewing_service_request_id: str | None = None,
+        viewing_notification: dict[str, Any] | None = None,
+        active_notification_id: dict[str, Any] | None = None,
     ) -> ChatTurnResult:
         """Execute one complete chat turn and return structured result."""
 
-        sr_id = resolve_turn_sr_id(
-            session_id=session_id, sr_id=sr_id, message=message
+        # Opening a notification carries an authoritative SR reference — it must
+        # never be dropped as a "stale" sr_id, even alongside a seed message.
+        notification_ref = active_notification_id or (msp_context or {}).get(
+            "active_notification_id"
         )
+        if isinstance(notification_ref, dict) and notification_ref.get("id"):
+            sr_id = sr_id or str(notification_ref["id"]).strip()
+        else:
+            notification_ref = None
+            sr_id = resolve_turn_sr_id(
+                session_id=session_id, sr_id=sr_id, message=message
+            )
 
         # 1. Load or create session ----------------------------------------
         chat_session = await self._load_or_create_session(session_id, user_id)
@@ -405,6 +447,23 @@ class ChatOrchestrationService:
                     initial_state["response_decorations"] = inbox_deco
         if sr_id:
             backend_refs["sr_id"] = sr_id
+        if notification_ref is not None:
+            # OPEN_NOTIFICATION — the user tapped a notification whose payload
+            # carries the SR id (platform text_content.id).  Seed the open-SR
+            # path directly; sr_status_sync does the rest (stage mapping +
+            # active_agent re-hydration).
+            backend_refs["opened_from_notification"] = True
+            seed = build_open_notification_seed(
+                notification_ref,
+                session_active_agent=chat_session.active_agent,
+            )
+            initial_state.update(seed)
+            log.info(
+                "chat.open_notification",
+                sr_id=sr_id,
+                sub_category=notification_ref.get("sub_category"),
+                seeded_agent=seed.get("active_agent"),
+            )
         if backend_refs:
             initial_state["backend_refs"] = backend_refs
         # MSP Platform fields — injected by the MSP adapter layer only;
@@ -656,7 +715,13 @@ class ChatOrchestrationService:
         # (handover_entry_node writes intent=None), which is handled by the
         # new_agent != chat_session.active_agent guard above flushing that state.
         is_unknown = (new_intent or "").upper() == "UNKNOWN"
-        is_transient = is_unknown or (new_intent or "") in NOTIFICATION_INTENTS
+        # OPEN_NOTIFICATION is a routing seed, not a workflow intent — the SR
+        # workflow it lands in persists its own intents on later turns.
+        is_transient = (
+            is_unknown
+            or (new_intent or "") in NOTIFICATION_INTENTS
+            or (new_intent or "") == "OPEN_NOTIFICATION"
+        )
         if new_intent != chat_session.intent and not is_transient:
             updates["intent"] = new_intent
 

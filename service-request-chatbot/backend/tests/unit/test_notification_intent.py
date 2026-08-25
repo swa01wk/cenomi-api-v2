@@ -135,3 +135,68 @@ def test_status_question_resolves_viewing_sr() -> None:
     assert (
         resolve_service_request_id("What's the status?", "11711") == "11711"
     )
+
+
+# ---------------------------------------------------------------------------
+# NL list filters
+# ---------------------------------------------------------------------------
+
+
+from app.agents.services.notification_intent import parse_notification_list_filters
+
+
+@pytest.mark.parametrize(
+    "message,subs,unread",
+    [
+        ("show my notifications", None, None),
+        ("show unread notifications", None, True),
+        ("any new notifications?", None, True),
+        ("show handover notifications", ("HANDOVER",), None),
+        ("list my FOS notifications", ("FIT_OUT_CONFIRM_FOS",), None),
+        ("fit-out start notifications", ("FIT_OUT_CONFIRM_FOS",), None),
+        ("fit out end notifications", ("FIT_OUT_CONFIRM_END",), None),
+        ("show trading notifications", ("FIT_OUT_CONFIRM_TRADING",), None),
+        ("handover confirmation notifications", ("FIT_OUT_CONFIRM_HO",), None),
+        (
+            "unread handover and trading notifications",
+            ("HANDOVER", "FIT_OUT_CONFIRM_TRADING"),
+            True,
+        ),
+    ],
+)
+def test_parse_notification_list_filters(message, subs, unread) -> None:
+    filters = parse_notification_list_filters(message)
+    assert filters.sub_categories == subs
+    assert filters.unread == unread
+
+
+def test_filters_empty_message() -> None:
+    filters = parse_notification_list_filters("")
+    assert filters.sub_categories is None
+    assert filters.unread is None
+
+
+# ---------------------------------------------------------------------------
+# Seeded OPEN_NOTIFICATION turns bypass the notification side-path
+# ---------------------------------------------------------------------------
+
+
+def test_seeded_open_turn_not_classified() -> None:
+    state = {
+        "user_message": "",
+        "action_override": "open_notification",
+        "backend_refs": {"sr_id": "11711", "opened_from_notification": True},
+        "viewing_notification_id": "NTF-000012",
+    }
+    assert classify_notification_intent_from_state(state) is None
+    assert should_bypass_for_notification_context(state) is False
+
+
+def test_legacy_open_action_without_seed_still_detail() -> None:
+    state = {
+        "user_message": "",
+        "action_override": "open_notification",
+        "backend_refs": {},
+        "viewing_notification_id": "NTF-000012",
+    }
+    assert classify_notification_intent_from_state(state) == "GET_NOTIFICATION_DETAIL"

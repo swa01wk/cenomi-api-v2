@@ -144,7 +144,15 @@ VALID INTENTS
       User wants to browse their notification inbox / alerts.
       Keywords: show my notifications, list notifications, my alerts, inbox,
                 unread notifications
+      Filtered variants stay LIST_NOTIFICATIONS: "show unread notifications",
+      "handover notifications", "fit-out start / FOS notifications",
+      "trading notifications" — the filter is parsed downstream.
       Routing: target_agent = "notification_agent"
+
+  OPEN_NOTIFICATION
+      System-set only — never classify this from text.  The UI sends
+      active_notification_id when the user taps Open on a notification and
+      the backend seeds the SR workflow directly.
 
   GET_NOTIFICATION_DETAIL
       User wants an explanation or details of a specific notification.
