@@ -24,20 +24,39 @@ from app.agents.services.notification_inbox_service import (
 
 
 class TestAudienceSelection:
-    def test_mall_manager_only_handover(self) -> None:
-        assert _select_sub_categories(frozenset({"MALL_MANAGER"}), None) == ("HANDOVER",)
+    def test_mall_manager_handover_and_trading(self) -> None:
+        assert _select_sub_categories(frozenset({"MALL_MANAGER"}), None) == (
+            "HANDOVER",
+            "FIT_OUT_CONFIRM_TRADING",
+        )
 
     def test_fm_manager_only_handover(self) -> None:
         assert _select_sub_categories(frozenset({"FM_MANAGER"}), None) == ("HANDOVER",)
 
-    def test_dd_engineer_all_five(self) -> None:
-        assert _select_sub_categories(frozenset({"DD_ENGINEER"}), None) == NOTIFICATION_SUB_CATEGORIES
+    def test_operations_handover_and_trading(self) -> None:
+        assert _select_sub_categories(frozenset({"OPERATIONS"}), None) == (
+            "HANDOVER",
+            "FIT_OUT_CONFIRM_TRADING",
+        )
+
+    def test_dd_engineer_all_but_trading(self) -> None:
+        assert _select_sub_categories(frozenset({"DD_ENGINEER"}), None) == (
+            "HANDOVER",
+            "FIT_OUT_CONFIRM_FOS",
+            "FIT_OUT_CONFIRM_END",
+        )
 
     def test_empty_roles_call_all(self) -> None:
         assert _select_sub_categories(frozenset(), None) == NOTIFICATION_SUB_CATEGORIES
 
     def test_unknown_roles_call_all(self) -> None:
-        assert _select_sub_categories(frozenset({"81"}), None) == NOTIFICATION_SUB_CATEGORIES
+        # Role matching is by enum NAME only — an unrecognised name (never a
+        # numeric role id) falls back to calling everything; the platform's
+        # server-side audience intersection keeps that safe.
+        assert (
+            _select_sub_categories(frozenset({"SOME_UNKNOWN_ROLE"}), None)
+            == NOTIFICATION_SUB_CATEGORIES
+        )
 
     def test_admin_calls_all(self) -> None:
         roles = frozenset({"ADMIN", "MALL_MANAGER"})
@@ -134,7 +153,7 @@ class TestHttpFetch:
             get = AsyncMock(return_value=_mock_response(200, _platform_body("HANDOVER", [item])))
             mock_httpx.return_value.__aenter__.return_value.get = get
             result = await _http_service().fetch_inbox(
-                user_id="123", roles=frozenset({"MALL_MANAGER"})
+                user_id="123", roles=frozenset({"FM_MANAGER"})
             )
         assert result.success
         assert len(result.groups) == 1
@@ -173,7 +192,7 @@ class TestHttpFetch:
             mock_httpx.return_value.__aenter__.return_value.get = get
             await _http_service().fetch_inbox(
                 user_id="123",
-                roles=frozenset({"MALL_MANAGER"}),
+                roles=frozenset({"FM_MANAGER"}),
                 filters=NotificationListFilters(unread=True),
             )
         _, kwargs = get.call_args
@@ -202,10 +221,8 @@ class TestHttpFetch:
         assert result.success
         assert [g.sub_category for g in result.groups] == ["HANDOVER"]
         assert set(result.partial_errors) == {
-            "FIT_OUT_CONFIRM_HO",
             "FIT_OUT_CONFIRM_FOS",
             "FIT_OUT_CONFIRM_END",
-            "FIT_OUT_CONFIRM_TRADING",
         }
 
     @pytest.mark.asyncio
@@ -215,7 +232,7 @@ class TestHttpFetch:
                 return_value=_mock_response(500, {})
             )
             result = await _http_service().fetch_inbox(
-                user_id="123", roles=frozenset({"MALL_MANAGER"})
+                user_id="123", roles=frozenset({"FM_MANAGER"})
             )
         assert not result.success
         assert result.error
@@ -231,11 +248,11 @@ class TestMockAndFactory:
     @pytest.mark.asyncio
     async def test_mock_deterministic_and_filtered(self) -> None:
         svc = MockNotificationInboxService()
-        all_groups = await svc.fetch_inbox(user_id="1", roles=frozenset({"DD_ENGINEER"}))
+        all_groups = await svc.fetch_inbox(user_id="1", roles=frozenset({"ADMIN"}))
         assert [g.sub_category for g in all_groups.groups] == list(NOTIFICATION_SUB_CATEGORIES)
         unread = await svc.fetch_inbox(
             user_id="1",
-            roles=frozenset({"MALL_MANAGER"}),
+            roles=frozenset({"FM_MANAGER"}),
             filters=NotificationListFilters(unread=True),
         )
         assert [i.sr_id for g in unread.groups for i in g.items] == ["11711"]

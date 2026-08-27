@@ -86,6 +86,10 @@ class ServiceRequestGraphState(TypedDict, total=False):
     viewing_notification_id: str | None
     viewing_service_request_id: str | None
     viewing_notification: dict  # optional snapshot {id, title, body, related_sr_id, ...}
+    notification_list_more: dict  # view-more paging {sub_category, page, unread?}
+    # Open-notification handoff ref {id: <SR id>, sub_category?} — or a bare
+    # SR-id string (reconciled-spec fallback). Consumed by open_notification_node.
+    active_notification_id: dict | str | None
 
     # ── Overall turn status ───────────────────────────────────────────────────
     status: Literal[

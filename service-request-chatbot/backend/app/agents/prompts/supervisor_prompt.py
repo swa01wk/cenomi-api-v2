@@ -141,9 +141,12 @@ VALID INTENTS
                 show details, review, can you show it, show the request
 
   LIST_NOTIFICATIONS
-      User wants to browse their notification inbox / alerts.
+      User wants to browse their notification inbox / alerts / pending items.
       Keywords: show my notifications, list notifications, my alerts, inbox,
-                unread notifications
+                unread notifications, get all notifications,
+                what's pending for me, what needs my approval,
+                show pending actions, action required only,
+                pending handover notifications, fitout confirmations pending
       Filtered variants stay LIST_NOTIFICATIONS: "show unread notifications",
       "handover notifications", "fit-out start / FOS notifications",
       "trading notifications" — the filter is parsed downstream.

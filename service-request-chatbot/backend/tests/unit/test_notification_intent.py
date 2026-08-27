@@ -156,7 +156,8 @@ from app.agents.services.notification_intent import parse_notification_list_filt
         ("fit-out start notifications", ("FIT_OUT_CONFIRM_FOS",), None),
         ("fit out end notifications", ("FIT_OUT_CONFIRM_END",), None),
         ("show trading notifications", ("FIT_OUT_CONFIRM_TRADING",), None),
-        ("handover confirmation notifications", ("FIT_OUT_CONFIRM_HO",), None),
+        # FIT_OUT_CONFIRM_HO decommissioned — this now reads as plain handover.
+        ("handover confirmation notifications", ("HANDOVER",), None),
         (
             "unread handover and trading notifications",
             ("HANDOVER", "FIT_OUT_CONFIRM_TRADING"),
@@ -200,3 +201,36 @@ def test_legacy_open_action_without_seed_still_detail() -> None:
         "viewing_notification_id": "NTF-000012",
     }
     assert classify_notification_intent_from_state(state) == "GET_NOTIFICATION_DETAIL"
+
+
+@pytest.mark.parametrize(
+    "message,expected",
+    [
+        # Copilot chip messages (TC-3662)
+        ("Show my handover notifications", ("HANDOVER",)),
+        (
+            "Show my fit-out notifications",
+            ("FIT_OUT_CONFIRM_FOS", "FIT_OUT_CONFIRM_END"),
+        ),
+        ("Show my trading notifications", ("FIT_OUT_CONFIRM_TRADING",)),
+        # A stage keyword still narrows to that one flow.
+        ("fit-out start notifications", ("FIT_OUT_CONFIRM_FOS",)),
+        ("fit out end notifications", ("FIT_OUT_CONFIRM_END",)),
+    ],
+)
+def test_copilot_chip_messages_map_to_filters(message, expected) -> None:
+    filters = parse_notification_list_filters(message)
+    assert filters.sub_categories == expected
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Show my handover notifications",
+        "Show my fit-out notifications",
+        "Show my trading notifications",
+    ],
+)
+def test_copilot_chip_messages_are_list_intent(message: str) -> None:
+    assert is_list_notifications_message(message)
+    assert classify_notification_intent(message) == "LIST_NOTIFICATIONS"

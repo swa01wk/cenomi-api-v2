@@ -65,8 +65,14 @@ from app.agents.registries.workflow_config import WORKFLOW_CONFIG_REGISTRY, get_
 
 # ── FAQ agent nodes ───────────────────────────────────────────────────────────
 from app.agents.graph.nodes.faq.faq_node import faq_node
+from app.agents.graph.nodes.notification.list_notifications_node import (
+    list_notifications_node,
+)
 from app.agents.graph.nodes.notification.notification_entry_node import (
     notification_entry_node,
+)
+from app.agents.graph.nodes.notification.open_notification_node import (
+    open_notification_node,
 )
 from app.agents.services.notification_intent import (
     NOTIFICATION_INTENTS,
@@ -189,11 +195,18 @@ def _route_after_load(state: dict[str, Any]) -> str:
     _awaiting_free_text = state.get("active_field") in _FREE_TEXT_ANSWER_FIELDS
     if not _awaiting_free_text and _user_wants_preview(user_message):
         return "supervisor"
+    if state.get("active_notification_id") and (state.get("intent") or "") == "OPEN_NOTIFICATION":
+        # UI tapped Open on a notification — the routing shim seeds the SR
+        # handoff and continues into sr_status_sync (reconciled spec §2.2).
+        return "open_notification"
     if not _awaiting_free_text and should_bypass_for_notification_context(state):
         # Notification list/detail/mark-read (including deictic viewing context)
         # must not be swallowed by an already-active SR agent.  Free-text answers
         # (e.g. an SR description mentioning "alerts") stay with the open field.
-        if classify_notification_intent_from_state(state) is not None:
+        notif_intent = classify_notification_intent_from_state(state)
+        if notif_intent == "LIST_NOTIFICATIONS":
+            return "list_notifications"
+        if notif_intent is not None:
             return "notification"
         return "supervisor"
 
@@ -291,6 +304,13 @@ def _route_after_sync(state: dict[str, Any]) -> str:
     return "supervisor"
 
 
+def _route_after_open_notification(state: dict[str, Any]) -> str:
+    """Continue the open handoff into sync, or surface the error turn."""
+    if (state.get("backend_refs") or {}).get("sr_id"):
+        return "sr_status_sync"
+    return "response_generation"
+
+
 def _route_after_supervisor(state: dict[str, Any]) -> str:
     """Route after intent classification.
 
@@ -310,6 +330,10 @@ def _route_after_supervisor(state: dict[str, Any]) -> str:
     intent: str = state.get("intent") or "UNKNOWN"
     status: str = state.get("status") or ""
 
+    if intent == "LIST_NOTIFICATIONS":
+        return "list_notifications"
+    if intent == "OPEN_NOTIFICATION":
+        return "open_notification"
     if intent in NOTIFICATION_INTENTS:
         return "notification"
 
@@ -694,6 +718,8 @@ def build_help_agent_graph():
     graph.add_node("supervisor", supervisor_node)
     graph.add_node("faq_node", faq_node)
     graph.add_node("notification", notification_entry_node)
+    graph.add_node("list_notifications", list_notifications_node)
+    graph.add_node("open_notification", open_notification_node)
     graph.add_node("preview", preview_node)
     graph.add_node("registry", registry_node)
     graph.add_node("handover_entry", handover_entry_node)
@@ -747,6 +773,8 @@ def build_help_agent_graph():
             # the draft (see detect_help_interrupt).
             "faq_node": "faq_node",
             "notification": "notification",
+            "list_notifications": "list_notifications",
+            "open_notification": "open_notification",
         },
     )
     graph.add_conditional_edges(
@@ -776,12 +804,26 @@ def build_help_agent_graph():
             "registry": "registry",
             "response_generation": "response_generation",
             "notification": "notification",
+            "list_notifications": "list_notifications",
+            "open_notification": "open_notification",
         },
     )
     # FAQ answers are self-contained — skip the SR-workflow rewrite step to
     # save one LLM call (~200–400 ms) and preserve inline [Source: ...] markers.
     graph.add_edge("faq_node", "save_state")
     graph.add_edge("notification", "save_state")
+    graph.add_edge("list_notifications", "save_state")
+    # Spec §2.2: open_notification → sr_status_sync. The error turn (no sr_id)
+    # branches to response_generation so the message reaches the user instead
+    # of being swallowed by an sr-less sync no-op.
+    graph.add_conditional_edges(
+        "open_notification",
+        _route_after_open_notification,
+        {
+            "sr_status_sync": "sr_status_sync",
+            "response_generation": "response_generation",
+        },
+    )
     graph.add_edge("preview", "response_generation")
     graph.add_conditional_edges(
         "registry",

@@ -75,6 +75,16 @@ class ActiveNotificationRef(BaseModel):
         return str(value).strip()
 
 
+class NotificationListMoreRef(BaseModel):
+    """View-more paging for one notification group (TC-3662)."""
+
+    sub_category: str = Field(description="Group to page, e.g. HANDOVER.")
+    page: int = Field(ge=1, description="1-based page to fetch.")
+    unread: bool | None = Field(
+        default=None, description="Carry the list's unread filter forward."
+    )
+
+
 class ServiceRequestChatRequest(BaseModel):
     """Incoming chat turn for the service-request workflow."""
 
@@ -168,9 +178,26 @@ class ServiceRequestChatRequest(BaseModel):
         description=(
             "Sent when the user taps Open on a notification. Seeds the SR id "
             "(and agent, when sub_category maps) and routes straight into "
-            "sr_status_sync — the OPEN_NOTIFICATION flow."
+            "sr_status_sync — the OPEN_NOTIFICATION flow. A bare string is "
+            "accepted as the SR id (reconciled-spec fallback)."
         ),
     )
+
+    notification_list_more: NotificationListMoreRef | None = Field(
+        default=None,
+        description=(
+            "Sent when the user taps View more on a notification group — "
+            "fetches the next page of that group as a fresh list card."
+        ),
+    )
+
+    @field_validator("active_notification_id", mode="before")
+    @classmethod
+    def _coerce_notification_ref(cls, value: Any) -> Any:
+        """Reconciled-spec fallback: a bare string is the SR id."""
+        if isinstance(value, str) and value.strip():
+            return {"id": value.strip()}
+        return value
 
 
 class ChatStatePayload(BaseModel):
@@ -274,6 +301,7 @@ async def post_service_request_chat(
         and not body.session_id
         and not body.viewing_notification_id
         and not body.active_notification_id
+        and not body.notification_list_more
     ):
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -321,6 +349,11 @@ async def post_service_request_chat(
             active_notification_id=(
                 body.active_notification_id.model_dump()
                 if body.active_notification_id
+                else None
+            ),
+            notification_list_more=(
+                body.notification_list_more.model_dump()
+                if body.notification_list_more
                 else None
             ),
         )

@@ -58,7 +58,6 @@ from app.agents.services.review_decorations_service import (
 )
 from app.agents.services.conversation_state_service import ConversationStateService
 from app.agents.services.notification_intent import NOTIFICATION_INTENTS
-from app.agents.registry import lookup_agent
 from app.services.response_ui_finalize import finalize_response_ui
 from app.core.injection_guard import scan_message
 from app.db.models import ChatSession
@@ -129,29 +128,6 @@ def resolve_turn_sr_id(
     return sr_id
 
 
-def build_open_notification_seed(
-    notification_ref: dict[str, Any],
-    *,
-    session_active_agent: str | None,
-) -> dict[str, Any]:
-    """State updates for an OPEN_NOTIFICATION turn (UI sent active_notification_id).
-
-    Maps the notification's ``sub_category`` to an agent via the registry when
-    possible; unmapped sub-categories (e.g. FIT_OUT_CONFIRM_HO) seed nothing
-    extra — ``sr_status_sync`` re-derives sub_category from the SR payload, and
-    a state-level value would incorrectly win its cascade.  A live session's
-    ``active_agent`` is never clobbered.
-    """
-    updates: dict[str, Any] = {"intent": "OPEN_NOTIFICATION"}
-    sub = str(notification_ref.get("sub_category") or "").strip().upper()
-    agent_cfg = lookup_agent("FIT_OUT_AND_HANDOVER", sub) if sub else None
-    if agent_cfg and not session_active_agent:
-        updates["active_agent"] = agent_cfg["agent_name"]
-        updates["service_category"] = "FIT_OUT_AND_HANDOVER"
-        updates["sub_category"] = sub
-    return updates
-
-
 # ---------------------------------------------------------------------------
 # Result type
 # ---------------------------------------------------------------------------
@@ -220,6 +196,7 @@ class ChatOrchestrationService:
         viewing_service_request_id: str | None = None,
         viewing_notification: dict[str, Any] | None = None,
         active_notification_id: dict[str, Any] | None = None,
+        notification_list_more: dict[str, Any] | None = None,
     ) -> ChatTurnResult:
         """Run one turn, serialised against other turns for the same session.
 
@@ -243,6 +220,7 @@ class ChatOrchestrationService:
             viewing_service_request_id=viewing_service_request_id,
             viewing_notification=viewing_notification,
             active_notification_id=active_notification_id,
+            notification_list_more=notification_list_more,
         )
         if session_id is None:
             return await self._process_turn_serialised(**kwargs)
@@ -283,6 +261,7 @@ class ChatOrchestrationService:
         viewing_service_request_id: str | None = None,
         viewing_notification: dict[str, Any] | None = None,
         active_notification_id: dict[str, Any] | None = None,
+        notification_list_more: dict[str, Any] | None = None,
     ) -> ChatTurnResult:
         """Execute one complete chat turn and return structured result."""
 
@@ -291,8 +270,12 @@ class ChatOrchestrationService:
         notification_ref = active_notification_id or (msp_context or {}).get(
             "active_notification_id"
         )
+        if isinstance(notification_ref, str) and notification_ref.strip():
+            # Reconciled-spec fallback: a bare string is the SR id.
+            notification_ref = {"id": notification_ref.strip()}
         if isinstance(notification_ref, dict) and notification_ref.get("id"):
-            sr_id = sr_id or str(notification_ref["id"]).strip()
+            # The open ref is authoritative SR context — skip the stale-drop.
+            pass
         else:
             notification_ref = None
             sr_id = resolve_turn_sr_id(
@@ -438,7 +421,7 @@ class ChatOrchestrationService:
             user_role = derive_user_role(auth_context)
             if user_role:
                 backend_refs["user_role"] = user_role
-            if not sr_id and not chat_session.active_agent:
+            if not sr_id and notification_ref is None and not chat_session.active_agent:
                 # Only show the Handover reviewer inbox when there is no active
                 # workflow.  Fitout/Trading confirmation agents in CREATE_SR stage
                 # have no sr_id yet but must not see the Handover SR picker.
@@ -449,20 +432,16 @@ class ChatOrchestrationService:
             backend_refs["sr_id"] = sr_id
         if notification_ref is not None:
             # OPEN_NOTIFICATION — the user tapped a notification whose payload
-            # carries the SR id (platform text_content.id).  Seed the open-SR
-            # path directly; sr_status_sync does the rest (stage mapping +
-            # active_agent re-hydration).
-            backend_refs["opened_from_notification"] = True
-            seed = build_open_notification_seed(
-                notification_ref,
-                session_active_agent=chat_session.active_agent,
-            )
-            initial_state.update(seed)
+            # carries the SR id (platform text_content.id).  The graph's
+            # open_notification_node (reconciled-spec routing shim) turns this
+            # into backend_refs.sr_id + active_agent and hands off to
+            # sr_status_sync.
+            initial_state["active_notification_id"] = notification_ref
+            initial_state["intent"] = "OPEN_NOTIFICATION"
             log.info(
                 "chat.open_notification",
-                sr_id=sr_id,
+                sr_id=notification_ref.get("id"),
                 sub_category=notification_ref.get("sub_category"),
-                seeded_agent=seed.get("active_agent"),
             )
         if backend_refs:
             initial_state["backend_refs"] = backend_refs
@@ -472,6 +451,12 @@ class ChatOrchestrationService:
             initial_state["language"] = language
         if msp_context is not None:
             initial_state["msp_context"] = msp_context
+        list_more = notification_list_more or (msp_context or {}).get(
+            "notification_list_more"
+        )
+        if isinstance(list_more, dict) and list_more.get("sub_category"):
+            # View-more paging — deterministic LIST_NOTIFICATIONS turn.
+            initial_state["notification_list_more"] = list_more
 
         ctx = dict(msp_context or {})
         snapshot = viewing_notification or ctx.get("viewing_notification")

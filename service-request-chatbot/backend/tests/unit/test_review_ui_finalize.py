@@ -91,6 +91,78 @@ def test_build_review_decorations_keeps_card_after_fm_upload() -> None:
     assert by_key["SR_HANDOVER_SITE_SURVEY"] == "missing"
 
 
+def test_build_review_decorations_hides_docs_for_non_actor_role() -> None:
+    """MM viewing an SR already in FM_REVIEW: no upload card, no chips.
+
+    fm_review_entry_node denies FM actions for MALL_MANAGER, so offering the
+    document upload/delete card next to that denial is a dead end.
+    """
+    state = {
+        "backend_refs": {"sr_id": "12847", "user_role": "MALL_MANAGER"},
+        "workflow_stage": "FM_REVIEW",
+        "session_id": "sess-1",
+        "documents": [
+            {"document_id": "d1", "document_type_id": "SR_HANDOVER_CHECKLIST"}
+        ],
+        "collected_data": {},
+    }
+    deco = build_review_decorations(state)
+    assert "document_requirement" not in deco
+    assert deco.get("promote_preview") is True
+    # No stage action left for MM — offer the SR page instead of a dead end.
+    options = deco["suggestions"]["options"]
+    assert [o["action"] for o in options] == ["view_service_request"]
+    assert options[0]["value"] == "12847"
+
+
+def test_build_review_decorations_hides_rdd_docs_for_non_actor_role() -> None:
+    """FM Manager viewing an SR in RDD_REVIEW gets no RDD upload card."""
+    state = {
+        "backend_refs": {
+            "sr_id": "11721",
+            "user_role": "FM_MANAGER",
+            "rdd_status": "IN_PROGRESS",
+        },
+        "workflow_stage": "RDD_REVIEW",
+        "session_id": "sess-1",
+        "documents": [],
+        "collected_data": {
+            "guideLineLink": "https://example.com/g",
+            "rdd_upload_doc_type": "DR_SR_HANDOVER_REPORT",
+        },
+    }
+    deco = build_review_decorations(state)
+    assert "document_requirement" not in deco
+    assert deco["suggestions"]["options"][0]["action"] == "view_service_request"
+
+
+def test_build_review_decorations_hides_docs_for_admin() -> None:
+    """ADMIN is denied by fm_review_entry_node, so it gets no card and no chips."""
+    state = {
+        "backend_refs": {"sr_id": "12847", "user_role": "ADMIN"},
+        "workflow_stage": "FM_REVIEW",
+        "session_id": "sess-1",
+        "documents": [],
+        "collected_data": {},
+    }
+    deco = build_review_decorations(state)
+    assert "document_requirement" not in deco
+    assert deco["suggestions"]["options"][0]["action"] == "view_service_request"
+
+
+def test_build_review_decorations_docs_shown_when_role_unresolved() -> None:
+    """No role on state (dev/unauthenticated) stays permissive, as before."""
+    state = {
+        "backend_refs": {"sr_id": "12847"},
+        "workflow_stage": "FM_REVIEW",
+        "session_id": "sess-1",
+        "documents": [],
+        "collected_data": {},
+    }
+    deco = build_review_decorations(state)
+    assert deco.get("document_requirement") is not None
+
+
 def test_build_review_decorations_skips_when_confirmation_pending() -> None:
     state = {
         "backend_refs": {"sr_id": "12847", "user_role": "FM_MANAGER"},
@@ -120,7 +192,7 @@ def test_build_review_decorations_hides_docs_after_report_submitted() -> None:
 
 
 def test_build_review_decorations_hides_actions_after_rdd_approved() -> None:
-    """Post-approval: no action chips (View SR deferred)."""
+    """Post-approval: no stage actions — only the read-only View SR chip."""
     state = {
         "backend_refs": {
             "sr_id": "11721",
@@ -137,7 +209,9 @@ def test_build_review_decorations_hides_actions_after_rdd_approved() -> None:
         },
     }
     deco = build_review_decorations(state)
-    assert "suggestions" not in deco
+    options = deco["suggestions"]["options"]
+    assert [o["action"] for o in options] == ["view_service_request"]
+    assert options[0]["value"] == "11721"
 
 
 def test_build_review_decorations_rdd_hides_docs_until_dates() -> None:

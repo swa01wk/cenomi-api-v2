@@ -1,8 +1,14 @@
-"""Unit tests — OPEN_NOTIFICATION seeding (orchestration helper)."""
+"""Unit tests — OPEN_NOTIFICATION seeding (open_notification_node)."""
 
 from __future__ import annotations
 
-from app.services.chat_orchestration_service import build_open_notification_seed
+import pytest
+
+from app.agents.graph.nodes.notification.open_notification_node import (
+    SUB_CATEGORY_TO_AGENT,
+    build_open_notification_seed,
+    open_notification_node,
+)
 
 
 def test_handover_seeds_rdd_handover_agent() -> None:
@@ -77,3 +83,45 @@ def test_process_turn_signature_parity() -> None:
         inspect.signature(ChatOrchestrationService._process_turn_serialised).parameters
     )
     assert inner == outer
+
+
+def test_sub_category_to_agent_registry_backed() -> None:
+    """Spec export exists, is registry-backed, and excludes decommissioned HO."""
+    assert SUB_CATEGORY_TO_AGENT["HANDOVER"] == "rdd_handover_agent"
+    assert SUB_CATEGORY_TO_AGENT["FIT_OUT_CONFIRM_FOS"] == "rdd_fitout_start_agent"
+    assert SUB_CATEGORY_TO_AGENT["FIT_OUT_CONFIRM_END"] == "rdd_fitout_end_agent"
+    assert SUB_CATEGORY_TO_AGENT["FIT_OUT_CONFIRM_TRADING"] == "rdd_trading_confirmation_agent"
+    assert "FIT_OUT_CONFIRM_HO" not in SUB_CATEGORY_TO_AGENT
+
+
+@pytest.mark.asyncio
+async def test_node_seeds_backend_refs_and_agent() -> None:
+    updates = await open_notification_node(
+        {
+            "active_notification_id": {"id": "11711", "sub_category": "HANDOVER"},
+            "backend_refs": {"user_role": "FM_MANAGER"},
+        }
+    )
+    assert updates["backend_refs"]["sr_id"] == "11711"
+    assert updates["backend_refs"]["opened_from_notification"] is True
+    assert updates["backend_refs"]["user_role"] == "FM_MANAGER"
+    assert updates["active_agent"] == "rdd_handover_agent"
+    assert updates["intent"] == "OPEN_NOTIFICATION"
+
+
+@pytest.mark.asyncio
+async def test_node_accepts_bare_string_ref() -> None:
+    """Reconciled-spec fallback: a bare string is the SR id."""
+    updates = await open_notification_node(
+        {"active_notification_id": "320971", "backend_refs": {}}
+    )
+    assert updates["backend_refs"]["sr_id"] == "320971"
+    assert "active_agent" not in updates
+
+
+@pytest.mark.asyncio
+async def test_node_missing_ref_returns_error_turn() -> None:
+    updates = await open_notification_node({"backend_refs": {}})
+    assert "backend_refs" not in updates
+    assert updates["response_ui"]["type"] == "message"
+    assert "service request" in updates["response_message"]

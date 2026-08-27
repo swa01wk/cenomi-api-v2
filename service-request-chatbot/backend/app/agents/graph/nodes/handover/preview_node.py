@@ -27,7 +27,10 @@ from app.agents.graph.nodes.shared.sr_status_sync_node import (
 )
 from app.agents.graph.state import ServiceRequestState
 from app.agents.prompts.response_generation_prompt import FIELD_LABELS
-from app.agents.services.display_formatters import format_field_display_value
+from app.agents.services.display_formatters import (
+    format_enum_label,
+    format_field_display_value,
+)
 from app.agents.services.service_request_api_service import get_service_request_api_service
 from app.observability.decorators import trace_node
 
@@ -115,13 +118,24 @@ _PLATFORM_FIELD_ORDER: list[tuple[str, str]] = [
 
 
 def _field(key: str, label: str, value: Any) -> dict[str, Any]:
-    """Build a single preview field dict with user-friendly display values."""
+    """Build a single preview field dict with user-friendly display values.
+
+    ``value`` stays machine-readable — the FE bridge writes it straight into
+    Formik, and the HANDOVER ↔ HANDED_OVER swap observer matches literal codes
+    like ``initiate_handover``. When a code has a human label, it is published
+    alongside as ``display`` and the card renders that instead; consumers that
+    only know ``value`` are unaffected.
+    """
     if value is None or value == "" or value == []:
-        display = None
-    else:
-        formatted = format_field_display_value(key, value)
-        display = str(formatted) if formatted is not None else None
-    return {"key": key, "label": label, "value": display}
+        return {"key": key, "label": label, "value": None}
+    formatted = format_field_display_value(key, value)
+    raw = str(formatted) if formatted is not None else None
+    row: dict[str, Any] = {"key": key, "label": label, "value": raw}
+    if raw is not None:
+        humanized = str(format_enum_label(raw))
+        if humanized != raw:
+            row["display"] = humanized
+    return row
 
 
 def _hidden_preview_keys(state: ServiceRequestState) -> frozenset[str]:
@@ -274,10 +288,15 @@ async def preview_node(state: ServiceRequestState) -> dict[str, Any]:
                 "isSubmitted": True,
                 "fields": fields,
             }
+            # Humanize before the LLM sees it: the model quotes this instruction
+            # almost verbatim, so a raw code here reaches the user as
+            # "with the status 'REPORT_SUBMITTED'". response_ui.status stays raw
+            # because the FE badge maps the code, not the label.
             response_message = (
                 f"Show the user the service request (ID: {sr_id}) "
-                f"with status '{platform_status}'. "
-                "The structured card is being shown; give a very short 1-sentence intro."
+                f"with status '{format_enum_label(platform_status)}'. "
+                "The structured card is being shown; give a very short 1-sentence intro. "
+                "Use the status wording exactly as written above."
             )
             return {
                 "response_ui": response_ui,
@@ -307,8 +326,9 @@ async def preview_node(state: ServiceRequestState) -> dict[str, Any]:
                 }
                 response_message = (
                     f"Show the user the service request (ID: {sr_id}) "
-                    f"with status '{result.status}'. "
-                    "The structured card is being shown; give a very short 1-sentence intro."
+                    f"with status '{format_enum_label(result.status)}'. "
+                    "The structured card is being shown; give a very short 1-sentence intro. "
+                    "Use the status wording exactly as written above."
                 )
                 log.info("preview_node.sr_fetched", sr_id=sr_id, status=result.status)
             else:

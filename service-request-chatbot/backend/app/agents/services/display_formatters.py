@@ -19,8 +19,14 @@ ENUM_DISPLAY_LABELS: dict[str, str] = {
     "APPROVED": "Approved",
     "APPROVED_WITH_CHANGES": "Approved with changes",
     "DISAPPROVED": "Disapproved",
+    # Path B carries two codes for the same thing: the agent extracts
+    # ``already_trading``, while the platform form's select stores
+    # ``already_handovered`` (see handover_entry_node, which accepts both).
+    # Both read as "Already Trading" to the user.
     "already_trading": "Already Trading",
     "ALREADY_TRADING": "Already Trading",
+    "already_handovered": "Already Trading",
+    "ALREADY_HANDOVERED": "Already Trading",
     "initiate_handover": "Initiate Handover",
     "INITIATE_HANDOVER": "Initiate Handover",
     # SR workflow-operation statuses (platform-returned enum codes rendered
@@ -36,6 +42,12 @@ ENUM_DISPLAY_LABELS: dict[str, str] = {
     "REPORT_SUBMITTED": "Report Submitted",
     "COMPLETED": "Completed",
     "SKIPPED": "Skipped",
+    # Workflow stages (surfaced in "Opening ... SR (stage)" messages).
+    "FM_REVIEW": "FM Review",
+    "RDD_REVIEW": "RDD Review",
+    "CREATE_SR": "Create SR",
+    "APPROVE_SR": "Approve SR",
+    "DRAFT": "Draft",
     "SR_CREATED": "SR Created",
     "SR_APPROVED": "SR Approved",
     "SR_COMPLETED": "SR Completed",
@@ -81,12 +93,34 @@ def format_date_ddmmyyyy(value: Any) -> Any:
     return f"{day}/{month}/{year}"
 
 
+# SCREAMING_SNAKE_CASE codes the platform may return that are not in
+# ENUM_DISPLAY_LABELS. Matching these lets us humanize new statuses the moment
+# the platform adds them, instead of leaking "REPORT_SUBMITTED" to the user.
+_ENUM_CODE_RE = re.compile(r"^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+$")
+
+
+def humanize_enum_code(text: str) -> str:
+    """``REPORT_SUBMITTED`` → ``Report Submitted``. Title-cases word by word."""
+    return " ".join(word.capitalize() for word in text.split("_") if word)
+
+
 def format_enum_label(value: Any) -> Any:
-    """Humanize known enum codes (e.g. ``FM_MANAGER`` → ``FM Manager``)."""
+    """Humanize enum codes (e.g. ``FM_MANAGER`` → ``FM Manager``).
+
+    Curated labels win; any other SCREAMING_SNAKE_CASE code falls back to a
+    generic humanization so raw codes never reach the user. Values that are not
+    enum-shaped (free text, lower-case keys the FE matches on) pass through
+    untouched.
+    """
     if value is None or value == "":
         return value
     text = str(value).strip()
-    return ENUM_DISPLAY_LABELS.get(text, ENUM_DISPLAY_LABELS.get(text.upper(), value))
+    label = ENUM_DISPLAY_LABELS.get(text) or ENUM_DISPLAY_LABELS.get(text.upper())
+    if label is not None:
+        return label
+    if _ENUM_CODE_RE.match(text):
+        return humanize_enum_code(text)
+    return value
 
 
 def format_field_display_value(field_key: str, value: Any) -> Any:

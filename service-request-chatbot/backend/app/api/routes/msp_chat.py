@@ -158,6 +158,10 @@ class _MSPChatContext(BaseModel):
             "notification's text_content.id, not the notification row id."
         ),
     )
+    notification_list_more: dict[str, Any] | None = Field(
+        default=None,
+        description="View-more paging {sub_category, page, unread?} for one group.",
+    )
 
 
 class MSPChatRequest(BaseModel):

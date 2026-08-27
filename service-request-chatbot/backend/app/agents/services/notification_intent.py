@@ -106,7 +106,9 @@ def classify_notification_intent(
 
 
 def _is_seeded_open_turn(state: dict[str, Any]) -> bool:
-    """True when orchestration seeded an OPEN_NOTIFICATION → sr_status_sync turn."""
+    """True on an OPEN_NOTIFICATION handoff turn (must reach open_notification/sync)."""
+    if state.get("active_notification_id") and (state.get("intent") or "") == "OPEN_NOTIFICATION":
+        return True
     backend_refs = state.get("backend_refs") or {}
     return bool(backend_refs.get("opened_from_notification"))
 
@@ -117,6 +119,8 @@ def classify_notification_intent_from_state(state: dict[str, Any]) -> Notificati
         # OPEN_NOTIFICATION turns carry an authoritative SR seed and must reach
         # sr_status_sync — never the notification side-path.
         return None
+    if isinstance(state.get("notification_list_more"), dict):
+        return "LIST_NOTIFICATIONS"
     action = (state.get("action_override") or "").strip()
     viewing_notification_id, _viewing_sr = viewing_ids_from_state(state)
     if action in {"mark_notification_read", "mark_read"}:
@@ -172,13 +176,14 @@ _SUB_CATEGORY_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
         re.compile(r"\bfit[\s-]?out\s+(end|complet\w*)\b", re.IGNORECASE),
     ),
     ("FIT_OUT_CONFIRM_TRADING", re.compile(r"\btrading\b", re.IGNORECASE)),
-    (
-        "FIT_OUT_CONFIRM_HO",
-        re.compile(
-            r"\bhandover\s+confirm\w*\b|\bconfirm\w*\s+handover\b|\bfit[\s-]?out\s+ho\b",
-            re.IGNORECASE,
-        ),
-    ),
+)
+
+
+# Bare "fit-out notifications" means every confirmation flow, not one stage.
+_GENERIC_FITOUT_PATTERN = re.compile(r"\bfit[\s-]?out\b", re.IGNORECASE)
+_FITOUT_CONFIRM_SUBS = (
+    "FIT_OUT_CONFIRM_FOS",
+    "FIT_OUT_CONFIRM_END",
 )
 
 
@@ -198,10 +203,12 @@ def parse_notification_list_filters(message: str) -> NotificationListFilters:
     for sub, pattern in _SUB_CATEGORY_PATTERNS:
         if pattern.search(text):
             matched.append(sub)
-    # "handover confirmation" also matches the plain handover cue — prefer the
-    # more specific HO tool when both hit.
-    if "FIT_OUT_CONFIRM_HO" in matched and "HANDOVER" in matched:
-        matched.remove("HANDOVER")
+    # Generic "fit-out notifications" (the Copilot chip) with no stage keyword
+    # expands to all three confirmation flows.
+    if _GENERIC_FITOUT_PATTERN.search(text) and not any(
+        sub in matched for sub in _FITOUT_CONFIRM_SUBS
+    ):
+        matched.extend(_FITOUT_CONFIRM_SUBS)
 
     return NotificationListFilters(
         sub_categories=tuple(matched) or None,

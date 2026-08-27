@@ -37,9 +37,10 @@ log = structlog.get_logger(__name__)
 _MAX_RESPONSE_BYTES = 4096
 
 # Fixed display order — groups render in this sequence.
+# FIT_OUT_CONFIRM_HO is decommissioned (product decision, Aug 2026) — the
+# platform tool still exists but this service no longer calls it.
 NOTIFICATION_SUB_CATEGORIES: tuple[str, ...] = (
     "HANDOVER",
-    "FIT_OUT_CONFIRM_HO",
     "FIT_OUT_CONFIRM_FOS",
     "FIT_OUT_CONFIRM_END",
     "FIT_OUT_CONFIRM_TRADING",
@@ -47,7 +48,6 @@ NOTIFICATION_SUB_CATEGORIES: tuple[str, ...] = (
 
 _SUB_CATEGORY_PATHS: dict[str, str] = {
     "HANDOVER": "/notifications/agent/handover",
-    "FIT_OUT_CONFIRM_HO": "/notifications/agent/fit-out-confirm-ho",
     "FIT_OUT_CONFIRM_FOS": "/notifications/agent/fit-out-confirm-fos",
     "FIT_OUT_CONFIRM_END": "/notifications/agent/fit-out-confirm-end",
     "FIT_OUT_CONFIRM_TRADING": "/notifications/agent/fit-out-confirm-trading",
@@ -57,16 +57,16 @@ _SUB_CATEGORY_PATHS: dict[str, str] = {
 # cannot have rows on (latency optimisation) — the platform re-intersects
 # server-side, so calling everything is always safe.
 _SUB_CATEGORY_AUDIENCE: dict[str, frozenset[str]] = {
-    "HANDOVER": frozenset({"MALL_MANAGER", "FM_MANAGER", "DD_ENGINEER"}),
-    "FIT_OUT_CONFIRM_HO": frozenset({"DD_ENGINEER"}),
+    "HANDOVER": frozenset({"MALL_MANAGER", "FM_MANAGER", "OPERATIONS", "DD_ENGINEER"}),
     "FIT_OUT_CONFIRM_FOS": frozenset({"DD_ENGINEER"}),
     "FIT_OUT_CONFIRM_END": frozenset({"DD_ENGINEER"}),
-    "FIT_OUT_CONFIRM_TRADING": frozenset({"DD_ENGINEER"}),
+    # Trading confirmations are raised against the mall, not RDD — the
+    # scheduler targets MALL_MANAGER and OPERATIONS (mirrors the Go handler).
+    "FIT_OUT_CONFIRM_TRADING": frozenset({"MALL_MANAGER", "OPERATIONS"}),
 }
 
 SUB_CATEGORY_LABELS: dict[str, str] = {
     "HANDOVER": "Handover",
-    "FIT_OUT_CONFIRM_HO": "Handover Confirmation",
     "FIT_OUT_CONFIRM_FOS": "Fit-out Start Confirmation",
     "FIT_OUT_CONFIRM_END": "Fit-out End Confirmation",
     "FIT_OUT_CONFIRM_TRADING": "Trading Confirmation",
@@ -92,6 +92,7 @@ class NotificationItem:
     sr_id: str | None
     sub_category: str
     message: str
+    message_ar: str | None = None
     created_at: str | None = None
     read_at: str | None = None
     action_required: bool = True
@@ -105,6 +106,12 @@ class NotificationGroup:
     sub_category: str
     total_count: int
     items: list[NotificationItem] = field(default_factory=list)
+    page: int = 1
+
+    @property
+    def has_more(self) -> bool:
+        """True when later pages exist (platform pages are fixed-size)."""
+        return self.total_count > self.page * max(len(self.items), 1) and bool(self.items)
 
 
 @dataclass(slots=True)
@@ -135,6 +142,7 @@ class AbstractNotificationInboxService(ABC):
         roles: frozenset[str] = frozenset(),
         filters: NotificationListFilters | None = None,
         limit: int = 10,
+        page: int = 1,
     ) -> NotificationInboxResult:
         """Fetch action-required notifications grouped by sub-category."""
 
@@ -181,11 +189,16 @@ def _parse_item(entry: dict[str, Any], sub_category: str) -> NotificationItem:
     sr_id = str(sr_raw).strip() if sr_raw not in (None, "") else None
     lease = entry.get("lease_id")
     prop = entry.get("unique_property_id")
+    # Real SR notifications carry the human text in ``en`` / ``ar``;
+    # ``message`` only exists on some legacy payload shapes.
+    message_en = str(text_content.get("en") or text_content.get("message") or "").strip()
+    message_ar = str(text_content.get("ar") or "").strip() or None
     return NotificationItem(
         notification_id=str(entry.get("id") or entry.get("notification_id") or ""),
         sr_id=sr_id,
         sub_category=sub_category,
-        message=str(text_content.get("message") or "").strip(),
+        message=message_en,
+        message_ar=message_ar,
         created_at=entry.get("created_at"),
         read_at=entry.get("read_at"),
         action_required=bool(entry.get("action_required", True)),
@@ -244,13 +257,19 @@ class HttpNotificationInboxService(AbstractNotificationInboxService):
         roles: frozenset[str] = frozenset(),
         filters: NotificationListFilters | None = None,
         limit: int = 10,
+        page: int = 1,
     ) -> NotificationInboxResult:
         selected = _select_sub_categories(roles, filters)
         if not selected:
             return NotificationInboxResult(success=True, groups=[])
 
         outcomes = await asyncio.gather(
-            *(self._fetch_one(sub, user_id=user_id, filters=filters, limit=limit) for sub in selected),
+            *(
+                self._fetch_one(
+                    sub, user_id=user_id, filters=filters, limit=limit, page=page
+                )
+                for sub in selected
+            ),
             return_exceptions=True,
         )
 
@@ -290,9 +309,10 @@ class HttpNotificationInboxService(AbstractNotificationInboxService):
         user_id: str,
         filters: NotificationListFilters | None,
         limit: int,
+        page: int = 1,
     ) -> tuple[NotificationGroup, str | None]:
         endpoint = f"{self._base_url}{_SUB_CATEGORY_PATHS[sub_category]}"
-        params: dict[str, Any] = {"user_id": user_id, "page": 1, "limit": limit}
+        params: dict[str, Any] = {"user_id": user_id, "page": page, "limit": limit}
         if filters and filters.unread is not None:
             params["unread"] = "true" if filters.unread else "false"
         headers = {"x-internal-api-token": self._token}
@@ -328,7 +348,15 @@ class HttpNotificationInboxService(AbstractNotificationInboxService):
             total_count=total,
             latency_ms=latency_ms,
         )
-        return NotificationGroup(sub_category, total if total is not None else len(items), items), None
+        return (
+            NotificationGroup(
+                sub_category,
+                total if total is not None else len(items),
+                items,
+                page=page,
+            ),
+            None,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -365,20 +393,6 @@ _MOCK_FIXTURES: dict[str, list[dict[str, Any]]] = {
             "notification_type": "SERVICE_REQUEST",
             "lease_id": 502,
             "unique_property_id": 3691,
-        },
-    ],
-    "FIT_OUT_CONFIRM_HO": [
-        {
-            "id": "ntf-ho-001",
-            "text_content": {
-                "message": "Handover confirmation pending for SR 11720.",
-                "type": "SERVICE_REQUEST",
-                "id": "11720",
-            },
-            "created_at": "2026-08-21T08:00:00Z",
-            "read_at": None,
-            "action_required": True,
-            "notification_type": "SERVICE_REQUEST",
         },
     ],
     "FIT_OUT_CONFIRM_FOS": [
@@ -436,6 +450,7 @@ class MockNotificationInboxService(AbstractNotificationInboxService):
         roles: frozenset[str] = frozenset(),
         filters: NotificationListFilters | None = None,
         limit: int = 10,
+        page: int = 1,
     ) -> NotificationInboxResult:
         selected = _select_sub_categories(roles, filters)
         groups: list[NotificationGroup] = []
@@ -446,9 +461,10 @@ class MockNotificationInboxService(AbstractNotificationInboxService):
                 items = [i for i in items if not i.read_at]
             elif filters and filters.unread is False:
                 items = [i for i in items if i.read_at]
-            items = items[:limit]
+            total = len(items)
+            items = items[(page - 1) * limit : page * limit]
             if items:
-                groups.append(NotificationGroup(sub, len(items), items))
+                groups.append(NotificationGroup(sub, total, items, page=page))
         return NotificationInboxResult(success=True, groups=groups)
 
 

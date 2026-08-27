@@ -70,7 +70,8 @@ async def test_detail_without_snapshot_still_resolves_id() -> None:
     assert "NTF-000012" in result["response_message"]
 
 
-_NODE_MODULE = "app.agents.graph.nodes.notification.notification_entry_node"
+# List fetching lives in list_notifications_node (reconciled-spec split).
+_NODE_MODULE = "app.agents.graph.nodes.notification.list_notifications_node"
 
 
 def _mock_inbox_service() -> MockNotificationInboxService:
@@ -105,12 +106,12 @@ async def test_list_emits_grouped_notification_list() -> None:
     assert result["intent"] == "LIST_NOTIFICATIONS"
     assert ui["type"] == "notification_list"
     subs = [g["sub_category"] for g in ui["groups"]]
+    # DD Engineer audience: everything except Trading (MM/Operations only);
+    # FIT_OUT_CONFIRM_HO is decommissioned.
     assert subs == [
         "HANDOVER",
-        "FIT_OUT_CONFIRM_HO",
         "FIT_OUT_CONFIRM_FOS",
         "FIT_OUT_CONFIRM_END",
-        "FIT_OUT_CONFIRM_TRADING",
     ]
     handover = ui["groups"][0]
     assert handover["total_count"] == 2
@@ -134,7 +135,7 @@ async def test_list_respects_role_audience() -> None:
             )
         )
     subs = [g["sub_category"] for g in result["response_ui"]["groups"]]
-    assert subs == ["HANDOVER"]
+    assert subs == ["HANDOVER", "FIT_OUT_CONFIRM_TRADING"]
 
 
 @pytest.mark.asyncio
@@ -249,7 +250,7 @@ def test_route_after_supervisor_notification_beats_existing_sr_id() -> None:
         status="IN_PROGRESS",
         backend_refs={"sr_id": "11711"},
     )
-    assert _route_after_supervisor(state) == "notification"
+    assert _route_after_supervisor(state) == "list_notifications"
 
 
 @pytest.mark.asyncio
@@ -328,3 +329,85 @@ def test_free_text_answer_not_hijacked_by_list_pattern() -> None:
         active_field="description",
     )
     assert _route_after_load(state) == "handover_entry"
+
+
+@pytest.mark.asyncio
+async def test_notification_turns_clear_seeded_decorations() -> None:
+    """Orchestration pre-seeds the reviewer 'View Service Request' picker;
+    notification turns must clear it so finalize can't attach it (TC-3662)."""
+    failed = AsyncMock()
+    failed.fetch_inbox = AsyncMock(
+        return_value=NotificationInboxResult(success=False, error="HTTP 500")
+    )
+    with patch(
+        f"{_NODE_MODULE}.get_notification_inbox_service",
+        return_value=failed,
+    ):
+        result = await notification_entry_node(
+            _state(
+                user_message="Show my notifications",
+                auth_context=AuthContext(subject_id="6", roles=frozenset({"FM_MANAGER"})),
+                response_decorations={"suggestions": {"kind": "pending_handover_srs"}},
+            )
+        )
+    assert result["response_decorations"] == {}
+
+
+@pytest.mark.asyncio
+async def test_lease_activation_rows_marked_and_not_sr(monkeypatch) -> None:
+    """ACTIVATED_LEASE_NOTIFICATION carries a LEASE id in text_content.id —
+    it must surface as kind=lease_activation with lease_code, never as sr_id."""
+    from app.agents.services.notification_inbox_service import (
+        NotificationGroup,
+        NotificationItem,
+    )
+
+    svc = AsyncMock()
+    svc.fetch_inbox = AsyncMock(
+        return_value=NotificationInboxResult(
+            success=True,
+            groups=[
+                NotificationGroup(
+                    "HANDOVER",
+                    2,
+                    [
+                        NotificationItem(
+                            notification_id="ntf-act-1",
+                            sr_id="271716",  # actually the lease id
+                            sub_category="HANDOVER",
+                            message=(
+                                "Contract DUMMY-CUST-001 is now active. Please "
+                                "initiate the handover of the lease by creating a "
+                                "Fit-Out & Handover Service Request."
+                            ),
+                            notification_type="ACTIVATED_LEASE_NOTIFICATION",
+                        ),
+                        NotificationItem(
+                            notification_id="ntf-sr-1",
+                            sr_id="320971",
+                            sub_category="HANDOVER",
+                            message="The Mall Manager has submitted SR 320971.",
+                            notification_type="SERVICE_REQUEST",
+                        ),
+                    ],
+                )
+            ],
+        )
+    )
+    with patch(f"{_NODE_MODULE}.get_notification_inbox_service", return_value=svc):
+        result = await notification_entry_node(
+            _state(
+                user_message="show my notifications",
+                auth_context=AuthContext(
+                    subject_id="11", roles=frozenset({"MALL_MANAGER"})
+                ),
+            )
+        )
+    rows = result["response_ui"]["groups"][0]["notifications"]
+    activation, sr_row = rows[0], rows[1]
+    assert activation["kind"] == "lease_activation"
+    assert activation["sr_id"] is None
+    assert activation["lease_code"] == "DUMMY-CUST-001"
+    assert activation["lease_id"] == "271716"
+    assert sr_row["kind"] == "service_request"
+    assert sr_row["sr_id"] == "320971"
