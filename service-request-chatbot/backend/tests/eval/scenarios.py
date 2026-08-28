@@ -34,6 +34,8 @@ TIER STRUCTURE
                     + S241  RDD correction vs stale WAITING_FOR_USER routing
   (Tier 4/5/6 live in lifecycle_scenarios.py)
   Tier 8  FitoutConfirm Core+Edge — S70–S82: FIT_OUT_CONFIRM_FOS/END/TRADING
+  Tier 9  Notification agent — S250–S255: inbox listing, NL filters,
+                    supervisor routing, free-text guard, audience scoping
 
 DYNAMIC DATES
 -------------
@@ -142,6 +144,13 @@ class Turn:
 
     expect_field_value: Optional[dict] = None
     """Soft: {label: expected_value} — check ui.fields entries on a confirmation_card."""
+
+    expect_ui_contains: Optional[dict] = None
+    """Soft: {ui_key: expected_value} — check top-level keys on response.ui.
+
+    Read by ``run_eval._assert_turn``; the field was dropped from this dataclass
+    in a merge, which made every turn raise AttributeError before asserting.
+    """
 
 
 @dataclass
@@ -4281,6 +4290,197 @@ _S212 = Scenario(
 
 
 # =============================================================================
+# TIER 9 — Notification agent (S250–S255)
+# =============================================================================
+#
+# These run against the platform notification inbox, so they need a seeded
+# environment: the user must have action-required rows in the groups their role
+# is an audience for (handover → MM/FM/OPERATIONS/DD; fit-out FOS+END → DD;
+# trading → MM/OPERATIONS). With an empty inbox the node answers "You're all
+# caught up" as a plain message and the ui-type assertions fail correctly —
+# that is a data problem, not a regression.
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# S250 — Inbox listing (deterministic route, no LLM)
+# ─────────────────────────────────────────────────────────────────────────────
+_S250 = Scenario(
+    id=250,
+    name="Notification inbox listing",
+    goal="'show my notifications' renders the grouped action-required inbox card",
+    tier=0,
+    user_email="sara@cenomi.com",  # DD_ENGINEER — audience for handover + fit-out
+    turns=[
+        Turn(
+            message="show my notifications",
+            note=(
+                "Classified deterministically by is_list_notifications_message — "
+                "no supervisor LLM call. Groups are role-scoped."
+            ),
+            expect_ui_type="notification_list",
+            expect_keywords=["action-required", "notification"],
+            expect_no_submit=True,
+        ),
+    ],
+    tags=["notifications", "listing", "smoke"],
+)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# S251 — Sub-category filter from natural language
+# ─────────────────────────────────────────────────────────────────────────────
+_S251 = Scenario(
+    id=251,
+    name="Notification inbox — handover filter",
+    goal="A category keyword narrows the fan-out to one group and is echoed back",
+    tier=1,
+    user_email="sara@cenomi.com",
+    turns=[
+        Turn(
+            message="show my handover notifications",
+            note="parse_notification_list_filters → sub_categories=('HANDOVER',)",
+            expect_ui_type="notification_list",
+            expect_keywords=["handover"],
+            # The card must state which filter it applied; the FE renders it.
+            expect_ui_contains={"filters": {"sub_categories": ["HANDOVER"]}},
+        ),
+    ],
+    tags=["notifications", "filters"],
+)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# S252 — Unread filter, and "fit-out" meaning every confirmation stage
+# ─────────────────────────────────────────────────────────────────────────────
+_S252 = Scenario(
+    id=252,
+    name="Notification inbox — unread and fit-out filters",
+    goal="'unread' sets the flag; bare 'fit-out' expands to FOS + END, not one stage",
+    tier=2,
+    user_email="sara@cenomi.com",
+    turns=[
+        Turn(
+            message="show my unread notifications",
+            note="_UNREAD_PATTERN → unread=True, no category narrowing",
+            expect_ui_type="notification_list",
+            expect_ui_contains={"filters": {"unread": True}},
+        ),
+        Turn(
+            message="show my fit-out notifications",
+            note=(
+                "The Copilot chip wording. Bare 'fit-out' means every confirmation "
+                "flow — FIT_OUT_CONFIRM_HO is decommissioned and must not appear."
+            ),
+            expect_ui_type="notification_list",
+            expect_ui_contains={
+                "filters": {
+                    "sub_categories": ["FIT_OUT_CONFIRM_FOS", "FIT_OUT_CONFIRM_END"]
+                }
+            },
+        ),
+    ],
+    tags=["notifications", "filters", "edge"],
+)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# S253 — Supervisor phrasing (LLM route, not the regex)
+# ─────────────────────────────────────────────────────────────────────────────
+_S253 = Scenario(
+    id=253,
+    name="Notification inbox — 'what's pending for me'",
+    goal="Spec phrasings that miss the deterministic regex still route to the inbox",
+    tier=2,
+    user_email="sara@cenomi.com",
+    turns=[
+        Turn(
+            message="what's pending for me",
+            note=(
+                "No 'notifications' token, so is_list_notifications_message misses "
+                "it — this exercises the supervisor prompt's LIST_NOTIFICATIONS "
+                "examples."
+            ),
+            expect_ui_type="notification_list",
+            expect_no_submit=True,
+        ),
+    ],
+    tags=["notifications", "routing", "supervisor"],
+)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# S254 — Free-text answers must not be hijacked into the inbox
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Regression guard. The notification bypass originally ran ahead of the
+# free-text guard, so an SR description that happened to read like an inbox
+# request was swallowed mid-collection and the user lost their answer.
+_S254 = Scenario(
+    id=254,
+    name="Notification bypass must yield to free-text collection",
+    goal="An SR description matching the list regex is kept as the field answer",
+    tier=1,
+    turns=[
+        Turn(
+            message="I want to create a handover service request",
+            note="Bot asks for lease code, brand, or mall name",
+        ),
+        Turn(
+            message="t0105712",
+            note="Under Armour, Jawharat Jeddah resolved; bot asks for description",
+        ),
+        Turn(
+            message=(
+                "Tenant cannot view notifications or alerts on the mall display board"
+            ),
+            note=(
+                "Matches _LIST_PATTERN (view … notifications) but arrives while the "
+                "agent awaits free text — it must be stored as the description and "
+                "the flow must continue to the start date, not open the inbox."
+            ),
+            expect_no_submit=True,
+            expect_keywords=["start date", "start"],
+        ),
+        Turn(
+            message=_START_A,
+            note="Confirms the flow really is still collecting; bot asks for end date",
+            expect_keywords=["end date", "end"],
+        ),
+    ],
+    tags=["notifications", "free-text", "regression", "core"],
+)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# S255 — Role audience scoping
+# ─────────────────────────────────────────────────────────────────────────────
+_S255 = Scenario(
+    id=255,
+    name="Notification inbox — audience scoping by role",
+    goal="A user outside a group's audience gets an empty result, never another role's rows",
+    tier=2,
+    user_email="khalid@cenomi.com",  # FM_MANAGER — handover only, no fit-out
+    turns=[
+        Turn(
+            message="show my fit-out notifications",
+            note=(
+                "Fit-out confirmations target DD_ENGINEER only. FM must get the "
+                "empty-filter message, not somebody else's inbox."
+            ),
+            expect_keywords=["no action-required", "caught up", "no notifications"],
+            expect_no_submit=True,
+        ),
+        Turn(
+            message="show my handover notifications",
+            note="FM_MANAGER is in the handover audience, so this one lists.",
+            expect_ui_type="notification_list",
+        ),
+    ],
+    tags=["notifications", "rbac", "audience"],
+)
+
+
+# =============================================================================
 # Tier buckets and master list
 # =============================================================================
 
@@ -4413,6 +4613,12 @@ FITOUT_CONFIRM_SCENARIOS: list[Scenario] = (
     + FITOUT_APPROVE_SCENARIOS
 )
 
+#: Tier 9 — Notification agent (listing, filters, routing, audience scoping).
+#: Needs a seeded inbox; see the tier header for what each role must have.
+TIER9_NOTIFICATION_SCENARIOS: list[Scenario] = [
+    _S250, _S251, _S252, _S253, _S254, _S255,
+]
+
 #: Master list — all scenarios in tier order (for backward-compatibility)
 SCENARIOS: list[Scenario] = (
     TIER0_SCENARIOS
@@ -4421,4 +4627,5 @@ SCENARIOS: list[Scenario] = (
     + TIER3_SCENARIOS
     + FITOUT_CONFIRM_SCENARIOS
     + TIER8_SCENARIOS
+    + TIER9_NOTIFICATION_SCENARIOS
 )
