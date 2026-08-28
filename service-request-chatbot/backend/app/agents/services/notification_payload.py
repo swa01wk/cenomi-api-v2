@@ -69,11 +69,15 @@ def serialize_groups(result: NotificationInboxResult) -> list[dict[str, Any]]:
             "sub_category": group.sub_category,
             "label": SUB_CATEGORY_LABELS.get(group.sub_category, group.sub_category),
             "total_count": group.total_count,
-            "action_required_count": sum(
-                1 for item in group.items if item.action_required
-            ),
+            # The whole outstanding count, NOT this page's rows: the platform
+            # tools filter to action_required = TRUE server-side, so every row
+            # in the group qualifies and total_count is the honest badge value.
+            # Counting group.items instead made the badge say 5 while
+            # "load more" kept producing rows.
+            "action_required_count": group.total_count,
             "notifications": [row_payload(item) for item in group.items],
             "page": group.page,
+            "limit": group.limit,
             "has_more": group.has_more,
         }
         for group in result.groups

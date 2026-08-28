@@ -107,6 +107,9 @@ class NotificationGroup:
     total_count: int
     items: list[NotificationItem] = field(default_factory=list)
     page: int = 1
+    #: Page size used for the fetch — lets the UI render "11–20 of 360"
+    #: rather than restating the page length on every page.
+    limit: int = 10
 
     @property
     def has_more(self) -> bool:
@@ -354,6 +357,7 @@ class HttpNotificationInboxService(AbstractNotificationInboxService):
                 total if total is not None else len(items),
                 items,
                 page=page,
+                limit=limit,
             ),
             None,
         )
@@ -464,7 +468,9 @@ class MockNotificationInboxService(AbstractNotificationInboxService):
             total = len(items)
             items = items[(page - 1) * limit : page * limit]
             if items:
-                groups.append(NotificationGroup(sub, total, items, page=page))
+                groups.append(
+                    NotificationGroup(sub, total, items, page=page, limit=limit)
+                )
         return NotificationInboxResult(success=True, groups=groups)
 
 

@@ -77,7 +77,10 @@ async def test_returns_serialized_groups() -> None:
     # Same contract fields as the chat card (shared serializer).
     assert group["service_category"] == "FIT_OUT_AND_HANDOVER"
     assert group["sub_category"] == "HANDOVER"
-    assert group["action_required_count"] == 1
+    # The badge shows the whole outstanding count, not the rows on this page:
+    # the fixture holds 1 row of a 42-row group.
+    assert group["action_required_count"] == 42
+    assert len(group["notifications"]) == 1
     assert group["has_more"] is True
     row = group["notifications"][0]
     assert row["sr_id"] == "320971"
