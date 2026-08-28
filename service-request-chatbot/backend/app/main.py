@@ -11,6 +11,7 @@ from app.api.routes.auth import router as auth_router
 from app.api.routes.chat import router as chat_router
 from app.api.routes.chat import service_request_router
 from app.api.routes.msp_chat import msp_chat_router
+from app.api.routes import notifications as notifications_routes
 from app.core.config import settings
 from app.core.logging import configure_logging
 from app.integrations.factory import close_integrations
@@ -56,6 +57,11 @@ def create_app() -> FastAPI:
     application.include_router(chat_router, prefix=settings.api_v1_prefix, tags=["chat-v1"])
     # MSP Platform-compatible help endpoints — contractually pinned to /api/v1 by cenomi-ai-backend
     application.include_router(msp_chat_router, prefix=settings.api_v1_prefix, tags=["msp-chat"])
+    application.include_router(
+        notifications_routes.router,
+        prefix=settings.api_v1_prefix,
+        tags=["notifications-v1"],
+    )
     application.include_router(upload.router, prefix=settings.api_v1_prefix, tags=["upload-v1"])
     # RAG indexer status / re-index request (admin-only)
     application.include_router(indexer.router, prefix=settings.api_v1_prefix, tags=["indexer-v1"])

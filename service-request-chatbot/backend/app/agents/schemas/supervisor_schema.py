@@ -33,6 +33,10 @@ class SupervisorDecision(BaseModel):
         "APPROVE_FITOUT_CONFIRM_TRADING",
         "CHECK_SERVICE_REQUEST_STATUS",
         "PREVIEW_SERVICE_REQUEST",
+        "LIST_NOTIFICATIONS",
+        "GET_NOTIFICATION_DETAIL",
+        "MARK_NOTIFICATION_READ",
+        "OPEN_NOTIFICATION",
         "UNKNOWN",
     ] = Field(description="Classified user intent")
 

@@ -136,6 +136,32 @@ class _MSPChatContext(BaseModel):
         ),
         examples=["Yasmeen Mall"],
     )
+    viewing_notification_id: str | None = Field(
+        default=None,
+        description="Notification currently open in the UI (deictic 'this notification').",
+        examples=["NTF-000012"],
+    )
+    viewing_service_request_id: str | None = Field(
+        default=None,
+        description="Service request currently open in the UI (deictic 'this SR').",
+        examples=["11711"],
+    )
+    viewing_notification: dict[str, Any] | None = Field(
+        default=None,
+        description="Optional notification snapshot {id, title, body, related_sr_id, status}.",
+    )
+    active_notification_id: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Open-notification reference {id: <SR id>, sub_category}. Seeds the "
+            "SR workflow handoff (OPEN_NOTIFICATION) — id is the SR id from the "
+            "notification's text_content.id, not the notification row id."
+        ),
+    )
+    notification_list_more: dict[str, Any] | None = Field(
+        default=None,
+        description="View-more paging {sub_category, page, unread?} for one group.",
+    )
 
 
 class MSPChatRequest(BaseModel):

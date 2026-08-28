@@ -22,6 +22,10 @@ Matching rules (see app/indexer/config.py):
   localized and one value carries a trailing space.
 - REGIONAL_DD_ENGINEER contains "DD_" but is not an RDD-team role; exact
   equality excludes it without a special case.
+- The person must be a live account: ``user_status = 'ACTIVE'`` and
+  ``invite_status = 'JOINED'``.  Deactivated staff and never-accepted
+  invitations are not contactable, so surfacing them as a Key Contact sends
+  tenants to a dead address.
 
 FIX vs legacy: the legacy job derived ROLE_KEY from a leaked inner-loop
 variable, so a group's document id could carry the role of the LAST group
@@ -67,11 +71,18 @@ INNER JOIN cenomi.properties p ON p.property_id = tc.property_id
 WHERE p.unique_property_id IN :prop_ids
   AND tc.user_type = 'ADMIN'
   AND (tc.role_status = 'ACTIVE' OR tc.role_status IS NULL)
+  AND u.user_status = 'ACTIVE'
+  AND u.invite_status = 'JOINED'
   AND r.role_name IN :roles
 ORDER BY p.unique_property_id, r.role_id, tc.tenant_contact_user_id,
          r.role_name, u.first_name, u.last_name
 """
 
+# Deliberately NOT filtered by user_status/invite_status, unlike
+# _ROLE_CONTACTS_SQL: this query decides which malls to REBUILD, and
+# deactivating a user is exactly the change that must trigger a rebuild so
+# the stale card is dropped.  Filtering here would hide that change and the
+# departed contact would stay in the index until the next full run.
 _AFFECTED_PROPS_SQL = """
 SELECT DISTINCT p.unique_property_id
 FROM cenomi.tenant_contacts tc

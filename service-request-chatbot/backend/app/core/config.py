@@ -64,6 +64,14 @@ class Settings(BaseSettings):
             "Use for local eval runs where the UAT API rejects the chatbot's local JWT."
         ),
     )
+    notifications_use_mock: bool = Field(
+        default=False,
+        validation_alias="NOTIFICATIONS_USE_MOCK",
+        description=(
+            "Force in-memory mock notification inbox data even when the platform "
+            "base URL and internal API token are configured. Use for local dev/eval."
+        ),
+    )
     # FILE_UPLOAD_API_BASE_URL is accepted in .env for forward compatibility but
     # is not currently used — file uploads route through SERVICE_REQUEST_API_BASE_URL
     # + PUT /files per the Postman collection.  Keeping the field avoids noisy

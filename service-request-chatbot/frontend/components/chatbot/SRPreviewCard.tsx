@@ -62,6 +62,9 @@ function StatusBadge({ status }: { status: string }) {
 
 function FieldRow({ field }: { field: PreviewField }) {
   const isEmpty = field.value === null || field.value === undefined || field.value === "";
+  // `display` carries the human label for enum codes (e.g. initiate_handover →
+  // "Initiate Handover"); `value` stays raw for edit round-trips and bridges.
+  const shown = field.display ?? field.value;
   return (
     <div className="flex items-start justify-between gap-3 py-2">
       <span className="shrink-0 text-xs font-medium text-zinc-500 dark:text-zinc-400">
@@ -74,7 +77,7 @@ function FieldRow({ field }: { field: PreviewField }) {
             : "text-zinc-800 dark:text-zinc-100"
         }`}
       >
-        {isEmpty ? "—" : field.value}
+        {isEmpty ? "—" : shown}
       </span>
     </div>
   );
