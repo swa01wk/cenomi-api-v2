@@ -148,7 +148,10 @@ export type ResponseUIDocumentRequirement = {
 export type PreviewField = {
   key: string;
   label: string;
+  /** Machine-readable value — enum codes stay raw so Formik/bridge logic can match them. */
   value: string | null;
+  /** Human label for `value`, present only when the raw code differs from what a user should read. */
+  display?: string | null;
 };
 
 export type ResponseUISRPreviewCard = {
