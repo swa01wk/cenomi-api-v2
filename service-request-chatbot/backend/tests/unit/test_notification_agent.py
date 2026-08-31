@@ -114,7 +114,10 @@ async def test_list_emits_grouped_notification_list() -> None:
         "FIT_OUT_CONFIRM_END",
     ]
     handover = ui["groups"][0]
-    assert handover["total_count"] == 2
+    # The fixture holds two HANDOVER rows, but one is read — read rows are
+    # never listed by the agent (shared-queue read-hiding, lifecycle plan
+    # §3.6), so only the unread one survives.
+    assert handover["total_count"] == 1
     assert handover["notifications"][0]["sr_id"] == "11711"
     assert "action-required" in result["response_message"]
 
