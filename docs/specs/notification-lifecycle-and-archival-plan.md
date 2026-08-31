@@ -1,6 +1,6 @@
 # Notification lifecycle + archival — design plan
 
-**Status:** approved 2026-08-31 — all §6 decisions taken (recorded below); ready to implement
+**Status:** DELIVERED 2026-08-31 — all four phases shipped on `cenomi-api-2` `feature/TC-3520-notification-agent` (`1441214ac`, `6c27dd623`, `234755f73`, `b1daf4256`) + FE tab hiding (`56e162cdf`) + chatbot mock parity (`fe67633`)
 **Pilot scope:** `HANDOVER` and the fit-out confirmation sub-categories
 (`FIT_OUT_CONFIRM_FOS`, `FIT_OUT_CONFIRM_END`, `FIT_OUT_CONFIRM_TRADING`) —
 i.e. exactly the notifications the notification agent reads today.
@@ -262,20 +262,15 @@ everyone in that role.
 
 ---
 
-## 4. Backfill
+## 4. Backfill — delivered by the reconciler, not a migration
 
-One-time reconcile over the ~3,240 agent-relevant rows (not the 13.5M table):
-
-1. `entity_type = 'SERVICE_REQUEST'` and the SR is APPROVED / COMPLETED /
-   REJECTED → `ACTION_DONE`. (~828 rows)
-2. `entity_type = 'LEASE'` and a HANDOVER SR exists for the lease **created at
-   or after the notification** → `ACTION_DONE`. (~36 rows; the other 20
-   "SR exists" matches are stale SRs from earlier lease terms and stay open)
-3. Sweep those into the archive.
-
-Idempotent and reversible — the down migration moves rows back by
-`archive_reason`. Expected to take seconds at this volume; the TC-3520 backfill
-of 3,240 rows ran in ~23s.
+As built, there is no separate backfill migration: the phase-3 reconciler's
+rules ARE the backfill rules (terminal-status with the `FIT_OUT_APPROVED`
+carve-out; lease rule with the timing guard), so its **first scheduled run**
+flips the stale rows and the sweep archives them. Dry-run against the
+production copy confirmed the exact predicted counts: **36** lease
+activations (the 20 stale-SR matches correctly left open) + **828** legacy
+terminal rows, in ~1.2s. One implementation instead of two to keep in sync.
 
 ---
 
@@ -286,7 +281,7 @@ of 3,240 rows ran in ~23s.
 | 1 | `action_state`, `source_operation_id`, archive table. Write the new columns. **Nothing moves, nothing is filtered.** | none — additive |
 | 2 | Set `ACTION_DONE` at the hooks. Every exposing API filters `action_state <> 'ACTION_DONE'`; agent adds `read_at IS NULL`. Empty-group/tab hiding. | low — **the user-visible feature is fully delivered here, with zero rows moved** |
 | 3 | New scheduler in `cenomi-api-2`: sweep `ACTION_DONE` + read `NO_ACTION` rows into the archive; drift reconcile. | low — pure storage; reversible |
-| 4 | One-time backfill of the 828 + 36 stale rows (respecting the `FIT_OUT_APPROVED` carve-out and the SR-after-notification timing guard). `include_archived=true` on `GET /notifications`. | low — idempotent |
+| 4 | `include_archived=true` on `GET /notifications`. The planned backfill migration was **dropped as redundant**: the phase-3 reconciler applies the same rules (carve-out and timing guard included) on its first run and the sweep moves the 36 + 828 rows — one implementation instead of two to keep in sync. | low — idempotent |
 
 Phases 1–2 are worth doing on their own even if 3 never ships.
 
