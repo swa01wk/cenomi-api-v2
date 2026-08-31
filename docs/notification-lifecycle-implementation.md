@@ -26,7 +26,7 @@ the handover flow. It is *not* handover-only, and it is *not* everything:
 | **Physical archival** (rows moved to `notifications_archive`) | **Pilot only** — every sweep statement carries `sr_sub_category IS NOT NULL`, which matches only the four sub-categories above. Sales-data, document-expiry, lead and other notifications are never touched. |
 | **Reconciler** (lease rule, legacy terminal rule) | **Pilot only** — same guard. |
 | Lease-activation close-out (handover SR created → notification done) | Handover by nature — `ACTIVATED_LEASE_NOTIFICATION` only. |
-| Operation-completion hook (step done → its notifications flip) | **Generic** — it keys on `source_operation_id`, which is stamped on all *new* V2 workflow SR notifications from deploy onward, whatever the category. Non-pilot rows that flip become invisible in the bell/list (honest-inbox semantics apply uniformly) but are **never archived** — they stay in the live table until their category joins the rollout. |
+| Operation-completion hook (step done → its notifications flip) | **Generic** — it keys on `source_operation_id`, which is stamped on new SR notifications from deploy onward **on both usecases**: V2 stamps it explicitly at its notify sites, and for V1 (where most FIT_OUT_AND_HANDOVER traffic lives, across ~60 write sites) the repository derives it at insert time by matching the notification's target role/user against the SR's IN_PROGRESS operations — explicit stamps win, ambiguity stamps nothing. Non-pilot rows that flip become invisible in the bell/list (honest-inbox semantics apply uniformly) but are **never archived** — they stay in the live table until their category joins the rollout. |
 | Read filters on `GET /notifications` | Table-wide by construction, but only rows that ever reach `ACTION_DONE` are affected — which today means the pilot rows plus post-deploy V2 workflow rows. |
 
 Legacy rows of other categories (13.5M-row table) are never flipped, never
@@ -106,8 +106,19 @@ nothing is wrong, storage just lags.
   (`Store`, `UpdateNotification`, `BulkInsertNotification`) with caller-set
   values winning — the same pattern as the TC-3520 entity columns.
 - `ActiveOperationRecipients` gained `UserSourceOps` / `RoleSourceOps` so both
-  SR notify paths stamp each recipient with the operation that put it in the
+  V2 notify paths stamp each recipient with the operation that put it in the
   set (contact-resolved users inherit their role's operation; first-seen wins).
+- **V1 coverage** (`1c71b8742`): the V1 usecase — which carries most
+  FIT_OUT_AND_HANDOVER traffic across ~60 notification write sites — never
+  passes the operation. The repository therefore resolves it at insert time:
+  an action-required SERVICE_REQUEST row targeted at exactly the role (or
+  user) an IN_PROGRESS operation of that SR is assigned to belongs to that
+  operation. Explicit stamps (V2) win; an ambiguous match stamps nothing —
+  a wrong link would close a pending notification, a missing one only falls
+  back to the reconciler's terminal rule. The lookup runs on the caller's
+  transaction so a step opened moments earlier is visible. The reconciler's
+  operation rule is NOT EXISTS, so an operation V1 *deletes* (some re-flow
+  paths) counts as finished too.
 
 ### Phase 2 — hooks and filters (all three repos)
 
@@ -224,9 +235,10 @@ sweep atomicity and reasons, archive-union list and count.
 
 ## 7. Out of scope / future
 
-- **Other notification categories** (sales data, documents, leads…): get
-  lifecycle stamps on new V2 workflow rows but are never archived. Rollout =
-  widen the `sr_sub_category` guard in the reconciler + sweeps.
+- **Other notification categories** (sales data, documents, leads…): new SR
+  workflow rows get lifecycle stamps (V2 explicitly, V1 via the repository
+  resolver) but are never archived. Rollout = widen the `sr_sub_category`
+  guard in the reconciler + sweeps.
 - **Per-user read receipts**: dropped by decision — shared-queue `read_at`
   stands. Revisit only if the whole-role behaviour is reported as a problem.
 - **History UI**: the API flag exists; no frontend consumes it yet.
