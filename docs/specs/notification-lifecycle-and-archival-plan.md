@@ -80,7 +80,9 @@ Actionable notifications in the pilot scope, joined to their service request:
 APPROVED or COMPLETED**, 217 of them still unread. Separately, of 207
 lease-activation "create the handover" notifications, **56 already have their
 handover SR — and 55 of those are still sitting unread** in a Mall Manager's
-queue. The inbox is asking people to do work that is already done.
+queue. (Only 36 of those SRs postdate the notification and genuinely close it —
+see the timing guard in §3.4; the other 20 are stale SRs from earlier lease
+terms.) The inbox is asking people to do work that is already done.
 
 ### Finding 2 — "read → archive" is unsafe on most rows
 
@@ -213,7 +215,7 @@ SELECT *, now(), $2, $3 FROM moved;
 
 | Notification | Raised when | Becomes ACTION_DONE when |
 |---|---|---|
-| `ACTIVATED_LEASE_NOTIFICATION` (entity = LEASE) | lease activates; MM must raise the handover | a `HANDOVER` SR exists for that `lease_id` |
+| `ACTIVATED_LEASE_NOTIFICATION` (entity = LEASE) | lease activates; MM must raise the handover | a `HANDOVER` SR exists for that `lease_id` **with `sr.created_at >= notification.created_at`** — an SR from an earlier lease term predates the notification and is not the response to it. Measured: 20 of 56 "SR exists" matches are such stale SRs and must NOT close the notification. At the creation hook the predicate holds trivially (every existing notification predates the just-created SR); the reconciler and backfill must apply it explicitly. SR-targeted rows need no timing guard — they reference their exact SR by `entity_id`. |
 | any SR notification with `source_operation_id` | the operation went IN_PROGRESS | that operation leaves IN_PROGRESS |
 | SR notification without it (legacy rows) | — | the SR reaches a terminal status (APPROVED / COMPLETED / REJECTED) — **except `FIT_OUT_APPROVED`**, which needs the tenant-acceptance step recorded (§6.2): an APPROVED SR with an unaccepted report is still actionable |
 | `NO_ACTION`, **user-targeted** | informational | `read_at` set → archive with reason `READ` |
@@ -266,8 +268,9 @@ One-time reconcile over the ~3,240 agent-relevant rows (not the 13.5M table):
 
 1. `entity_type = 'SERVICE_REQUEST'` and the SR is APPROVED / COMPLETED /
    REJECTED → `ACTION_DONE`. (~828 rows)
-2. `entity_type = 'LEASE'` and a HANDOVER SR exists for the lease →
-   `ACTION_DONE`. (~56 rows)
+2. `entity_type = 'LEASE'` and a HANDOVER SR exists for the lease **created at
+   or after the notification** → `ACTION_DONE`. (~36 rows; the other 20
+   "SR exists" matches are stale SRs from earlier lease terms and stay open)
 3. Sweep those into the archive.
 
 Idempotent and reversible — the down migration moves rows back by
@@ -283,7 +286,7 @@ of 3,240 rows ran in ~23s.
 | 1 | `action_state`, `source_operation_id`, archive table. Write the new columns. **Nothing moves, nothing is filtered.** | none — additive |
 | 2 | Set `ACTION_DONE` at the hooks. Every exposing API filters `action_state <> 'ACTION_DONE'`; agent adds `read_at IS NULL`. Empty-group/tab hiding. | low — **the user-visible feature is fully delivered here, with zero rows moved** |
 | 3 | New scheduler in `cenomi-api-2`: sweep `ACTION_DONE` + read `NO_ACTION` rows into the archive; drift reconcile. | low — pure storage; reversible |
-| 4 | One-time backfill of the 828 + 56 stale rows (respecting the `FIT_OUT_APPROVED` carve-out). `include_archived=true` on `GET /notifications`. | low — idempotent |
+| 4 | One-time backfill of the 828 + 36 stale rows (respecting the `FIT_OUT_APPROVED` carve-out and the SR-after-notification timing guard). `include_archived=true` on `GET /notifications`. | low — idempotent |
 
 Phases 1–2 are worth doing on their own even if 3 never ships.
 
