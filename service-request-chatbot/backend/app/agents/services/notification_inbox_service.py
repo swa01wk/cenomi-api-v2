@@ -461,13 +461,15 @@ class MockNotificationInboxService(AbstractNotificationInboxService):
         for sub in selected:
             entries = _MOCK_FIXTURES.get(sub, [])
             items = [_parse_item(e, sub) for e in entries]
-            # Platform parity: the agent endpoints never list read rows
-            # (shared-queue read-hiding, lifecycle plan §3.6) — asking for
-            # read-only (`unread=False`) therefore yields nothing there, and
-            # the mock must not behave more generously than production.
-            items = [i for i in items if not i.read_at]
-            if filters and filters.unread is False:
-                items = []
+            # Platform parity: read rows STAY listed — every agent row is
+            # action-required and reading one does not discharge the action
+            # (an earlier read-hiding cut made "Needs your action" drop rows
+            # whose work was still owed). unread only acts as an explicit
+            # filter, mirroring the platform's IsUnRead param.
+            if filters and filters.unread is True:
+                items = [i for i in items if not i.read_at]
+            elif filters and filters.unread is False:
+                items = [i for i in items if i.read_at]
             total = len(items)
             items = items[(page - 1) * limit : page * limit]
             if items:

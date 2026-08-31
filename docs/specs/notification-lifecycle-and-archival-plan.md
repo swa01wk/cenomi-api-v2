@@ -244,12 +244,18 @@ hides it for the whole role. Archival of role-targeted rows still triggers on
 user-targeted ones. Per-user read receipts are out of scope; revisit only if
 shared-queue behaviour is reported as a problem in practice.
 
-### 3.6 Hiding read notifications from the agent
+### 3.6 Hiding read notifications from the agent — AMENDED in practice
 
-`AND read_at IS NULL AND action_state <> 'ACTION_DONE'` in
-`buildAgentSubCategoryFilters`. Shared-queue semantics apply (§6.3): once any
-holder of the role opens a row, it stops appearing in the agent inbox for
-everyone in that role.
+As shipped first: `read_at IS NULL AND action_state <> 'ACTION_DONE'`.
+**Reverted to the lifecycle filter only (2026-08-31)** after live use showed
+the predicted weakness of read-as-signal: the agent endpoints serve only
+action-required rows, so read-hiding there removed rows whose action was
+still owed the moment someone opened them ("Needs your action" dropped a
+live lease activation while the bell kept it). Reading now drives only the
+unread badge; a row leaves the agent inbox when its action is taken —
+`action_state` — and `unread=true` remains available as an explicit filter.
+Shared-queue read semantics (§6.3) still govern the unread badge and the
+read→archive rule for informational rows.
 
 ### 3.7 Hiding empty groups in the agent view
 

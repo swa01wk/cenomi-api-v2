@@ -137,8 +137,12 @@ Read-side:
 
 - `GET /notifications` list + both counts filter out `ACTION_DONE` (NULL on
   pre-migration rows passes, so legacy data is unaffected).
-- The five agent endpoints additionally filter `read_at IS NULL` —
-  **read notifications never appear in the agent inbox** (shared-queue).
+- The five agent endpoints briefly filtered `read_at IS NULL` too; this was
+  **reverted the same day**: every agent row is action-required, and reading
+  one does not discharge the action — the filter made "Needs your action"
+  drop a live lease activation the moment it was opened, while the bell kept
+  it. Read now drives only the unread badge (`unread=true` stays available
+  as an explicit filter); rows leave the agent inbox on `ACTION_DONE`.
 - The mark-read UPDATE deliberately keeps an unfiltered WHERE: filtering it
   would turn a complete-vs-click race into HTTP 403.
 - Frontend (`56e162cdf`): Copilot inbox tabs hide when their groups hold
