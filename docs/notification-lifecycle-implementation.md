@@ -26,8 +26,8 @@ the handover flow. It is *not* handover-only, and it is *not* everything:
 | **Physical archival** (rows moved to `notifications_archive`) | **Pilot only** — every sweep statement carries `sr_sub_category IS NOT NULL`, which matches only the four sub-categories above. Sales-data, document-expiry, lead and other notifications are never touched. |
 | **Reconciler** (lease rule, legacy terminal rule) | **Pilot only** — same guard. |
 | Lease-activation close-out (handover SR created → notification done) | Handover by nature — `ACTIVATED_LEASE_NOTIFICATION` only. |
-| Operation-completion hook (step done → its notifications flip) | **Generic** — it keys on `source_operation_id`, which is stamped on new SR notifications from deploy onward **on both usecases**: V2 stamps it explicitly at its notify sites, and for V1 (where most FIT_OUT_AND_HANDOVER traffic lives, across ~60 write sites) the repository derives it at insert time by matching the notification's target role/user against the SR's IN_PROGRESS operations — explicit stamps win, ambiguity stamps nothing. Non-pilot rows that flip become invisible in the bell/list (honest-inbox semantics apply uniformly) but are **never archived** — they stay in the live table until their category joins the rollout. |
-| Read filters on `GET /notifications` | Table-wide by construction, but only rows that ever reach `ACTION_DONE` are affected — which today means the pilot rows plus post-deploy V2 workflow rows. |
+| Operation-completion hook (step done → its notifications flip) | **Pilot only** — the hook (and the reconciler's drift rule) carry the same `sr_sub_category IS NOT NULL` guard as the sweeps. `source_operation_id` is still stamped on new SR notifications of every category (V2 explicitly; V1 via the repository resolver matching target role/user against the SR's IN_PROGRESS operations), but outside the pilot the stamp is inert routing data: nothing is flipped, hidden, or archived until a category joins the rollout. |
+| Read filters on `GET /notifications` | Table-wide by construction, but only rows that ever reach `ACTION_DONE` are affected — and only pilot rows ever do. Every other category stays fully visible. |
 
 Legacy rows of other categories (13.5M-row table) are never flipped, never
 hidden, never moved. Extending the pilot later = widening the
@@ -240,9 +240,9 @@ sweep atomicity and reasons, archive-union list and count.
 ## 7. Out of scope / future
 
 - **Other notification categories** (sales data, documents, leads…): new SR
-  workflow rows get lifecycle stamps (V2 explicitly, V1 via the repository
-  resolver) but are never archived. Rollout = widen the `sr_sub_category`
-  guard in the reconciler + sweeps.
+  workflow rows get `source_operation_id` stamps but are never flipped,
+  hidden, or archived. Rollout = widen the `sr_sub_category` guard shared by
+  the hook, reconciler and sweeps.
 - **Per-user read receipts**: dropped by decision — shared-queue `read_at`
   stands. Revisit only if the whole-role behaviour is reported as a problem.
 - **History UI**: the API flag exists; no frontend consumes it yet.
