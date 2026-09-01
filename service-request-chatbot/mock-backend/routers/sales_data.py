@@ -167,6 +167,48 @@ async def post_sales_data(request: Request, body: list[dict]):
 # PATCH /api/v1/sales-data  (status update by admin)
 # ---------------------------------------------------------------------------
 
+def find_row_for_patch(db: list[dict], body: dict) -> dict | None:
+    """Match the live Cenomi PATCH key: lease_id + lease_code + period dates.
+
+    ``lease_id`` alone is not unique — the same lease has one row per month.
+    """
+    lease_id = body.get("lease_id")
+    lease_code = str(body.get("lease_code") or "").strip()
+    start = str(body.get("sales_period_start") or "").strip()
+    end = str(body.get("sales_period_end") or "").strip()
+
+    if start and end:
+        by_id = next(
+            (
+                r
+                for r in db
+                if r.get("lease_id") == lease_id
+                and r.get("sales_period_start") == start
+                and r.get("sales_period_end") == end
+            ),
+            None,
+        )
+        if by_id:
+            return by_id
+        if lease_code:
+            return next(
+                (
+                    r
+                    for r in db
+                    if r.get("lease_code") == lease_code
+                    and r.get("sales_period_start") == start
+                    and r.get("sales_period_end") == end
+                ),
+                None,
+            )
+        return None
+
+    candidates = [r for r in db if r.get("lease_id") == lease_id]
+    if len(candidates) == 1:
+        return candidates[0]
+    return None
+
+
 @router.patch("/api/v1/sales-data")
 async def patch_sales_data(request: Request, body: dict):
     """Update a single sales data row's status (admin approval / action request)."""
@@ -181,9 +223,17 @@ async def patch_sales_data(request: Request, body: dict):
     if not lease_id or not new_status:
         raise HTTPException(status_code=400, detail="lease_id and status are required")
 
-    match = next((r for r in db if r["lease_id"] == lease_id), None)
+    match = find_row_for_patch(db, body)
     if not match:
-        raise HTTPException(status_code=404, detail=f"No row found for lease_id {lease_id}")
+        start = body.get("sales_period_start") or "?"
+        end = body.get("sales_period_end") or "?"
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"No row found for lease_id {lease_id} "
+                f"in period {start} – {end}."
+            ),
+        )
 
     # Role check
     _ADMIN_STATUSES = {"APPROVED", "NEED_REUPLOAD", "NEED_UPLOAD_SUPPORTING_DOCUMENT",
@@ -192,16 +242,38 @@ async def patch_sales_data(request: Request, body: dict):
 
     if new_status in _ADMIN_STATUSES and role not in ("SALES_DATA_APPROVER", "ADMIN"):
         raise HTTPException(status_code=403, detail="Only admins can set this status")
-    if new_status in _TENANT_STATUSES and role not in (
-        "TENANT_DOC_UPLOADER", "TENANT_CSV_UPLOADER", "ADMIN"
-    ):
-        raise HTTPException(status_code=403, detail="Insufficient permissions")
+    if new_status in _TENANT_STATUSES:
+        if role not in ("TENANT_DOC_UPLOADER", "TENANT_CSV_UPLOADER", "ADMIN"):
+            raise HTTPException(status_code=403, detail="Insufficient permissions")
+        if not document_id:
+            raise HTTPException(
+                status_code=400,
+                detail="document_id is required for tenant document responses",
+            )
+
+    # Mirror live API: tenant may only move NEED_* → the matching UPLOADED_*/RE_UPLOADED
+    _TENANT_FROM = {
+        "UPLOADED_SUPPORTING_DOCUMENT": "NEED_UPLOAD_SUPPORTING_DOCUMENT",
+        "RE_UPLOADED": "NEED_REUPLOAD",
+        "UPLOADED_AUDITED_SALES": "NEED_UPLOAD_AUDITED_SALES",
+    }
+    expected_from = _TENANT_FROM.get(new_status)
+    if expected_from and match["status"] != expected_from:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Cannot set {new_status}: current status is {match['status']}, "
+                f"expected {expected_from}."
+            ),
+        )
 
     match["status"] = new_status
     if comment:
         match["comment_text"] = comment
     if document_id:
         match["document_id"] = document_id
+    if body.get("sales_amt") is not None:
+        match["sales_amt"] = float(body["sales_amt"])
     match["updated_at"] = datetime.utcnow().isoformat() + "Z"
 
     return ""
@@ -211,20 +283,66 @@ async def patch_sales_data(request: Request, body: dict):
 # GET /api/v1/sales-data/template
 # ---------------------------------------------------------------------------
 
+def _iso_to_ddmmyyyy(iso: str) -> str:
+    raw = (iso or "")[:10]
+    try:
+        return datetime.strptime(raw, "%Y-%m-%d").strftime("%d-%m-%Y")
+    except ValueError:
+        return iso or ""
+
+
+def _template_amount(amt: Any) -> str:
+    if amt is None or amt == "":
+        return ""
+    try:
+        number = float(amt)
+        if number == int(number):
+            return str(int(number))
+        return str(number)
+    except (TypeError, ValueError):
+        return str(amt)
+
+
 @router.get("/api/v1/sales-data/template")
 async def get_template(request: Request):
-    """Return a CSV template with the required headers and example rows."""
+    """Return the Cenomi platform CSV template (same headers as live GET /template)."""
+    db: list[dict] = _get_db(request)
+    role, tenant_id = _parse_auth(request)
+    rows = list(db)
+    if role in ("TENANT_CSV_UPLOADER", "TENANT_DOC_UPLOADER"):
+        rows = [r for r in rows if r["tenant_profile_id"] == tenant_id]
+
+    fillable = [r for r in rows if r.get("status") in ("PENDING", "NEED_REUPLOAD")]
+
     output = io.StringIO()
     writer = csv.writer(output)
-    writer.writerow(["lease_code", "sales_period_start", "sales_period_end", "sales_amt"])
-    writer.writerow(["LC-1001", "2026-08-01", "2026-08-31", "85000"])
-    writer.writerow(["LC-1002", "2026-08-01", "2026-08-31", "120000"])
+    writer.writerow([
+        "Lease code",
+        "Brand",
+        "Property",
+        "Start date(DD-MM-YYYY)",
+        "End date(DD-MM-YYYY)",
+        "Sales amount",
+    ])
+    if fillable:
+        for row in fillable:
+            writer.writerow([
+                row.get("lease_code") or "",
+                row.get("brand_name") or "",
+                row.get("property_name") or row.get("mall_name") or "",
+                _iso_to_ddmmyyyy(row.get("sales_period_start") or ""),
+                _iso_to_ddmmyyyy(row.get("sales_period_end") or ""),
+                _template_amount(row.get("sales_amt")),
+            ])
+    else:
+        writer.writerow(["LC-1001", "Noon Fashion", "Riyadh Park", "01-08-2026", "31-08-2026", ""])
+        writer.writerow(["LC-1002", "Pure Gym", "Riyadh Park", "01-08-2026", "31-08-2026", ""])
     output.seek(0)
 
     return StreamingResponse(
         iter([output.getvalue()]),
         media_type="text/csv",
-        headers={"Content-Disposition": "attachment; filename=sales_data_template.csv"},
+        headers={"Content-Disposition": "attachment; filename=salesdatatemplate.csv"},
     )
 
 

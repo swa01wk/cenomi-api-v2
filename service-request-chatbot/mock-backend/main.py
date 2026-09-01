@@ -20,7 +20,7 @@ Usage:
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from seed_data import get_initial_state
+from seed_data import get_initial_state, get_initial_files
 from routers import sales_data, files, dev
 
 app = FastAPI(
@@ -36,12 +36,14 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["Content-Disposition", "Content-Type"],
 )
 
 
 @app.on_event("startup")
 async def startup():
     app.state.db = get_initial_state()
+    app.state.files = get_initial_files()
 
 
 app.include_router(sales_data.router)
