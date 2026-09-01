@@ -6,17 +6,17 @@ import { SalesDataLeftPanel } from "@/components/SalesDataLeftPanel";
 
 function SplitScreenContent() {
   return (
-    <div className="flex h-screen bg-gray-100 gap-3 p-3 overflow-hidden">
+    <div className="flex h-screen gap-3 p-3 overflow-hidden">
       {/* ── Left panel — platform mirror ── */}
       <div className="flex-1 min-w-0 overflow-hidden">
         <SalesDataLeftPanel />
       </div>
 
       {/* Divider */}
-      <div className="w-px bg-gray-200 flex-shrink-0 self-stretch" />
+      <div className="w-px bg-gradient-to-b from-transparent via-[#C9A84C]/40 to-transparent flex-shrink-0 self-stretch" />
 
       {/* ── Right panel — AI chatbot ── */}
-      <div className="w-[420px] flex-shrink-0 flex flex-col bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+      <div className="w-[420px] flex-shrink-0 flex flex-col glass-strong rounded-2xl overflow-hidden">
         <Suspense>
           <SalesDataChat />
         </Suspense>

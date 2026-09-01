@@ -57,7 +57,7 @@ export function SalesDataReviewCard({
   }
 
   return (
-    <div className="bg-white border border-gray-200 rounded-2xl overflow-hidden shadow-sm my-2">
+    <div className="glass-light rounded-2xl overflow-hidden my-2">
       {/* Header */}
       <div className="bg-gradient-to-r from-blue-50 to-indigo-50 border-b border-gray-200 px-4 py-3 flex items-center justify-between">
         <div>
@@ -79,6 +79,8 @@ export function SalesDataReviewCard({
           <thead>
             <tr className="bg-gray-50 text-xs text-gray-500 uppercase tracking-wide">
               <th className="text-left px-4 py-2 font-medium">Lease</th>
+              <th className="text-left px-4 py-2 font-medium">Brand</th>
+              <th className="text-left px-4 py-2 font-medium">Property</th>
               <th className="text-left px-4 py-2 font-medium">Period</th>
               <th className="text-left px-4 py-2 font-medium">Status</th>
               <th className="text-right px-4 py-2 font-medium">Sales Amt (SAR)</th>
@@ -99,6 +101,12 @@ export function SalesDataReviewCard({
                 >
                   <td className="px-4 py-3 font-medium text-gray-900">
                     {row.lease_code}
+                  </td>
+                  <td className="px-4 py-3 text-gray-600">
+                    {row.brand || "—"}
+                  </td>
+                  <td className="px-4 py-3 text-gray-600">
+                    {row.property || "—"}
                   </td>
                   <td className="px-4 py-3 text-gray-600 whitespace-nowrap">
                     {row.period}

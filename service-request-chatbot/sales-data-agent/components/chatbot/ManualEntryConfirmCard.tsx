@@ -20,7 +20,7 @@ export function ManualEntryConfirmCard({
     : "—";
 
   return (
-    <div className="bg-white border border-gray-200 rounded-2xl overflow-hidden shadow-sm my-2">
+    <div className="glass-light rounded-2xl overflow-hidden my-2">
       <div className="bg-gradient-to-r from-amber-50 to-yellow-50 border-b border-gray-200 px-4 py-3">
         <h3 className="text-sm font-semibold text-gray-800">
           ✏️ Confirm Manual Entry
@@ -35,6 +35,8 @@ export function ManualEntryConfirmCard({
           <tbody>
             {[
               { label: "Lease Code", value: ui.lease_code },
+              { label: "Brand", value: ui.brand || "—" },
+              { label: "Property", value: ui.property || "—" },
               {
                 label: "Period Start",
                 value: ui.sales_period_start,

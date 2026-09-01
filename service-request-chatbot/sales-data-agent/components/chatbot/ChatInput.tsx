@@ -9,6 +9,8 @@ interface ChatInputProps {
   placeholder?: string;
   showFileUpload?: boolean;
   onTemplateDownload?: () => void;
+  accept?: string;
+  uploadLabel?: string;
 }
 
 export function ChatInput({
@@ -18,6 +20,8 @@ export function ChatInput({
   placeholder = "Type a message…",
   showFileUpload = false,
   onTemplateDownload,
+  accept = ".csv",
+  uploadLabel = "Upload CSV",
 }: ChatInputProps) {
   const [text, setText] = useState("");
   const fileRef = useRef<HTMLInputElement>(null);
@@ -45,7 +49,7 @@ export function ChatInput({
   }
 
   return (
-    <div className="border-t border-gray-200 bg-white p-4">
+    <div className="border-t border-white/10 bg-white/[0.04] backdrop-blur-md p-4">
       {/* Toolbar */}
       {(showFileUpload || onTemplateDownload) && (
         <div className="flex gap-2 mb-2">
@@ -54,14 +58,14 @@ export function ChatInput({
               <button
                 onClick={() => fileRef.current?.click()}
                 disabled={disabled}
-                className="text-xs flex items-center gap-1.5 px-3 py-1.5 bg-blue-50 text-blue-700 rounded-lg hover:bg-blue-100 disabled:opacity-50 transition-colors"
+                className="text-xs flex items-center gap-1.5 px-3 py-1.5 bg-sky-400/15 text-sky-200 border border-sky-400/25 rounded-lg hover:bg-sky-400/25 disabled:opacity-50 transition-colors"
               >
-                📁 Upload CSV
+                📁 {uploadLabel}
               </button>
               <input
                 ref={fileRef}
                 type="file"
-                accept=".csv"
+                accept={accept}
                 className="hidden"
                 onChange={handleFileChange}
               />
@@ -70,7 +74,7 @@ export function ChatInput({
           {onTemplateDownload && (
             <button
               onClick={onTemplateDownload}
-              className="text-xs flex items-center gap-1.5 px-3 py-1.5 bg-gray-50 text-gray-600 rounded-lg hover:bg-gray-100 transition-colors"
+              className="text-xs flex items-center gap-1.5 px-3 py-1.5 bg-white/10 text-white/60 border border-white/10 rounded-lg hover:bg-white/15 transition-colors"
             >
               ⬇ Download Template
             </button>
@@ -87,7 +91,7 @@ export function ChatInput({
           disabled={disabled}
           placeholder={placeholder}
           rows={1}
-          className="flex-1 resize-none border border-gray-300 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#C9A84C]/40 focus:border-[#C9A84C] disabled:opacity-50 disabled:bg-gray-50 max-h-32 overflow-y-auto"
+          className="flex-1 resize-none bg-white/10 border border-white/15 rounded-xl px-4 py-2.5 text-sm text-white placeholder:text-white/30 focus:outline-none focus:ring-2 focus:ring-[#C9A84C]/40 focus:border-[#C9A84C]/50 disabled:opacity-50 max-h-32 overflow-y-auto"
           style={{ minHeight: "42px" }}
           onInput={(e) => {
             const target = e.target as HTMLTextAreaElement;
@@ -98,7 +102,7 @@ export function ChatInput({
         <button
           onClick={handleSend}
           disabled={disabled || !text.trim()}
-          className="bg-gradient-to-r from-[#C9A84C] to-[#E4C063] text-white rounded-xl px-4 py-2.5 text-sm font-medium hover:opacity-90 disabled:opacity-40 transition-all flex-shrink-0"
+          className="bg-gradient-to-r from-[#C9A84C] to-[#E4C063] text-[#1A1A2E] rounded-xl px-4 py-2.5 text-sm font-semibold hover:opacity-90 disabled:opacity-40 transition-all flex-shrink-0 shadow-[0_6px_18px_rgba(201,168,76,0.25)]"
         >
           Send
         </button>

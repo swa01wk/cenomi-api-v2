@@ -31,6 +31,10 @@ interface SalesDataSession {
   /** Called when left panel's Submit button is clicked */
   onSubmitFromPanel: ((rows: SalesDataReviewRow[]) => void) | null;
   registerSubmitHandler: (fn: (rows: SalesDataReviewRow[]) => void) => void;
+
+  /** Send a chat turn from the left-panel three-dot menu (Accept / Ask upload). */
+  onPanelMessage: ((text: string) => void) | null;
+  registerPanelMessageHandler: (fn: (text: string) => void) => void;
 }
 
 const SalesDataSessionContext = createContext<SalesDataSession | null>(null);
@@ -41,10 +45,18 @@ export function SalesDataSessionProvider({ children }: { children: ReactNode }) 
   const [workflowStage, setWorkflowStage] = useState<string | null>(null);
   const [isPending, setIsPending] = useState(false);
   const [submitHandler, setSubmitHandler] = useState<((rows: SalesDataReviewRow[]) => void) | null>(null);
+  const [panelMessageHandler, setPanelMessageHandler] = useState<((text: string) => void) | null>(null);
 
   const registerSubmitHandler = useCallback(
     (fn: (rows: SalesDataReviewRow[]) => void) => {
       setSubmitHandler(() => fn);
+    },
+    [],
+  );
+
+  const registerPanelMessageHandler = useCallback(
+    (fn: (text: string) => void) => {
+      setPanelMessageHandler(() => fn);
     },
     [],
   );
@@ -62,6 +74,8 @@ export function SalesDataSessionProvider({ children }: { children: ReactNode }) 
         setIsPending,
         onSubmitFromPanel: submitHandler,
         registerSubmitHandler,
+        onPanelMessage: panelMessageHandler,
+        registerPanelMessageHandler,
       }}
     >
       {children}

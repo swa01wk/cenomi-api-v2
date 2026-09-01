@@ -52,16 +52,16 @@ export interface MockNotification {
   period: string;          // e.g. "2026-08-01"
   periodLabel: string;     // e.g. "August 2026"
   mallName: string;
-  status: "pending" | "need_reupload";
+  status: "pending" | "need_reupload" | "need_supporting_document" | "need_audited_sales";
   createdAt: string;
 }
 
 export const DEMO_ROLES: Record<DemoRole, DemoRoleInfo> = {
   TENANT: {
-    label: "Tenant — Al Futtaim Retail",
+    label: "Tenant",
     icon: "🏪",
     description:
-      "Tenant with 2 pending leases. Receives notifications when monthly sales data is due.",
+      "Tenant with pending CSV uploads plus file requests: sales re-upload, supporting document, and audited sales.",
     username: "tenant.csv@cenomi.com",
     password: "test1234",
     type: "tenant",
@@ -88,13 +88,46 @@ export const DEMO_ROLES: Record<DemoRole, DemoRoleInfo> = {
         status: "pending",
         createdAt: "2026-08-19T09:00:00Z",
       },
+      {
+        id: "notif-3",
+        title: "Sales Data Needs Re-upload",
+        body: "The Sales Data team requested a PDF re-upload for Lease LC-1003 (Mall of Arabia) — August 2026.",
+        leaseCode: "LC-1003",
+        period: "2026-08-01",
+        periodLabel: "August 2026",
+        mallName: "Mall of Arabia",
+        status: "need_reupload",
+        createdAt: "2026-08-20T09:00:00Z",
+      },
+      {
+        id: "notif-4",
+        title: "Supporting Document Required",
+        body: "The Sales Data team asked for a supporting document (POS report) for Lease LC-1004 (Riyadh Park) — July 2026.",
+        leaseCode: "LC-1004",
+        period: "2026-07-01",
+        periodLabel: "July 2026",
+        mallName: "Riyadh Park",
+        status: "need_supporting_document",
+        createdAt: "2026-08-21T09:00:00Z",
+      },
+      {
+        id: "notif-5",
+        title: "Audited Sales Required",
+        body: "The Sales Data team asked for audited sales data for Lease LC-1005 (Mall of Arabia) — July 2026.",
+        leaseCode: "LC-1005",
+        period: "2026-07-01",
+        periodLabel: "July 2026",
+        mallName: "Mall of Arabia",
+        status: "need_audited_sales",
+        createdAt: "2026-08-22T09:00:00Z",
+      },
     ],
   },
   SALES_DATA_APPROVER: {
-    label: "Sales Data Approver",
+    label: "Sales Data Team",
     icon: "✅",
     description:
-      "Admin reviewer — can view all submitted data and approve or request re-upload.",
+      "Admin reviewer — approve submissions or Ask upload: sales data, supporting document, or audited sales.",
     username: "sales.approver@cenomi.com",
     password: "test1234",
     type: "admin",
@@ -128,11 +161,18 @@ function aiBase(): string {
 export async function loginWithRole(role: DemoRole): Promise<CurrentUser> {
   const info = DEMO_ROLES[role];
 
-  const res = await fetch(`${aiBase()}/auth/login`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ username: info.username, password: info.password }),
-  });
+  let res: Response;
+  try {
+    res = await fetch(`${aiBase()}/auth/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username: info.username, password: info.password }),
+    });
+  } catch {
+    throw new Error(
+      "Cannot reach the AI backend on localhost:8000. Start it with: cd backend && uvicorn app.main:app --reload --port 8000"
+    );
+  }
 
   if (!res.ok) {
     const errText = await res.text().catch(() => res.statusText);
@@ -202,7 +242,13 @@ export function getStoredUser(): CurrentUser | null {
   const raw = localStorage.getItem(USER_KEY);
   if (!raw) return null;
   try {
-    return JSON.parse(raw) as CurrentUser;
+    const user = JSON.parse(raw) as CurrentUser;
+    const info = DEMO_ROLES[user.role];
+    if (info) {
+      user.label = info.label;
+      user.notifications = info.notifications;
+    }
+    return user;
   } catch {
     return null;
   }

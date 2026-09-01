@@ -49,6 +49,36 @@ export interface CsvValidationErrorUI extends ResponseUIBase {
 export interface LeaseValidationErrorUI extends ResponseUIBase {
   type: "lease_validation_error";
   errors: Array<{ lease_code: string; _error: string }>;
+  show_file_upload?: boolean;
+}
+
+export interface PeriodMismatchWarningUI extends ResponseUIBase {
+  type: "period_mismatch_warning";
+  asked_label: string;
+  file_label: string;
+  includes_asked_month?: boolean;
+  show_file_upload: boolean;
+}
+
+export interface PendingMonthItem {
+  label: string;
+  year_month: string;
+}
+
+export interface PendingMonthsListUI extends ResponseUIBase {
+  type: "pending_months_list";
+  leases: Array<{ lease_code: string; months: PendingMonthItem[] }>;
+  show_file_upload: boolean;
+  show_template_download?: boolean;
+}
+
+export interface OtherMonthsReminderUI extends ResponseUIBase {
+  type: "other_months_reminder";
+  lease_code: string;
+  asked_label: string;
+  asked_year_month: string;
+  other_months: PendingMonthItem[];
+  show_file_upload: boolean;
 }
 
 export interface SalesDataReviewUI extends ResponseUIBase {
@@ -61,6 +91,8 @@ export interface SalesDataReviewUI extends ResponseUIBase {
 export interface SalesDataReviewRow {
   lease_code: string;
   lease_id?: number;
+  brand?: string;
+  property?: string;
   period: string;
   sales_period_start: string;
   sales_period_end: string;
@@ -71,6 +103,8 @@ export interface SalesDataReviewRow {
 export interface ManualEntryConfirmUI extends ResponseUIBase {
   type: "manual_entry_confirm";
   lease_code: string;
+  brand?: string;
+  property?: string;
   sales_period_start: string;
   sales_period_end: string;
   sales_amt: number;
@@ -99,17 +133,32 @@ export interface AdminSalesDataListUI extends ResponseUIBase {
   rows: SalesDataRow[];
 }
 
+export interface AdminConfirmTarget {
+  lease_code: string;
+  lease_id?: number;
+  sales_period_start?: string;
+  sales_period_end?: string;
+  sales_amt?: number;
+}
+
 export interface AdminConfirmUI extends ResponseUIBase {
   type: "admin_confirm";
   action: string;
+  action_label?: string;
   lease_code: string;
+  targets?: AdminConfirmTarget[];
+  unmatched?: string[];
   comment_text?: string;
 }
 
 export interface AdminActionSuccessUI extends ResponseUIBase {
   type: "admin_action_success";
   action: string;
+  action_label?: string;
   lease_code: string;
+  lease_codes?: string[];
+  succeeded?: number;
+  failed?: number;
 }
 
 export interface StaleNotificationUI extends ResponseUIBase {
@@ -117,10 +166,57 @@ export interface StaleNotificationUI extends ResponseUIBase {
   show_listing_link: boolean;
 }
 
+export interface SupportingDocPromptUI extends ResponseUIBase {
+  type: "supporting_doc_prompt";
+  lease_code: string;
+  lease_id?: number;
+  sales_period_start: string;
+  sales_period_end: string;
+  current_status: string;
+  target_status: string;
+  ask_label?: string;
+  sales_amt?: number | null;
+  comment_text?: string | null;
+  show_file_upload: boolean;
+  accept?: string;
+}
+
+export interface SupportingDocSelectUI extends ResponseUIBase {
+  type: "supporting_doc_select";
+  rows: SalesDataRow[];
+}
+
+export interface SupportingDocConfirmUI extends ResponseUIBase {
+  type: "supporting_doc_confirm";
+  lease_code: string;
+  lease_id?: number;
+  sales_period_start: string;
+  sales_period_end: string;
+  filename: string;
+  current_status: string;
+  target_status: string;
+  ask_label?: string;
+  sales_amt?: number | null;
+  comment_text?: string;
+  comment_required?: boolean;
+}
+
+export interface SupportingDocSuccessUI extends ResponseUIBase {
+  type: "supporting_doc_success";
+  lease_code: string;
+  status: string;
+  document_id?: string;
+  filename?: string;
+  ask_label?: string;
+}
+
 export type ResponseUI =
   | SalesDataUploadPromptUI
   | CsvValidationErrorUI
   | LeaseValidationErrorUI
+  | PeriodMismatchWarningUI
+  | PendingMonthsListUI
+  | OtherMonthsReminderUI
   | SalesDataReviewUI
   | ManualEntryConfirmUI
   | SubmissionSuccessUI
@@ -130,6 +226,10 @@ export type ResponseUI =
   | AdminConfirmUI
   | AdminActionSuccessUI
   | StaleNotificationUI
+  | SupportingDocPromptUI
+  | SupportingDocSelectUI
+  | SupportingDocConfirmUI
+  | SupportingDocSuccessUI
   | (ResponseUIBase & Record<string, unknown>);
 
 // ---------------------------------------------------------------------------
@@ -142,9 +242,12 @@ export interface SalesDataRow {
   lease_code: string;
   brand_name?: string;
   mall_name?: string;
+  property_name?: string;
+  company_name?: string;
   sales_period_start: string;
   sales_period_end: string;
   status: string;
   sales_amt?: number | null;
   comment_text?: string | null;
+  document_id?: string | null;
 }

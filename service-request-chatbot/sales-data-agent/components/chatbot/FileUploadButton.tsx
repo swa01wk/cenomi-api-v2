@@ -37,7 +37,7 @@ export function FileUploadButton({
       onDragLeave={() => setDragOver(false)}
       onDrop={handleDrop}
       className={`border-2 border-dashed rounded-xl p-6 text-center transition-all cursor-pointer ${
-        dragOver ? "border-[#C9A84C] bg-[#FFF9EE]" : "border-gray-300 hover:border-[#C9A84C]/50"
+        dragOver ? "border-[#C9A84C] bg-[#C9A84C]/10" : "border-white/20 hover:border-[#C9A84C]/50"
       } ${disabled ? "opacity-50 pointer-events-none" : ""}`}
       onClick={() => !disabled && fileRef.current?.click()}
     >
@@ -50,11 +50,11 @@ export function FileUploadButton({
         disabled={disabled}
       />
       <div className="text-3xl mb-2">{uploading ? "⏳" : "📁"}</div>
-      <div className="text-sm font-medium text-gray-700">
+      <div className="text-sm font-medium text-white/80">
         {uploading ? "Uploading…" : "Drop CSV here or click to browse"}
       </div>
-      <div className="text-xs text-gray-400 mt-1">
-        Max 5 MB · .csv files only
+      <div className="text-xs text-white/40 mt-1">
+        Max 5 MB · Cenomi template · dates DD-MM-YYYY
       </div>
     </div>
   );
