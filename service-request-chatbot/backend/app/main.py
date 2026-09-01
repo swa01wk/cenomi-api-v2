@@ -12,6 +12,7 @@ from app.api.routes.chat import router as chat_router
 from app.api.routes.chat import service_request_router
 from app.api.routes.msp_chat import msp_chat_router
 from app.api.routes import notifications as notifications_routes
+from app.api.routes import session_analytics as session_analytics_routes
 from app.core.config import settings
 from app.core.logging import configure_logging
 from app.integrations.factory import close_integrations
@@ -53,6 +54,9 @@ def create_app() -> FastAPI:
     application.include_router(auth_router, prefix="/api", tags=["auth"])
     # Original service-request endpoint — unversioned path kept for RDD frontend
     application.include_router(service_request_router, prefix="/api", tags=["chat"])
+    application.include_router(
+        session_analytics_routes.router, prefix="/api", tags=["session-analytics"]
+    )
     # Legacy v1 chat stub
     application.include_router(chat_router, prefix=settings.api_v1_prefix, tags=["chat-v1"])
     # MSP Platform-compatible help endpoints — contractually pinned to /api/v1 by cenomi-ai-backend
@@ -76,6 +80,11 @@ def create_app() -> FastAPI:
     application.include_router(health.router, prefix=settings.api_v2_prefix, tags=["health-v2"])
     application.include_router(auth_router, prefix=settings.api_v2_prefix, tags=["auth-v2"])
     application.include_router(service_request_router, prefix=settings.api_v2_prefix, tags=["chat-v2"])
+    application.include_router(
+        session_analytics_routes.router,
+        prefix=settings.api_v2_prefix,
+        tags=["session-analytics-v2"],
+    )
     application.include_router(chat_router, prefix=settings.api_v2_prefix, tags=["chat-v2"])
     application.include_router(upload.router, prefix=settings.api_v2_prefix, tags=["upload-v2"])
     application.include_router(indexer.router, prefix=settings.api_v2_prefix, tags=["indexer-v2"])

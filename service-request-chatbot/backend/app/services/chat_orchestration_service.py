@@ -64,6 +64,13 @@ from app.db.models import ChatSession
 from app.db.repositories.audit_log_repo import AuditLogRepository
 from app.db.repositories.chat_message_repo import ChatMessageRepository
 from app.db.repositories.chat_session_repo import ChatSessionRepository
+from app.observability.analytics_constants import (
+    EVENT_FIELD_CORRECTED,
+    EVENT_FLOW_CANCELLED,
+    EVENT_SESSION_STARTED,
+    FLOW_CANCEL_ACTIONS,
+)
+from app.observability.analytics_emit import emit_analytics
 from app.observability.trace_manager import TraceManager
 
 log = structlog.get_logger(__name__)
@@ -285,13 +292,43 @@ class ChatOrchestrationService:
         # 1. Load or create session ----------------------------------------
         chat_session = await self._load_or_create_session(session_id, user_id)
         session_uuid = chat_session.id
+        is_new_session = session_id is None or chat_session.id != session_id
 
         log.info(
             "chat.turn_started",
             session_id=str(session_uuid),
             user_id=str(user_id),
-            is_new_session=(session_id is None or chat_session.id != session_id),
+            is_new_session=is_new_session,
         )
+
+        try:
+            await self._session_repo.touch(session_uuid)
+        except Exception:
+            log.exception("analytics.session_touch.failed", session_id=str(session_uuid))
+
+        if is_new_session:
+            await emit_analytics(
+                self._db,
+                user_id=user_id,
+                session_id=session_uuid,
+                event_name=EVENT_SESSION_STARTED,
+            )
+        if corrected_fields:
+            await emit_analytics(
+                self._db,
+                user_id=user_id,
+                session_id=session_uuid,
+                event_name=EVENT_FIELD_CORRECTED,
+                properties={"keys": sorted(str(k) for k in corrected_fields.keys())},
+            )
+        if action in FLOW_CANCEL_ACTIONS:
+            await emit_analytics(
+                self._db,
+                user_id=user_id,
+                session_id=session_uuid,
+                event_name=EVENT_FLOW_CANCELLED,
+                properties={"workflow_stage": chat_session.workflow_stage},
+            )
 
         # 2. Start trace -------------------------------------------------------
         trace_id = await self._trace_manager.start_trace(

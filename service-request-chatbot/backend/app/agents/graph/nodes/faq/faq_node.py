@@ -41,6 +41,7 @@ from app.agents.services.context_builder import build_agent_context, format_cont
 from app.integrations.factory import get_search_repository
 from app.integrations.search.base import SearchResult
 from app.observability.decorators import trace_node
+from app.observability.llm_capture import capture_complete_json
 
 log = structlog.get_logger(__name__)
 
@@ -305,16 +306,16 @@ async def faq_node(state: ServiceRequestState) -> dict[str, Any]:
     answer: str = _FALLBACK_MESSAGE
 
     try:
-        parsed, _in, _out, _ms = await gateway.complete_json(
+        parsed, input_tokens, output_tokens, latency_ms = await gateway.complete_json(
             system_prompt=FAQ_SYSTEM_PROMPT,
             user_message=user_content,
         )
+        parse_ok = isinstance(parsed, dict) and bool(parsed.get("message"))
         if isinstance(parsed, dict) and parsed.get("message"):
             raw_message = parsed["message"]
             if isinstance(raw_message, str):
                 answer = raw_message.strip()
             else:
-                # Model ignored the string contract and nested structured data.
                 log.warning(
                     "faq_node.structured_message_coerced",
                     message_type=type(raw_message).__name__,
@@ -322,8 +323,30 @@ async def faq_node(state: ServiceRequestState) -> dict[str, Any]:
                 answer = _render_structured(raw_message).strip() or _FALLBACK_MESSAGE
         else:
             log.warning("faq_node.unexpected_llm_shape", parsed=parsed)
+        await capture_complete_json(
+            state,
+            run_name="faq_llm_call",
+            prompt_name="faq_prompt",
+            gateway=gateway,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            latency_ms=latency_ms,
+            structured_output={"message": answer[:500]},
+            parse_success=parse_ok,
+        )
     except json.JSONDecodeError as exc:
         log.warning("faq_node.json_parse_error", error=str(exc))
+        await capture_complete_json(
+            state,
+            run_name="faq_llm_call",
+            prompt_name="faq_prompt",
+            gateway=gateway,
+            input_tokens=0,
+            output_tokens=0,
+            latency_ms=0,
+            parse_success=False,
+            parse_error=str(exc),
+        )
     except Exception as exc:
         log.exception("faq_node.llm_failed", error=str(exc))
 

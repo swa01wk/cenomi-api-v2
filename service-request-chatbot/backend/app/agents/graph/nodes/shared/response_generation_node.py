@@ -35,6 +35,7 @@ from app.agents.prompts.response_generation_prompt import (
     build_response_generation_context,
 )
 from app.observability.decorators import trace_node
+from app.observability.llm_capture import capture_complete_json
 
 logger = logging.getLogger(__name__)
 
@@ -178,11 +179,22 @@ async def response_generation_node(state: ServiceRequestState) -> dict[str, Any]
     llm_message: str | None = None
     try:
         gateway = get_default_gateway()
-        parsed, _, _, _ = await gateway.complete_json(
+        parsed, input_tokens, output_tokens, latency_ms = await gateway.complete_json(
             system_prompt=RESPONSE_GENERATION_SYSTEM_PROMPT,
             user_message=user_content,
         )
         llm_message = parsed.get("message") or None
+        await capture_complete_json(
+            state,
+            run_name="response_generation_llm_call",
+            prompt_name="response_generation_prompt",
+            gateway=gateway,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            latency_ms=latency_ms,
+            structured_output={"message": (llm_message or "")[:500]},
+            parse_success=bool(llm_message),
+        )
         if llm_message:
             logger.debug("response_generation_node.llm_success: %s", llm_message[:80])
         else:

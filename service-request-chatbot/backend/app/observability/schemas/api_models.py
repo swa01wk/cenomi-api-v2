@@ -18,7 +18,7 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.observability.redaction import sanitise
 
@@ -157,19 +157,61 @@ class ToolCallResponse(BaseModel):
 
 
 class FeedbackResponse(BaseModel):
-    """Feedback record submitted against a trace or run."""
+    """Feedback record submitted against a trace, run, or session."""
 
     model_config = ConfigDict(from_attributes=True)
 
     id: UUID
-    trace_id: UUID
+    trace_id: UUID | None = None
+    session_id: UUID | None = None
+    sr_id: str | None = None
     run_id: UUID | None = None
     user_id: UUID | None = None
     feedback_type: str
     score: int | None = None
     label: str | None = None
     comment: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime
+
+    @model_validator(mode="before")
+    @classmethod
+    def _from_orm_metadata(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            if "metadata" not in data and "metadata_" in data:
+                return {**data, "metadata": data.get("metadata_") or {}}
+            return data
+        metadata = getattr(data, "metadata_", None)
+        if not isinstance(metadata, dict):
+            metadata = {}
+        return {
+            "id": data.id,
+            "trace_id": data.trace_id,
+            "session_id": getattr(data, "session_id", None),
+            "sr_id": getattr(data, "sr_id", None),
+            "run_id": data.run_id,
+            "user_id": data.user_id,
+            "feedback_type": data.feedback_type,
+            "score": data.score,
+            "label": data.label,
+            "comment": data.comment,
+            "metadata": metadata,
+            "created_at": data.created_at,
+        }
+
+    @field_validator("trace_id", "session_id", "run_id", "user_id", mode="before")
+    @classmethod
+    def _drop_non_uuid(cls, value: Any) -> Any:
+        if value is None or isinstance(value, UUID):
+            return value
+        if isinstance(value, str):
+            return value
+        return None
+
+    @field_validator("metadata", mode="before")
+    @classmethod
+    def _coerce_metadata(cls, value: Any) -> dict[str, Any]:
+        return value if isinstance(value, dict) else {}
 
 
 class TraceResponse(BaseModel):

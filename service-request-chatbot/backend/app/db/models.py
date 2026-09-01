@@ -24,12 +24,23 @@ Agent observability models (custom internal tracing layer)
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, Numeric, String, Text, func
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    Float,
+    ForeignKey,
+    Integer,
+    Numeric,
+    String,
+    Text,
+    func,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
@@ -100,6 +111,22 @@ class ChatSession(Base):
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+    last_activity_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+    last_heartbeat_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    ended_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    end_reason: Mapped[str | None] = mapped_column(Text(), nullable=True)
+    client_active_ms: Mapped[int] = mapped_column(
+        Integer(), default=0, server_default="0", nullable=False
     )
 
     messages: Mapped[list[ChatMessage]] = relationship(
@@ -697,21 +724,28 @@ class AgentLLMCall(Base):
 
 
 class AgentFeedback(Base):
-    """Explicit user or automated feedback signal attached to a trace.
+    """Explicit user or automated feedback signal attached to a trace or session.
 
-    ``feedback_type`` distinguishes thumbs-up/down, scores, labels, etc.
-    ``run_id`` is nullable — feedback may refer to the whole trace.
+    ``trace_id`` is nullable so session-level FLOW_USEFUL / CSAT can exist
+    without a single turn.  At least one of ``trace_id`` / ``session_id``
+    must be set (DB check constraint).
     """
 
     __tablename__ = "agent_feedback"
+    __table_args__ = (
+        CheckConstraint(
+            "trace_id IS NOT NULL OR session_id IS NOT NULL",
+            name="ck_agent_feedback_target",
+        ),
+    )
 
     id: Mapped[UUID] = mapped_column(
         PG_UUID(as_uuid=True), primary_key=True, default=uuid4
     )
-    trace_id: Mapped[UUID] = mapped_column(
+    trace_id: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True),
         ForeignKey("agent_traces.id", ondelete="CASCADE"),
-        nullable=False,
+        nullable=True,
         index=True,
     )
     run_id: Mapped[UUID | None] = mapped_column(
@@ -720,21 +754,58 @@ class AgentFeedback(Base):
         nullable=True,
     )
     user_id: Mapped[UUID | None] = mapped_column(
-        PG_UUID(as_uuid=True), nullable=True
+        PG_UUID(as_uuid=True), nullable=True, index=True
     )
+    session_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), nullable=True, index=True
+    )
+    sr_id: Mapped[str | None] = mapped_column(Text(), nullable=True)
     feedback_type: Mapped[str] = mapped_column(Text(), nullable=False)
     score: Mapped[int | None] = mapped_column(Integer(), nullable=True)
     label: Mapped[str | None] = mapped_column(Text(), nullable=True)
     comment: Mapped[str | None] = mapped_column(Text(), nullable=True)
+    metadata_: Mapped[dict[str, Any]] = mapped_column(
+        "metadata", JSONB, default=dict, server_default="{}"
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
 
-    trace: Mapped[AgentTrace] = relationship(
+    trace: Mapped[AgentTrace | None] = relationship(
         back_populates="feedback", lazy="raise"
     )
     run: Mapped[AgentRun | None] = relationship(
         back_populates="feedback", lazy="raise"
+    )
+
+
+class AnalyticsEvent(Base):
+    """Append-only product analytics event.  No message text, no payloads.
+
+    ``session_id`` has no FK (same loose coupling as ``agent_traces``) so
+    deleting a chat session does not wipe the product log.
+    """
+
+    __tablename__ = "analytics_events"
+
+    id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), primary_key=True, default=uuid4
+    )
+    occurred_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    user_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), nullable=False
+    )
+    session_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), nullable=False, index=True
+    )
+    trace_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), nullable=True
+    )
+    event_name: Mapped[str] = mapped_column(Text(), nullable=False)
+    properties: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, default=dict, server_default="{}"
     )
 
 
