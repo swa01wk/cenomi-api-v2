@@ -258,7 +258,7 @@ A: For RDD review, dates must be in this order:
 A: No. RDD review only becomes available after FM Manager approves the FM review stage.
 
 **Q: I can't see my lease — what should I do?**
-A: Try providing your lease code directly (e.g. T0028604). If the lease is still not found,
+A: Try providing your lease code directly (e.g. T0028604 or LC-1234). If the lease is still not found,
    contact your system administrator to verify your lease assignment.
 
 **Q: What is the Preventive Maintenance Schedule?**

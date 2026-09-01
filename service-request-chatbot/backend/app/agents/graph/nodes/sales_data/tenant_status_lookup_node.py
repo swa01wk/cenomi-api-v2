@@ -62,16 +62,48 @@ async def tenant_status_lookup_node(state: ServiceRequestState) -> dict[str, Any
             period = f"{item.get('sales_period_start', '')} – {item.get('sales_period_end', '')}"
             amt = item.get("sales_amt")
             amt_str = f" | SAR {float(amt):,.2f}" if amt else ""
-            lines.append(f"  • {lc} ({period}){amt_str}")
+            ctx = " · ".join(
+                p
+                for p in (
+                    (item.get("property_name") or item.get("mall_name") or "").strip(),
+                    (item.get("company_name") or "").strip(),
+                    (item.get("brand_name") or "").strip(),
+                )
+                if p
+            )
+            ctx_str = f" — {ctx}" if ctx else ""
+            lines.append(f"  • {lc}{ctx_str} ({period}){amt_str}")
         if len(items) > 3:
             lines.append(f"  _(and {len(items) - 3} more)_")
         lines.append("")
 
-    action_required = [r for r in rows if r.get("status") in ("PENDING", "NEED_REUPLOAD")]
+    action_required = [
+        r
+        for r in rows
+        if r.get("status") in (
+            "PENDING",
+            "NEED_REUPLOAD",
+            "NEED_UPLOAD_SUPPORTING_DOCUMENT",
+            "NEED_UPLOAD_AUDITED_SALES",
+        )
+    ]
     if action_required:
+        pending = [r for r in action_required if r.get("status") == "PENDING"]
+        docs = [r for r in action_required if r.get("status") != "PENDING"]
+        bits = []
+        if pending:
+            bits.append(
+                f"{len(pending)} pending CSV/manual submission(s)"
+            )
+        if docs:
+            bits.append(
+                f"{len(docs)} file request(s) from the Sales Data team "
+                "(sales data, supporting document, or audited sales)"
+            )
         lines.append(
-            f"🔔 **{len(action_required)} submission(s) require your attention.** "
-            "Would you like to upload data now?"
+            f"🔔 **{len(action_required)} submission(s) require your attention:** "
+            + "; ".join(bits)
+            + "."
         )
 
     message = "\n".join(lines)

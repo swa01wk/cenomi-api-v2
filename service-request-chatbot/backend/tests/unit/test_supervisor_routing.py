@@ -826,3 +826,248 @@ class TestHandedOverSupervisorRouting:
         assert result.get("sub_category") == "HANDED_OVER", (
             f"sub_category must be HANDED_OVER; got {result.get('sub_category')!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Sales Data RBAC
+# ---------------------------------------------------------------------------
+
+
+class TestSalesDataRbac:
+    def test_tenant_intents_exclude_admin_actions(self) -> None:
+        from app.agents.schemas.help_agent_schema import intents_for_roles
+
+        permitted = intents_for_roles(frozenset({"TENANT_CSV_UPLOADER"}))
+        assert "CHECK_SALES_DATA_STATUS" in permitted
+        assert "UPLOAD_SALES_DATA" in permitted
+        assert "REVIEW_SALES_DATA" not in permitted
+        assert "APPROVE_SALES_DATA" not in permitted
+
+    def test_approver_intents_exclude_tenant_upload(self) -> None:
+        from app.agents.schemas.help_agent_schema import intents_for_roles
+
+        permitted = intents_for_roles(frozenset({"SALES_DATA_APPROVER"}))
+        assert "REVIEW_SALES_DATA" in permitted
+        assert "APPROVE_SALES_DATA" in permitted
+        assert "CHECK_SALES_DATA_STATUS" in permitted
+        assert "UPLOAD_SALES_DATA" not in permitted
+        assert "UPLOAD_SUPPORTING_DOCUMENT" not in permitted
+
+    def test_same_pending_question_is_role_gated(self) -> None:
+        from app.agents.graph.nodes.supervisor_node import _sales_data_shortcut
+
+        msg = "What data are pending ?"
+        admin = _sales_data_shortcut(msg, ["SALES_DATA_APPROVER"])
+        tenant = _sales_data_shortcut(msg, ["TENANT_CSV_UPLOADER"])
+        assert admin is not None
+        assert tenant is not None
+        assert admin["intent"] == "REVIEW_SALES_DATA"
+        assert tenant["intent"] == "CHECK_SALES_DATA_STATUS"
+        assert admin["sub_category"] == "ADMIN_REVIEW"
+        assert tenant["sub_category"] == "STATUS_CHECK"
+
+    def test_tenant_cannot_shortcut_into_admin_review(self) -> None:
+        from app.agents.graph.nodes.supervisor_node import _sales_data_shortcut
+
+        assert _sales_data_shortcut("review sales data", ["TENANT_CSV_UPLOADER"]) is None
+        assert _sales_data_shortcut("show submitted sales", ["TENANT_CSV_UPLOADER"]) is None
+
+    def test_notification_submit_shortcuts_to_upload_not_status(self) -> None:
+        from app.agents.graph.nodes.supervisor_node import _sales_data_shortcut
+
+        msg = (
+            "I received a notification about pending sales data for lease "
+            "LC-1001 for August 2026. I want to submit it."
+        )
+        result = _sales_data_shortcut(msg, ["TENANT_CSV_UPLOADER"])
+        assert result is not None
+        assert result["intent"] == "UPLOAD_SALES_DATA"
+        assert result["sub_category"] == "BULK_UPLOAD"
+
+    def test_upload_sales_data_phrase_shortcuts_to_upload(self) -> None:
+        from app.agents.graph.nodes.supervisor_node import _sales_data_shortcut
+
+        result = _sales_data_shortcut("I want to upload sales data", ["TENANT_CSV_UPLOADER"])
+        assert result is not None
+        assert result["intent"] == "UPLOAD_SALES_DATA"
+        assert result["sub_category"] == "BULK_UPLOAD"
+
+    @pytest.mark.asyncio
+    async def test_upload_after_status_lookup_skips_continuity(self) -> None:
+        from app.agents.graph.nodes.supervisor_node import supervisor_node
+        from app.types.chat import AuthContext
+
+        state = _base_state(
+            user_message="I want to upload sales data",
+            active_agent="sales_data_agent",
+            intent="CHECK_SALES_DATA_STATUS",
+            workflow_stage="STATUS_LOOKUP",
+            auth_context=AuthContext(
+                subject_id="tenant-1",
+                roles=frozenset({"TENANT_CSV_UPLOADER"}),
+            ),
+        )
+        with patch(
+            "app.agents.graph.nodes.supervisor_node._call_supervisor_llm",
+            new_callable=AsyncMock,
+        ) as mock_llm:
+            result = await supervisor_node(state)
+
+        mock_llm.assert_not_called()
+        assert result["intent"] == "UPLOAD_SALES_DATA"
+        assert result["active_agent"] == "sales_data_agent"
+
+    @pytest.mark.asyncio
+    async def test_tenant_pending_question_skips_llm_and_uses_status(self) -> None:
+        from app.agents.graph.nodes.supervisor_node import supervisor_node
+        from app.types.chat import AuthContext
+
+        state = _base_state(
+            user_message="What data are pending ?",
+            auth_context=AuthContext(
+                subject_id="tenant-1",
+                roles=frozenset({"TENANT_CSV_UPLOADER"}),
+            ),
+        )
+        with patch(
+            "app.agents.graph.nodes.supervisor_node._call_supervisor_llm",
+            new_callable=AsyncMock,
+        ) as mock_llm:
+            result = await supervisor_node(state)
+
+        mock_llm.assert_not_called()
+        assert result["intent"] == "CHECK_SALES_DATA_STATUS"
+        assert result["active_agent"] == "sales_data_agent"
+        assert result["status"] == "IN_PROGRESS"
+
+    @pytest.mark.asyncio
+    async def test_tenant_review_intent_from_llm_is_denied(self) -> None:
+        from app.agents.graph.nodes.supervisor_node import supervisor_node
+        from app.types.chat import AuthContext
+
+        decision = _make_decision(
+            intent="REVIEW_SALES_DATA",
+            confidence=0.95,
+            service_category="SALES_DATA",
+            sub_category="ADMIN_REVIEW",
+            target_agent="sales_data_agent",
+            reasoning="User asked to review sales",
+        )
+        state = _base_state(
+            user_message="review tenant sales for approval",
+            auth_context=AuthContext(
+                subject_id="tenant-1",
+                roles=frozenset({"TENANT_CSV_UPLOADER"}),
+            ),
+        )
+        with patch(
+            "app.agents.graph.nodes.supervisor_node._call_supervisor_llm",
+            new_callable=AsyncMock,
+            return_value=(decision, 50, 30, 100),
+        ), patch(
+            "app.agents.graph.nodes.supervisor_node.get_default_gateway",
+            return_value=MagicMock(),
+        ):
+            result = await supervisor_node(state)
+
+        assert result["status"] == "WAITING_FOR_USER"
+        assert result["intent"] == "REVIEW_SALES_DATA"
+        assert "couldn't match that to a sales data action" in result["response_message"]
+        assert "does not permit" not in result["response_message"]
+        assert "service request" not in result["response_message"].lower()
+        assert result.get("active_agent") is None
+        assert result.get("response_ui", {}).get("verbatim") is True
+
+    @pytest.mark.asyncio
+    async def test_tenant_preview_phrase_gets_sales_data_fallback(self) -> None:
+        from app.agents.graph.nodes.supervisor_node import supervisor_node
+        from app.types.chat import AuthContext
+
+        decision = _make_decision(
+            intent="PREVIEW_SERVICE_REQUEST",
+            confidence=0.95,
+            service_category=None,
+            sub_category=None,
+            target_agent=None,
+            reasoning="User asked to preview",
+        )
+        state = _base_state(
+            user_message="shjow me review list",
+            auth_context=AuthContext(
+                subject_id="tenant-1",
+                roles=frozenset({"TENANT_CSV_UPLOADER"}),
+            ),
+        )
+        with patch(
+            "app.agents.graph.nodes.supervisor_node._call_supervisor_llm",
+            new_callable=AsyncMock,
+            return_value=(decision, 50, 30, 100),
+        ), patch(
+            "app.agents.graph.nodes.supervisor_node.get_default_gateway",
+            return_value=MagicMock(),
+        ):
+            result = await supervisor_node(state)
+
+        assert result["status"] == "WAITING_FOR_USER"
+        assert result["intent"] == "PREVIEW_SERVICE_REQUEST"
+        assert "couldn't match that to a sales data action" in result["response_message"]
+        assert "upload a CSV" in result["response_message"]
+        assert "service request" not in result["response_message"].lower()
+        assert result.get("response_ui", {}).get("verbatim") is True
+
+    @pytest.mark.asyncio
+    async def test_admin_review_list_shortcuts_to_review(self) -> None:
+        from app.agents.graph.nodes.supervisor_node import supervisor_node
+        from app.types.chat import AuthContext
+
+        state = _base_state(
+            user_message="show me review list",
+            auth_context=AuthContext(
+                subject_id="admin-1",
+                roles=frozenset({"SALES_DATA_APPROVER"}),
+            ),
+        )
+        with patch(
+            "app.agents.graph.nodes.supervisor_node._call_supervisor_llm",
+            new_callable=AsyncMock,
+        ) as mock_llm:
+            result = await supervisor_node(state)
+
+        mock_llm.assert_not_called()
+        assert result["intent"] == "REVIEW_SALES_DATA"
+        assert result["active_agent"] == "sales_data_agent"
+        assert result["status"] == "IN_PROGRESS"
+
+    @pytest.mark.asyncio
+    async def test_mall_manager_preview_is_not_sales_data_fallback(self) -> None:
+        from app.agents.graph.nodes.supervisor_node import supervisor_node
+        from app.types.chat import AuthContext
+
+        decision = _make_decision(
+            intent="PREVIEW_SERVICE_REQUEST",
+            confidence=0.95,
+            service_category=None,
+            sub_category=None,
+            target_agent=None,
+            reasoning="User asked to preview",
+        )
+        state = _base_state(
+            user_message="show me the request",
+            auth_context=AuthContext(
+                subject_id="mm-1",
+                roles=frozenset({"MALL_MANAGER"}),
+            ),
+        )
+        with patch(
+            "app.agents.graph.nodes.supervisor_node._call_supervisor_llm",
+            new_callable=AsyncMock,
+            return_value=(decision, 50, 30, 100),
+        ), patch(
+            "app.agents.graph.nodes.supervisor_node.get_default_gateway",
+            return_value=MagicMock(),
+        ):
+            result = await supervisor_node(state)
+
+        assert result["intent"] == "PREVIEW_SERVICE_REQUEST"
+        assert result["status"] == "IN_PROGRESS"
+        assert "couldn't match that" not in (result.get("response_message") or "")

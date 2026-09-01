@@ -3,16 +3,17 @@
 TIER STRUCTURE
 --------------
   Tier sd0  Smoke      (~2 min)  SD200–SD201: intent + RBAC smoke
-  Tier sd1  Happy      (~5 min)  SD210–SD212: manual entry, status, admin review
+  Tier sd1  Happy      (~5 min)  SD210–SD216: manual, status, admin, docs
   Tier sd2  Edge       (~5 min)  SD220–SD223: future date, zero amt, cancel, stale
-  Tier sd3  Admin      (~3 min)  SD230–SD231: admin approve + RBAC denial
+  Tier sd3  Admin      (~3 min)  SD230–SD235: approve, RBAC, ask-upload
 
 CSV upload turns use ``pre_upload_csv=True`` on the first turn; the runner
 calls POST /api/v2/sales-data/upload with a minimal in-memory CSV and injects
 the returned session_id as ``corrected_fields.csv_session_id``.
 
 Mock backend credentials (seeded by seed_users.py + mock-backend/seed_data.py):
-  tenant.csv@cenomi.com   / test1234  → TENANT_CSV_UPLOADER (LC-1001, LC-1002 PENDING)
+  tenant.csv@cenomi.com   / test1234  → TENANT_CSV_UPLOADER
+    (LC-1001/1002 PENDING, LC-1003 NEED_REUPLOAD, LC-1004 supporting doc, LC-1005 audited)
   sales.approver@cenomi.com / test1234 → SALES_DATA_APPROVER
 """
 
@@ -76,6 +77,10 @@ class SalesDataTurn:
 
     csv_rows: Optional[list[dict]] = None
     """Rows to include in the test CSV. Defaults to one valid row for LC-1001."""
+
+    pre_upload_doc: bool = False
+    """If True, the runner POSTs a tiny PDF to /api/v2/sales-data/supporting-doc
+    and injects corrected_fields.doc_session_id."""
 
 
 @dataclass
@@ -152,9 +157,9 @@ SD200 = SalesDataScenario(
         SalesDataTurn(
             message="I want to upload my sales data",
             note="Should classify as UPLOAD_SALES_DATA → UPLOAD_INTENT stage",
-            expect_ui_type="sales_data_upload_prompt",
-            expect_workflow_stage="UPLOAD_INTENT",
-            expect_keywords=["upload", "csv"],
+            expect_ui_type="pending_months_list",
+            expect_workflow_stage="AWAITING_PENDING_MONTHS_CHOICE",
+            expect_keywords=["pending", "month"],
         ),
     ],
 )
@@ -253,7 +258,139 @@ SD212 = SalesDataScenario(
     ],
 )
 
-TIER_SD1 = [SD210, SD211, SD212]
+SD213 = SalesDataScenario(
+    id=213,
+    name="Sales Data — NEED_REUPLOAD PDF Happy",
+    goal="Tenant responds to NEED_REUPLOAD on LC-1003 by attaching a PDF, confirming, and PATCHing RE_UPLOADED.",
+    tier="sd1",
+    tags=["happy", "supporting-doc", "reupload"],
+    turns=[
+        SalesDataTurn(
+            message="I need to re-upload a PDF for lease LC-1003",
+            note="UPLOAD_SUPPORTING_DOCUMENT → prompt for PDF on LC-1003",
+            expect_ui_type="supporting_doc_prompt",
+            expect_workflow_stage="AWAITING_DOC_UPLOAD",
+            expect_keywords=["LC-1003", "PDF"],
+        ),
+        SalesDataTurn(
+            message="I've attached the corrected PDF",
+            note="Cached PDF → PUT /files → confirmation card",
+            action="doc_uploaded",
+            pre_upload_doc=True,
+            expect_ui_type="supporting_doc_confirm",
+            expect_workflow_stage="AWAITING_DOC_CONFIRM",
+            expect_keywords=["LC-1003", "re-uploaded", "confirm"],
+        ),
+        SalesDataTurn(
+            message="Yes, submit it",
+            note="Confirm → PATCH RE_UPLOADED",
+            action="confirm_supporting_doc",
+            corrected_fields={"comment_text": "Corrected figures attached"},
+            expect_ui_type="supporting_doc_success",
+            expect_keywords=["LC-1003", "re-uploaded", "notified"],
+        ),
+    ],
+)
+
+SD214 = SalesDataScenario(
+    id=214,
+    name="Sales Data — Admin Batch Approve",
+    goal="Admin approves LC-2001 and LC-2002 in one confirmation; agent PATCHes each row.",
+    tier="sd1",
+    tags=["happy", "admin", "approve", "batch"],
+    user_email="sales.approver@cenomi.com",
+    turns=[
+        SalesDataTurn(
+            message="Show me submitted sales data for review",
+            note="REVIEW_SALES_DATA → admin_sales_data_list",
+            expect_ui_type="admin_sales_data_list",
+            expect_keywords=["LC-2001", "LC-2002"],
+        ),
+        SalesDataTurn(
+            message="approve LC-2001 and 2002",
+            note="Both leases in one admin_confirm card",
+            expect_ui_type="admin_confirm",
+            expect_keywords=["LC-2001", "LC-2002"],
+        ),
+        SalesDataTurn(
+            message="Confirmed",
+            note="Both rows PATCH APPROVED",
+            action="confirm_admin_action",
+            expect_ui_type="admin_action_success",
+            expect_keywords=["LC-2001", "LC-2002", "approved"],
+        ),
+    ],
+)
+
+SD215 = SalesDataScenario(
+    id=215,
+    name="Sales Data — Supporting Document Happy",
+    goal="Tenant responds to NEED_UPLOAD_SUPPORTING_DOCUMENT on LC-1004 with a file, required comment, and PATCH UPLOADED_SUPPORTING_DOCUMENT.",
+    tier="sd1",
+    tags=["happy", "supporting-doc"],
+    turns=[
+        SalesDataTurn(
+            message="I need to upload a supporting document for lease LC-1004",
+            note="UPLOAD_SUPPORTING_DOCUMENT → prompt for supporting document on LC-1004",
+            expect_ui_type="supporting_doc_prompt",
+            expect_workflow_stage="AWAITING_DOC_UPLOAD",
+            expect_keywords=["LC-1004", "supporting document"],
+        ),
+        SalesDataTurn(
+            message="I've attached the POS report",
+            note="Cached PDF → PUT /files SD_SUP_DOC → confirmation card",
+            action="doc_uploaded",
+            pre_upload_doc=True,
+            expect_ui_type="supporting_doc_confirm",
+            expect_workflow_stage="AWAITING_DOC_CONFIRM",
+            expect_keywords=["LC-1004", "supporting document"],
+        ),
+        SalesDataTurn(
+            message="Yes, submit it",
+            note="Confirm with required comment → PATCH UPLOADED_SUPPORTING_DOCUMENT",
+            action="confirm_supporting_doc",
+            corrected_fields={"comment_text": "POS report attached"},
+            expect_ui_type="supporting_doc_success",
+            expect_keywords=["LC-1004", "supporting document", "notified"],
+        ),
+    ],
+)
+
+SD216 = SalesDataScenario(
+    id=216,
+    name="Sales Data — Audited Sales Happy",
+    goal="Tenant responds to NEED_UPLOAD_AUDITED_SALES on LC-1005 with a file, required comment, and PATCH UPLOADED_AUDITED_SALES.",
+    tier="sd1",
+    tags=["happy", "audited-sales"],
+    turns=[
+        SalesDataTurn(
+            message="I need to upload audited sales for lease LC-1005",
+            note="UPLOAD_SUPPORTING_DOCUMENT → prompt for audited sales on LC-1005",
+            expect_ui_type="supporting_doc_prompt",
+            expect_workflow_stage="AWAITING_DOC_UPLOAD",
+            expect_keywords=["LC-1005", "audited sales"],
+        ),
+        SalesDataTurn(
+            message="I've attached the audited pack",
+            note="Cached PDF → PUT /files SD_AUD_DOC → confirmation card",
+            action="doc_uploaded",
+            pre_upload_doc=True,
+            expect_ui_type="supporting_doc_confirm",
+            expect_workflow_stage="AWAITING_DOC_CONFIRM",
+            expect_keywords=["LC-1005", "audited sales"],
+        ),
+        SalesDataTurn(
+            message="Yes, submit it",
+            note="Confirm with required comment → PATCH UPLOADED_AUDITED_SALES",
+            action="confirm_supporting_doc",
+            corrected_fields={"comment_text": "Audited pack attached"},
+            expect_ui_type="supporting_doc_success",
+            expect_keywords=["LC-1005", "audited sales", "notified"],
+        ),
+    ],
+)
+
+TIER_SD1 = [SD210, SD211, SD212, SD213, SD214, SD215, SD216]
 
 
 # =============================================================================
@@ -270,8 +407,8 @@ SD220 = SalesDataScenario(
         SalesDataTurn(
             message="I want to upload sales data",
             note="Initial intent",
-            expect_ui_type="sales_data_upload_prompt",
-            expect_workflow_stage="UPLOAD_INTENT",
+            expect_ui_type="pending_months_list",
+            expect_workflow_stage="AWAITING_PENDING_MONTHS_CHOICE",
         ),
         SalesDataTurn(
             message="Here is my CSV file",
@@ -294,8 +431,8 @@ SD221 = SalesDataScenario(
         SalesDataTurn(
             message="I want to upload sales data",
             note="Initial intent",
-            expect_ui_type="sales_data_upload_prompt",
-            expect_workflow_stage="UPLOAD_INTENT",
+            expect_ui_type="pending_months_list",
+            expect_workflow_stage="AWAITING_PENDING_MONTHS_CHOICE",
         ),
         SalesDataTurn(
             message="Here is my CSV file",
@@ -395,7 +532,100 @@ SD231 = SalesDataScenario(
     ],
 )
 
-TIER_SD3 = [SD230, SD231]
+SD232 = SalesDataScenario(
+    id=232,
+    name="Sales Data — Tenant Pending Question Is Own Status Not Admin List",
+    goal="Tenant asking 'what data are pending' gets tenant-scoped status_summary, not the admin review list.",
+    tier="sd3",
+    tags=["rbac", "status"],
+    turns=[
+        SalesDataTurn(
+            message="What data are pending ?",
+            note="Tenant → CHECK_SALES_DATA_STATUS (own leases only)",
+            expect_ui_type="status_summary",
+            expect_keywords=["LC-1001", "pending"],
+            expect_no_keywords=["admin_confirm", "awaiting review"],
+        ),
+    ],
+)
+
+SD233 = SalesDataScenario(
+    id=233,
+    name="Sales Data — Tenant Cannot Review Admin Queue",
+    goal="Tenant asking to review submitted sales is RBAC-denied (no REVIEW_SALES_DATA).",
+    tier="sd3",
+    tags=["rbac", "admin"],
+    turns=[
+        SalesDataTurn(
+            message="Show me submitted sales data for review",
+            note="REVIEW_SALES_DATA is admin-only — tenant must be denied",
+            expect_keywords=["not authorised", "not authorized", "cannot", "permission", "doesn't allow", "does not allow", "role", "does not permit"],
+            expect_no_keywords=["LC-2001"],
+        ),
+    ],
+)
+
+SD234 = SalesDataScenario(
+    id=234,
+    name="Sales Data — Admin Ask Upload Supporting Document",
+    goal="Sales Data team requests a supporting document on LC-2001 (portal Ask upload).",
+    tier="sd3",
+    tags=["admin", "ask-upload", "supporting-doc"],
+    user_email="sales.approver@cenomi.com",
+    turns=[
+        SalesDataTurn(
+            message="Show me submitted sales data for review",
+            note="REVIEW_SALES_DATA → admin_sales_data_list",
+            expect_ui_type="admin_sales_data_list",
+            expect_keywords=["LC-2001"],
+        ),
+        SalesDataTurn(
+            message="request supporting document for LC-2001",
+            note="Ask upload — Supporting document confirm card",
+            expect_ui_type="admin_confirm",
+            expect_keywords=["LC-2001", "supporting document"],
+        ),
+        SalesDataTurn(
+            message="Confirmed",
+            note="PATCH NEED_UPLOAD_SUPPORTING_DOCUMENT",
+            action="confirm_admin_action",
+            expect_ui_type="admin_action_success",
+            expect_keywords=["LC-2001", "supporting document"],
+        ),
+    ],
+)
+
+SD235 = SalesDataScenario(
+    id=235,
+    name="Sales Data — Admin Ask Upload Audited Sales",
+    goal="Sales Data team requests audited sales on LC-2002 (portal Ask upload).",
+    tier="sd3",
+    tags=["admin", "ask-upload", "audited-sales"],
+    user_email="sales.approver@cenomi.com",
+    turns=[
+        SalesDataTurn(
+            message="Show me submitted sales data for review",
+            note="REVIEW_SALES_DATA → admin_sales_data_list",
+            expect_ui_type="admin_sales_data_list",
+            expect_keywords=["LC-2002"],
+        ),
+        SalesDataTurn(
+            message="request audited sales for LC-2002",
+            note="Ask upload — Audited sales data confirm card",
+            expect_ui_type="admin_confirm",
+            expect_keywords=["LC-2002", "audited"],
+        ),
+        SalesDataTurn(
+            message="Confirmed",
+            note="PATCH NEED_UPLOAD_AUDITED_SALES",
+            action="confirm_admin_action",
+            expect_ui_type="admin_action_success",
+            expect_keywords=["LC-2002", "audited"],
+        ),
+    ],
+)
+
+TIER_SD3 = [SD230, SD231, SD232, SD233, SD234, SD235]
 
 # ---------------------------------------------------------------------------
 # Full flat registry for reference

@@ -94,8 +94,15 @@ async def manual_entry_lease_validation_node(state: ServiceRequestState) -> dict
     collected["sales_period_start"] = enriched["sales_period_start"]
     collected["sales_period_end"] = enriched["sales_period_end"]
     collected["current_status"] = enriched.get("current_status", "PENDING")
+    collected["brand"] = (enriched.get("brand") or "").strip()
+    collected["property"] = (enriched.get("property") or "").strip()
 
-    log.info("manual_entry_lease_validation.valid", lease_code=lease_code)
+    log.info(
+        "manual_entry_lease_validation.valid",
+        lease_code=lease_code,
+        brand=collected["brand"],
+        property=collected["property"],
+    )
     return {
         "collected_data": collected,
         "backend_refs": backend_refs,

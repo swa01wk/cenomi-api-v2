@@ -29,8 +29,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import csv
-import io
 import json as _json
 import sys
 import time
@@ -55,6 +53,7 @@ from tests.eval.sales_data_scenarios import (
 
 _CHAT_ENDPOINT = "/api/chat/service-request"
 _UPLOAD_ENDPOINT = "/api/v2/sales-data/upload"
+_DOC_UPLOAD_ENDPOINT = "/api/v2/sales-data/supporting-doc"
 _AUTH_ENDPOINT = "/api/auth/login"
 
 _DEFAULT_BASE_URL = "http://localhost:8000"
@@ -126,15 +125,32 @@ class ScenarioResult:
 # Helpers
 # ---------------------------------------------------------------------------
 
+_EVAL_BRAND_PROPERTY: dict[str, tuple[str, str]] = {
+    "LC-1001": ("Noon Fashion", "Riyadh Park"),
+    "LC-1002": ("Pure Gym", "Riyadh Park"),
+    "LC-1003": ("Pure Gym", "Mall of Arabia"),
+    "LC-1004": ("Noon Fashion", "Riyadh Park"),
+    "LC-1005": ("Noon Fashion", "Riyadh Park"),
+}
+
+
 def _make_csv_bytes(rows: list[dict]) -> bytes:
-    """Serialise row dicts to a UTF-8 CSV bytes object."""
-    buf = io.StringIO()
+    """Serialise row dicts as the Cenomi platform CSV template."""
+    from app.agents.services.sales_data_csv import render_platform_csv
+
     if not rows:
         return b""
-    writer = csv.DictWriter(buf, fieldnames=list(rows[0].keys()))
-    writer.writeheader()
-    writer.writerows(rows)
-    return buf.getvalue().encode("utf-8")
+    filled: list[dict] = []
+    for row in rows:
+        mapped = dict(row)
+        lease = str(mapped.get("lease_code") or mapped.get("Lease code") or "")
+        brand, prop = _EVAL_BRAND_PROPERTY.get(lease, ("Noon Fashion", "Riyadh Park"))
+        if not mapped.get("brand") and not mapped.get("Brand"):
+            mapped["brand"] = brand
+        if not mapped.get("property") and not mapped.get("Property"):
+            mapped["property"] = prop
+        filled.append(mapped)
+    return render_platform_csv(filled).encode("utf-8")
 
 
 async def _authenticate(
@@ -193,6 +209,40 @@ async def _upload_csv(
         return None
 
 
+async def _upload_doc(
+    client: httpx.AsyncClient,
+    base_url: str,
+    token: Optional[str],
+    session_id: Optional[str],
+) -> Optional[str]:
+    """Upload a tiny PDF and return the cache session_id."""
+    pdf_bytes = b"%PDF-1.1\n1 0 obj<<>>endobj\ntrailer<<>>\n%%EOF\n"
+    headers = {}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
+    files = {"file": ("reupload.pdf", pdf_bytes, "application/pdf")}
+    data = {}
+    if session_id:
+        data["session_id"] = session_id
+
+    try:
+        resp = await client.post(
+            f"{base_url.rstrip('/')}{_DOC_UPLOAD_ENDPOINT}",
+            files=files,
+            data=data,
+            headers=headers,
+            timeout=20.0,
+        )
+        if not resp.is_success:
+            print(f"  {yellow('WARN')} Doc upload failed ({resp.status_code}): {resp.text[:200]}")
+            return None
+        return resp.json().get("session_id")
+    except Exception as exc:
+        print(f"  {yellow('WARN')} Doc upload error: {exc}")
+        return None
+
+
 async def _chat_turn(
     client: httpx.AsyncClient,
     base_url: str,
@@ -201,6 +251,7 @@ async def _chat_turn(
     session_id: Optional[str],
     turn: SalesDataTurn,
     csv_session_id: Optional[str],
+    doc_session_id: Optional[str] = None,
 ) -> tuple[dict[str, Any], int]:
     """Send one chat turn and return (response_dict, latency_ms)."""
     payload: dict[str, Any] = {
@@ -212,10 +263,12 @@ async def _chat_turn(
     if turn.action:
         payload["action"] = turn.action
 
-    # Merge corrected_fields from turn + injected csv_session_id
+    # Merge corrected_fields from turn + injected csv/doc session ids
     cf: dict[str, Any] = dict(turn.corrected_fields or {})
     if csv_session_id:
         cf["csv_session_id"] = csv_session_id
+    if doc_session_id:
+        cf["doc_session_id"] = doc_session_id
     if cf:
         payload["corrected_fields"] = cf
 
@@ -358,8 +411,23 @@ async def _run_scenario(
                 result.turn_results.append(tr)
                 break
 
+        doc_session_id: Optional[str] = None
+        if turn.pre_upload_doc:
+            doc_session_id = await _upload_doc(client, base_url, token, session_id)
+            if not doc_session_id:
+                print(f"  → {red('FAIL')} (PDF upload failed)")
+                tr = TurnResult(
+                    turn_idx=idx,
+                    message=turn.message,
+                    note=turn.note,
+                    passed=False,
+                    failures=["PDF pre-upload failed — check /api/v2/sales-data/supporting-doc"],
+                )
+                result.turn_results.append(tr)
+                break
+
         data, latency_ms = await _chat_turn(
-            client, base_url, token, user_id, session_id, turn, csv_session_id
+            client, base_url, token, user_id, session_id, turn, csv_session_id, doc_session_id
         )
 
         # Update session_id from first successful response

@@ -40,6 +40,7 @@ class SupervisorDecision(BaseModel):
         "UPLOAD_SALES_DATA",
         "ENTER_SALES_DATA_MANUAL",
         "CHECK_SALES_DATA_STATUS",
+        "UPLOAD_SUPPORTING_DOCUMENT",
         "REVIEW_SALES_DATA",
         "APPROVE_SALES_DATA",
     ] = Field(description="Classified user intent")

@@ -16,7 +16,6 @@ Design notes
 from __future__ import annotations
 
 import csv
-import io
 import logging
 import uuid
 from typing import Any
@@ -24,6 +23,9 @@ from typing import Any
 import structlog
 from fastapi import APIRouter, File, HTTPException, UploadFile
 from fastapi.responses import JSONResponse
+
+from app.agents.schemas.sales_data_schema import CSV_MAX_SIZE_BYTES, CSV_REQUIRED_HEADERS
+from app.agents.services.sales_data_csv import parse_sales_data_csv
 
 log = structlog.get_logger(__name__)
 logger = logging.getLogger(__name__)
@@ -36,8 +38,8 @@ router = APIRouter()
 
 _FILE_CACHE: dict[str, dict[str, Any]] = {}
 
-MAX_SIZE_BYTES = 5 * 1024 * 1024  # 5 MB
-REQUIRED_HEADERS = {"lease_code", "sales_period_start", "sales_period_end", "sales_amt"}
+MAX_SIZE_BYTES = CSV_MAX_SIZE_BYTES
+REQUIRED_HEADERS = set(CSV_REQUIRED_HEADERS)
 
 
 def store_uploaded_csv(session_id: str, rows: list[dict], filename: str, raw: bytes) -> None:
@@ -95,20 +97,30 @@ async def upload_sales_data_csv(
             detail=f"File exceeds maximum size of {MAX_SIZE_BYTES // (1024*1024)} MB.",
         )
 
-    # Parse CSV
+    # Parse CSV — Cenomi platform template (Lease code, Brand, Property, dates).
     try:
         text = raw.decode("utf-8-sig")  # strip BOM if present
-        reader = csv.DictReader(io.StringIO(text))
-        headers = set(reader.fieldnames or [])
-        missing_headers = REQUIRED_HEADERS - {h.strip() for h in headers}
-        if missing_headers:
-            raise HTTPException(
-                status_code=400,
-                detail=f"CSV is missing required columns: {', '.join(sorted(missing_headers))}.",
-            )
-        rows = [dict(row) for row in reader]
-    except (UnicodeDecodeError, csv.Error) as exc:
+        parsed = parse_sales_data_csv(text)
+    except UnicodeDecodeError as exc:
         raise HTTPException(status_code=400, detail=f"Invalid CSV file: {exc}") from exc
+    except csv.Error as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid CSV file: {exc}") from exc
+
+    if parsed.missing_headers:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "CSV is missing required columns: "
+                + ", ".join(parsed.missing_headers)
+                + ". Accepted: lease_code, sales_period_start, sales_period_end, sales_amt "
+                "or the Cenomi template (Lease code, Brand, Property, "
+                "Start date(DD-MM-YYYY), End date(DD-MM-YYYY), Sales amount). "
+                "Brand and Property are optional."
+            ),
+        )
+
+    rows = parsed.rows
+    headers = parsed.headers_found or list(CSV_REQUIRED_HEADERS)
 
     if not rows:
         raise HTTPException(status_code=400, detail="CSV file is empty — no data rows found.")

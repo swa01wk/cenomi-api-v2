@@ -4,7 +4,7 @@ Builds the structured SALES_DATA_REVIEW message that the frontend renders
 as an editable table (SalesDataReviewCard).
 
 The table shows:
-  - lease_code (read-only)
+  - lease_code, brand, property (read-only)
   - sales_period_start / sales_period_end (read-only, formatted)
   - sales_amt (editable input field)
 
@@ -59,6 +59,8 @@ async def sales_data_confirmation_node(state: ServiceRequestState) -> dict[str, 
         display_rows.append({
             "lease_code": row["lease_code"],
             "lease_id": row.get("lease_id"),
+            "brand": row.get("brand") or "",
+            "property": row.get("property") or "",
             "period": _format_period(
                 row["sales_period_start"], row["sales_period_end"]
             ),

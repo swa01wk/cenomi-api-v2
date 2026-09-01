@@ -87,6 +87,11 @@ SERVICE_REQUEST_AGENT_REGISTRY: dict[str, dict[str, AgentConfig]] = {
             "display_name": "Sales Data Agent",
             "schema_key": "sales_data_schema",
         },
+        "SUPPORTING_DOC": {
+            "agent_name": "sales_data_agent",
+            "display_name": "Sales Data Agent",
+            "schema_key": "sales_data_schema",
+        },
     },
 }
 

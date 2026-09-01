@@ -287,6 +287,11 @@ class TestRouteAfterSupervisor:
         result = _route_after_supervisor(state)
         assert result == "preview"
 
+    def test_preview_waiting_for_user_routes_to_response_generation(self) -> None:
+        state = _state(intent="PREVIEW_SERVICE_REQUEST", status="WAITING_FOR_USER")
+        result = _route_after_supervisor(state)
+        assert result == "response_generation"
+
     def test_check_status_routes_to_preview(self) -> None:
         state = _state(intent="CHECK_SERVICE_REQUEST_STATUS", status="IN_PROGRESS")
         result = _route_after_supervisor(state)

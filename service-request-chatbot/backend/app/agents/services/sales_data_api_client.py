@@ -36,6 +36,26 @@ def _base_url() -> str:
     return os.getenv("SALES_DATA_API_BASE_URL", _DEFAULT_BASE_URL).rstrip("/")
 
 
+def unwrap_sales_data_rows(body: Any) -> list[dict[str, Any]]:
+    """Normalise live Cenomi and mock GET /sales-data envelopes to a row list.
+
+    Live: ``{ success, data: { list, total_count, ... } }``
+    Mock: ``{ data: [ ...rows ] }`` or a bare list.
+    """
+    if isinstance(body, list):
+        return [r for r in body if isinstance(r, dict)]
+    if not isinstance(body, dict):
+        return []
+    data = body.get("data", body)
+    if isinstance(data, list):
+        return [r for r in data if isinstance(r, dict)]
+    if isinstance(data, dict):
+        lst = data.get("list")
+        if isinstance(lst, list):
+            return [r for r in lst if isinstance(r, dict)]
+    return []
+
+
 # ---------------------------------------------------------------------------
 # Client
 # ---------------------------------------------------------------------------
@@ -91,8 +111,7 @@ class SalesDataApiClient:
             )
 
         resp.raise_for_status()
-        body = resp.json()
-        return body.get("data", body) if isinstance(body, dict) else body
+        return unwrap_sales_data_rows(resp.json())
 
     # ── POST /api/v1/sales-data ─────────────────────────────────────────────
 
@@ -134,6 +153,31 @@ class SalesDataApiClient:
         resp.raise_for_status()
         return {"success": True}
 
+    async def update_sales_data_statuses(
+        self, payloads: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """Apply one PATCH per payload. Live Cenomi PATCH is a single object.
+
+        Sequential on purpose (notifications + Yardi are per-row). Swap this
+        method later if a bulk endpoint is added — callers stay the same.
+        """
+        results: list[dict[str, Any]] = []
+        for payload in payloads:
+            try:
+                result = await self.update_sales_data_status(payload)
+                results.append({
+                    **payload,
+                    "success": bool(result.get("success")),
+                    "error": result.get("error"),
+                })
+            except Exception as exc:
+                results.append({
+                    **payload,
+                    "success": False,
+                    "error": str(exc),
+                })
+        return results
+
     # ── PUT /files ──────────────────────────────────────────────────────────
 
     async def upload_file(
@@ -141,16 +185,32 @@ class SalesDataApiClient:
         file_bytes: bytes,
         filename: str,
         content_type: str = "application/octet-stream",
+        *,
+        document_type_id: str | None = None,
+        lease_id: int | None = None,
     ) -> dict[str, Any]:
-        """Upload a file and return the document_id."""
+        """Upload a file via PUT /files and return the document_id.
+
+        Live Cenomi: ``PUT /files?file_extension=&document_type_id=&lease_id=&file_name=``
+        """
         headers = {}
         if self._token:
             headers["Authorization"] = f"Bearer {self._token}"
+
+        ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+        params: dict[str, Any] = {"file_name": filename}
+        if ext:
+            params["file_extension"] = ext
+        if document_type_id:
+            params["document_type_id"] = document_type_id
+        if lease_id is not None:
+            params["lease_id"] = lease_id
 
         async with httpx.AsyncClient(timeout=60.0) as client:
             resp = await client.put(
                 f"{self._base}/files",
                 headers=headers,
+                params=params,
                 files={"file": (filename, io.BytesIO(file_bytes), content_type)},
             )
 
@@ -175,27 +235,84 @@ class SalesDataApiClient:
 # ---------------------------------------------------------------------------
 
 
+def _norm_lease_name(value: str | None) -> str:
+    """Case-fold and collapse whitespace so CSV names can match platform names."""
+    return " ".join(str(value or "").casefold().split())
+
+
+def canonical_brand_name(backend_row: dict[str, Any]) -> str:
+    """Brand on a sales-data row from mock or live Cenomi."""
+    return str(
+        backend_row.get("brand_name")
+        or backend_row.get("brand")
+        or ""
+    ).strip()
+
+
+def canonical_property_name(backend_row: dict[str, Any]) -> str:
+    """Property / mall on a sales-data row from mock or live Cenomi."""
+    return str(
+        backend_row.get("property_name")
+        or backend_row.get("mall_name")
+        or backend_row.get("property")
+        or backend_row.get("mall")
+        or ""
+    ).strip()
+
+
+def _csv_name_matches_lease(csv_value: str | None, canonical: str) -> bool:
+    """Empty CSV or empty platform name is not a mismatch; otherwise ignore case/spaces."""
+    csv_n = _norm_lease_name(csv_value)
+    can_n = _norm_lease_name(canonical)
+    if not csv_n or not can_n:
+        return True
+    return csv_n == can_n
+
+
+def _identity_mismatch_error(
+    row: dict[str, Any],
+    *,
+    brand_ok: bool,
+    property_ok: bool,
+    expected_brand: str,
+    expected_property: str,
+) -> str:
+    lease = row.get("lease_code") or ""
+    csv_brand = (row.get("brand") or "").strip()
+    csv_property = (row.get("property") or "").strip()
+    parts: list[str] = []
+    if not brand_ok:
+        parts.append(
+            f'Brand "{csv_brand}" does not match this lease '
+            f'(expected "{expected_brand}")'
+        )
+    if not property_ok:
+        parts.append(
+            f'Property "{csv_property}" does not match this lease '
+            f'(expected "{expected_property}")'
+        )
+    detail = "; ".join(parts) or "Brand/Property do not match this lease"
+    return (
+        f"{detail} for {lease}. "
+        "Please correct Brand and Property to the names on this lease and upload the file again."
+    )
+
+
 def partition_rows_by_lease_access(
     csv_rows: list[dict[str, Any]],
     backend_rows: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    """Partition CSV rows into (valid, no_access, no_pending_row) buckets.
+    """Partition CSV rows into Layer 2 buckets.
 
-    Args:
-        csv_rows: Rows from the parsed/validated CSV.
-                  Each row must have: lease_code, sales_period_start, sales_period_end.
-        backend_rows: Rows returned by GET /api/v1/sales-data (user-scoped).
+    Matching is by ``(lease_code, sales_period_start, sales_period_end)`` against
+    GET /sales-data rows (mock or live Cenomi). Brand / Property, when the tenant
+    filled them in, must match the lease's platform names ignoring case and
+    extra spaces. Canonical platform spelling is kept on valid rows.
 
-    Returns a dict:
-      {
-        "valid":          [rows that have a matching PENDING/NEED_REUPLOAD backend row],
-        "no_access":      [rows whose lease_code is not in any backend row],
-        "no_pending_row": [rows accessible but no PENDING/NEED_REUPLOAD for this period],
-        "accessible_lease_codes": set of lease codes visible to this user,
-      }
+    Returns:
+      valid, no_access, no_pending_row, identity_mismatch, accessible_lease_codes
     """
     accessible: set[str] = {r["lease_code"] for r in backend_rows}
-    # Index backend rows by (lease_code, start, end)
     pending_index: dict[tuple[str, str, str], dict] = {}
     for r in backend_rows:
         if r["status"] in ("PENDING", "NEED_REUPLOAD"):
@@ -205,6 +322,7 @@ def partition_rows_by_lease_access(
     valid: list[dict] = []
     no_access: list[dict] = []
     no_pending_row: list[dict] = []
+    identity_mismatch: list[dict] = []
 
     for row in csv_rows:
         lc = row.get("lease_code", "")
@@ -213,7 +331,8 @@ def partition_rows_by_lease_access(
 
         if lc not in accessible:
             no_access.append({**row, "_error": f"You don't have access to lease {lc}."})
-        elif (lc, start, end) not in pending_index:
+            continue
+        if (lc, start, end) not in pending_index:
             no_pending_row.append(
                 {
                     **row,
@@ -223,20 +342,40 @@ def partition_rows_by_lease_access(
                     ),
                 }
             )
-        else:
-            # Enrich with backend row data (lease_id, exact dates for PATCH)
-            backend_row = pending_index[(lc, start, end)]
-            valid.append({
+            continue
+
+        backend_row = pending_index[(lc, start, end)]
+        expected_brand = canonical_brand_name(backend_row)
+        expected_property = canonical_property_name(backend_row)
+        brand_ok = _csv_name_matches_lease(row.get("brand"), expected_brand)
+        property_ok = _csv_name_matches_lease(row.get("property"), expected_property)
+        if not brand_ok or not property_ok:
+            identity_mismatch.append({
                 **row,
-                "lease_id": backend_row["lease_id"],
-                "sales_period_start": backend_row["sales_period_start"],
-                "sales_period_end": backend_row["sales_period_end"],
-                "current_status": backend_row["status"],
+                "_error": _identity_mismatch_error(
+                    row,
+                    brand_ok=brand_ok,
+                    property_ok=property_ok,
+                    expected_brand=expected_brand,
+                    expected_property=expected_property,
+                ),
             })
+            continue
+
+        valid.append({
+            **row,
+            "lease_id": backend_row["lease_id"],
+            "sales_period_start": backend_row["sales_period_start"],
+            "sales_period_end": backend_row["sales_period_end"],
+            "current_status": backend_row["status"],
+            "brand": expected_brand or (row.get("brand") or ""),
+            "property": expected_property or (row.get("property") or ""),
+        })
 
     return {
         "valid": valid,
         "no_access": no_access,
         "no_pending_row": no_pending_row,
+        "identity_mismatch": identity_mismatch,
         "accessible_lease_codes": accessible,
     }

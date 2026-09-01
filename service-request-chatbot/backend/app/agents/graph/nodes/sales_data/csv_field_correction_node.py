@@ -19,7 +19,7 @@ Data agent replicates that pattern for the CSV correction case:
   response asking for the remaining rows  (WAITING_FOR_USER)
 
 The LLM extraction is intentionally simple: it looks for the most natural
-patterns users write ("row 1 is 1000", "LC-1001: 85000", "20000 for LC-1002").
+patterns users write ("row 1 is 1000", "<lease code>: 85000").
 """
 
 from __future__ import annotations
@@ -55,6 +55,8 @@ Context provided to you will include:
 Rules:
 - Match amounts to lease codes using any of: lease code name, row number (1-indexed),
   ordinal ("first row", "second"), or positional ("last one").
+  Lease codes look like LC-1234 or T0028604 — copy the code from the
+  rows_needing_correction context, not from these examples.
 - sales_amt must be a positive number.  Strip currency symbols and commas.
 - If the user provides ONE amount and there is only ONE row needing correction,
   assign it to that row.
@@ -65,8 +67,7 @@ Rules:
 Output format (JSON only — no markdown fences):
 {
   "corrections": [
-    {"lease_code": "LC-1001", "sales_amt": 1000.0},
-    {"lease_code": "LC-1002", "sales_amt": 20000.0}
+    {"lease_code": "LC-1234", "sales_amt": 1000.0}
   ],
   "summary": "one sentence"
 }

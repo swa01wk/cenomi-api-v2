@@ -231,10 +231,11 @@ def _fitout_confirm_extraction_prompt() -> str:
 
         "## Lease identification\n"
         "lease_code: Short alphanumeric tenant lease identifier — typically 7-10 characters "
-        "such as 't0105712', 'T0208831', 'LC-1234'. "
+        "such as 't0105712', 'T0028604', 'LC-1234'. "
+        "Copy the identifier exactly from the user; never invent one or reuse an example. "
         "It may appear after 'lease', 'for lease', 'unit', or standalone. "
         "Example: 'Confirm fitout for lease t0105712' → lease_code: 't0105712'. "
-        "Example: 'Confirm trading for t0105712' → lease_code: 't0105712'.\n"
+        "Example: 'Confirm trading for LC-1234' → lease_code: 'LC-1234'.\n"
         "brand: Tenant brand name (e.g. 'Nike', 'Zara').\n"
         "mall: Mall or property name (e.g. 'Riyadh Park').\n"
         "company: Tenant company or legal entity name.\n\n"
@@ -481,6 +482,7 @@ def _build_sales_data_config() -> WorkflowConfig:
             "UPLOAD_SALES_DATA",
             "ENTER_SALES_DATA_MANUAL",
             "CHECK_SALES_DATA_STATUS",
+            "UPLOAD_SUPPORTING_DOCUMENT",
             "REVIEW_SALES_DATA",
             "APPROVE_SALES_DATA",
         }),

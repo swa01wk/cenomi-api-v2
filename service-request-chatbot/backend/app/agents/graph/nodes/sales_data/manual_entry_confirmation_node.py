@@ -78,16 +78,22 @@ async def manual_entry_confirmation_node(state: ServiceRequestState) -> dict[str
     start = collected.get("sales_period_start", "")
     end = collected.get("sales_period_end", "")
     sales_amt = collected.get("sales_amt", 0)
+    brand = (collected.get("brand") or "").strip()
+    property_name = (collected.get("property") or "").strip()
     try:
         amt_display = f"SAR {float(sales_amt):,.2f}"
     except (ValueError, TypeError):
         amt_display = str(sales_amt)
 
+    brand_line = f"| Brand | **{brand or '—'}** |\n"
+    property_line = f"| Property | **{property_name or '—'}** |\n"
     message = (
         f"Please confirm the following details before submitting:\n\n"
         f"| Field | Value |\n"
         f"|---|---|\n"
         f"| Lease Code | **{lease_code}** |\n"
+        f"{brand_line}"
+        f"{property_line}"
         f"| Period | **{start} – {end}** |\n"
         f"| Sales Amount | **{amt_display}** |\n\n"
         "Reply **yes** to confirm and submit, or **no** to make changes."
@@ -101,9 +107,12 @@ async def manual_entry_confirmation_node(state: ServiceRequestState) -> dict[str
         "response_ui": {
             "type": "manual_entry_confirm",
             "lease_code": lease_code,
+            "brand": brand,
+            "property": property_name,
             "sales_period_start": start,
             "sales_period_end": end,
             "sales_amt": sales_amt,
+            "verbatim": True,
             "message": message,
         },
     }

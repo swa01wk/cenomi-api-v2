@@ -129,7 +129,7 @@ async def manual_entry_extraction_node(state: ServiceRequestState) -> dict[str, 
             "status": "WAITING_FOR_USER",
             "response_message": (
                 "Please tell me the sales details. For example:\n"
-                '"Sales for August 2026, lease LC-1001, amount SAR 85,000."'
+                '"Sales for August, lease LC-1234, amount SAR 85,000."'
             ),
         }
 

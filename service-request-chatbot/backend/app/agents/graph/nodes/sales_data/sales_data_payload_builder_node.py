@@ -8,7 +8,7 @@ Expected action_payload from frontend:
   {
     "rows": [
       {
-        "lease_code": "LC-1001",
+        "lease_code": "<LEASE_CODE>",
         "sales_period_start": "2026-08-01",
         "sales_period_end": "2026-08-31",
         "sales_amt": 85000.0

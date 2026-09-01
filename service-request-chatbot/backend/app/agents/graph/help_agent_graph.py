@@ -98,7 +98,15 @@ from app.agents.graph.nodes.sales_data.manual_entry_confirmation_node import man
 from app.agents.graph.nodes.sales_data.manual_entry_submission_node import manual_entry_submission_node
 from app.agents.graph.nodes.sales_data.tenant_status_lookup_node import tenant_status_lookup_node
 from app.agents.graph.nodes.sales_data.admin_review_entry_node import admin_review_entry_node
+from app.agents.graph.nodes.sales_data.pending_months_gate_node import pending_months_gate_node
 from app.agents.graph.nodes.sales_data.admin_status_update_node import admin_status_update_node
+from app.agents.graph.nodes.sales_data.supporting_doc_upload_node import supporting_doc_upload_node
+from app.agents.graph.nodes.sales_data.supporting_doc_confirmation_node import (
+    supporting_doc_confirmation_node,
+)
+from app.agents.graph.nodes.sales_data.supporting_doc_submission_node import (
+    supporting_doc_submission_node,
+)
 
 # ── RDD agent nodes (CREATE_SR / FM_REVIEW / RDD_REVIEW workflow phases) ──────
 from app.agents.graph.nodes.handover.handover_entry_node import handover_entry_node
@@ -154,6 +162,7 @@ _CREATE_NEW_SR_INTENTS: frozenset[str] = frozenset(
         "UPLOAD_SALES_DATA",
         "ENTER_SALES_DATA_MANUAL",
         "CHECK_SALES_DATA_STATUS",
+        "UPLOAD_SUPPORTING_DOCUMENT",
         "REVIEW_SALES_DATA",
         "APPROVE_SALES_DATA",
     }
@@ -224,6 +233,15 @@ def _route_after_load(state: dict[str, Any]) -> str:
         return "sr_status_sync"
 
     agent = state.get("active_agent")
+    workflow_stage = state.get("workflow_stage") or ""
+    # Status lookup is a completed one-shot. Re-enter the supervisor so
+    # "I want to upload" is not stuck on CHECK_SALES_DATA_STATUS.
+    if (
+        agent == "sales_data_agent"
+        and workflow_stage in {"STATUS_LOOKUP", "SALES_DATA_COMPLETE"}
+        and not action
+    ):
+        return "supervisor"
     if agent:
         return _AGENT_ENTRY_NODES.get(agent, "supervisor")
     return "supervisor"
@@ -279,9 +297,9 @@ def _route_after_supervisor(state: dict[str, Any]) -> str:
 
     Priority:
     1. Open existing SR (sr_id extracted / present) → sr_status_sync (same turn).
-    2. PREVIEW_SERVICE_REQUEST → preview node.
-    3. WAITING_FOR_USER (LLM/parse failure or RBAC denial set in supervisor_node)
+    2. WAITING_FOR_USER (RBAC denial, unmatched sales-data phrasing, LLM failure)
        → response_generation.
+    3. PREVIEW_SERVICE_REQUEST → preview node.
     4. CHECK_SERVICE_REQUEST_STATUS → preview node (after sync when sr_id set).
     5. ASK_HELP / UNKNOWN → faq_node.
     6. SR action intents → registry.
@@ -296,13 +314,14 @@ def _route_after_supervisor(state: dict[str, Any]) -> str:
     if _should_open_existing_sr(state):
         return "sr_status_sync"
 
+    # Supervisor already composed a user-facing reply (RBAC denial, unmatched
+    # sales-data phrasing, LLM failure). Do not send that turn to preview.
+    if status == "WAITING_FOR_USER":
+        return "response_generation"
+
     # Preview always routes to the dedicated preview node
     if intent == "PREVIEW_SERVICE_REQUEST":
         return "preview"
-
-    # LLM/parse failure or RBAC denial (supervisor_node sets WAITING_FOR_USER)
-    if status == "WAITING_FOR_USER":
-        return "response_generation"
 
     # CHECK_SERVICE_REQUEST_STATUS — preview after sync when sr_id is present;
     # otherwise preview_node may GET or show draft.
@@ -585,6 +604,14 @@ def _route_after_sales_data_entry(state: dict[str, Any]) -> str:
         "SUBMITTING": "sales_data_payload_builder",
         "AWAITING_TABLE_CONFIRM": "sales_data_confirmation",
         "AWAITING_MANUAL_CONFIRM": "manual_entry_confirmation",
+        "PENDING_MONTHS_CHECK": "pending_months_gate",
+        "AWAITING_PENDING_MONTHS_CHOICE": "pending_months_gate",
+        "AWAITING_OTHER_MONTHS_REMINDER": "pending_months_gate",
+        "DOC_SELECT": "supporting_doc_upload",
+        "AWAITING_DOC_UPLOAD": "supporting_doc_upload",
+        "DOC_UPLOADING": "supporting_doc_upload",
+        "AWAITING_DOC_CONFIRM": "supporting_doc_confirmation",
+        "DOC_SUBMITTING": "supporting_doc_submission",
     }
     return route_map.get(workflow_stage, "response_generation")
 
@@ -617,6 +644,8 @@ def _route_after_lease_validation(state: dict[str, Any]) -> str:
         return "stale_notification"
     if workflow_stage == "AWAITING_TABLE_CONFIRM":
         return "sales_data_confirmation"
+    if workflow_stage == "AWAITING_PERIOD_MISMATCH_CONFIRM":
+        return "response_generation"
     return "response_generation"
 
 
@@ -661,6 +690,23 @@ def _route_after_manual_entry_lease_validation(state: dict[str, Any]) -> str:
 def _route_after_manual_entry_confirmation(state: dict[str, Any]) -> str:
     if state.get("confirmation_status") == "CONFIRMED" or state.get("workflow_stage") == "SUBMITTING":
         return "manual_entry_submission"
+    return "response_generation"
+
+
+def _route_after_supporting_doc_upload(state: dict[str, Any]) -> str:
+    if state.get("status") == "WAITING_FOR_USER":
+        return "response_generation"
+    if state.get("workflow_stage") == "AWAITING_DOC_CONFIRM":
+        return "supporting_doc_confirmation"
+    return "response_generation"
+
+
+def _route_after_supporting_doc_confirmation(state: dict[str, Any]) -> str:
+    if (
+        state.get("confirmation_status") == "CONFIRMED"
+        or state.get("workflow_stage") == "DOC_SUBMITTING"
+    ):
+        return "supporting_doc_submission"
     return "response_generation"
 
 
@@ -738,6 +784,7 @@ def build_help_agent_graph():
     graph.add_node("fitout_confirm_api_submission", fitout_confirm_api_submission_node)
     # ── Sales Data agent nodes ─────────────────────────────────────────────────
     graph.add_node("sales_data_entry", sales_data_entry_node)
+    graph.add_node("pending_months_gate", pending_months_gate_node)
     graph.add_node("csv_validation", csv_validation_node)
     graph.add_node("lease_validation", lease_validation_node)
     graph.add_node("stale_notification", stale_notification_node)
@@ -755,6 +802,9 @@ def build_help_agent_graph():
     graph.add_node("tenant_status_lookup", tenant_status_lookup_node)
     graph.add_node("admin_review_entry", admin_review_entry_node)
     graph.add_node("admin_status_update", admin_status_update_node)
+    graph.add_node("supporting_doc_upload", supporting_doc_upload_node)
+    graph.add_node("supporting_doc_confirmation", supporting_doc_confirmation_node)
+    graph.add_node("supporting_doc_submission", supporting_doc_submission_node)
     graph.add_node("response_generation", response_generation_node)
     graph.add_node("save_state", save_state_node)
 
@@ -963,9 +1013,14 @@ def build_help_agent_graph():
             "sales_data_payload_builder": "sales_data_payload_builder",
             "sales_data_confirmation": "sales_data_confirmation",
             "manual_entry_confirmation": "manual_entry_confirmation",
+            "supporting_doc_upload": "supporting_doc_upload",
+            "supporting_doc_confirmation": "supporting_doc_confirmation",
+            "supporting_doc_submission": "supporting_doc_submission",
+            "pending_months_gate": "pending_months_gate",
             "response_generation": "response_generation",
         },
     )
+    graph.add_edge("pending_months_gate", "response_generation")
     graph.add_conditional_edges(
         "csv_validation",
         _route_after_csv_validation,
@@ -1065,6 +1120,23 @@ def build_help_agent_graph():
         },
     )
     graph.add_edge("admin_status_update", "response_generation")
+    graph.add_conditional_edges(
+        "supporting_doc_upload",
+        _route_after_supporting_doc_upload,
+        {
+            "supporting_doc_confirmation": "supporting_doc_confirmation",
+            "response_generation": "response_generation",
+        },
+    )
+    graph.add_conditional_edges(
+        "supporting_doc_confirmation",
+        _route_after_supporting_doc_confirmation,
+        {
+            "supporting_doc_submission": "supporting_doc_submission",
+            "response_generation": "response_generation",
+        },
+    )
+    graph.add_edge("supporting_doc_submission", "response_generation")
 
     # ── Turn finalisation — always runs ───────────────────────────────────────
     graph.add_edge("response_generation", "save_state")
