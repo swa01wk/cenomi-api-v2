@@ -19,6 +19,20 @@ service if Workstream C is approved).
 | `SALES_DATA_SUBMITTED` | 4,324 | 366 | role 30 (`SALES_DATA_TEAM`) + perms, `target_type=ADMIN`, has `lease_id`+`group_id` | admin: review upload |
 | `SALES_DATA_APPROVED` | 17,694 | 55 | user-targeted, `TENANT` | informational — **wrongly flagged `action_required=true`** |
 
+The remaining keys form ask/response pairs (verified in
+`cenomi-api-2/internal/config/notification.json` and
+`sales_data_usecase.go`; ~zero rows on this copy — the flows are rare and
+staging must provoke them via admin PATCH, guide matrix row 15):
+
+| Ask (admin → tenant, action-required) | Response (tenant → Sales Data Team) | `sales_data.status` pair |
+|---|---|---|
+| `SALES_DATA_NEED_REUPLOAD` | `SALES_DATA_REUPLOADED` | `NEED_REUPLOAD` → `RE_UPLOADED` |
+| `SALES_DATA_NEED_UPLOAD_SUPPORTING_DOCUMENT` | `SALES_DATA_UPLOADED_SUPPORTING_DOCUMENT` | `NEED_UPLOAD_SUPPORTING_DOCUMENT` → `UPLOADED_SUPPORTING_DOCUMENT` |
+| `SALES_DATA_NEED_UPLOAD_AUDITED_SALES` | `SALES_DATA_UPLOADED_AUDITED_SALES_DATA` ⚠ | `NEED_UPLOAD_AUDITED_SALES` → `UPLOADED_AUDITED_SALES` |
+
+⚠ The audited-sales response key carries an asymmetric `_DATA` suffix —
+match keys exactly, never by reconstructing the pattern.
+
 Payload facts that shape everything below:
 
 - `text_content.id` is the **lease code** (`t00xxxxx`), not a numeric id.
@@ -77,11 +91,17 @@ Per guide §8.2–8.6. All in `cenomi-frontend-2`.
    failure is fine: send `lease_code` alone and the agent lists PENDING
    months. When Workstream B ships, prefer the structured field over parsing.
 
-4. **Key gating (phase 1):** deep-link only tenant keys — `SALES_DATA_PENDING`
-   and the `NEED_*` family. Admin `SALES_DATA_SUBMITTED` keeps listing
-   navigation (guide §8.6); `SALES_DATA_APPROVED` is informational and never
-   deep-links. Mirror the pilot's lesson: gate on
-   `notification_type === 'SALES_DATA'` + key, never on display text.
+4. **Key gating (phase 1):** deep-link only tenant ask keys —
+   `SALES_DATA_PENDING`, `SALES_DATA_NEED_REUPLOAD`,
+   `SALES_DATA_NEED_UPLOAD_SUPPORTING_DOCUMENT`,
+   `SALES_DATA_NEED_UPLOAD_AUDITED_SALES`. Admin keys
+   (`SALES_DATA_SUBMITTED` and the tenant-response trio `SALES_DATA_REUPLOADED`
+   / `SALES_DATA_UPLOADED_SUPPORTING_DOCUMENT` /
+   `SALES_DATA_UPLOADED_AUDITED_SALES_DATA`) keep listing navigation (guide
+   §8.6); `SALES_DATA_APPROVED` is informational and never deep-links.
+   Mirror the pilot's lesson: gate on `notification_type === 'SALES_DATA'`
+   + an exact-key allowlist, never on display text or key patterns (see the
+   `_DATA` suffix asymmetry in §1).
 
 5. **Reuse, don't fork:** the AI-token mint, `sr-chatbot` session plumbing and
    the expiry-refresh fix from TC-3721 all apply as-is. The stale case is
@@ -133,7 +153,10 @@ workflow operations**, so it needs its own anchor — the rules:
 | `SALES_DATA_PENDING` (lease L, period P) | a `sales_data` row for L+P reaches `SUBMITTED` or later, **created/updated at or after the notification** (timing guard, same as handover) |
 | `SALES_DATA_PENDING` re-nag | a **newer** PENDING notification exists for the same L+P → older one archived as `SUPERSEDED` — this alone retires the bulk of the 6.4M |
 | `SALES_DATA_SUBMITTED` (admin) | that L+P row reaches `APPROVED` / any `NEED_*` (the admin acted) |
-| `NEED_*` family | the tenant's corresponding `RE_UPLOADED` / `UPLOADED_*` status lands |
+| `SALES_DATA_NEED_REUPLOAD` | the L+P row reaches `RE_UPLOADED` (or later) |
+| `SALES_DATA_NEED_UPLOAD_SUPPORTING_DOCUMENT` | the L+P row reaches `UPLOADED_SUPPORTING_DOCUMENT` |
+| `SALES_DATA_NEED_UPLOAD_AUDITED_SALES` | the L+P row reaches `UPLOADED_AUDITED_SALES` |
+| response keys (`SALES_DATA_REUPLOADED`, `SALES_DATA_UPLOADED_SUPPORTING_DOCUMENT`, `SALES_DATA_UPLOADED_AUDITED_SALES_DATA`) | the admin acts on the resubmission — `APPROVED` or the next `NEED_*` ask |
 | `SALES_DATA_APPROVED` | **reclassified `NO_ACTION`** (write-site fix + one-line backfill) → archives on read |
 
 Implementation shape (all patterns already exist from the pilot):
