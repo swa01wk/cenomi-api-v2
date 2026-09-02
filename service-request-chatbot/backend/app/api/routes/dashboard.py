@@ -226,17 +226,25 @@ def _conversation_row(
 ) -> dict[str, Any]:
     """Map one aggregated session onto the frontend's conversation row shape."""
     user_id = session["user_id"] or ""
+    agent_label = session.get("agent_label") or ""
+    # The column is a message preview, so show what the user opened with.
+    # A session of only silent turns has no question — leave it blank rather
+    # than substituting the agent name, which would read as something the
+    # user said.
+    preview = (session.get("first_question") or "").strip()
     return {
         "id": session["session_id"],
         "user_name": names.get(user_id) or (f"User {user_id[:8]}" if user_id else ""),
-        "message_preview": session["agent"] or "",
+        "message_preview": preview,
         "turns": session["turns"],
         # Escalated = at least one turn the agent could not answer.
         "escalated": session["unanswered_turns"] > 0,
         "resolved": session["resolved"],
         "time_label": _time_label(session["last_activity_at"], now),
         # Additive fields the current UI ignores but the richer view uses.
-        "agent": session["agent"],
+        # `agent` is the human label — the raw routing key is `agent_key`.
+        "agent": agent_label,
+        "agent_key": session["agent"],
         "duration_seconds": session["duration_seconds"],
         "avg_rating": session["avg_rating"],
         "ratings_count": session.get("ratings_count", 0),

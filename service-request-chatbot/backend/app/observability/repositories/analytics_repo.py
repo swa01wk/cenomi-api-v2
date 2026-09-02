@@ -21,6 +21,8 @@ import structlog
 from sqlalchemy import Integer, Text, cast, func, literal, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agents.agent_display import agent_display_name
+
 from app.db.models import (
     AgentFeedback,
     AgentLLMCall,
@@ -411,6 +413,7 @@ class AnalyticsRepository:
                 "user_id": str(r.user_id),
                 "asked_at": r.created_at,
                 "agent": r.active_agent,
+                "agent_label": agent_display_name(r.active_agent, r.intent),
                 "intent": r.intent,
                 "question": r.input_message,
                 "answer": r.output_message,
@@ -621,6 +624,9 @@ class AnalyticsRepository:
                 .filter(AgentTrace.answer_status.in_(["UNANSWERED", "FAILED"]))
                 .label("not_answered"),
                 func.max(AgentTrace.active_agent).label("agent"),
+                # Names the handler for FAQ and notification turns, which never
+                # set active_agent.
+                func.max(AgentTrace.intent).label("intent"),
             )
             .where(*clauses)
             .group_by(AgentTrace.session_id)
@@ -671,6 +677,31 @@ class AnalyticsRepository:
             .subquery()
         )
 
+        # The opening question, so a conversation row can preview what the
+        # user actually asked. Silent refresh turns are skipped — previewing
+        # a blank background sync tells the reader nothing.
+        opening_question = (
+            select(
+                AgentTrace.session_id.label("session_id"),
+                func.min(AgentTrace.created_at).label("asked_at"),
+            )
+            .where(_is_real_question())
+            .group_by(AgentTrace.session_id)
+            .subquery()
+        )
+        first_question = (
+            select(
+                opening_question.c.session_id.label("session_id"),
+                AgentTrace.input_message.label("question"),
+            )
+            .join(
+                AgentTrace,
+                (AgentTrace.session_id == opening_question.c.session_id)
+                & (AgentTrace.created_at == opening_question.c.asked_at),
+            )
+            .subquery()
+        )
+
         rows = await self._session.execute(
             select(
                 grouped.c.session_id,
@@ -680,10 +711,12 @@ class AnalyticsRepository:
                 grouped.c.user_id,
                 grouped.c.not_answered,
                 grouped.c.agent,
+                grouped.c.intent,
                 first_message.c.first_at,
                 rating.c.avg_score,
                 rating.c.ratings_count,
                 rating.c.comments,
+                first_question.c.question,
                 func.coalesce(created_srs.c.created, 0).label("srs_created"),
             )
             .select_from(grouped)
@@ -691,6 +724,9 @@ class AnalyticsRepository:
                 first_message, first_message.c.session_id == grouped.c.session_id
             )
             .outerjoin(rating, rating.c.session_id == grouped.c.session_id)
+            .outerjoin(
+                first_question, first_question.c.session_id == grouped.c.session_id
+            )
             .outerjoin(created_srs, created_srs.c.session_id == grouped.c.session_id)
             .order_by(grouped.c.last_at.desc())
             .limit(limit)
@@ -705,6 +741,8 @@ class AnalyticsRepository:
                     "session_id": str(r.session_id),
                     "user_id": r.user_id,
                     "agent": r.agent,
+                    "agent_label": agent_display_name(r.agent, r.intent),
+                    "first_question": r.question,
                     "turns": r.turns or 0,
                     "started_at": r.started_at,
                     "last_activity_at": r.last_at,
@@ -744,7 +782,9 @@ class AnalyticsRepository:
             turns = r.turns or 0
             breakdown.append(
                 {
+                    # Raw name stays the filter key; the label is for display.
                     "agent": r.agent or "unrouted",
+                    "agent_label": agent_display_name(r.agent),
                     "turns": turns,
                     "answered": r.answered or 0,
                     "failed": r.failed or 0,
