@@ -26,6 +26,7 @@ def _store(request: Request) -> dict:
 
 
 @router.put("/files")
+@router.put("/api/v1/files")
 async def upload_file(
     request: Request,
     file: UploadFile = File(...),
