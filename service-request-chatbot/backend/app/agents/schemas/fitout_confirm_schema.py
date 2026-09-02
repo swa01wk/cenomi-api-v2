@@ -74,9 +74,17 @@ SUBCAT_CONFIG: dict[str, dict[str, Any]] = {
         ],
         # delay_reason is required for FOS when no
         "delay_reason_required": True,
-        # FOS and END have a documents + comments section
+        # FOS and END have a documents section
         "has_documents": True,
-        "has_comments": True,
+        # The chat flow never asks for comments on any fitout confirmation SR
+        # (_route_after_validation excludes fitout agents from proactive optional
+        # asking), so showing a Comments row on the card is a promise the flow
+        # does not keep — it renders permanently blank.
+        "has_comments": False,
+        # ...but the platform payload still carries the key for FOS/END, so the
+        # request shape is unchanged. Kept separate from ``has_comments`` so the
+        # display decision cannot silently alter the API contract.
+        "payload_has_comments": True,
         "approver_role": "DD_ENGINEER",
         "title_prefix": "Confirm Fitout Start",
     },
@@ -101,7 +109,10 @@ SUBCAT_CONFIG: dict[str, dict[str, Any]] = {
         ],
         "delay_reason_required": True,
         "has_documents": True,
-        "has_comments": True,
+        # See FIT_OUT_CONFIRM_FOS above — never asked, so never displayed, but
+        # still sent in the payload.
+        "has_comments": False,
+        "payload_has_comments": True,
         "approver_role": "DD_ENGINEER",
         "title_prefix": "Confirm Fitout End",
     },
@@ -126,6 +137,7 @@ SUBCAT_CONFIG: dict[str, dict[str, Any]] = {
         # TRADING does NOT have documents or comments sections
         "has_documents": False,
         "has_comments": False,
+        "payload_has_comments": False,
         "approver_role": "MALL_MANAGER",  # also OPERATIONS — see PERMISSION_MAP below
         "title_prefix": "Confirm Trading",
     },

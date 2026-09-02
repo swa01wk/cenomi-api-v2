@@ -406,6 +406,95 @@ async def test_no_trace_id_when_tracing_unavailable() -> None:
     assert resp.json()["trace_id"] is None
 
 
+async def test_viewing_notification_id_accepted_with_empty_message() -> None:
+    """UI may open a notification page and send viewing context without chat text."""
+    result = _make_result(message="You're viewing notification NTF-000012.")
+    client = _make_client_and_patch()
+    captured: dict = {}
+
+    async def _mock_process_turn(self, **kwargs):  # noqa: ANN001
+        captured.update(kwargs)
+        return result
+
+    try:
+        with patch(
+            "app.services.chat_orchestration_service.ChatOrchestrationService.process_turn",
+            new=_mock_process_turn,
+        ):
+            async with client as c:
+                resp = await c.post(
+                    _ENDPOINT,
+                    json={
+                        "user_id": _USER_ID,
+                        "message": "",
+                        "viewing_notification_id": "NTF-000012",
+                        "viewing_service_request_id": "11711",
+                        "viewing_notification": {
+                            "id": "NTF-000012",
+                            "title": "Handover awaiting FM review",
+                            "related_sr_id": "11711",
+                        },
+                    },
+                )
+    finally:
+        _restore_overrides()
+
+    assert resp.status_code == 200
+    assert captured["viewing_notification_id"] == "NTF-000012"
+    assert captured["viewing_service_request_id"] == "11711"
+    assert captured["viewing_notification"]["title"] == "Handover awaiting FM review"
+
+
+async def test_active_notification_id_accepted_with_empty_message() -> None:
+    """OPEN_NOTIFICATION: tapping Open sends active_notification_id and no text."""
+    result = _make_result(message="Opening SR 11711 for FM review.")
+    client = _make_client_and_patch()
+    captured: dict = {}
+
+    async def _mock_process_turn(self, **kwargs):  # noqa: ANN001
+        captured.update(kwargs)
+        return result
+
+    try:
+        with patch(
+            "app.services.chat_orchestration_service.ChatOrchestrationService.process_turn",
+            new=_mock_process_turn,
+        ):
+            async with client as c:
+                resp = await c.post(
+                    _ENDPOINT,
+                    json={
+                        "user_id": _USER_ID,
+                        "message": "",
+                        "active_notification_id": {
+                            "id": 11711,
+                            "sub_category": "HANDOVER",
+                        },
+                    },
+                )
+    finally:
+        _restore_overrides()
+
+    assert resp.status_code == 200
+    # int id is coerced to str by the pydantic validator
+    assert captured["active_notification_id"] == {
+        "id": "11711",
+        "sub_category": "HANDOVER",
+    }
+
+
+async def test_empty_body_still_422_with_new_field() -> None:
+    """The guard must keep rejecting fully-empty turns."""
+    client = _make_client_and_patch()
+    try:
+        async with client as c:
+            resp = await c.post(_ENDPOINT, json={"user_id": _USER_ID, "message": ""})
+    finally:
+        _restore_overrides()
+    assert resp.status_code == 422
+    assert "active_notification_id" in resp.json()["detail"]
+
+
 # ---------------------------------------------------------------------------
 # Health endpoint smoke test (regression guard)
 # ---------------------------------------------------------------------------

@@ -109,8 +109,11 @@ def build_create_fitout_confirm_payload(
             ]
         payload_inner["documents_ids"] = doc_ids
 
-    # Comments — only for FOS and END; TRADING has no comments section
-    if cfg["has_comments"]:
+    # Comments — only for FOS and END; TRADING has no comments section.
+    # Driven by ``payload_has_comments``, not ``has_comments``: the latter now
+    # only controls whether the chat asks for and displays the field, and the
+    # payload shape must not change when that display decision changes.
+    if cfg.get("payload_has_comments"):
         payload_inner["comments"] = collected.get("comments", "") or ""
 
     title = collected.get("title") or build_title(sub_category, pms_tenant_code)

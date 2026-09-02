@@ -28,7 +28,7 @@ _GRAPH_ROLES: tuple[str, ...] = ("FM_MANAGER", "OPERATIONS", "DD_ENGINEER", "MAL
 _DOC_LABELS: dict[str, str] = {
     "SR_HANDOVER_CHECKLIST": "Handover Checklist",
     "SR_HANDOVER_SITE_SURVEY": "Site Survey",
-    "SR_COP_CHECKLIST_OTHER": "COP Checklist / Other",  # Fix 2: was SR_HANDOVER_OTHER
+    "SR_COP_CHECKLIST_OTHER": "Other",
     "SR_HANDOVER_OTHER": "Other",
     "DR_SR_HANDOVER_REPORT": "Handover Meeting Report",
     "SR_REJECTED_HANDOVER_REPORT": "Rejected Fitout and Handover Report",
@@ -46,6 +46,30 @@ _RDD_DOC_TYPES: frozenset[str] = frozenset({
     "SR_REJECTED_HANDOVER_REPORT",
     "SR_HANDOVER_OTHER",
 })
+
+# Roles allowed to ACT inside each review stage (upload documents, take the
+# stage actions). Single source of truth for both the upload card and the
+# action chips, and it must stay identical to the entry-node role guards
+# (``_FM_ALLOWED_ROLES`` / ``_RDD_ALLOWED_ROLES``): anything we surface here
+# that those guards reject becomes a dead end — the user clicks and is told
+# they do not have permission. ADMIN is deliberately absent for that reason;
+# the entry nodes deny it today.
+_STAGE_ACTOR_ROLES: dict[str, frozenset[str]] = {
+    "FM_REVIEW": frozenset({"FM_MANAGER", "OPERATIONS"}),
+    "RDD_REVIEW": frozenset({"DD_ENGINEER"}),
+}
+
+
+def can_act_in_stage(stage: str, user_role: str | None) -> bool:
+    """True when ``user_role`` may upload/act in ``stage``.
+
+    An unknown stage or an unresolved role is permissive — same as the entry
+    node guards, which only deny when a role is actually present.
+    """
+    allowed = _STAGE_ACTOR_ROLES.get(stage)
+    if not allowed or not user_role:
+        return True
+    return user_role.upper() in allowed
 
 
 def derive_user_role(auth: AuthContext | None) -> str | None:
@@ -89,7 +113,18 @@ def payload_to_collected_data(payload: dict[str, Any]) -> dict[str, Any]:
         "title", "description", "startDate", "endDate", "inspection_done_by",
         "unit_readiness_date", "expected_handover_date", "actual_handover_date",
         "fitout_start_date", "fitout_end_date", "trading_date", "comments",
+        "notes",
         "guideLineLink", "document_status",
+        # ── Path B (Already Trading / HANDED_OVER) ─────────────────────────────
+        # payload_builder_service.build_handed_over_payload sends all four of
+        # these; without them here an opened Path B SR loses the shop handover
+        # and fitout end dates from its preview card, and ``already_handovered``
+        # — the discriminator HandoverAgenticBridge reads to switch between the
+        # HANDOVER and HANDED_OVER form skeletons — never reaches the frontend.
+        # ``actual_fitout_start_date`` and ``actual_trading_date`` are already
+        # mapped below as part of the Fitout Confirmation block.
+        "already_handovered",
+        "actual_shop_handover_date", "actual_fitout_end_date",
         "lease_code", "brand", "mall", "city", "unit_codes", "contracted_area",
         "lease_id", "brand_id", "property_id", "tenant_profile_id", "contract_id",
         # ── Fitout Confirmation workflow fields ────────────────────────────────
@@ -262,7 +297,8 @@ def maybe_reset_rdd_upload_slot(
     return out
 
 
-# Terminal / post-approval RDD statuses — no action chips (View SR deferred).
+# Terminal / post-approval RDD statuses — no stage actions left to take, so the
+# card falls back to the read-only "View Service Request" chip.
 _RDD_TERMINAL_STATUSES: frozenset[str] = frozenset(
     {
         "APPROVED",
@@ -382,6 +418,26 @@ def _rdd_ready_to_submit(
     return not get_missing_fields("RDD_REVIEW", collected)
 
 
+def build_view_sr_suggestions(sr_id: str) -> dict[str, Any]:
+    """Read-only chip that takes the user to the SR page on the platform.
+
+    Shown when the SR is real but the viewer has no action left in this stage —
+    a Mall Manager on an SR that has moved to FM review, or anyone looking at an
+    already-approved SR. ``value`` carries the SR id so the frontend can deep
+    link without a second lookup.
+    """
+    return {
+        "kind": "labeled_options",
+        "options": [
+            {
+                "label": "View Service Request",
+                "value": str(sr_id),
+                "action": "view_service_request",
+            },
+        ],
+    }
+
+
 def _action_suggestions(
     *,
     stage: str,
@@ -402,8 +458,11 @@ def _action_suggestions(
     options: list[dict[str, str]] = []
     collected = collected or {}
     documents = documents or []
+    # Normalised the same way the entry-node guards do, so chip visibility and
+    # the guard that accepts the chip's action never disagree on casing.
+    role = (user_role or "").upper()
 
-    if stage == "FM_REVIEW" and user_role in ("FM_MANAGER", "OPERATIONS", "ADMIN"):
+    if stage == "FM_REVIEW" and role in _STAGE_ACTOR_ROLES["FM_REVIEW"]:
         if _fm_review_ready(collected, documents):
             options = [
                 {
@@ -420,7 +479,7 @@ def _action_suggestions(
                     "action": "save_fm_progress",
                 },
             ]
-    elif stage == "RDD_REVIEW" and user_role in ("DD_ENGINEER", "ADMIN"):
+    elif stage == "RDD_REVIEW" and role in _STAGE_ACTOR_ROLES["RDD_REVIEW"]:
         status = (rdd_status or "").upper()
         if status in _RDD_TERMINAL_STATUSES:
             # Post-approval: hide action suggestions (View SR deferred).
@@ -511,6 +570,12 @@ def build_review_decorations(state: dict[str, Any]) -> dict[str, Any]:
     )
     if suggestions:
         decorations["suggestions"] = suggestions
+    elif not can_act_in_stage(stage, user_role) or (
+        stage == "RDD_REVIEW" and (rdd_status or "").upper() in _RDD_TERMINAL_STATUSES
+    ):
+        # Nothing actionable for this viewer — offer the SR page instead of a
+        # card with no way forward.
+        decorations["suggestions"] = build_view_sr_suggestions(sr_id)
 
     # After report submit, the mandatory RDD doc is already on the platform —
     # don't re-prompt uploads while offering Final Approve.
@@ -518,6 +583,10 @@ def build_review_decorations(state: dict[str, Any]) -> dict[str, Any]:
     # dates come AFTER upload (their values are nested on the uploaded row).
     # No longer gated on the removed rdd_upload_doc_type chip.
     show_docs = not (stage == "RDD_REVIEW" and (rdd_status or "").upper() == "REPORT_SUBMITTED")
+    if not can_act_in_stage(stage, user_role):
+        # Read-only viewer for this stage: the entry node will refuse their
+        # actions, so an upload/delete card would contradict that refusal.
+        show_docs = False
     if stage == "RDD_REVIEW" and not collected.get("guideLineLink"):
         # Wait until the guideline link is provided before offering uploads.
         show_docs = False

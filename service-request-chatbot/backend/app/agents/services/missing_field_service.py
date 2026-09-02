@@ -39,16 +39,39 @@ HANDOVER_FIELD_QUESTIONS: dict[str, str] = {
         "Ask the user for a short description of this handover request "
         "(or say 'none' to skip)."
     ),
-    "startDate": "Ask the user when the inspection should start (date).",
-    "endDate": "Ask the user when the inspection should end (date).",
+    "startDate": (
+        "Ask the user when the inspection should start — date and time together. "
+        "Instruct them to use DD/MM/YYYY format and include the time, "
+        "e.g. '20/08/2026 9:00 AM' or '20 Aug 2:00 PM'. "
+        "If they provide the time here, no separate time question will be needed."
+    ),
+    "endDate": (
+        "Ask the user when the inspection should end — date AND time together. "
+        "Instruct them to use DD/MM/YYYY format and include the time, "
+        "e.g. '21/08/2026 6:00 PM'. "
+        "Do NOT tell them the time is optional and do NOT say the start time "
+        "will be reused — if they omit the time they will be asked for it next."
+    ),
     "inspectionTime": (
-        "Ask the user what time the inspection should start (e.g. '10:00 AM', '14:30'). "
-        "Accept 'skip' or 'none' to use the current time."
+        "The user gave a start date but no time. Ask what time the inspection "
+        "should start on that date (e.g. '10:00 AM', '14:30'). "
+        "Ask ONLY for the time — do not re-ask for the date, and do not move on "
+        "to any other field. "
+        "Mention they can reply 'skip' to use 9:00 AM as the default."
+    ),
+    "inspectionEndTime": (
+        "The user gave an end date but no time. Ask what time the inspection "
+        "should end on that date (e.g. '6:00 PM', '18:30'). "
+        "Ask ONLY for the time — do not re-ask for the date, and do not move on "
+        "to any other field. "
+        "Mention they can reply 'skip' to reuse the inspection start time."
     ),
     "inspection_done_by": (
         "Ask the user who will perform the inspection. "
-        "They must choose one of exactly two options: FM Manager or Operations. "
-        "Make the two choices explicit."
+        "They must choose one of exactly two options using the buttons below: "
+        "'FM Manager' or 'Operations'. "
+        "Do not accept any other role name — if they type anything else, "
+        "ask them to use the selection buttons."
     ),
     "notes": (
         "Ask the user if they have any additional notes for this handover request. "

@@ -21,6 +21,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
+from app.agents.graph.nodes.handover.confirmation_node import _FIELD_LABELS
 from app.agents.graph.state import ServiceRequestState
 from app.agents.registries.workflow_config import get_workflow_config
 from app.agents.schemas.fitout_confirm_schema import (
@@ -33,6 +34,7 @@ from app.agents.schemas.handover_schema import (
     STAGE_REGISTRY,
     get_missing_fields as handover_get_missing_fields,
 )
+from app.agents.services.display_formatters import format_field_display_value
 from app.agents.services.missing_field_service import (
     HANDOVER_FIELD_QUESTIONS,
     get_missing_fields,
@@ -41,7 +43,75 @@ from app.agents.services.review_decorations_service import (
     build_document_upload_ask_response,
     maybe_reset_rdd_upload_slot,
 )
+from app.agents.services.validation_service import _SINGLE_DATE_FIELDS
 from app.observability.decorators import trace_node
+
+# Chip decorations reused for enum-style fields so a correction re-ask looks
+# identical to the field's normal first-time ask (see the matching blocks
+# further down in this file for the initial-ask versions).
+#
+# The ``action`` on each option matters as much as the value: the entry nodes
+# key off it to write the field straight into collected_data
+# (handover_entry_node._INSPECTION_DONE_BY_ACTIONS,
+# rdd_review_entry_node._STATUS_ACTIONS), and the graph then routes those
+# actions past field_extraction. A chip without one sends a bare label instead,
+# which goes through LLM re-extraction — and extraction's correction re-arm
+# reads "field already has a value + nothing extracted" as a failed correction
+# and re-asks the question the user just clicked. Keep these in lockstep with
+# the initial-ask blocks below.
+_CORRECTION_FIELD_DECORATIONS: dict[str, dict[str, Any]] = {
+    "inspection_done_by": {
+        "suggestions": {
+            "kind": "labeled_options",
+            "options": [
+                {
+                    "label": "FM Manager",
+                    "value": "FM_MANAGER",
+                    "action": "select_inspection_done_by_fm_manager",
+                },
+                {
+                    "label": "Operations",
+                    "value": "OPERATIONS",
+                    "action": "select_inspection_done_by_operations",
+                },
+            ],
+        }
+    },
+    "already_handovered": {
+        "suggestions": {
+            "kind": "labeled_options",
+            "options": [
+                {
+                    "label": "Already Trading",
+                    "value": "already_trading",
+                    "action": "select_handover_type_already_trading",
+                },
+                {
+                    "label": "Initiate Handover",
+                    "value": "initiate_handover",
+                    "action": "select_handover_type_initiate_handover",
+                },
+            ],
+        }
+    },
+    "document_status": {
+        "suggestions": {
+            "kind": "labeled_options",
+            "options": [
+                {
+                    "label": "Approve",
+                    "value": "APPROVED",
+                    "action": "select_rdd_status_approved",
+                },
+                {
+                    "label": "Approve with changes",
+                    "value": "APPROVED_WITH_CHANGES",
+                    "action": "select_rdd_status_approved_with_changes",
+                },
+            ],
+        }
+    },
+}
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -117,6 +187,54 @@ _FITOUT_CONFIRM_AGENTS: frozenset[str] = frozenset({
 _RDD_MANDATORY_UPLOAD_TYPES: frozenset[str] = frozenset(
     {"DR_SR_HANDOVER_REPORT", "SR_REJECTED_HANDOVER_REPORT"}
 )
+
+# Wording for the FOS / FOE / Trading yes-no milestone question.
+#
+# Each milestone owns its whole phrasing rather than sharing one noun label
+# slotted into a fixed verb. A single label cannot serve all three: the field
+# names read as nouns ("fitout start", "fitout complete"), so "Has {label}
+# started?" produced "Has fitout start started?" and "Has fitout complete
+# started?" — and "complete" is a state, not something that starts.
+#
+# - ``question``  — the first-ask form, used when the radio has no value yet
+# - ``subject``   — sentence-initial subject for the "currently marked as" forms
+# - ``affirmed`` / ``negated`` — how the stored yes / no reads for this milestone
+# - ``not_yet`` / ``now`` — mid-sentence clauses offering the opposite answer
+_RADIO_PHRASING: dict[str, dict[str, str]] = {
+    "fitout_start_done": {
+        "question": "Has the fitout started?",
+        "subject": "The fitout",
+        "affirmed": "started",
+        "negated": "not started",
+        "not_yet": "it has not started",
+        "now": "it has now started",
+    },
+    "fitout_complete_done": {
+        "question": "Has the fitout been completed?",
+        "subject": "The fitout",
+        "affirmed": "completed",
+        "negated": "not completed",
+        "not_yet": "it is not complete",
+        "now": "it is now complete",
+    },
+    "trading_done": {
+        "question": "Has trading started?",
+        "subject": "Trading",
+        "affirmed": "started",
+        "negated": "not started",
+        "not_yet": "it has not started",
+        "now": "it has now started",
+    },
+}
+
+_RADIO_PHRASING_FALLBACK: dict[str, str] = {
+    "question": "Has this milestone been reached?",
+    "subject": "This milestone",
+    "affirmed": "done",
+    "negated": "not done",
+    "not_yet": "it has not been reached",
+    "now": "it has now been reached",
+}
 
 # Maps each FOS/FOE/Trading actual-date field to candidate "original date"
 # sources (first non-empty wins).  Mirrors the form: prefer lease base date,
@@ -238,6 +356,77 @@ async def missing_field_node(state: ServiceRequestState) -> dict[str, Any]:
     validation_errors: list[dict[str, Any]] = state.get("validation_errors") or []
     documents: list[dict[str, Any]] = list(state.get("documents") or [])
 
+    # ── Priority -1: pending "change field X" redirect ─────────────────────
+    # Set by field_extraction_node when the user asked to revisit an already
+    # answered field with no inline value yet. One-turn signal: always cleared
+    # in the returned patch so the next turn's answer flows through the
+    # normal active_field binding.
+    #
+    # This message is sent to the user verbatim (response_ui["verbatim"] =
+    # True) rather than going through response_generation_node's LLM
+    # rewrite step. That LLM rewrite is fed collected_data, which still
+    # shows the field's OLD value at this point (nothing has changed it
+    # yet) — it would "helpfully" read that as the field already being
+    # answered and re-confirm the old value instead of asking for a new
+    # one. Building the final user-facing text here, deterministically,
+    # avoids that misread entirely.
+    correction_pending_field: str | None = state.get("correction_pending_field")
+    if correction_pending_field:
+        label = _FIELD_LABELS.get(
+            correction_pending_field, correction_pending_field
+        )
+        # Refuse fields the merge layer will not let the user overwrite.
+        # Backend-derived fields come from the lease lookup, and once the lease
+        # is resolved its identifiers are authoritative (see
+        # ``_LEASE_CONFIRMED_FIELDS`` in merge_state_node). Asking "what would
+        # you like to change it to?" for one of these promises a change that is
+        # silently discarded on the next turn.
+        _locked = set(_effective_backend_fields)
+        if collected.get("lease_id"):
+            _locked |= {"lease_code", "mall", "brand"}
+        if correction_pending_field in _locked:
+            refusal = (
+                f"{label} comes from the lease record and can't be edited here. "
+                f"To use a different lease, start a new handover request. "
+                f"Is there anything else you'd like to change?"
+            )
+            return {
+                "response_message": refusal,
+                "response_ui": {
+                    "type": "message",
+                    "message": refusal,
+                    "verbatim": True,
+                },
+                "status": "WAITING_FOR_USER",
+                "active_field": None,
+                "correction_pending_field": None,
+            }
+        current_value = collected.get(correction_pending_field)
+        display_value = format_field_display_value(correction_pending_field, current_value)
+        if display_value not in (None, "", []):
+            question = f"Current {label}: {display_value}. What would you like to change it to?"
+        else:
+            question = f"What would you like to set as the {label}?"
+        if correction_pending_field in _SINGLE_DATE_FIELDS:
+            question += " Use DD/MM/YYYY format, e.g. '21/08/2026'."
+        correction_update: dict[str, Any] = {
+            "missing_fields": [correction_pending_field],
+            "response_message": question,
+            "response_ui": {
+                "type": "text_question",
+                "field": correction_pending_field,
+                "message": question,
+                "verbatim": True,
+            },
+            "status": "WAITING_FOR_USER",
+            "active_field": correction_pending_field,
+            "correction_pending_field": None,
+        }
+        decorations = _CORRECTION_FIELD_DECORATIONS.get(correction_pending_field)
+        if decorations:
+            correction_update["response_decorations"] = decorations
+        return correction_update
+
     # After optional Rejected/Other upload, clear the slot so Meeting Report
     # can be selected next (Submit still requires the Meeting Report).
     if workflow_stage == "RDD_REVIEW":
@@ -292,6 +481,21 @@ async def missing_field_node(state: ServiceRequestState) -> dict[str, Any]:
 
         if v_type in _VALIDATION_ERROR_QUESTIONS:
             next_field, next_question = _VALIDATION_ERROR_QUESTIONS[v_type]
+            # Name the value that was rejected. The generic hint alone produces
+            # a byte-identical message every turn, so a user who retypes the
+            # same bad date sees no sign that anything was read or refused.
+            if v_type == "date_range" and next_field == "endDate":
+                bad_end = str(collected.get("endDate") or "").strip()
+                start_raw = str(collected.get("startDate") or "").strip()
+                if bad_end and start_raw:
+                    next_question = (
+                        f"The end date you entered "
+                        f"({_format_base_date_for_display(bad_end)}) is not after the "
+                        f"start date ({_format_base_date_for_display(start_raw)}). "
+                        f"Please enter an end date later than "
+                        f"{_format_base_date_for_display(start_raw)}, in DD/MM/YYYY format."
+                    )
+                    verbatim_question = True
         elif error_field and error_field not in _effective_backend_fields:
             next_field = error_field
             next_question = field_questions.get(
@@ -299,9 +503,12 @@ async def missing_field_node(state: ServiceRequestState) -> dict[str, Any]:
                 f"Please correct the value for: {error_field}",
             )
 
-    elif backend_missing:
-        # One or more backend-derived fields are unresolved — ask for a lease
-        # trigger so ``lease_lookup_node`` can fill them programmatically.
+    elif backend_missing and not collected.get("lease_id"):
+        # Backend-derived fields are unresolved and the lease is not identified
+        # yet — ask for a lease trigger so ``lease_lookup_node`` can fill them.
+        # Once lease_id is set the lease is already resolved (form is populated).
+        # Do not fall through to ``company`` just because city/units/etc. came
+        # back empty for that lease — that re-asks tenant/company QA already see.
         for trigger in _effective_lease_triggers:
             if not collected.get(trigger):
                 next_field = trigger
@@ -361,12 +568,8 @@ async def missing_field_node(state: ServiceRequestState) -> dict[str, Any]:
                 "fitout_complete_done": "actual_fitout_complete_date",
                 "trading_done": "actual_trading_date",
             }
-            _RADIO_LABEL = {
-                "fitout_start_done": "fitout start",
-                "fitout_complete_done": "fitout complete",
-                "trading_done": "trading",
-            }
-            label = _RADIO_LABEL.get(next_field, "this milestone")
+            phrasing = _RADIO_PHRASING.get(next_field, _RADIO_PHRASING_FALLBACK)
+            subject = phrasing["subject"]
             actual_key = _RADIO_TO_ACTUAL.get(next_field, "")
             actual_raw = str(collected.get(actual_key) or "").strip()
             actual_display = (
@@ -374,26 +577,26 @@ async def missing_field_node(state: ServiceRequestState) -> dict[str, Any]:
             )
             if radio_val == "yes" and actual_display:
                 next_question = (
-                    f"{label.capitalize()} is currently marked as **done** "
+                    f"{subject} is currently marked as **{phrasing['affirmed']}** "
                     f"(actual date {actual_display}). "
-                    f"Reply **yes** to confirm, or **no** if it has not started "
+                    f"Reply **yes** to confirm, or **no** if {phrasing['not_yet']} "
                     f"and you need to add revised planned dates."
                 )
             elif radio_val == "yes":
                 next_question = (
-                    f"{label.capitalize()} is currently marked as **done**. "
-                    f"Reply **yes** to confirm, or **no** if it has not started "
+                    f"{subject} is currently marked as **{phrasing['affirmed']}**. "
+                    f"Reply **yes** to confirm, or **no** if {phrasing['not_yet']} "
                     f"and you need to add revised planned dates."
                 )
             elif radio_val == "no":
                 next_question = (
-                    f"{label.capitalize()} is currently marked as **not done**. "
+                    f"{subject} is currently marked as **{phrasing['negated']}**. "
                     f"Reply **no** to keep that and review/update planned dates, "
-                    f"or **yes** if it has now started and you have an actual date."
+                    f"or **yes** if {phrasing['now']} and you have an actual date."
                 )
             else:
                 next_question = (
-                    f"Has {label} started? Reply **yes** or **no**. "
+                    f"{phrasing['question']} Reply **yes** or **no**. "
                     f"If no, you can add revised planned dates."
                 )
 
@@ -413,6 +616,19 @@ async def missing_field_node(state: ServiceRequestState) -> dict[str, Any]:
                     f"Reply **confirm** to use it, or enter a different date in DD/MM/YYYY format."
                 )
                 verbatim_question = True
+
+        # The Handover Meeting Report outcome is answered with the two chips
+        # below, so the prompt is built here rather than left to the LLM
+        # rewrite: field_questions holds an instruction *about* asking ("Ask the
+        # RDD Project Manager for...") and when that rewrite does not land the
+        # chips render with no question above them at all.
+        elif next_field == "document_status":
+            next_question = (
+                "Please select the document status for the Handover Meeting "
+                "Report: **Approve** if the report is accepted as-is, or "
+                "**Approve with changes** if it needs amendments."
+            )
+            verbatim_question = True
 
     # When the next question is driven by a non-required validation error (e.g.
     # date_range), the correction target field may already be in collected_data

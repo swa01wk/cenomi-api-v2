@@ -191,7 +191,8 @@ class SalesDataApiClient:
     ) -> dict[str, Any]:
         """Upload a file via PUT /files and return the document_id.
 
-        Live Cenomi: ``PUT /files?file_extension=&document_type_id=&lease_id=&file_name=``
+        Live Cenomi: ``PUT /api/v1/files?file_extension=&document_type_id=&lease_id=&file_name=``.
+        Mock backend aliases the same path (and still serves ``PUT /files``).
         """
         headers = {}
         if self._token:
@@ -208,7 +209,7 @@ class SalesDataApiClient:
 
         async with httpx.AsyncClient(timeout=60.0) as client:
             resp = await client.put(
-                f"{self._base}/files",
+                f"{self._base}/api/v1/files",
                 headers=headers,
                 params=params,
                 files={"file": (filename, io.BytesIO(file_bytes), content_type)},

@@ -275,7 +275,7 @@ def _build_confirmation_card(
     if workflow_stage == "RDD_REVIEW":
         uploaded_types = {
             str(d.get("document_type_id") or d.get("document_type") or "")
-            for d in (backend_refs.get("documents") or [])
+            for d in ((backend_refs or {}).get("documents") or [])
             if d.get("document_type_id") or d.get("document_type")
         }
         # `backend_refs.documents` isn't always populated; also inspect the
@@ -289,9 +289,29 @@ def _build_confirmation_card(
         ):
             display_keys = [k for k in display_keys if k != "document_status"]
 
+    # Start and end times are independent. inspectionTime is the start clock;
+    # endDateLT keeps an end-specific time when the user gave one.
+    from app.agents.services.payload_builder_service import (  # local import avoids circular deps
+        _normalize_inspection_datetime,
+        resolve_start_end_hhmm,
+    )
+    start_hhmm, end_hhmm = resolve_start_end_hhmm(collected_data)
+    _date_lt_overrides: dict[str, Any] = {}
+    for _date_key, _lt_key, _hhmm in (
+        ("startDate", "startDateLT", start_hhmm),
+        ("endDate", "endDateLT", end_hhmm),
+    ):
+        _raw = collected_data.get(_date_key)
+        if _raw and _hhmm:
+            _, _lt = _normalize_inspection_datetime(
+                _raw, collected_data.get(_lt_key), inspection_time=_hhmm
+            )
+            if _lt:
+                _date_lt_overrides[_date_key] = _lt
+
     fields: list[dict[str, Any]] = []
     for field_key in display_keys:
-        raw_value = collected_data.get(field_key)
+        raw_value = _date_lt_overrides.get(field_key, collected_data.get(field_key))
         is_editable = field_key in editable
         # Keep raw ISO / enum codes for editable inputs (selects + round-trip).
         # Format only for read-only display rows.

@@ -8,6 +8,7 @@ This module defines:
 Agent taxonomy
 --------------
 - help_agent  : supervisor classification + FAQ Q&A
+- notification_agent : list / explain / mark-read using page viewing context
 - rdd_agent   : full RDD lifecycle (CREATE_SR → FM_REVIEW → RDD_REVIEW)
 
 Design principle
@@ -34,6 +35,10 @@ _SR_READ_INTENTS: frozenset[str] = frozenset(
         "ASK_HELP",
         "CHECK_SERVICE_REQUEST_STATUS",
         "PREVIEW_SERVICE_REQUEST",
+        "LIST_NOTIFICATIONS",
+        "GET_NOTIFICATION_DETAIL",
+        "MARK_NOTIFICATION_READ",
+        "OPEN_NOTIFICATION",
         "UNKNOWN",
     }
 )
@@ -127,6 +132,27 @@ ROLE_PERMITTED_INTENTS: dict[str, frozenset[str]] = {
     # Unrestricted
     "ADMIN": ALL_INTENTS,
 }
+
+# Live cenomi-api AI session JWTs stamp platform role names, not the demo
+# aliases (TENANT_CSV_UPLOADER / SALES_DATA_APPROVER). Keep both so inbox
+# skip-logic and supervisor shortcuts work against the dump / staging.
+SALES_DATA_TENANT_PLATFORM_ROLES: frozenset[str] = frozenset(
+    {
+        "AUTHORIZED_SIGNATORY",
+        "BILLING_CONTACT",
+        "PRIMARY_TENANT_CONTACT",
+        "COMPANY_ADMIN_CENTRAL",
+        "SHOP_MANAGER",
+        "FINANCIAL_CONTROLLER",
+        "LEASING_MANAGER",
+    }
+)
+SALES_DATA_APPROVER_PLATFORM_ROLES: frozenset[str] = frozenset({"SALES_DATA_TEAM"})
+
+for _role in SALES_DATA_TENANT_PLATFORM_ROLES:
+    ROLE_PERMITTED_INTENTS[_role] = _SR_READ_INTENTS | _SALES_DATA_TENANT_INTENTS
+for _role in SALES_DATA_APPROVER_PLATFORM_ROLES:
+    ROLE_PERMITTED_INTENTS[_role] = _SR_READ_INTENTS | _SALES_DATA_ADMIN_INTENTS
 
 
 def _rebuild_intents_for_roles() -> None:

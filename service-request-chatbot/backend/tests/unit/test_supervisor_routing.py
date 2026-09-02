@@ -853,18 +853,38 @@ class TestSalesDataRbac:
         assert "UPLOAD_SALES_DATA" not in permitted
         assert "UPLOAD_SUPPORTING_DOCUMENT" not in permitted
 
+    def test_platform_tenant_roles_match_demo_uploader(self) -> None:
+        from app.agents.schemas.help_agent_schema import intents_for_roles
+
+        demo = intents_for_roles(frozenset({"TENANT_CSV_UPLOADER"}))
+        live = intents_for_roles(frozenset({"BILLING_CONTACT", "LEASING_MANAGER"}))
+        assert demo == live
+        assert "UPLOAD_SALES_DATA" in live
+        assert "REVIEW_SALES_DATA" not in live
+
+    def test_platform_sales_data_team_matches_approver(self) -> None:
+        from app.agents.schemas.help_agent_schema import intents_for_roles
+
+        assert intents_for_roles(frozenset({"SALES_DATA_TEAM"})) == intents_for_roles(
+            frozenset({"SALES_DATA_APPROVER"})
+        )
+
     def test_same_pending_question_is_role_gated(self) -> None:
         from app.agents.graph.nodes.supervisor_node import _sales_data_shortcut
 
         msg = "What data are pending ?"
         admin = _sales_data_shortcut(msg, ["SALES_DATA_APPROVER"])
         tenant = _sales_data_shortcut(msg, ["TENANT_CSV_UPLOADER"])
+        live_tenant = _sales_data_shortcut(msg, ["BILLING_CONTACT"])
+        live_admin = _sales_data_shortcut(msg, ["SALES_DATA_TEAM"])
         assert admin is not None
         assert tenant is not None
+        assert live_tenant is not None
+        assert live_admin is not None
         assert admin["intent"] == "REVIEW_SALES_DATA"
+        assert live_admin["intent"] == "REVIEW_SALES_DATA"
         assert tenant["intent"] == "CHECK_SALES_DATA_STATUS"
-        assert admin["sub_category"] == "ADMIN_REVIEW"
-        assert tenant["sub_category"] == "STATUS_CHECK"
+        assert live_tenant["intent"] == "CHECK_SALES_DATA_STATUS"
 
     def test_tenant_cannot_shortcut_into_admin_review(self) -> None:
         from app.agents.graph.nodes.supervisor_node import _sales_data_shortcut

@@ -90,9 +90,60 @@ def _clear_all_state() -> dict:
         "lease_matches": [],
         "backend_refs": {},
         "documents": [],
+        # Cancelling wipes the draft, so any per-turn pointer into it is stale.
+        # Leaving active_field set sent the very next turn to field_extraction
+        # (see _waiting_short_circuit_target), which discarded the "request has
+        # been cleared" reply and re-asked for the lease code — the draft really
+        # was cleared, but the user only saw the question come back.
+        "active_field": None,
+        "correction_pending_field": None,
         "response_ui": {"cancelled": True},
         "status": "WAITING_FOR_USER",
     }
+
+
+_MILESTONE_ACK_KEY = "_milestone_confirmed_ack"
+
+_CONTINUE_MILESTONE_PHRASES: frozenset[str] = frozenset(
+    {
+        "continue",
+        "proceed",
+        "go ahead",
+        "revise",
+        "keep going",
+        "yes",
+        "yep",
+        "yeah",
+        "ok",
+        "okay",
+    }
+)
+
+_CLEARED_REQUEST_MESSAGE = (
+    "The request has been cleared. Would you like to continue?"
+)
+
+
+def _ack_milestone(state: ServiceRequestState) -> dict[str, Any]:
+    collected = dict(state.get("collected_data") or {})
+    collected[_MILESTONE_ACK_KEY] = True
+    log.info("fitout_confirm_entry.continue_milestone")
+    return {
+        "collected_data": collected,
+        "confirmation_status": None,
+        "status": "IN_PROGRESS",
+    }
+
+
+def _clear_draft_for_milestone_cancel() -> dict[str, Any]:
+    patch = _clear_all_state()
+    patch["response_ui"] = {
+        "type": "message",
+        "verbatim": True,
+        "reset_conversation": True,
+    }
+    patch["response_message"] = _CLEARED_REQUEST_MESSAGE
+    return patch
 
 
 def _contains_phrase(message: str, phrases: frozenset[str]) -> bool:
@@ -114,6 +165,38 @@ async def fitout_confirm_entry_node(state: ServiceRequestState) -> dict[str, Any
     user_message: str = state.get("user_message") or ""
     confirmation_status: str | None = state.get("confirmation_status")
     action_override: str | None = state.get("action_override")  # type: ignore[assignment]
+
+    if action_override == "continue_milestone":
+        return _ack_milestone(state)
+
+    if action_override == "cancel_milestone":
+        log.info("fitout_confirm_entry.action_override_cancel_milestone")
+        return _clear_draft_for_milestone_cancel()
+
+    if state.get("confirmation_status") == "MILESTONE_PENDING":
+        if _contains_phrase(user_message, _CONTINUE_MILESTONE_PHRASES):
+            return _ack_milestone(state)
+        if _contains_phrase(user_message, _CANCEL_SR_PHRASES):
+            log.info("fitout_confirm_entry.milestone_cancel_by_text")
+            return _clear_draft_for_milestone_cancel()
+        return {
+            "status": "WAITING_FOR_USER",
+            "confirmation_status": "MILESTONE_PENDING",
+            "response_message": (
+                "Please tap **Continue** to revise the existing date, "
+                "or **Cancel** to pick a different lease."
+            ),
+            "response_ui": {"type": "message", "verbatim": True},
+            "response_decorations": {
+                "suggestions": {
+                    "kind": "labeled_options",
+                    "options": [
+                        {"label": "Cancel", "value": "cancel", "action": "cancel_milestone"},
+                        {"label": "Continue", "value": "continue", "action": "continue_milestone"},
+                    ],
+                }
+            },
+        }
 
     # ── 0. Explicit UI action — takes priority over text parsing ───────────
     if action_override in (
@@ -140,29 +223,26 @@ async def fitout_confirm_entry_node(state: ServiceRequestState) -> dict[str, Any
             "confirmation_status": "CONFIRMED",
         }
 
-    if action_override == "cancel" and confirmation_status == "PENDING":
-        log.info("fitout_confirm_entry.cancel_rejects_pending_confirmation")
-        return {"confirmation_status": "REJECTED", "status": "IN_PROGRESS"}
-
     if action_override in ("cancel_sr", "cancel", "cancel_create_sr"):
         log.info("fitout_confirm_entry.action_override_cancel_sr")
         backend_refs: dict[str, Any] = state.get("backend_refs") or {}
         sr_id = backend_refs.get("sr_id")
-        if not sr_id:
-            patch = _clear_all_state()
-            patch["response_message"] = (
-                "Your fitout confirmation request has been cancelled. "
-                "What would you like to do next?"
-            )
-            return patch
-        return {
-            "confirmation_status": "CANCEL_PENDING",
-            "status": "WAITING_FOR_USER",
-            "response_message": (
+        if sr_id:
+            message = (
                 f"Are you sure you want to cancel Service Request **{sr_id}**? "
                 "This will mark it as cancelled on the platform. "
                 "Reply **yes** to confirm, or **no** to go back."
-            ),
+            )
+        else:
+            message = (
+                "Are you sure you want to cancel this request? "
+                "This will clear the current details. "
+                "Reply **yes** to confirm, or **no** to go back to the review."
+            )
+        return {
+            "confirmation_status": "CANCEL_PENDING",
+            "status": "WAITING_FOR_USER",
+            "response_message": message,
         }
 
     if action_override == "confirm_cancel_sr":
@@ -256,20 +336,20 @@ async def fitout_confirm_entry_node(state: ServiceRequestState) -> dict[str, Any
         log.info("fitout_confirm_entry.text_cancel_sr", user_message=user_message[:120])
         backend_refs = state.get("backend_refs") or {}
         sr_id = backend_refs.get("sr_id")
-        if not sr_id:
-            patch = _clear_all_state()
-            patch["response_message"] = (
-                "Your fitout confirmation request has been cancelled. "
-                "What would you like to do next?"
+        if sr_id:
+            message = (
+                f"Are you sure you want to cancel Service Request **{sr_id}**? "
+                "Reply **yes** to confirm, or **no** to go back."
             )
-            return patch
+        else:
+            message = (
+                "Are you sure you want to cancel this request? "
+                "Reply **yes** to confirm, or **no** to go back to the review."
+            )
         return {
             "confirmation_status": "CANCEL_PENDING",
             "status": "WAITING_FOR_USER",
-            "response_message": (
-                f"Are you sure you want to cancel Service Request **{sr_id}**? "
-                "Reply **yes** to confirm, or **no** to go back."
-            ),
+            "response_message": message,
         }
 
     if _contains_phrase(user_message, _CANCEL_WORKFLOW_PHRASES):

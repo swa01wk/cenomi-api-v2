@@ -34,7 +34,6 @@ LLM gateway changes and is deferred.
 from __future__ import annotations
 
 import json
-import logging
 import re
 from collections.abc import AsyncIterator
 from typing import Any
@@ -119,6 +118,49 @@ class _MSPChatContext(BaseModel):
         default=None,
         description="Help subcategory, e.g. 'How to Submit'.",
         examples=["How to Submit"],
+    )
+    property_id: int | None = Field(
+        default=None,
+        description=(
+            "unique_property_id of the mall the user is currently viewing "
+            "(e.g. from /propertydetails?propertyId=3691). Lets 'who is the "
+            "mall manager' resolve without the user naming the mall."
+        ),
+        examples=[3691],
+    )
+    mall_name: str | None = Field(
+        default=None,
+        description=(
+            "marketing_name of the mall being viewed. Sent alongside "
+            "property_id so the agent needs no extra lookup to ground the answer."
+        ),
+        examples=["Yasmeen Mall"],
+    )
+    viewing_notification_id: str | None = Field(
+        default=None,
+        description="Notification currently open in the UI (deictic 'this notification').",
+        examples=["NTF-000012"],
+    )
+    viewing_service_request_id: str | None = Field(
+        default=None,
+        description="Service request currently open in the UI (deictic 'this SR').",
+        examples=["11711"],
+    )
+    viewing_notification: dict[str, Any] | None = Field(
+        default=None,
+        description="Optional notification snapshot {id, title, body, related_sr_id, status}.",
+    )
+    active_notification_id: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Open-notification reference {id: <SR id>, sub_category}. Seeds the "
+            "SR workflow handoff (OPEN_NOTIFICATION) — id is the SR id from the "
+            "notification's text_content.id, not the notification row id."
+        ),
+    )
+    notification_list_more: dict[str, Any] | None = Field(
+        default=None,
+        description="View-more paging {sub_category, page, unread?} for one group.",
     )
 
 

@@ -22,8 +22,10 @@ Non-responsibilities
 
 from __future__ import annotations
 
+import difflib
 import json
 import logging
+import re
 from typing import Any
 
 from app.agents.graph.state import ServiceRequestState
@@ -42,6 +44,58 @@ _FALLBACK_RESPONSE = (
 
 # Terminal statuses whose ``response_message`` must not be overwritten.
 _TERMINAL_STATUSES = {"SUBMITTED", "FAILED", "COMPLETED"}
+
+# A generated reply this similar to the previous assistant turn is a repeat of
+# the question the user just answered, not a new one.
+_REPEAT_SIMILARITY_THRESHOLD = 0.75
+
+
+def _last_assistant_message(conversation_history: list[dict]) -> str:
+    for turn in reversed(conversation_history or []):
+        if turn.get("role") == "assistant" and turn.get("content"):
+            return str(turn["content"])
+    return ""
+
+
+def _mentions_field(message: str, asking_field: str | None) -> bool:
+    """True when *message* plausibly asks about *asking_field*.
+
+    Consecutive questions in this workflow are near-identical by design
+    ("…additional **notes**…" vs "…additional **comments**…" score 0.96
+    similarity), so raw similarity alone rejects perfectly good questions.
+    Checking that the reply actually names the target field distinguishes
+    "asked the next field in a familiar phrasing" (fine) from "re-asked the
+    previous field" (the bug).
+    """
+    if not asking_field:
+        return False
+    from app.agents.prompts.response_generation_prompt import FIELD_LABELS
+
+    label = FIELD_LABELS.get(asking_field, asking_field)
+    # Split camelCase (endDate → end Date) before tokenising.
+    label = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", label)
+    tokens = [t for t in re.split(r"[^a-z]+", label.lower()) if len(t) > 3]
+    if not tokens:
+        return False
+    lowered = message.lower()
+    return all(t in lowered for t in tokens)
+
+
+def _is_repeat_of_previous_question(message: str, previous: str) -> bool:
+    """True when *message* just re-asks the previous assistant question.
+
+    Observed live: after the user answered a field-correction question, the
+    LLM ignored the "ask for X" constraint and re-emitted the previous turn's
+    question verbatim-ish — quoting the now-stale value. The backend state was
+    correct, so only the user-facing text was wrong, which reads as the bot
+    looping and losing the answer.
+    """
+    if not message or not previous:
+        return False
+    ratio = difflib.SequenceMatcher(
+        None, " ".join(message.lower().split()), " ".join(previous.lower().split())
+    ).ratio()
+    return ratio >= _REPEAT_SIMILARITY_THRESHOLD
 
 
 @trace_node("response_generation", "AGENT")
@@ -67,6 +121,27 @@ async def response_generation_node(state: ServiceRequestState) -> dict[str, Any]
             updates["status"] = "WAITING_FOR_USER"
         return updates
 
+    # A confirmation card authors its own text and deliberately leaves
+    # response_message None (see the four *_confirmation_node modules), so there
+    # is no hint for the LLM to rewrite — it improvises from conversation
+    # history instead. Observed on an RDD review card as "The fitout end date is
+    # currently set to 24/08/2026. Please confirm the new fitout end date you'd
+    # like to set.": the user had just changed that date to 25/08, merge_state
+    # had stored it, and the card underneath showed the new value — only the
+    # sentence above it quoted the replaced one and re-asked a question already
+    # answered. The card is the contract at this point; keep its wording.
+    if (
+        current_ui
+        and not current_message
+        and current_ui.get("type") == "confirmation_card"
+        and current_ui.get("message")
+    ):
+        card_message = str(current_ui["message"])
+        updates = {"response_message": card_message, "response_ui": current_ui}
+        if not is_terminal:
+            updates["status"] = "WAITING_FOR_USER"
+        return updates
+
     # ── Build context for the LLM ───────────────────────────────────────────
     collected_data: dict[str, Any] = state.get("collected_data") or {}
     missing_fields: list[str] = state.get("missing_fields") or []
@@ -74,7 +149,16 @@ async def response_generation_node(state: ServiceRequestState) -> dict[str, Any]
     conversation_history: list[dict] = state.get("conversation_history") or []  # type: ignore[typeddict-item]
     user_message: str = state.get("user_message") or ""
 
-    response_intent = current_message or _FALLBACK_RESPONSE
+    # Nodes that emit a UI payload without a response_message (e.g. the
+    # pre-submission upload gate) still carry user-facing text inside that
+    # payload. Falling straight through to the generic placeholder left the
+    # LLM with nothing to say, so it improvised from conversation history and
+    # re-asked the question the user had just answered.
+    response_intent = (
+        current_message
+        or (current_ui or {}).get("message")
+        or _FALLBACK_RESPONSE
+    )
 
     user_content = build_response_generation_context(
         user_message=user_message,
@@ -107,6 +191,42 @@ async def response_generation_node(state: ServiceRequestState) -> dict[str, Any]
         logger.warning("response_generation_node.llm_json_parse_failed: %s", exc)
     except Exception as exc:
         logger.warning("response_generation_node.llm_call_failed: %s", exc)
+
+    # ── Guard: reject a reply that re-asks the previous question ────────────
+    # The prompt states the target field twice (top and, most importantly,
+    # after the conversation history), but the model can still latch onto the
+    # last assistant turn. When it does, prefer a plain deterministic ask for
+    # the field the backend is actually collecting over a message that
+    # contradicts it — a slightly blunter sentence is far better than looping
+    # the user on a question they already answered.
+    asking_field: str | None = current_ui.get("field") if current_ui else None
+    if (
+        llm_message
+        # A reply that names the field being collected is legitimate even when
+        # it closely resembles the previous question — sibling fields share
+        # phrasing. Only unrecognised replies are candidates for rejection.
+        and not _mentions_field(llm_message, asking_field)
+        and _is_repeat_of_previous_question(
+            llm_message, _last_assistant_message(conversation_history)
+        )
+    ):
+        from app.agents.prompts.response_generation_prompt import FIELD_LABELS
+
+        logger.warning(
+            "response_generation_node.repeated_previous_question: "
+            "asking_field=%s discarded=%r",
+            asking_field,
+            llm_message[:120],
+        )
+        if asking_field:
+            label = FIELD_LABELS.get(asking_field, asking_field.replace("_", " "))
+            llm_message = f"Thanks — that's been updated. Please provide the {label}."
+        else:
+            # No field is being collected (e.g. the pre-submission upload gate,
+            # which leaves response_message None). The turn has nothing left to
+            # ask, so re-asking the previous question is pure noise — defer to
+            # whatever text the UI payload carries.
+            llm_message = (current_ui or {}).get("message") or None
 
     # Fall back to the raw hint from prior nodes if LLM failed or returned nothing.
     final_message = llm_message or response_intent or _FALLBACK_RESPONSE

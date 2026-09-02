@@ -323,3 +323,35 @@ async def test_status_question_still_looks_up_status() -> None:
     )
     assert result["workflow_stage"] == "STATUS_LOOKUP"
     assert result["status"] == "IN_PROGRESS"
+
+
+@pytest.mark.asyncio
+async def test_open_notification_seed_goes_to_pending_months() -> None:
+    """Notification Agent open path: backend_refs.notification_context + UPLOAD."""
+    from app.agents.graph.nodes.sales_data.sales_data_entry_node import (
+        sales_data_entry_node,
+    )
+
+    result = await sales_data_entry_node(
+        _state(
+            intent="UPLOAD_SALES_DATA",
+            user_message="",
+            backend_refs={
+                "opened_from_notification": True,
+                "notification_context": {
+                    "lease_code": "LC-1001",
+                    "period_hint": "month August",
+                    "source": "notification",
+                },
+            },
+            corrected_fields={
+                "notification_context": {
+                    "lease_code": "LC-1001",
+                    "period_hint": "month August",
+                    "source": "notification",
+                },
+            },
+        )
+    )
+    assert result["workflow_stage"] == "PENDING_MONTHS_CHECK"
+    assert result["status"] == "IN_PROGRESS"

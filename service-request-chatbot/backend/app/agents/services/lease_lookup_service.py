@@ -63,6 +63,12 @@ class LeaseRecord(BaseModel):
     base_fitout_start_date: str = ""
     base_fitout_end_date: str = ""
     base_trading_date: str = ""
+    # Confirmed actual dates on the lease (YYYY-MM-DD). Empty when not yet set.
+    actual_handover_date: str = ""
+    actual_shop_handover_date: str = ""
+    actual_fitout_start_date: str = ""
+    actual_fitout_end_date: str = ""
+    actual_trading_date: str = ""
 
     @model_validator(mode="before")
     @classmethod
@@ -113,6 +119,46 @@ class LeaseRecord(BaseModel):
             )
             if v:
                 values["base_trading_date"] = v
+
+        if not values.get("actual_shop_handover_date"):
+            v = _pick(
+                "actual_shop_handover_date",
+                "actual_handover_date",
+                "actualShopHandoverDate",
+                "actualHandoverDate",
+            )
+            if v:
+                values["actual_shop_handover_date"] = v
+        if not values.get("actual_handover_date"):
+            v = _pick(
+                "actual_handover_date",
+                "actual_shop_handover_date",
+                "actualHandoverDate",
+                "actualShopHandoverDate",
+            )
+            if v:
+                values["actual_handover_date"] = v
+        if not values.get("actual_fitout_start_date"):
+            v = _pick(
+                "actual_fitout_start_date",
+                "actualFitoutStartDate",
+            )
+            if v:
+                values["actual_fitout_start_date"] = v
+        if not values.get("actual_fitout_end_date"):
+            v = _pick(
+                "actual_fitout_end_date",
+                "actualFitoutEndDate",
+            )
+            if v:
+                values["actual_fitout_end_date"] = v
+        if not values.get("actual_trading_date"):
+            v = _pick(
+                "actual_trading_date",
+                "actualTradingDate",
+            )
+            if v:
+                values["actual_trading_date"] = v
 
         return values
 

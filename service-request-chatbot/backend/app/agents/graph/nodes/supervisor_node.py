@@ -33,9 +33,23 @@ from app.agents.prompts.supervisor_prompt import (
     SUPERVISOR_SYSTEM_PROMPT,
 )
 from app.agents.registry import lookup_agent
-from app.agents.schemas.help_agent_schema import intents_for_roles
+from app.agents.schemas.help_agent_schema import (
+    SALES_DATA_APPROVER_PLATFORM_ROLES,
+    SALES_DATA_TENANT_PLATFORM_ROLES,
+    intents_for_roles,
+)
 from app.agents.schemas.supervisor_schema import SupervisorDecision
 from app.agents.services.sr_reference_parser import parse_sr_reference
+from app.agents.services.context_builder import build_agent_context, format_context_for_prompt
+from app.agents.services.notification_intent import (
+    classify_notification_intent_from_state,
+    should_bypass_for_notification_context,
+)
+from app.agents.services.viewing_context import (
+    references_viewing_service_request,
+    resolve_service_request_id,
+    viewing_ids_from_state,
+)
 from app.agents.graph.state import ServiceRequestState
 from app.observability.decorators import trace_node
 from app.types.chat import AuthContext
@@ -114,8 +128,11 @@ def _user_wants_preview(message: str) -> bool:
     return any(phrase in lowered for phrase in _PREVIEW_PHRASES)
 
 
-_ADMIN_SALES_ROLES = frozenset({"SALES_DATA_APPROVER", "ADMIN"})
-_TENANT_SALES_ROLES = frozenset({"TENANT_CSV_UPLOADER", "TENANT_DOC_UPLOADER"})
+_ADMIN_SALES_ROLES = frozenset({"SALES_DATA_APPROVER", "ADMIN"}) | SALES_DATA_APPROVER_PLATFORM_ROLES
+_TENANT_SALES_ROLES = (
+    frozenset({"TENANT_CSV_UPLOADER", "TENANT_DOC_UPLOADER"})
+    | SALES_DATA_TENANT_PLATFORM_ROLES
+)
 
 # Natural-language openers that the LLM otherwise classifies as ASK_HELP
 # because they are phrased as questions ("what data are pending?").
@@ -331,9 +348,11 @@ def _build_user_content(state: ServiceRequestState) -> str:
     session, and up to 4 recent conversation turns so the model can classify
     short follow-up messages in context (e.g. "8th june" when an update
     workflow is already in progress).
+    Compact context (authoritative fields, last 5 turns, viewing IDs) plus the
+    current message — never the full event history.
     """
-    message = state.get("user_message") or ""
-    parts = [f"User message: {message}"]
+    context = build_agent_context(state)
+    parts = [format_context_for_prompt(context)]
 
     auth: AuthContext | None = state.get("auth_context")  # type: ignore[assignment]
     if auth is not None and auth.roles:
@@ -347,20 +366,7 @@ def _build_user_content(state: ServiceRequestState) -> str:
     if intent:
         parts.append(f"Previously classified intent: {intent}")
 
-    # Include the last 4 turns of conversation so the supervisor can score
-    # short follow-up messages accurately rather than treating them as
-    # standalone ambiguous openers.
-    conversation_history: list[dict] = state.get("conversation_history") or []  # type: ignore[assignment]
-    recent = conversation_history[-4:]
-    if recent:
-        parts.append("Recent conversation (oldest first):")
-        for turn in recent:
-            role = (turn.get("role") or "unknown").capitalize()
-            content = (turn.get("content") or "").strip()
-            if content:
-                parts.append(f"  {role}: {content}")
-
-    return "\n".join(parts)
+    return "\n".join(part for part in parts if part)
 
 
 async def _call_supervisor_llm(
@@ -466,6 +472,41 @@ async def supervisor_node(state: ServiceRequestState) -> dict[str, Any]:  # noqa
     tm = state.get("trace_manager")
     trace_id: UUID | None = _extract_uuid(state.get("trace_id"))
 
+    # ── 0. Notification viewing context (deterministic, no LLM) ───────────
+    # Page-aware deictic phrases and list/mark-read intents are classified
+    # without an LLM call.  Do not overwrite active_agent so an in-progress
+    # SR workflow is preserved after this side-path turn.
+    notification_intent = classify_notification_intent_from_state(state)
+    if notification_intent is not None:
+        log.info(
+            "supervisor.notification_intent_deterministic",
+            intent=notification_intent,
+            user_message=user_message[:120],
+        )
+        return {
+            "intent": notification_intent,
+            "status": "IN_PROGRESS",
+        }
+
+    _viewing_notification_id, viewing_sr_id = viewing_ids_from_state(state)
+    if viewing_sr_id and references_viewing_service_request(user_message):
+        resolved_sr = resolve_service_request_id(
+            user_message, viewing_sr_id, allow_standalone=True
+        )
+        backend_refs = dict(state.get("backend_refs") or {})
+        if resolved_sr and not backend_refs.get("sr_id"):
+            backend_refs["sr_id"] = resolved_sr
+        log.info(
+            "supervisor.viewing_sr_status",
+            viewing_service_request_id=viewing_sr_id,
+            resolved_sr=resolved_sr,
+        )
+        return {
+            "intent": "CHECK_SERVICE_REQUEST_STATUS",
+            "backend_refs": backend_refs,
+            "status": "IN_PROGRESS",
+        }
+
     # ── 1. Session continuity ──────────────────────────────────────────────
     # If a downstream agent is already handling this session and the user has
     # not explicitly requested a switch or a preview, delegate back immediately.
@@ -484,6 +525,7 @@ async def supervisor_node(state: ServiceRequestState) -> dict[str, Any]:  # noqa
         and not _user_wants_preview(user_message)
         and shortcut is None
         and not sales_data_idle
+        and not should_bypass_for_notification_context(state)
     ):
         log.debug(
             "supervisor.session_continuity",

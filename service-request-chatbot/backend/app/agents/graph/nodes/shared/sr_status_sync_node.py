@@ -37,6 +37,7 @@ from app.agents.services.review_decorations_service import (
     merge_decorations,
     payload_to_collected_data,
 )
+from app.agents.services.display_formatters import format_enum_label
 from app.agents.services.service_request_api_service import get_service_request_api_service
 from app.observability.decorators import trace_node
 
@@ -467,19 +468,19 @@ async def sr_status_sync_node(state: ServiceRequestState) -> dict[str, Any]:
             )
             if dates_ready:
                 updates["response_message"] = (
-                    f"Opening Handover SR **{sr_id}** (Rdd Review). "
+                    f"Opening Handover SR **{sr_id}** ({format_enum_label(effective_stage)}). "
                     "Review the details below, upload any required documents, then choose an action."
                 )
             else:
                 updates["response_message"] = (
-                    f"Opening Handover SR **{sr_id}** (Rdd Review). "
+                    f"Opening Handover SR **{sr_id}** ({format_enum_label(effective_stage)}). "
                     "Please provide the required dates first "
                     "(actual handover, fitout start, and fitout end). "
                     "Document upload will be available after the dates are set."
                 )
         elif effective_stage in ("FM_REVIEW", "RDD_REVIEW"):
             updates["response_message"] = (
-                f"Opening Handover SR **{sr_id}** ({effective_stage.replace('_', ' ').title()}). "
+                f"Opening Handover SR **{sr_id}** ({format_enum_label(effective_stage)}). "
                 "Review the details below, upload any required documents, then choose an action."
             )
 

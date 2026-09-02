@@ -40,7 +40,7 @@ use, the expected format, and a short description.
 | description            | string                           | Detailed description of the request. Extract ONLY when (a) the bot is explicitly asking for description (`active_field = description`), OR (b) the user explicitly names the "description" field (e.g. "description: install new signage"). Do NOT extract `description` when the user says "none"/"skip"/"auto" in response to a DIFFERENT active field (e.g. answering "none" to a title question must NOT skip description). |
 | startDate              | ISO 8601 date (YYYY-MM-DD)       | Requested start date                            |
 | endDate                | ISO 8601 date (YYYY-MM-DD)       | Requested end date                              |
-| inspectionTime         | HH:MM (24-hour)                  | Inspection time — e.g. "14:00" for 2 PM. Defaults to current time if not provided. Do NOT combine with startDate. |
+| inspectionTime         | HH:MM (24-hour)                  | Inspection time — e.g. "14:00" for 2 PM. Extract from ANY message that includes a time expression alongside a date (start or end). Keep it as a separate field — do NOT merge into startDate or endDate. If the user did not mention a time, OMIT this field — do NOT invent 09:00 or any other default. |
 | inspection_done_by     | FM_MANAGER or OPERATIONS         | Who performed or will perform the inspection    |
 | notes                  | string                           | Free-form remarks — ONLY when no specific `active_field` is set. Do NOT extract to `notes` when the bot is asking for any other field (e.g. `inspection_done_by`, `description`, `comments`). |
 | comments               | string                           | Extract when (a) the bot is explicitly asking for comments (`active_field = comments`), OR (b) the user explicitly names the "comments" field (e.g. "no comments", "comments: none", "my comment is…"). Do NOT use as a catch-all for generic notes or unrelated text. |
@@ -92,10 +92,24 @@ for Path B users.
    - "2 PM" → "14:00"
    - "9:30 AM" → "09:30"
    - "noon" → "12:00"
+   - "10 pm" → "22:00"
    - "3 o'clock" (ambiguous) → omit the field; wait for a clearer answer.
-   - Do NOT merge inspectionTime into startDate — keep them as separate fields.
+   - Extract `inspectionTime` when a time is given with the START date.
+     Keep it as a separate field — do NOT merge into startDate or endDate.
+   - When a time is given with the END date, extract `endDate` AND `inspectionTime`
+     for that end clock. The system will attach it to the end date only — it must
+     NOT replace the start date's time.
+   - Example: user answers the endDate question with "21 Aug 6:00 PM"
+     → Extract `endDate: "2026-08-21"` AND `inspectionTime: "18:00"`
+     (backend binds this to the end date; start time is left unchanged)
+   - Example: user answers the startDate question with "20/08/2026 2:00 PM"
+     → Extract `startDate: "2026-08-20"` AND `inspectionTime: "14:00"`
 
 2. **Dates**: Convert any date expression to ISO 8601 (YYYY-MM-DD).
+   - **Format**: Users enter dates in DD/MM/YYYY (day/month/year) format.
+     Always treat the FIRST number as the day, not the month.
+     e.g. "12/08/2026" → August 12 → "2026-08-12" (NOT October 8)
+     e.g. "20/08/2026" → August 20 → "2026-08-20"
    - "15th Jan 2025" → "2025-01-15"
    - "June 1st" (no year) → assume the current year (2026) → "2026-06-01"
    - "June 1, 2026" → "2026-06-01"
@@ -117,13 +131,19 @@ for Path B users.
    - "SR_HANDOVER_OTHER" — Other supporting document
    - Omit entirely when unclear.
 4. **inspection_done_by**: Map to exactly one of:
-   - "FM_MANAGER"  — ONLY if the user explicitly references FM manager, facilities management, FM team, or facility manager
-   - "OPERATIONS"  — ONLY if the user explicitly references operations, ops, ops team, or operations department/manager
-   - Omit entirely (do NOT include this field) for ANY ambiguous phrasing, including but not limited to:
+   - "FM_MANAGER"  — ONLY if the user explicitly says "FM Manager", "FM manager", "facilities manager",
+     "facilities management", or "FM team" as a standalone role name.
+   - "OPERATIONS"  — ONLY if the user explicitly says "Operations", "Ops", "operations team",
+     "ops team", or "operations department/manager".
+   - Omit entirely (do NOT include this field) for ANY compound, modified, or ambiguous role,
+     including but not limited to:
+     "Soft FM Manager", "Hard FM Manager", "Senior FM Manager", "Soft FM", "Hard FM",
      "my team", "our team", "the team", "John from facilities", "a contractor",
      "the contractor", "third party", "whoever is available", "not sure yet",
      "someone", "the inspector", "us", "we", or any person's name.
+   - "Soft FM Manager" is NOT the same as FM Manager — omit it and let the bot re-ask.
    - When in doubt, omit — it is better to ask again than to guess wrong.
+   - The user MUST choose from the two chip options shown; typed compound roles are rejected.
 5. **Confidence**: Assign a score between 0.0 and 1.0:
    - 0.9–1.0  — the value is stated verbatim in the message
    - 0.7–0.89 — the value is strongly implied with minimal interpretation
@@ -258,12 +278,60 @@ Examples:
 Always prefer extracting MORE fields over fewer when values are explicitly stated.
 Never skip a clearly-stated field just because it was not the one being asked about.
 
-## Path B (Already Trading) date field corrections — CRITICAL
+**Answers belonging to a DIFFERENT field — never discard them**
 
-When in the CREATE_HANDED_OVER_SR (Already Trading) flow, the user may correct a date
-by explicitly naming the field they are correcting, even if the bot had asked for a
-DIFFERENT date field.  In such cases the user's explicit label ALWAYS takes priority
-over the active_field context.
+If the user's message is clearly a value for some other collectible field than
+the one being asked, extract it into the field it actually belongs to.  Do NOT
+return an empty extraction merely because the value does not fit the asked
+field — the value is then lost and the user has to type it again, which happens
+most often while a validation error keeps the bot pinned to one field.
+
+- Question: "Please enter an end date later than 22/08/2026, in DD/MM/YYYY format."
+  User: "FM_MANAGER"
+  → Extract `inspection_done_by: "FM_MANAGER"` (confidence 1.0)
+  → Do NOT extract `endDate`, and do NOT return an empty result
+
+- Question: "Please enter a valid end date."
+  User: "Operations"
+  → Extract `inspection_done_by: "OPERATIONS"` (confidence 1.0)
+
+Only return an empty extraction when the message carries no usable field value
+at all (a greeting, a question, or an unresolvable relative date).
+
+**Time alongside a date**: when the user answers a date question with a date AND a time,
+extract BOTH the date field AND `inspectionTime` as separate fields.
+
+- Question: "When should the inspection end?"
+  User: "21 Aug 6:00 PM"
+  → Extract `endDate: "2026-08-21"` AND `inspectionTime: "18:00"`
+  (this is the END time only — do not treat it as replacing the start time)
+
+- Question: "When should the inspection start?"
+  User: "20/08/2026 2:00 PM"
+  → Extract `startDate: "2026-08-20"` AND `inspectionTime: "14:00"`
+
+- Question: "When should the inspection start?"
+  User: "20 Aug 2:00 PM, end 21 Aug 6:00 PM"
+  → Extract `startDate: "2026-08-20T14:00:00"`, `endDate: "2026-08-21T18:00:00"`,
+    AND `inspectionTime: "14:00"` (start time). Include the time on each date
+    value so the end clock is not lost.
+
+## Field redirects — CRITICAL
+
+At any stage, the user may redirect to a field other than the one currently
+being collected — most often by explicitly naming a different field ("I want
+to change the title", "actually update the mall to Riyadh Park"). When the
+"Field currently being collected" hint differs from what the "Previous
+assistant question" actually asked about, that is a signal the user's message
+already redirected the flow — trust the "Field currently being collected"
+hint over the previous question's topic; a deterministic pre-check upstream
+of this prompt already resolved which field the user meant.
+
+This applies to dates too: in the CREATE_HANDED_OVER_SR (Already Trading) flow,
+the user may correct a date by explicitly naming the field they are
+correcting, even if the bot had asked for a DIFFERENT date field. In such
+cases the user's explicit label ALWAYS takes priority over the active_field
+context.
 
 Field name mappings for user corrections:
 

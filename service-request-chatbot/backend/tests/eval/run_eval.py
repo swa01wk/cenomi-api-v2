@@ -47,6 +47,7 @@ from typing import Any, Optional
 import httpx
 
 from tests.eval.scenarios import (
+    EVAL_2026_08_17,
     SCENARIOS,
     TIER0_SCENARIOS,
     TIER1_SCENARIOS,
@@ -61,6 +62,7 @@ from tests.eval.scenarios import (
     TIER6I_TRADING_EDGE,
     TIER6J_TRADING_BATTLE,
     TIER8_SCENARIOS,
+    TIER9_NOTIFICATION_SCENARIOS,
     Scenario,
     Turn,
 )
@@ -82,6 +84,12 @@ _TIER_MAP: dict[int | str, list[Scenario]] = {
     "6i": TIER6I_TRADING_EDGE,
     "6j": TIER6J_TRADING_BATTLE,
     8: TIER8_SCENARIOS,
+    # Notification agent — needs a seeded inbox for the scenario's role.
+    9: TIER9_NOTIFICATION_SCENARIOS,
+    "notif": TIER9_NOTIFICATION_SCENARIOS,
+    # Session regression buckets — the defects fixed on a given day, grouped so
+    # the whole surface can be re-run after touching that area.
+    "aug17": EVAL_2026_08_17,
 }
 
 # ── ANSI colours ─────────────────────────────────────────────────────────────
@@ -757,6 +765,8 @@ def main() -> None:
             "6a=FOS happy, 6b=FOS edge, 6c=FOS battle, "
             "6e=END happy, 6f=END edge, "
             "6h=TRADING happy, 6i=TRADING edge, 6j=TRADING battle. "
+            "9 (or notif)=notification agent (needs a seeded inbox). "
+            "Session buckets: aug17=2026-08-17 correction/RDD/wording fixes. "
             "Overrides --scenarios; can still combine with --tags."
         ),
     )

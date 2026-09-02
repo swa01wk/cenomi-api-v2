@@ -42,6 +42,10 @@ class SupervisorDecision(BaseModel):
         "CHECK_SALES_DATA_STATUS",
         "UPLOAD_SUPPORTING_DOCUMENT",
         "REVIEW_SALES_DATA",
+        "LIST_NOTIFICATIONS",
+        "GET_NOTIFICATION_DETAIL",
+        "MARK_NOTIFICATION_READ",
+        "OPEN_NOTIFICATION",
         "APPROVE_SALES_DATA",
     ] = Field(description="Classified user intent")
 

@@ -8,6 +8,9 @@ TIER STRUCTURE
                     + S220, S221, S224  Handover Type prompt / chip /
                                         Path B review-card humanization
                     + S228  Fitout confirm submit-loop fix
+                    + S236, S239  Prose notes answer must not loop;
+                                  Path B asks for comments
+                    + S245  Mid-flow correction: bare redirect re-ask
   Tier 2  Edge    — S16–S33: corrections, multi-field, API edge cases
                     + S65–S68  HANDED_OVER / Path A fix scenarios
                     + S222, S223, S225–S227  Handover Type chip Path A,
@@ -19,11 +22,20 @@ TIER STRUCTURE
                                  comments auto-gen, fitout radio gate,
                                  APPROVE_SR session-wins merge, RDD
                                  tenant-acceptance success message
+                    + S237, S238, S240, S242–S244  Prose comments, Path B
+                                 correction targeting, RDD document-status
+                                 ask, guideline synonym spelling/plural,
+                                 fitout milestone wording, fitout
+                                 auto-approval message
+                    + S246  Mid-flow correction: unspecified request guard
   Tier 3  Battle  — S34–S59: Issues 1–7 from agent_ui_fixes.md
                     + S69   FM date format (Fix 5)
                     + S235  RDD final-approve payload contract (no user_action)
+                    + S241  RDD correction vs stale WAITING_FOR_USER routing
   (Tier 4/5/6 live in lifecycle_scenarios.py)
   Tier 8  FitoutConfirm Core+Edge — S70–S82: FIT_OUT_CONFIRM_FOS/END/TRADING
+  Tier 9  Notification agent — S250–S255: inbox listing, NL filters,
+                    supervisor routing, free-text guard, audience scoping
 
 DYNAMIC DATES
 -------------
@@ -132,6 +144,13 @@ class Turn:
 
     expect_field_value: Optional[dict] = None
     """Soft: {label: expected_value} — check ui.fields entries on a confirmation_card."""
+
+    expect_ui_contains: Optional[dict] = None
+    """Soft: {ui_key: expected_value} — check top-level keys on response.ui.
+
+    Read by ``run_eval._assert_turn``; the field was dropped from this dataclass
+    in a merge, which made every turn raise AttributeError before asserting.
+    """
 
 
 @dataclass
@@ -1731,10 +1750,10 @@ _S36 = Scenario(
 
 _S37 = Scenario(
     id=37,
-    name="Cancel from confirmation card — change-mind vs cancel-SR distinction",
+    name="Cancel from confirmation card — are-you-sure, then restore preview",
     goal=(
-        "Cancel action on confirmation card (action=cancel) must show 'what to change?' — "
-        "NOT cancel the SR; separate cancel_sr must exist for SR cancellation"
+        "Cancel on the review card must ask are-you-sure (not 'make changes'). "
+        "No restores the confirmation card; Yes clears the lease and asks for a new one."
     ),
     tier=3,
     turns=[
@@ -1749,13 +1768,13 @@ _S37 = Scenario(
         ),
         Turn(
             message="",
-            note="Cancel action on card — must trigger 'what would you like to change?' NOT cancel SR",
+            note="Cancel on review card — must ask are you sure, not treat as make-changes",
             action="cancel",
-            expect_keywords=["change", "update", "what", "modify", "edit"],
+            expect_keywords=["sure", "cancel", "yes", "no"],
         ),
         Turn(
-            message=f"change the end date to {_CORR_END_B}",
-            note="Field updated; confirmation card re-shown",
+            message="no",
+            note="Decline cancel — confirmation card re-shown",
             expect_ui_type="confirmation_card",
         ),
         Turn(
@@ -3364,6 +3383,387 @@ _S235 = Scenario(
 
 
 # =============================================================================
+# 2026-08-17 session — correction routing, prose answers, RDD status, wording
+# =============================================================================
+#
+# Every scenario below guards a defect reproduced in live testing on staging.
+# They are grouped here (rather than scattered by tier) so the session's
+# regression surface can be run as one block: EVAL_2026_08_17.
+
+_S236 = Scenario(
+    id=236,
+    name="notes_prose_answer_is_not_a_correction_request",
+    goal=(
+        "A notes answer that happens to contain a correction verb "
+        "('please update the flooring before handover') must be stored as the "
+        "note, not read as an 'I want to change something' request. The "
+        "unspecified-correction path returns an empty extraction by design, so "
+        "the answer was discarded and the same question re-asked — and "
+        "retyping it failed identically, so notes/comments could never be "
+        "passed. Guards the free-text guard in field_extraction_node."
+    ),
+    tier=1,
+    turns=[
+        Turn(
+            message="I want to create a handover service request for t0105712",
+            note="Lease resolves; collection starts",
+        ),
+        Turn(
+            message="Standard fit-out inspection",
+            note="Description accepted",
+        ),
+        Turn(message=_START_A, note="Start date"),
+        Turn(message=_END_A, note="End date"),
+        Turn(message="FM Manager", note="Inspector"),
+        Turn(
+            message="please update the flooring before handover",
+            note=(
+                "Prose note carrying a correction verb. Must be ACCEPTED as the "
+                "note and advance to comments — must NOT re-ask for notes."
+            ),
+            expect_keywords=["comment"],
+        ),
+    ],
+    tags=["notes", "comments", "free-text", "correction-loop", "tier1-core"],
+)
+
+_S237 = Scenario(
+    id=237,
+    name="comments_prose_answer_is_not_a_correction_request",
+    goal=(
+        "Same guard as S236 for the comments field — 'we need to change the "
+        "shutters as well' is a comment, not a request to change a field."
+    ),
+    tier=2,
+    turns=[
+        Turn(
+            message="Create a handover SR for t0105712",
+            note="Lease resolves",
+        ),
+        Turn(message="Fit-out inspection", note="Description"),
+        Turn(message=_START_A, note="Start date"),
+        Turn(message=_END_A, note="End date"),
+        Turn(message="Operations", note="Inspector"),
+        Turn(message="none", note="Notes skipped"),
+        Turn(
+            message="we need to change the shutters as well",
+            note=(
+                "Prose comment carrying a correction verb. Must be stored and "
+                "the flow must move past comments, not loop."
+            ),
+            expect_no_submit=False,
+        ),
+    ],
+    tags=["comments", "free-text", "correction-loop", "tier2-edge"],
+)
+
+_S238 = Scenario(
+    id=238,
+    name="handed_over_correction_targets_path_b_dates",
+    goal=(
+        "In Path B (Already Trading) the four milestones live under actual_* "
+        "keys. The synonym table is written for the standard handover path, so "
+        "'the fitout start date' resolved to fitout_start_date — a field Path B "
+        "never collects — and the bot asked 'What would you like to SET as ...' "
+        "for a field outside the flow, losing the edit. Guards the stage-scoped "
+        "synonym overrides in field_correction_service."
+    ),
+    tier=2,
+    turns=[
+        Turn(
+            message="This unit is already trading, register it for t0105712",
+            note="Path B intent",
+        ),
+        Turn(
+            message=(
+                f"Shop handover {_d(3)}, fitout {_d(4)} to {_d(8)}, "
+                f"trading from {_d(10)}"
+            ),
+            note="All four actual dates supplied",
+        ),
+        Turn(message="none", note="Comments skipped"),
+        Turn(
+            message="i want to edit the fitout start date",
+            note=(
+                "Must re-ask the CURRENT Path B value — the phrasing 'Current "
+                "... What would you like to change it to?' proves it targeted "
+                "actual_fitout_start_date, not the RDD fitout_start_date."
+            ),
+            expect_keywords=["current", "change it to"],
+        ),
+    ],
+    tags=["handed-over", "path-b", "correction", "synonyms", "tier2-edge"],
+)
+
+_S239 = Scenario(
+    id=239,
+    name="already_trading_asks_for_comments",
+    goal=(
+        "Path B must ask for comments once before the review card. "
+        "merge_state_node was filling the generated 'No additional comments "
+        "provided for lease X.' sentence while the field was still None — the "
+        "exact state the proactive-ask branch keys on — so every Already "
+        "Trading SR shipped with the placeholder and the user was never asked."
+    ),
+    tier=1,
+    turns=[
+        Turn(
+            message="Register t0105712 as already trading",
+            note="Path B intent",
+        ),
+        Turn(
+            message=(
+                f"Shop handover {_d(3)}, fitout {_d(4)} to {_d(8)}, "
+                f"trading {_d(10)}"
+            ),
+            note=(
+                "All four dates in one turn. The bot must then ASK for comments "
+                "rather than silently generating them."
+            ),
+            expect_keywords=["comment"],
+        ),
+    ],
+    tags=["handed-over", "path-b", "comments", "tier1-core"],
+)
+
+_S240 = Scenario(
+    id=240,
+    name="rdd_asks_document_status_after_meeting_report",
+    goal=(
+        "After the Handover Meeting Report is uploaded the RDD PM must be asked "
+        "for its outcome with Approve / Approve-with-changes chips, and the "
+        "question text must travel with them. get_missing_fields gated this on "
+        "rdd_upload_doc_type — retired when uploads moved to the "
+        "document_requirement card — so the condition was dead and the status "
+        "was never collected."
+    ),
+    tier=2,
+    user_email="sara@cenomi.com",  # DD_ENGINEER — the only role that reviews RDD
+    turns=[
+        Turn(
+            message="Open SR 320944 for RDD review",
+            note="Enter RDD_REVIEW",
+        ),
+        Turn(
+            message="Guideline link https://example.com/guide",
+            note=(
+                "Guideline captured. The next ask must not be a bare chip row — "
+                "the document status question carries its own text verbatim."
+            ),
+        ),
+    ],
+    tags=["rdd-review", "document-status", "chips", "tier2-edge"],
+)
+
+_S241 = Scenario(
+    id=241,
+    name="rdd_correction_survives_waiting_status",
+    goal=(
+        "Every question saves status=WAITING_FOR_USER, so that value is present "
+        "on the turn carrying the reply. _route_after_rdd_entry short-circuited "
+        "on it FIRST, sending corrections and answers to response_generation — "
+        "which cannot write collected_data. The LLM then improvised from the "
+        "current values ('I see you want to change the fitout start date to "
+        "<current value>') and every date typed afterwards was discarded, "
+        "looping forever. Guards _waiting_short_circuit_target."
+    ),
+    tier=3,
+    user_email="sara@cenomi.com",  # DD_ENGINEER
+    turns=[
+        Turn(
+            message=(
+                f"Open SR 320944 for RDD review. Guideline https://example.com. "
+                f"Actual handover {_d(5)}, fitout start {_d(6)}, "
+                f"fitout end {_d(8)}."
+            ),
+            note="Reach a fully collected RDD draft",
+        ),
+        Turn(
+            message="i want to edit the fitout end date",
+            note="Correction must reach field_extraction, not the LLM",
+            expect_keywords=["current", "change it to"],
+        ),
+        Turn(
+            message=_d(9),
+            note=(
+                "The new date must be MERGED. A reply quoting the previous "
+                "value and re-asking is the regression."
+            ),
+            expect_no_submit=False,
+        ),
+    ],
+    tags=["rdd-review", "correction", "routing", "waiting-status", "tier3-battle"],
+)
+
+_S242 = Scenario(
+    id=242,
+    name="guideline_link_synonym_spelling_and_plural",
+    goal=(
+        "'guidline link' (dropped e) and bare 'guidelines' (plural) matched no "
+        "field, so the request fell through to the unspecified-correction path "
+        "and re-armed whichever field was active — the user asked to edit the "
+        "guideline link and was asked for the actual handover date instead. "
+        "Guards the plural-tolerant matcher and the spelling variants."
+    ),
+    tier=2,
+    user_email="sara@cenomi.com",  # DD_ENGINEER
+    turns=[
+        Turn(
+            message=(
+                f"Open SR 320944 for RDD review. Guideline https://example.com. "
+                f"Handover {_d(5)}, fitout start {_d(6)}, end {_d(8)}."
+            ),
+            note="Reach a collected RDD draft",
+        ),
+        Turn(
+            message="i want to edit guidline link",
+            note=(
+                "Misspelled and singular. Must re-ask the GUIDELINE link — "
+                "not a date field."
+            ),
+            expect_keywords=["guideline", "current"],
+        ),
+    ],
+    tags=["rdd-review", "synonyms", "spelling", "plural", "tier2-edge"],
+)
+
+_S243 = Scenario(
+    id=243,
+    name="fitout_milestone_question_wording",
+    goal=(
+        "The three milestone radios read as nouns ('fitout start', 'fitout "
+        "complete'), so one shared label in 'Has {label} started?' produced "
+        "'Has fitout start started?' and 'Has fitout complete started?'. Each "
+        "milestone now owns its verb. Guards _RADIO_PHRASING."
+    ),
+    tier=2,
+    user_email="sara@cenomi.com",  # DD_ENGINEER — creates FOS SRs
+    turns=[
+        Turn(
+            message="I want to confirm fitout start for t0105712",
+            note=(
+                "The first ask must read 'Has the fitout started?' — never "
+                "'fitout start started'."
+            ),
+            expect_keywords=["has the fitout started"],
+        ),
+    ],
+    tags=["fitout-confirm", "fos", "wording", "tier2-edge"],
+)
+
+_S244 = Scenario(
+    id=244,
+    name="fitout_create_by_approver_reports_auto_approval",
+    goal=(
+        "All three fitout confirmations are single-level workflows whose only "
+        "approver is the role that raises them, so the platform approves them "
+        "in the same transaction. The success message promised 'It will be "
+        "routed to the approver for review' on every create, describing a step "
+        "that never happens. Guards the outcome-driven message in "
+        "fitout_confirm_api_submission_node."
+    ),
+    tier=2,
+    user_email="sara@cenomi.com",  # DD_ENGINEER — approver for FOS, so auto-approved
+    turns=[
+        Turn(
+            message="Confirm fitout start for t0105712",
+            note="FOS create as the approver role",
+        ),
+        Turn(message="yes", note="Milestone done"),
+        Turn(message=_d(2), note="Actual fitout start date"),
+        Turn(
+            message=" ",
+            action="confirm_create_fitout_confirm",
+            note=(
+                "Submitted by the approver → auto-approved. The message must "
+                "NOT promise routing to an approver."
+            ),
+            expect_keywords=["approved", "submitted"],
+        ),
+    ],
+    tags=["fitout-confirm", "fos", "auto-approve", "success-message", "tier2-edge"],
+)
+
+
+# ── The correction mechanism itself (not a specific defect) ───────────────────
+#
+# S17 already covers a correction carrying an inline value ("change the end date
+# to X"), which resolves through normal extraction. These two guard the arms
+# that are unique to the deterministic detector.
+
+_S245 = Scenario(
+    id=245,
+    name="bare_correction_redirect_reasks_with_current_value",
+    goal=(
+        "A redirect with NO inline value ('i want to change the title') must "
+        "set correction_pending_field, skip the extraction LLM entirely, and "
+        "re-ask that field quoting its current value — then resume normal "
+        "collection once answered. This is the core of the mid-flow correction "
+        "mechanism: without it the phrase reaches the extractor, which is "
+        "primed toward active_field and stores it as that field's value "
+        "(observed live: the title became 'chnage the titel')."
+    ),
+    tier=1,
+    turns=[
+        Turn(
+            message="Create a handover service request for t0105712",
+            note="Lease resolves; bot asks for description",
+        ),
+        Turn(
+            message="Fit-out inspection for the new unit",
+            note="Description accepted; bot asks for start date",
+        ),
+        Turn(
+            message="i want to change the description",
+            note=(
+                "Bare redirect while collecting startDate. Must re-ask "
+                "DESCRIPTION with its current value, not store this sentence "
+                "as the start date."
+            ),
+            expect_keywords=["current", "change it to"],
+        ),
+        Turn(
+            message="Corrected fit-out inspection scope",
+            note="New description accepted; collection resumes at start date",
+            expect_no_submit=True,
+        ),
+    ],
+    tags=["correction", "bare-redirect", "mechanism", "tier1-core"],
+)
+
+_S246 = Scenario(
+    id=246,
+    name="unspecified_correction_is_not_stored_as_a_value",
+    goal=(
+        "'can you fix it' names no field. While the bot waits on one, letting "
+        "it reach the extractor stores the whole phrase as that field's "
+        "content. The unspecified-correction guard blocks it and re-asks the "
+        "active field instead. Guards is_unspecified_correction — note the "
+        "deliberate carve-out for free-text fields (S236/S237), where the same "
+        "phrasing IS the value."
+    ),
+    tier=2,
+    turns=[
+        Turn(
+            message="Create a handover SR for t0105712",
+            note="Lease resolves",
+        ),
+        Turn(message="Fit-out inspection", note="Description"),
+        Turn(message=_START_A, note="Start date"),
+        Turn(
+            message="can you fix it",
+            note=(
+                "Names no field while endDate is active. Must NOT be stored as "
+                "the end date; the bot re-asks rather than accepting junk."
+            ),
+            expect_no_submit=True,
+        ),
+    ],
+    tags=["correction", "unspecified", "mechanism", "tier2-edge"],
+)
+
+
+# =============================================================================
 # TIER 0 — Smoke scenarios (S201–S202)
 # Fast sanity gate: ~60 seconds. Run before any longer tier.
 # =============================================================================
@@ -3890,6 +4290,197 @@ _S212 = Scenario(
 
 
 # =============================================================================
+# TIER 9 — Notification agent (S250–S255)
+# =============================================================================
+#
+# These run against the platform notification inbox, so they need a seeded
+# environment: the user must have action-required rows in the groups their role
+# is an audience for (handover → MM/FM/OPERATIONS/DD; fit-out FOS+END → DD;
+# trading → MM/OPERATIONS). With an empty inbox the node answers "You're all
+# caught up" as a plain message and the ui-type assertions fail correctly —
+# that is a data problem, not a regression.
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# S250 — Inbox listing (deterministic route, no LLM)
+# ─────────────────────────────────────────────────────────────────────────────
+_S250 = Scenario(
+    id=250,
+    name="Notification inbox listing",
+    goal="'show my notifications' renders the grouped action-required inbox card",
+    tier=0,
+    user_email="sara@cenomi.com",  # DD_ENGINEER — audience for handover + fit-out
+    turns=[
+        Turn(
+            message="show my notifications",
+            note=(
+                "Classified deterministically by is_list_notifications_message — "
+                "no supervisor LLM call. Groups are role-scoped."
+            ),
+            expect_ui_type="notification_list",
+            expect_keywords=["action-required", "notification"],
+            expect_no_submit=True,
+        ),
+    ],
+    tags=["notifications", "listing", "smoke"],
+)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# S251 — Sub-category filter from natural language
+# ─────────────────────────────────────────────────────────────────────────────
+_S251 = Scenario(
+    id=251,
+    name="Notification inbox — handover filter",
+    goal="A category keyword narrows the fan-out to one group and is echoed back",
+    tier=1,
+    user_email="sara@cenomi.com",
+    turns=[
+        Turn(
+            message="show my handover notifications",
+            note="parse_notification_list_filters → sub_categories=('HANDOVER',)",
+            expect_ui_type="notification_list",
+            expect_keywords=["handover"],
+            # The card must state which filter it applied; the FE renders it.
+            expect_ui_contains={"filters": {"sub_categories": ["HANDOVER"]}},
+        ),
+    ],
+    tags=["notifications", "filters"],
+)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# S252 — Unread filter, and "fit-out" meaning every confirmation stage
+# ─────────────────────────────────────────────────────────────────────────────
+_S252 = Scenario(
+    id=252,
+    name="Notification inbox — unread and fit-out filters",
+    goal="'unread' sets the flag; bare 'fit-out' expands to FOS + END, not one stage",
+    tier=2,
+    user_email="sara@cenomi.com",
+    turns=[
+        Turn(
+            message="show my unread notifications",
+            note="_UNREAD_PATTERN → unread=True, no category narrowing",
+            expect_ui_type="notification_list",
+            expect_ui_contains={"filters": {"unread": True}},
+        ),
+        Turn(
+            message="show my fit-out notifications",
+            note=(
+                "The Copilot chip wording. Bare 'fit-out' means every confirmation "
+                "flow — FIT_OUT_CONFIRM_HO is decommissioned and must not appear."
+            ),
+            expect_ui_type="notification_list",
+            expect_ui_contains={
+                "filters": {
+                    "sub_categories": ["FIT_OUT_CONFIRM_FOS", "FIT_OUT_CONFIRM_END"]
+                }
+            },
+        ),
+    ],
+    tags=["notifications", "filters", "edge"],
+)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# S253 — Supervisor phrasing (LLM route, not the regex)
+# ─────────────────────────────────────────────────────────────────────────────
+_S253 = Scenario(
+    id=253,
+    name="Notification inbox — 'what's pending for me'",
+    goal="Spec phrasings that miss the deterministic regex still route to the inbox",
+    tier=2,
+    user_email="sara@cenomi.com",
+    turns=[
+        Turn(
+            message="what's pending for me",
+            note=(
+                "No 'notifications' token, so is_list_notifications_message misses "
+                "it — this exercises the supervisor prompt's LIST_NOTIFICATIONS "
+                "examples."
+            ),
+            expect_ui_type="notification_list",
+            expect_no_submit=True,
+        ),
+    ],
+    tags=["notifications", "routing", "supervisor"],
+)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# S254 — Free-text answers must not be hijacked into the inbox
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Regression guard. The notification bypass originally ran ahead of the
+# free-text guard, so an SR description that happened to read like an inbox
+# request was swallowed mid-collection and the user lost their answer.
+_S254 = Scenario(
+    id=254,
+    name="Notification bypass must yield to free-text collection",
+    goal="An SR description matching the list regex is kept as the field answer",
+    tier=1,
+    turns=[
+        Turn(
+            message="I want to create a handover service request",
+            note="Bot asks for lease code, brand, or mall name",
+        ),
+        Turn(
+            message="t0105712",
+            note="Under Armour, Jawharat Jeddah resolved; bot asks for description",
+        ),
+        Turn(
+            message=(
+                "Tenant cannot view notifications or alerts on the mall display board"
+            ),
+            note=(
+                "Matches _LIST_PATTERN (view … notifications) but arrives while the "
+                "agent awaits free text — it must be stored as the description and "
+                "the flow must continue to the start date, not open the inbox."
+            ),
+            expect_no_submit=True,
+            expect_keywords=["start date", "start"],
+        ),
+        Turn(
+            message=_START_A,
+            note="Confirms the flow really is still collecting; bot asks for end date",
+            expect_keywords=["end date", "end"],
+        ),
+    ],
+    tags=["notifications", "free-text", "regression", "core"],
+)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# S255 — Role audience scoping
+# ─────────────────────────────────────────────────────────────────────────────
+_S255 = Scenario(
+    id=255,
+    name="Notification inbox — audience scoping by role",
+    goal="A user outside a group's audience gets an empty result, never another role's rows",
+    tier=2,
+    user_email="khalid@cenomi.com",  # FM_MANAGER — handover only, no fit-out
+    turns=[
+        Turn(
+            message="show my fit-out notifications",
+            note=(
+                "Fit-out confirmations target DD_ENGINEER only. FM must get the "
+                "empty-filter message, not somebody else's inbox."
+            ),
+            expect_keywords=["no action-required", "caught up", "no notifications"],
+            expect_no_submit=True,
+        ),
+        Turn(
+            message="show my handover notifications",
+            note="FM_MANAGER is in the handover audience, so this one lists.",
+            expect_ui_type="notification_list",
+        ),
+    ],
+    tags=["notifications", "rbac", "audience"],
+)
+
+
+# =============================================================================
 # Tier buckets and master list
 # =============================================================================
 
@@ -3907,6 +4498,10 @@ TIER1_SCENARIOS: list[Scenario] = [
     _S220, _S221, _S224,
     # 2026-08-07 session — fitout submit-loop fix (must not re-ask after Confirm).
     _S228,
+    # 2026-08-17 session — prose notes answer must not loop; Path B asks comments.
+    _S236, _S239,
+    # Mid-flow field correction mechanism — bare redirect (no inline value).
+    _S245,
 ]
 
 #: CREATE_SR edge cases, API fields, multi-field combos, missing coverage
@@ -3925,6 +4520,12 @@ TIER2_SCENARIOS: list[Scenario] = [
     # 2026-08-07 session (continued) — RDD final-approve platform behavior:
     # SR stays REPORT_SUBMITTED (tenant must accept); success message corrected.
     _S234,
+    # 2026-08-17 session — prose comments, Path B correction targeting, RDD
+    # document-status ask, guideline synonym spelling/plural, fitout milestone
+    # wording, fitout auto-approval message.
+    _S237, _S238, _S240, _S242, _S243, _S244,
+    # Mid-flow field correction mechanism — unspecified request guard.
+    _S246,
 ]
 
 #: Agent-fix battle tests (Issues 1–7 from agent_ui_fixes.md)
@@ -3938,6 +4539,7 @@ TIER3_SCENARIOS: list[Scenario] = [
     _S56, _S57, _S58, _S59,                  # RDD order (Issue 7, disabled)
     _S69,                                    # FM date format (Fix 5)
     _S235,                                   # RDD payload contract (no user_action)
+    _S241,                                   # RDD correction vs stale WAITING_FOR_USER
 ]
 
 # ── Per-agent Fitout sub-tiers ─────────────────────────────────────────────────
@@ -3994,6 +4596,15 @@ HANDED_OVER_SCENARIOS: list[Scenario] = [
 #: 2026-08-07 — Fitout APPROVE_SR flow + submit-loop fix
 FITOUT_APPROVE_SCENARIOS: list[Scenario] = [_S228, _S232, _S233]
 
+#: 2026-08-17 session — the full regression surface for that day's fixes.
+#: Run as one block after touching correction routing, free-text answers,
+#: RDD document status, or fitout wording.
+EVAL_2026_08_17: list[Scenario] = [
+    _S236, _S237, _S238, _S239, _S240, _S241, _S242, _S243, _S244,
+    # The mechanism itself, not a specific defect.
+    _S245, _S246,
+]
+
 #: Fitout Confirmation SR — all fitout flat scenarios grouped by agent
 FITOUT_CONFIRM_SCENARIOS: list[Scenario] = (
     TIER6A_FOS_HAPPY + TIER6B_FOS_EDGE + TIER6C_FOS_BATTLE
@@ -4001,6 +4612,12 @@ FITOUT_CONFIRM_SCENARIOS: list[Scenario] = (
     + TIER6H_TRADING_HAPPY + TIER6I_TRADING_EDGE + TIER6J_TRADING_BATTLE
     + FITOUT_APPROVE_SCENARIOS
 )
+
+#: Tier 9 — Notification agent (listing, filters, routing, audience scoping).
+#: Needs a seeded inbox; see the tier header for what each role must have.
+TIER9_NOTIFICATION_SCENARIOS: list[Scenario] = [
+    _S250, _S251, _S252, _S253, _S254, _S255,
+]
 
 #: Master list — all scenarios in tier order (for backward-compatibility)
 SCENARIOS: list[Scenario] = (
@@ -4010,4 +4627,5 @@ SCENARIOS: list[Scenario] = (
     + TIER3_SCENARIOS
     + FITOUT_CONFIRM_SCENARIOS
     + TIER8_SCENARIOS
+    + TIER9_NOTIFICATION_SCENARIOS
 )

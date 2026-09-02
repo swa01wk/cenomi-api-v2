@@ -53,6 +53,7 @@ class AzureSearchRepository:
         self._endpoint = endpoint.rstrip("/")
         self._index_name = index_name
         self._embedding_provider = embedding_provider
+        self._mall_names_cache: list[str] | None = None
         self._client = httpx.AsyncClient(
             headers={
                 "api-key": api_key,
@@ -69,7 +70,7 @@ class AzureSearchRepository:
         self,
         query: str,
         lang: str = "en",
-        top_k: int = 5,
+        top_k: int = 8,
     ) -> list[SearchResult]:
         """Run parallel hybrid search and return merged, deduplicated results.
 
@@ -81,7 +82,11 @@ class AzureSearchRepository:
             Language hint: ``"en"`` or ``"ar"``.  Passed to the search filter
             so language-specific content is preferred when available.
         top_k:
-            Maximum total results to return after deduplication.
+            Maximum total results to return after deduplication.  Needs to be
+            comfortably larger than the number of source types (4): with a
+            round-robin merge, a top_k of 5 left room for only ONE key_contact
+            card, so a mall with several contact roles could only ever surface
+            one of them and the model would answer with the wrong role.
         """
         t0 = time.monotonic()
 
@@ -120,6 +125,71 @@ class AzureSearchRepository:
         )
 
         return merged[:top_k]
+
+    async def list_mall_names(self) -> list[str]:
+        """All indexed mall marketing names (cached for the client's lifetime).
+
+        Used to tell whether the user already named a mall, so page context is
+        not layered on top of an explicit choice.
+        """
+        if self._mall_names_cache is not None:
+            return self._mall_names_cache
+        url = (
+            f"{self._endpoint}/indexes/{self._index_name}"
+            f"/docs/search?api-version=2023-11-01"
+        )
+        body = {
+            "search": "*",
+            "filter": "source_type eq 'mall_info'",
+            "select": "mall_name",
+            "top": 200,
+        }
+        try:
+            resp = await self._client.post(url, json=body)
+            resp.raise_for_status()
+            names = {
+                (d.get("mall_name") or "").strip()
+                for d in resp.json().get("value", [])
+            }
+            self._mall_names_cache = sorted(n for n in names if n)
+        except Exception as exc:
+            log.warning("azure_search.mall_names_failed", error=str(exc))
+            self._mall_names_cache = []
+        return self._mall_names_cache
+
+    async def lookup_mall_name(self, property_id: int) -> str | None:
+        """Return the marketing name for a ``unique_property_id``, or None.
+
+        Lets the chat widget send only ``property_id`` (which it always has
+        from the page URL) and still have the agent resolve which mall the
+        user means. Cheap: one filtered keyword query, no embedding.
+        """
+        url = (
+            f"{self._endpoint}/indexes/{self._index_name}"
+            f"/docs/search?api-version=2023-11-01"
+        )
+        body = {
+            "search": "*",
+            "filter": (
+                f"source_type eq 'mall_info' and unique_property_id eq {int(property_id)}"
+            ),
+            "select": "mall_name",
+            "top": 1,
+        }
+        try:
+            resp = await self._client.post(url, json=body)
+            resp.raise_for_status()
+            values = resp.json().get("value", [])
+        except Exception as exc:
+            log.warning(
+                "azure_search.mall_lookup_failed",
+                property_id=property_id,
+                error=str(exc),
+            )
+            return None
+        name = values[0].get("mall_name") if values else None
+        log.info("azure_search.mall_lookup", property_id=property_id, mall_name=name)
+        return name or None
 
     async def close(self) -> None:
         """Close the underlying ``httpx.AsyncClient``."""
@@ -215,29 +285,29 @@ class AzureSearchRepository:
 
     @staticmethod
     def _deduplicate(grouped: list[list[SearchResult]]) -> list[SearchResult]:
-        """Flatten, deduplicate, and interleave by source type.
+        """Flatten and deduplicate, interleaving by source type throughout.
 
-        Strategy: one round-robin pass guarantees at least one result per
-        non-empty source type before filling remaining slots in flat order.
-        This prevents high-volume source types (mall_info, help_content) from
-        crowding out low-volume types (key_contact, event) when the global
-        ``top_k`` cap is applied by the caller.
+        Every pass takes at most one result per source type, so the Nth-best
+        result of each type is reached before the (N+1)th of any type.  The
+        caller then applies ``top_k`` to this fairly-ordered list.
+
+        The earlier version only interleaved the FIRST pass and then drained
+        the groups one at a time.  Because help_content and mall_info come
+        first, they consumed every remaining slot, and exactly one key_contact
+        card ever reached the model — so "who handles operations at X" was
+        answered from the Mall Manager card when that ranked first, silently
+        substituting the wrong role.  Interleaving all the way down fixes the
+        ordering; ``top_k`` (8) provides the budget for at least two per type.
         """
         seen: set[tuple[str, str]] = set()
         merged: list[SearchResult] = []
 
-        # Round 1: take the best result from each non-empty group in order.
-        for group in grouped:
-            for result in group:
-                key = (result.source_type, result.title)
-                if key not in seen:
-                    seen.add(key)
-                    merged.append(result)
-                    break  # one per group in round 1
-
-        # Round 2: fill in remaining results from all groups in flat order.
-        for group in grouped:
-            for result in group:
+        depth = max((len(g) for g in grouped), default=0)
+        for rank in range(depth):
+            for group in grouped:
+                if rank >= len(group):
+                    continue
+                result = group[rank]
                 key = (result.source_type, result.title)
                 if key not in seen:
                     seen.add(key)

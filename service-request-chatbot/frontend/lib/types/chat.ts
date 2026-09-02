@@ -15,6 +15,13 @@ export type ChatAction =
   // CREATE_SR
   | "confirm"
   | "cancel"
+  | "cancel_create_sr"
+  | "cancel_sr"
+  | "confirm_cancel_sr"
+  | "decline_cancel_sr"
+  | "continue_milestone"
+  | "cancel_milestone"
+  | "create_handover_sr"
   // FM_REVIEW
   | "save_fm_progress"
   | "approve_fm_review"
@@ -141,7 +148,10 @@ export type ResponseUIDocumentRequirement = {
 export type PreviewField = {
   key: string;
   label: string;
+  /** Machine-readable value — enum codes stay raw so Formik/bridge logic can match them. */
   value: string | null;
+  /** Human label for `value`, present only when the raw code differs from what a user should read. */
+  display?: string | null;
 };
 
 export type ResponseUISRPreviewCard = {
@@ -200,6 +210,8 @@ export type ChatServiceResponse = {
   missingFields?: string[];
   /** True when all required fields are collected and confirmation is pending */
   readyToSubmit?: boolean;
+  /** HITL confirmation marker — CANCEL_PENDING shows Yes/No cancel confirm */
+  confirmationStatus?: string | null;
   /** RAG citations returned by the FAQ node — present on help/FAQ turns */
   faqSources?: Array<{ source_type: string; title: string }>;
   /** RDD review status — "REPORT_SUBMITTED" | "APPROVED" | null */

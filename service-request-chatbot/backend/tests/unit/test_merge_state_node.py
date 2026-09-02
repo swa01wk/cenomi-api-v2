@@ -625,25 +625,24 @@ class TestInspectionTimeField:
         assert cd["inspectionTime"] == "10:30"
 
     @pytest.mark.asyncio
-    async def test_inspection_time_auto_defaulted_in_create_sr_when_absent(self) -> None:
-        """When inspectionTime is absent in CREATE_SR, it is seeded with the current HH:MM."""
-        import datetime
-        import re
+    async def test_inspection_time_left_unset_in_create_sr_when_absent(self) -> None:
+        """inspectionTime must stay None when the user gave no time.
 
+        It used to be seeded with the current clock time, which marked the
+        field answered: a start date typed without a time silently advanced to
+        the next question and the inspection got booked at whatever time the
+        user happened to be typing. Leaving it None keeps it "missing" so
+        missing_field_node asks for the time right after the start date.
+        The 09:00 default still applies later, in payload_builder.
+        """
         state = _state(
             extracted_fields={},
             collected_data={},
             workflow_stage="CREATE_SR",
         )
-        before = datetime.datetime.now().strftime("%H:%M")
         result = await merge_state_node(state)
-        after = datetime.datetime.now().strftime("%H:%M")
 
-        time_value = result["collected_data"].get("inspectionTime")
-        assert time_value is not None, "inspectionTime must be auto-defaulted"
-        assert re.fullmatch(r"\d{2}:\d{2}", time_value), f"Expected HH:MM, got {time_value!r}"
-        # The defaulted time must be within the window of the test run.
-        assert before <= time_value <= after or time_value == before or time_value == after
+        assert result["collected_data"].get("inspectionTime") is None
 
     @pytest.mark.asyncio
     async def test_inspection_time_not_overwritten_when_already_set(self) -> None:

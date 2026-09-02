@@ -40,6 +40,10 @@ class ServiceRequestGraphState(TypedDict, total=False):
     # bare answers ("10th August") bind to the correct key even when
     # ``missing_fields`` is cleared at load time.
     active_field: Optional[str]
+    # One-turn signal set by field_extraction_node when a deterministic
+    # "change field X" redirect is detected with no inline value yet.
+    # missing_field_node consumes and clears it on the very next node run.
+    correction_pending_field: Optional[str]
 
     # ── Lease resolution ──────────────────────────────────────────────────────
     lease_matches: list[dict]
@@ -50,7 +54,7 @@ class ServiceRequestGraphState(TypedDict, total=False):
 
     # ── Human-in-the-loop confirmation ────────────────────────────────────────
     confirmation_required: bool
-    confirmation_status: Optional[Literal["PENDING", "CONFIRMED", "REJECTED"]]
+    confirmation_status: Optional[Literal["PENDING", "CONFIRMED", "REJECTED", "CANCEL_PENDING", "MILESTONE_PENDING"]]
 
     # ── Backend integration ───────────────────────────────────────────────────
     backend_refs: dict[str, Any]
@@ -74,6 +78,18 @@ class ServiceRequestGraphState(TypedDict, total=False):
     # Never persisted; not set by the existing /api/chat/service-request route.
     language: str             # "en" | "ar" — from request or auto-detected
     msp_context: dict         # {current_url_pattern?, help_category?, help_subcategory?}
+
+    # ── Page viewing context (injected per turn, never persisted) ─────────────
+    # Sent by the UI when the user is on a notification or SR detail page so
+    # deictic phrases ("this notification", "what's the status?") resolve
+    # without repeating the ID in chat.  See mosaic-poc viewing context.
+    viewing_notification_id: str | None
+    viewing_service_request_id: str | None
+    viewing_notification: dict  # optional snapshot {id, title, body, related_sr_id, ...}
+    notification_list_more: dict  # view-more paging {sub_category, page, unread?}
+    # Open-notification handoff ref {id: <SR id>, sub_category?} — or a bare
+    # SR-id string (reconciled-spec fallback). Consumed by open_notification_node.
+    active_notification_id: dict | str | None
 
     # ── Overall turn status ───────────────────────────────────────────────────
     status: Literal[

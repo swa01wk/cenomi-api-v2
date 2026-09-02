@@ -87,8 +87,15 @@ CREATE_SR_STAGE = StageDefinition(
         "title",
         "description",
         "startDate",
-        "endDate",
+        # Asked immediately after startDate (not after endDate): when the user
+        # gives a bare date the very next question must be the time for THAT
+        # date, otherwise the clock silently defaults and the flow moves on.
         "inspectionTime",  # optional HH:MM — combined with startDate/endDate in payload
+        "endDate",
+        # Same rule as inspectionTime, for the end of the window: asked right
+        # after endDate so a bare end date prompts for its time instead of
+        # silently inheriting the start time.
+        "inspectionEndTime",  # optional HH:MM
         "inspection_done_by",
         "notes",
         "comments",
@@ -125,6 +132,12 @@ RDD_REVIEW_STAGE = StageDefinition(
         # Documents (Meeting Report OR Rejected mandatory; Other optional) are
         # collected via the document_requirement UI, NOT via a chip-driven
         # rdd_upload_doc_type field. Same UX as FM: one card, all types visible.
+        #
+        # Outcome of the Handover Meeting Report, asked with Approve /
+        # Approve-with-changes chips once that report is uploaded — see the
+        # RDD_REVIEW branch in get_missing_fields for when it is suppressed.
+        # Listed before the dates so the status is settled first.
+        "document_status",
         # trading_date intentionally removed — auto-computed as fitout_end_date + 8 days
         # by merge_state_node. It is NOT asked of the user.
         "actual_handover_date",
@@ -194,13 +207,12 @@ WORKFLOW_STAGES: tuple[str, ...] = (
 # ── Derived field sets ────────────────────────────────────────────────────────
 
 # All fields that the LLM / user may supply across every stage.
-# document_status is conditional (Meeting Report path) so it is not in
-# RDD required_fields, but remains extractable / confirmable.
+# document_status now lives in RDD_REVIEW_STAGE.required_fields, so it no longer
+# needs to be appended separately.
 ALLOWED_EXTRACTED_FIELDS: frozenset[str] = frozenset(
     CREATE_SR_STAGE.required_fields
     + FM_REVIEW_STAGE.required_fields
     + RDD_REVIEW_STAGE.required_fields
-    + ("document_status",)
 )
 
 # Fields populated from backend APIs (lease lookup, tenant profile, etc.).
@@ -233,7 +245,7 @@ USER_SUPPLIED_FIELDS: frozenset[str] = ALLOWED_EXTRACTED_FIELDS - BACKEND_DERIVE
 # "no description" — the resulting empty string must not be treated as missing
 # and must not block title auto-generation or the confirmation card.
 OPTIONAL_FIELDS: frozenset[str] = frozenset(
-    {"description", "comments", "notes", "inspectionTime", "title"}
+    {"description", "comments", "notes", "inspectionTime", "inspectionEndTime", "title"}
 )
 # ``title`` is optional — merge_state_node / payload_builder auto-generate a
 # default ("handover-{lease}-{slug}" for Path A, "Already Trading - {lease}"
@@ -326,8 +338,14 @@ def get_missing_fields(stage_name: str, collected: dict) -> list[str]:
     comments").  A ``None`` value for an optional field still counts as
     missing so the bot still asks proactively on the first pass.
 
-    For RDD_REVIEW, ``document_status`` is required only when the chosen upload
-    type is the Handover Meeting Report.
+    ``document_status`` is a plain RDD_REVIEW required field. It does not need a
+    condition here because the upload state already gates it on both sides:
+    ``missing_field_node`` returns the document_requirement card before any
+    user_missing field while the mandatory report is still absent, and once a
+    *Rejected* report is uploaded ``merge_state_node`` has already written
+    ``DISAPPROVED``, so it is no longer missing. What remains — a Handover
+    Meeting Report uploaded with no status picked — is exactly the case the
+    Approve / Approve-with-changes chips are for.
     """
 
     def _is_missing(value: object) -> bool:
@@ -345,13 +363,6 @@ def get_missing_fields(stage_name: str, collected: dict) -> list[str]:
         for f in get_required_fields(stage_name)
         if _is_missing_for_field(f, collected.get(f))
     ]
-
-    if stage_name == "RDD_REVIEW":
-        doc_type = collected.get("rdd_upload_doc_type")
-        if doc_type == RDD_DOC_TYPE_MEETING and _is_missing(
-            collected.get("document_status")
-        ):
-            missing.append("document_status")
 
     return missing
 

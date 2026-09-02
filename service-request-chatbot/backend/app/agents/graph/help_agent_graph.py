@@ -28,6 +28,8 @@ START
 Agent taxonomy
 --------------
 - help_agent           : this graph — supervisor (intent routing) + faq_node (Q&A)
+- notification_agent   : list / explain / mark-read; OPEN hands off to
+                         handover/fitout (sr_status_sync) or sales_data_agent
 - rdd_handover_agent           : handles the full RDD lifecycle (CREATE_SR → FM_REVIEW → RDD_REVIEW)
 - work_permit_agent            : single-stage work permit SR creation (CREATE_WORK_PERMIT)
 - rdd_fitout_start_agent       : fitout start confirmation (FIT_OUT_CONFIRM_FOS)
@@ -64,6 +66,20 @@ from app.agents.registries.workflow_config import WORKFLOW_CONFIG_REGISTRY, get_
 
 # ── FAQ agent nodes ───────────────────────────────────────────────────────────
 from app.agents.graph.nodes.faq.faq_node import faq_node
+from app.agents.graph.nodes.notification.list_notifications_node import (
+    list_notifications_node,
+)
+from app.agents.graph.nodes.notification.notification_entry_node import (
+    notification_entry_node,
+)
+from app.agents.graph.nodes.notification.open_notification_node import (
+    open_notification_node,
+)
+from app.agents.services.notification_intent import (
+    NOTIFICATION_INTENTS,
+    classify_notification_intent_from_state,
+    should_bypass_for_notification_context,
+)
 
 # ── Work Permit agent nodes (CREATE_WORK_PERMIT workflow) ─────────────────────
 from app.agents.graph.nodes.work_permit.work_permit_entry_node import work_permit_entry_node
@@ -189,6 +205,8 @@ def _should_open_existing_sr(state: dict[str, Any]) -> bool:
     intent = state.get("intent") or ""
     if intent in _CREATE_NEW_SR_INTENTS:
         return False
+    if intent in NOTIFICATION_INTENTS:
+        return False
     return True
 
 
@@ -197,10 +215,36 @@ def _should_open_existing_sr(state: dict[str, Any]) -> bool:
 # ---------------------------------------------------------------------------
 
 
+# Fields whose answer is arbitrary prose. While one of these is being
+# collected the user's message is CONTENT, so it must never be re-read as a
+# new intent — ``_PREVIEW_PHRASES`` matches bare substrings like "review",
+# and a comment such as "Please review the details and approve it" was being
+# routed to the supervisor, classified as an approve intent, and RBAC-denied
+# instead of being stored as the comment.
+_FREE_TEXT_ANSWER_FIELDS: frozenset[str] = frozenset(
+    {"title", "description", "notes", "comments"}
+)
+
+
 def _route_after_load(state: dict[str, Any]) -> str:
     """Route to sr_status_sync when an SR ID exists; otherwise to agent/supervisor."""
     user_message = state.get("user_message") or ""
-    if _user_wants_preview(user_message):
+    _awaiting_free_text = state.get("active_field") in _FREE_TEXT_ANSWER_FIELDS
+    if not _awaiting_free_text and _user_wants_preview(user_message):
+        return "supervisor"
+    if state.get("active_notification_id") and (state.get("intent") or "") == "OPEN_NOTIFICATION":
+        # UI tapped Open on a notification — the routing shim seeds the SR
+        # or sales-data handoff (reconciled spec §2.2).
+        return "open_notification"
+    if not _awaiting_free_text and should_bypass_for_notification_context(state):
+        # Notification list/detail/mark-read (including deictic viewing context)
+        # must not be swallowed by an already-active SR agent.  Free-text answers
+        # (e.g. an SR description mentioning "alerts") stay with the open field.
+        notif_intent = classify_notification_intent_from_state(state)
+        if notif_intent == "LIST_NOTIFICATIONS":
+            return "list_notifications"
+        if notif_intent is not None:
+            return "notification"
         return "supervisor"
 
     sr_id = (state.get("backend_refs") or {}).get("sr_id")
@@ -243,6 +287,20 @@ def _route_after_load(state: dict[str, Any]) -> str:
     ):
         return "supervisor"
     if agent:
+        # A help question asked mid-collection must not be swallowed by the
+        # open field. Observed live: "Help me with Dashboard" was bound to
+        # active_field=lease_code and answered "Sorry, I couldn't find a lease
+        # matching that information", and the session could only be recovered by
+        # deleting it. faq_node writes only response_message/status, so the
+        # draft survives and collection resumes on the next turn.
+        from app.agents.services.help_interrupt_service import detect_help_interrupt
+
+        if detect_help_interrupt(
+            user_message,
+            active_agent=agent,
+            active_field=state.get("active_field"),
+        ):
+            return "faq_node"
         return _AGENT_ENTRY_NODES.get(agent, "supervisor")
     return "supervisor"
 
@@ -292,6 +350,23 @@ def _route_after_sync(state: dict[str, Any]) -> str:
     return "supervisor"
 
 
+def _route_after_open_notification(state: dict[str, Any]) -> str:
+    """Continue the open handoff into the domain agent, or surface an error.
+
+    Sales-data notifications have no SR id — they seed ``notification_context``
+    and land in ``sales_data_entry``. Handover / fit-out still ride
+    ``sr_status_sync``.
+    """
+    if (state.get("active_agent") or "") == "sales_data_agent":
+        return "sales_data_entry"
+    refs = state.get("backend_refs") or {}
+    if refs.get("notification_context") and not refs.get("sr_id"):
+        return "sales_data_entry"
+    if refs.get("sr_id"):
+        return "sr_status_sync"
+    return "response_generation"
+
+
 def _route_after_supervisor(state: dict[str, Any]) -> str:
     """Route after intent classification.
 
@@ -310,6 +385,13 @@ def _route_after_supervisor(state: dict[str, Any]) -> str:
     """
     intent: str = state.get("intent") or "UNKNOWN"
     status: str = state.get("status") or ""
+
+    if intent == "LIST_NOTIFICATIONS":
+        return "list_notifications"
+    if intent == "OPEN_NOTIFICATION":
+        return "open_notification"
+    if intent in NOTIFICATION_INTENTS:
+        return "notification"
 
     if _should_open_existing_sr(state):
         return "sr_status_sync"
@@ -382,6 +464,14 @@ def _route_after_validation(state: dict[str, Any]) -> str:
         from app.agents.schemas.fitout_confirm_schema import OPTIONAL_FIELDS
     else:
         from app.agents.schemas.handover_schema import OPTIONAL_FIELDS
+
+    # A pending "change field X" redirect must reach missing_field_node, which
+    # owns the re-ask. Without this the routing below sends a fully-collected
+    # draft straight to confirmation, the signal is never consumed, and the
+    # user's correction request is silently dropped — precisely when they are
+    # reviewing the finished draft and most want to fix something.
+    if state.get("correction_pending_field"):
+        return "missing_field"
 
     already_confirmed = state.get("confirmation_status") == "CONFIRMED"
 
@@ -472,11 +562,76 @@ def _route_after_validation(state: dict[str, Any]) -> str:
     return confirmation_nodes.get(original_stage, "confirmation")
 
 
+# Chip actions that write directly into
+# ``collected_data`` inside handover_entry_node (see
+# _HANDOVER_TYPE_ACTIONS / _INSPECTION_DONE_BY_ACTIONS) — the value is already
+# final, so routing through field_extraction is not just redundant, it is
+# actively wrong: the LLM re-extraction pass usually finds nothing new in the
+# chip's label text, and field_extraction's "correction re-arm" safety net
+# then reads "field already has a value + nothing extracted this turn" as a
+# failed correction attempt and re-asks the question the user just answered.
+_DIRECT_SET_CHIP_ACTIONS: frozenset[str] = frozenset(
+    {
+        "select_handover_type_already_trading",
+        "select_handover_type_initiate_handover",
+        "select_inspection_done_by_fm_manager",
+        "select_inspection_done_by_operations",
+    }
+)
+
+# Same idea for the RDD_REVIEW stage — rdd_review_entry_node writes
+# ``document_status`` straight into collected_data for these two chips.
+_RDD_DIRECT_SET_CHIP_ACTIONS: frozenset[str] = frozenset(
+    {
+        "select_rdd_status_approved",
+        "select_rdd_status_approved_with_changes",
+    }
+)
+
+
+def _waiting_short_circuit_target(state: dict[str, Any]) -> str:
+    """Where a turn goes when the persisted ``status`` is WAITING_FOR_USER.
+
+    Every question the bot asks saves WAITING_FOR_USER, so that value is present
+    on the *next* turn — the one carrying the user's reply. Short-circuiting
+    straight to response_generation therefore swallows the two messages that
+    most need to reach the graph:
+
+    - a correction request ("i want to edit the fitout start date"), and
+    - the answer to the question that status belongs to (``active_field``).
+
+    response_generation cannot write ``collected_data``, so the LLM just
+    improvises from the values already there — observed live in RDD_REVIEW as
+    "I see you want to change the fitout start date to 28/08/2026" (quoting the
+    *current* value back), after which every date the user typed was discarded
+    and the same question returned forever.
+
+    Anything else — a genuine idle wait such as the MM optional-upload offer,
+    which leaves ``active_field`` None — still short-circuits as before.
+    """
+    from app.agents.services.field_correction_service import detect_correction_intent
+
+    if detect_correction_intent(
+        state.get("user_message") or "",
+        state.get("collected_data") or {},
+        state.get("active_field"),
+        state.get("workflow_stage"),
+    ):
+        return "field_extraction"
+    if state.get("active_field"):
+        return "field_extraction"
+    return "response_generation"
+
+
 def _route_after_handover_entry(state: dict[str, Any]) -> str:
     # Check confirmation_status BEFORE stale WAITING_FOR_USER so that a confirm
     # action set this turn is never shadowed by a persisted WAITING_FOR_USER value
     # from the previous save_state.  Mirrors the same guard in _route_after_fm_entry.
     if state.get("confirmation_status") == "CONFIRMED":
+        return "merge_state"
+    if state.get("action_override") == "continue_milestone":
+        return "merge_state"
+    if state.get("action_override") in _DIRECT_SET_CHIP_ACTIONS:
         return "merge_state"
     # When REJECTED (e.g. after cancel+edit), always route through field_extraction
     # to process the correction, bypassing a stale WAITING_FOR_USER saved from the
@@ -485,7 +640,7 @@ def _route_after_handover_entry(state: dict[str, Any]) -> str:
         return "field_extraction"
     # Optional MM upload offer/wait and other WAITING short-circuits.
     if state.get("status") == "WAITING_FOR_USER":
-        return "response_generation"
+        return _waiting_short_circuit_target(state)
     if state.get("action_override") == "cancel":
         return "merge_state"
     return "field_extraction"
@@ -501,16 +656,28 @@ def _route_after_fm_entry(state: dict[str, Any]) -> str:
     if backend_refs.get("fm_action"):
         return "merge_state"
     if state.get("status") == "WAITING_FOR_USER":
-        return "response_generation"
+        return _waiting_short_circuit_target(state)
     return "field_extraction"
 
 
 def _route_after_rdd_entry(state: dict[str, Any]) -> str:
-    if state.get("status") == "WAITING_FOR_USER":
-        return "response_generation"
+    # Confirmation / action checks come BEFORE the stale-status short circuit,
+    # so an action set this turn is never shadowed by the WAITING_FOR_USER value
+    # persisted by the previous save_state. Same ordering as _route_after_fm_entry
+    # and _route_after_handover_entry.
+    #
     # Single-turn confirm already set CONFIRMED — skip extraction and go
     # straight through merge → validation → rdd_confirmation → payload builder.
     if state.get("confirmation_status") == "CONFIRMED":
+        return "merge_state"
+    # Status chips write document_status into collected_data directly (see
+    # rdd_review_entry_node._STATUS_ACTIONS), so the value is already final.
+    # Same reasoning as _DIRECT_SET_CHIP_ACTIONS on the handover entry node:
+    # re-running extraction over the chip label finds nothing, and
+    # field_extraction's correction re-arm then reads "field has a value +
+    # nothing extracted" as a failed correction and re-asks the question the
+    # user just answered.
+    if state.get("action_override") in _RDD_DIRECT_SET_CHIP_ACTIONS:
         return "merge_state"
     backend_refs = state.get("backend_refs") or {}
     if backend_refs.get("rdd_action"):
@@ -519,6 +686,8 @@ def _route_after_rdd_entry(state: dict[str, Any]) -> str:
     # not re-enter field collection / submit confirmation.
     if backend_refs.get("rdd_status") == "REPORT_SUBMITTED":
         return "response_generation"
+    if state.get("status") == "WAITING_FOR_USER":
+        return _waiting_short_circuit_target(state)
     return "field_extraction"
 
 
@@ -565,6 +734,8 @@ def _route_after_fitout_confirm_entry(state: dict[str, Any]) -> str:
     # question instead of submitting — the flow looped on the date prompt and
     # never produced a success message or View Service Request button.
     if state.get("confirmation_status") == "CONFIRMED":
+        return "merge_state"
+    if state.get("action_override") == "continue_milestone":
         return "merge_state"
     if state.get("confirmation_status") == "REJECTED":
         return "field_extraction"
@@ -753,6 +924,9 @@ def build_help_agent_graph():
     graph.add_node("sr_status_sync", sr_status_sync_node)
     graph.add_node("supervisor", supervisor_node)
     graph.add_node("faq_node", faq_node)
+    graph.add_node("notification", notification_entry_node)
+    graph.add_node("list_notifications", list_notifications_node)
+    graph.add_node("open_notification", open_notification_node)
     graph.add_node("preview", preview_node)
     graph.add_node("registry", registry_node)
     graph.add_node("handover_entry", handover_entry_node)
@@ -826,6 +1000,12 @@ def build_help_agent_graph():
             "work_permit_entry": "work_permit_entry",
             "fitout_confirm_entry": "fitout_confirm_entry",
             "sales_data_entry": "sales_data_entry",
+            # Help question asked mid-collection — answered without disturbing
+            # the draft (see detect_help_interrupt).
+            "faq_node": "faq_node",
+            "notification": "notification",
+            "list_notifications": "list_notifications",
+            "open_notification": "open_notification",
         },
     )
     graph.add_conditional_edges(
@@ -854,11 +1034,29 @@ def build_help_agent_graph():
             "preview": "preview",
             "registry": "registry",
             "response_generation": "response_generation",
+            "notification": "notification",
+            "list_notifications": "list_notifications",
+            "open_notification": "open_notification",
         },
     )
     # FAQ answers are self-contained — skip the SR-workflow rewrite step to
     # save one LLM call (~200–400 ms) and preserve inline [Source: ...] markers.
     graph.add_edge("faq_node", "save_state")
+    graph.add_edge("notification", "save_state")
+    graph.add_edge("list_notifications", "save_state")
+    # Spec §2.2: open_notification → sr_status_sync (SR) or sales_data_entry
+    # (lease-code notifications). The error turn (no id) branches to
+    # response_generation so the message reaches the user instead of an
+    # sr-less sync no-op.
+    graph.add_conditional_edges(
+        "open_notification",
+        _route_after_open_notification,
+        {
+            "sr_status_sync": "sr_status_sync",
+            "sales_data_entry": "sales_data_entry",
+            "response_generation": "response_generation",
+        },
+    )
     graph.add_edge("preview", "response_generation")
     graph.add_conditional_edges(
         "registry",

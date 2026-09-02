@@ -200,6 +200,40 @@ VALID INTENTS
       use CHECK_SALES_DATA_STATUS (tenant) or REVIEW_SALES_DATA (admin),
       never a handover preview.
 
+  LIST_NOTIFICATIONS
+      User wants to browse their notification inbox / alerts / pending items.
+      Keywords: show my notifications, list notifications, my alerts, inbox,
+                unread notifications, get all notifications,
+                what's pending for me, what needs my approval,
+                show pending actions, action required only,
+                pending handover notifications, fitout confirmations pending
+      Filtered variants stay LIST_NOTIFICATIONS: "show unread notifications",
+      "handover notifications", "fit-out start / FOS notifications",
+      "trading notifications", "sales data notifications" — the filter is
+      parsed downstream.
+      Routing: target_agent = "notification_agent"
+
+  OPEN_NOTIFICATION
+      System-set only — never classify this from text.  The UI sends
+      active_notification_id when the user taps Open on a notification.
+      Handover / fit-out: id is the SR number → sr_status_sync.
+      Sales data: sub_category SALES_DATA (or key SALES_DATA_*), id is the
+      lease code → sales_data_agent with notification_context.
+
+  GET_NOTIFICATION_DETAIL
+      User wants an explanation or details of a specific notification.
+      Triggers: an explicit NTF- ID in the message, OR a deictic phrase
+      ("this notification", "explain this", "what's this about") when
+      viewing_notification_id is present in context.
+      Routing: target_agent = "notification_agent"
+      Explicit IDs in the message always override viewing context.
+
+  MARK_NOTIFICATION_READ
+      User wants to mark a notification as read / dismiss / acknowledge it.
+      Triggers: "mark as read", "dismiss this", "acknowledge" plus either an
+      NTF- ID or viewing_notification_id with a deictic phrase.
+      Routing: target_agent = "notification_agent"
+
   UNKNOWN
       The intent is unclear or ambiguous AND does not fit ASK_HELP.
       Use this ONLY when the message is clearly not a question or an SR action.
@@ -310,6 +344,21 @@ When intent = PREVIEW_SERVICE_REQUEST:
     sub_category     = null
     target_agent     = null
 
+When intent = LIST_NOTIFICATIONS:
+    service_category = null
+    sub_category     = null
+    target_agent     = "notification_agent"
+
+When intent = GET_NOTIFICATION_DETAIL:
+    service_category = null
+    sub_category     = null
+    target_agent     = "notification_agent"
+
+When intent = MARK_NOTIFICATION_READ:
+    service_category = null
+    sub_category     = null
+    target_agent     = "notification_agent"
+
 When intent = UNKNOWN:
     service_category = null
     sub_category     = null
@@ -343,6 +392,14 @@ IMPORTANT — context-aware scoring:
     exists, if the user says "preview", "show me", "show what you have", "can you
     show it", "show the details", or similar review/summary phrases, classify as
     PREVIEW_SERVICE_REQUEST — do NOT keep the prior intent.
+  • Notification viewing context: if "Viewing notification ID" is present and the
+    user refers to "this notification", "explain this", or "what's this about"
+    without a different explicit ID, classify as GET_NOTIFICATION_DETAIL.
+    Explicit NTF- IDs in the message always win over viewing context.
+    "Show my notifications" is LIST_NOTIFICATIONS even when viewing context is set.
+  • If "Viewing service request ID" is present and the user asks "what's the
+    status?" / "this SR" without a different explicit ID, classify as
+    CHECK_SERVICE_REQUEST_STATUS for that ID.
 
 ════════════════════════════════════════════════════════════
 SESSION CONTINUITY HINTS
@@ -373,7 +430,7 @@ OUTPUT FORMAT — STRICT
 Return ONLY a JSON object with exactly these six keys:
 
 {
-  "intent":           "<one of the fourteen intents above>",
+  "intent":           "<one of the intents listed above>",
   "confidence":       <float between 0.0 and 1.0>,
   "service_category": "<string or null>",
   "sub_category":     "<string or null>",
