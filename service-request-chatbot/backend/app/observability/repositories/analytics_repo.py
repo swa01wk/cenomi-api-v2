@@ -695,10 +695,6 @@ class AnalyticsRepository:
                 func.count(AgentTrace.id)
                 .filter(AgentTrace.answer_status.in_(["UNANSWERED", "FAILED"]))
                 .label("not_answered"),
-                func.max(AgentTrace.active_agent).label("agent"),
-                # Names the handler for FAQ and notification turns, which never
-                # set active_agent.
-                func.max(AgentTrace.intent).label("intent"),
             )
             .where(*clauses)
             .group_by(AgentTrace.session_id)
@@ -749,6 +745,33 @@ class AnalyticsRepository:
             .subquery()
         )
 
+        # Which agent handled the conversation. A session can move between
+        # agents (a help question that turns into a service request), so this
+        # takes the agent it ended on rather than an aggregate — MAX() over a
+        # text column picks alphabetically, which is arbitrary.
+        latest_turn = (
+            select(
+                AgentTrace.session_id.label("session_id"),
+                func.max(AgentTrace.created_at).label("last_at"),
+            )
+            .where(*clauses)
+            .group_by(AgentTrace.session_id)
+            .subquery()
+        )
+        final_agent = (
+            select(
+                latest_turn.c.session_id.label("session_id"),
+                AgentTrace.active_agent.label("agent"),
+                AgentTrace.intent.label("intent"),
+            )
+            .join(
+                AgentTrace,
+                (AgentTrace.session_id == latest_turn.c.session_id)
+                & (AgentTrace.created_at == latest_turn.c.last_at),
+            )
+            .subquery()
+        )
+
         # The opening question, so a conversation row can preview what the
         # user actually asked. Silent refresh turns are skipped — previewing
         # a blank background sync tells the reader nothing.
@@ -782,8 +805,8 @@ class AnalyticsRepository:
                 grouped.c.last_at,
                 grouped.c.user_id,
                 grouped.c.not_answered,
-                grouped.c.agent,
-                grouped.c.intent,
+                final_agent.c.agent,
+                final_agent.c.intent,
                 first_message.c.first_at,
                 rating.c.avg_score,
                 rating.c.ratings_count,
@@ -796,6 +819,9 @@ class AnalyticsRepository:
                 first_message, first_message.c.session_id == grouped.c.session_id
             )
             .outerjoin(rating, rating.c.session_id == grouped.c.session_id)
+            .outerjoin(
+                final_agent, final_agent.c.session_id == grouped.c.session_id
+            )
             .outerjoin(
                 first_question, first_question.c.session_id == grouped.c.session_id
             )
