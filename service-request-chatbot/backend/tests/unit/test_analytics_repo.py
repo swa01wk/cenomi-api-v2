@@ -263,3 +263,49 @@ async def test_recent_sessions_surfaces_rating_comments() -> None:
     sql = " ".join(session.compiled).lower()
     assert "string_agg" in sql, "comments are not aggregated per session"
     assert "comment" in sql
+
+
+# ── transcript ─────────────────────────────────────────────────────────────
+
+
+async def test_session_transcript_pairs_questions_with_answers() -> None:
+    rows = [
+        SimpleNamespace(
+            id=uuid4(), created_at=NOW, input_message="How do I submit an SR?",
+            output_message="Follow these steps...", active_agent=None,
+            intent="ASK_HELP", status="SUCCESS", answer_status="ANSWERED",
+            total_latency_ms=1200, error_message=None,
+            score=5, comment="Nice", source="help_answer",
+        ),
+        SimpleNamespace(
+            id=uuid4(), created_at=NOW, input_message="  ",
+            output_message="ok", active_agent="rdd_handover_agent",
+            intent=None, status="SUCCESS", answer_status="ANSWERED",
+            total_latency_ms=90, error_message=None,
+            score=None, comment=None, source=None,
+        ),
+    ]
+    session = CompilingSession(rows=rows)
+
+    turns = await AnalyticsRepository(session).session_transcript(uuid4())
+
+    assert turns[0]["question"] == "How do I submit an SR?"
+    assert turns[0]["answer"] == "Follow these steps..."
+    assert turns[0]["rating"] == 5 and turns[0]["comment"] == "Nice"
+    # A FAQ turn records no agent; the intent still names the handler.
+    assert turns[0]["agent_label"] == "Help Agent"
+    assert turns[0]["is_silent"] is False
+    # A blank turn is a background sync, flagged so callers can hide it.
+    assert turns[1]["is_silent"] is True
+    assert turns[1]["question"] is None
+
+
+async def test_outcome_counts_ignore_silent_turns() -> None:
+    """Accuracy is about questions, so both sides of the ratio exclude
+    background syncs — otherwise coverage can exceed 100%."""
+    session = CompilingSession(row=_totals_row())
+    await AnalyticsRepository(session).turn_totals(WINDOW)
+
+    sql = " ".join(session.compiled).lower()
+    # The answer_status filters carry the real-question predicate alongside.
+    assert sql.count("'none'") >= 2, "outcome counts are not question-scoped"

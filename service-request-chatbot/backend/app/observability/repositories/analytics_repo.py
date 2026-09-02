@@ -96,20 +96,25 @@ class AnalyticsRepository:
                 func.count(AgentTrace.id)
                 .filter(_is_real_question())
                 .label("questions"),
+                # Outcome counts are scoped to real questions on both sides of
+                # the ratio. Silent refresh turns are classified too (they
+                # produce a reply), so counting them would inflate the
+                # numerator and denominator and make "accuracy" a statement
+                # about background syncs rather than about user questions.
                 func.count(AgentTrace.id)
-                .filter(AgentTrace.answer_status == "ANSWERED")
+                .filter(AgentTrace.answer_status == "ANSWERED", _is_real_question())
                 .label("answered"),
                 func.count(AgentTrace.id)
-                .filter(AgentTrace.answer_status == "PARTIAL")
+                .filter(AgentTrace.answer_status == "PARTIAL", _is_real_question())
                 .label("partial"),
                 func.count(AgentTrace.id)
-                .filter(AgentTrace.answer_status == "UNANSWERED")
+                .filter(AgentTrace.answer_status == "UNANSWERED", _is_real_question())
                 .label("unanswered"),
                 func.count(AgentTrace.id)
-                .filter(AgentTrace.answer_status == "FAILED")
+                .filter(AgentTrace.answer_status == "FAILED", _is_real_question())
                 .label("failed_answers"),
                 func.count(AgentTrace.id)
-                .filter(AgentTrace.answer_status.is_not(None))
+                .filter(AgentTrace.answer_status.is_not(None), _is_real_question())
                 .label("classified"),
                 func.count(AgentTrace.id)
                 .filter(AgentTrace.status == "FAILED")
@@ -453,6 +458,71 @@ class AnalyticsRepository:
             }
             for r in rows
         ]
+
+    async def session_transcript(self, session_id: UUID) -> list[dict[str, Any]]:
+        """Return one session's turns: what was asked, what came back, how it rated.
+
+        Reads from ``agent_traces`` rather than ``chat_messages`` because the
+        trace is what carries the outcome, latency and the rating join — the
+        three things a reviewer opens a conversation to see.
+        """
+        rating = (
+            select(
+                AgentFeedback.trace_id.label("trace_id"),
+                func.max(AgentFeedback.score).label("score"),
+                func.max(AgentFeedback.comment).label("comment"),
+                func.max(AgentFeedback.source).label("source"),
+            )
+            .where(AgentFeedback.feedback_type == _USER_RATING)
+            .group_by(AgentFeedback.trace_id)
+            .subquery()
+        )
+
+        rows = await self._session.execute(
+            select(
+                AgentTrace.id,
+                AgentTrace.created_at,
+                AgentTrace.input_message,
+                AgentTrace.output_message,
+                AgentTrace.active_agent,
+                AgentTrace.intent,
+                AgentTrace.status,
+                AgentTrace.answer_status,
+                AgentTrace.total_latency_ms,
+                AgentTrace.error_message,
+                rating.c.score,
+                rating.c.comment,
+                rating.c.source,
+            )
+            .outerjoin(rating, rating.c.trace_id == AgentTrace.id)
+            .where(AgentTrace.session_id == session_id)
+            .order_by(AgentTrace.created_at)
+        )
+
+        turns: list[dict[str, Any]] = []
+        for r in rows:
+            question = (r.input_message or "").strip()
+            turns.append(
+                {
+                    "trace_id": str(r.id),
+                    "at": r.created_at,
+                    "question": question or None,
+                    # A blank question means a background sync, not a user turn.
+                    "is_silent": question.lower() in _NON_QUESTION_INPUTS,
+                    "answer": r.output_message,
+                    "agent": r.active_agent,
+                    "agent_label": agent_display_name(r.active_agent, r.intent),
+                    "intent": r.intent,
+                    "status": r.status,
+                    "answer_status": r.answer_status,
+                    "latency_ms": r.total_latency_ms,
+                    "error": r.error_message,
+                    "rating": r.score,
+                    "comment": r.comment,
+                    "rating_source": r.source,
+                }
+            )
+        return turns
 
     # ------------------------------------------------------------------
     # Feedback

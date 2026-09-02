@@ -20,7 +20,7 @@ from typing import Any, Literal
 from uuid import UUID
 
 import structlog
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from app.core.security import get_auth_context
 from app.db.session import DbSession
@@ -111,6 +111,14 @@ async def analytics_overview(
         },
         "totals": {
             **totals,
+            # Success and failure rates are computed over classified turns
+            # only; coverage says what share of questions that is, so a rate
+            # from a thin sample cannot be mistaken for a rate over all of them.
+            "classification_coverage": (
+                round(totals["classified"] / totals["questions"], 4)
+                if totals["questions"]
+                else 0.0
+            ),
             "p95_latency_ms": p95_latency or 0,
             "avg_session_minutes": engagement["avg_session_minutes"],
             "total_time_spent_minutes": engagement["total_time_spent_minutes"],
@@ -169,6 +177,62 @@ async def analytics_questions(
     if include_top:
         payload["top_questions"] = await repo.top_questions(filters)
     return payload
+
+
+@router.get(
+    "/sessions/{session_id}",
+    summary="One conversation — what was asked, what came back, how it rated",
+    description=(
+        "Full turn-by-turn transcript for a session, each turn carrying its "
+        "answer, outcome, latency and any star rating or comment.  This is "
+        "what a reviewer opens from a rating to see the exchange behind it."
+    ),
+    responses={status.HTTP_404_NOT_FOUND: {"description": "No such session."}},
+)
+async def analytics_session(
+    session_id: UUID,
+    db: DbSession,
+    include_silent: bool = Query(
+        default=False,
+        description=(
+            "Include background sync turns (blank questions the UI fires on "
+            "upload or form patches). Off by default — they are not exchanges."
+        ),
+    ),
+    auth: AuthContext = Depends(get_auth_context),
+) -> dict[str, Any]:
+    """Return one conversation's transcript with ratings attached."""
+    repo = AnalyticsRepository(db)
+    turns = await repo.session_transcript(session_id)
+    if not turns:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"No conversation found for session {session_id}.",
+        )
+
+    visible = turns if include_silent else [t for t in turns if not t["is_silent"]]
+    rated = [t for t in turns if t["rating"] is not None]
+
+    return {
+        "session_id": str(session_id),
+        "turns": visible,
+        "summary": {
+            "total_turns": len(turns),
+            "questions": sum(1 for t in turns if not t["is_silent"]),
+            "silent_turns": sum(1 for t in turns if t["is_silent"]),
+            "started_at": turns[0]["at"],
+            "last_activity_at": turns[-1]["at"],
+            "ratings": [
+                {
+                    "trace_id": t["trace_id"],
+                    "rating": t["rating"],
+                    "comment": t["comment"],
+                    "source": t["rating_source"],
+                }
+                for t in rated
+            ],
+        },
+    }
 
 
 @router.get(

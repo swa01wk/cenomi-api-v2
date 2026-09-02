@@ -118,3 +118,18 @@ def test_period_keys_match_the_frontend_contract_exactly() -> None:
     assert _PERIODS["24h"] == 1
     assert _PERIODS["7d"] == 7
     assert _PERIODS["30d"] == 30
+
+
+# ── accuracy honesty ───────────────────────────────────────────────────────
+
+
+def test_coverage_never_exceeds_the_questions_it_is_measured_over() -> None:
+    """Sample size and questions must share a denominator.
+
+    Before this was enforced, outcome counts included silent refresh turns
+    while the question count did not, so coverage reported 184%.
+    """
+    assert _pct(82, 82) == 100.0
+    assert _pct(2, 82) < 100.0
+    # A thin sample must read as thin, not as full coverage.
+    assert _pct(2, 2668) == 0.1

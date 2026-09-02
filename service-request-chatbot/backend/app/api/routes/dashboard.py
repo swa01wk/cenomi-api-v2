@@ -132,6 +132,12 @@ async def _period_block(
 
     return {
         "accuracy_pct": accuracy_pct,
+        # How many turns that percentage is actually computed over. Without
+        # this, "100%" beside "82 questions" reads as 82 of 82 when it may be
+        # 2 of 2 — turns recorded before outcome classification shipped are
+        # not counted. Coverage tells the reader how far to trust the figure.
+        "accuracy_sample_size": totals["classified"],
+        "accuracy_coverage_pct": _pct(totals["classified"], totals["questions"]),
         # Real questions only — silent refresh turns are excluded.
         "questions_count": totals["questions"],
         # Approximated as the busiest hour's distinct-session count — the
