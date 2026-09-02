@@ -28,7 +28,7 @@ from uuid import UUID
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import func, select
+from sqlalchemy import select
 
 from app.api.routes.msp_chat import _require_service_token
 from app.db.models import User
@@ -450,9 +450,7 @@ async def assistant_admin_conversations(
         ) from exc
 
     names = await _resolve_user_names(
-        db,
-        [s["user_id"] for s in sessions if s["user_id"]]
-        + [u["user_id"] for u in top_users if u["user_id"]],
+        db, [s["user_id"] for s in sessions if s["user_id"]]
     )
 
     return {
