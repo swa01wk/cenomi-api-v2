@@ -156,6 +156,9 @@ class ChatTurnResult:
     trace_id: UUID | None
     draft_preview: dict[str, Any] | None = None
     faq_sources: list[dict] = field(default_factory=list)
+    # Persisted chat_messages.id of the assistant reply — the durable
+    # per-message identity clients use to attach feedback.
+    assistant_message_id: UUID | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -519,6 +522,7 @@ class ChatOrchestrationService:
         graph_status: str = result_state.get("status") or "IN_PROGRESS"
 
         # 8. Finish trace -------------------------------------------------------
+        answer_status = _classify_answer_status(result_state, graph_status)
         if trace_id:
             await self._trace_manager.finish_trace(
                 trace_id=trace_id,
@@ -530,12 +534,13 @@ class ChatOrchestrationService:
                 sub_category=result_state.get("sub_category"),
                 workflow_stage_before=chat_session.workflow_stage,
                 workflow_stage_after=result_state.get("workflow_stage"),
+                answer_status=answer_status,
             )
 
         # 9. Persist assistant reply -------------------------------------------
         faq_sources: list[dict] = result_state.get("faq_sources") or []
         assistant_msg_time = datetime.now(timezone.utc)
-        await self._message_repo.create(
+        assistant_msg = await self._message_repo.create(
             session_id=session_uuid,
             role="assistant",
             content=response_message,
@@ -644,6 +649,7 @@ class ChatOrchestrationService:
             trace_id=trace_id,
             draft_preview=draft_preview,
             faq_sources=faq_sources,
+            assistant_message_id=assistant_msg.id,
         )
 
     # ------------------------------------------------------------------
@@ -724,6 +730,30 @@ class ChatOrchestrationService:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _classify_answer_status(
+    result_state: dict[str, Any], graph_status: str
+) -> str:
+    """Classify a completed turn's outcome for analytics.
+
+    Precedence: an explicit ``answer_status`` set by an answer-producing node
+    (faq_node judges its own grounding) wins; otherwise fall back to turn-level
+    heuristics.  Failed turns never reach this — ``fail_trace`` stamps FAILED.
+    """
+    explicit = result_state.get("answer_status")
+    if explicit in ("ANSWERED", "PARTIAL", "UNANSWERED", "FAILED"):
+        return explicit
+
+    if graph_status == "FAILED":
+        return "FAILED"
+
+    # The supervisor could not resolve what the user wants — the turn ends in
+    # a clarification ask, which is a non-answer from the user's perspective.
+    if (result_state.get("intent") or "").upper() == "UNKNOWN":
+        return "UNANSWERED"
+
+    return "ANSWERED"
 
 
 def user_id_to_uuid(user_id: str) -> UUID:

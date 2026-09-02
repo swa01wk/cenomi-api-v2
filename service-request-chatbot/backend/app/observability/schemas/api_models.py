@@ -165,6 +165,10 @@ class FeedbackResponse(BaseModel):
     trace_id: UUID
     run_id: UUID | None = None
     user_id: UUID | None = None
+    session_id: UUID | None = None
+    message_id: UUID | None = None
+    source: str | None = None
+    sr_id: str | None = None
     feedback_type: str
     score: int | None = None
     label: str | None = None

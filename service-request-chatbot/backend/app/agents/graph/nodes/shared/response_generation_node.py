@@ -26,7 +26,9 @@ import difflib
 import json
 import logging
 import re
+from decimal import Decimal
 from typing import Any
+from uuid import UUID
 
 from app.agents.graph.state import ServiceRequestState
 from app.agents.llm.gateway import get_default_gateway
@@ -176,9 +178,11 @@ async def response_generation_node(state: ServiceRequestState) -> dict[str, Any]
 
     # ── Call the LLM ────────────────────────────────────────────────────────
     llm_message: str | None = None
+    in_tokens = out_tokens = llm_ms = 0
+    parse_error: str | None = None
+    gateway = get_default_gateway()
     try:
-        gateway = get_default_gateway()
-        parsed, _, _, _ = await gateway.complete_json(
+        parsed, in_tokens, out_tokens, llm_ms = await gateway.complete_json(
             system_prompt=RESPONSE_GENERATION_SYSTEM_PROMPT,
             user_message=user_content,
         )
@@ -188,9 +192,21 @@ async def response_generation_node(state: ServiceRequestState) -> dict[str, Any]
         else:
             logger.warning("response_generation_node.llm_empty_message: %s", parsed)
     except json.JSONDecodeError as exc:
+        parse_error = f"JSONDecodeError: {exc}"
         logger.warning("response_generation_node.llm_json_parse_failed: %s", exc)
     except Exception as exc:
+        parse_error = str(exc)
         logger.warning("response_generation_node.llm_call_failed: %s", exc)
+
+    await _capture_response_llm_call(
+        state,
+        gateway=gateway,
+        input_tokens=in_tokens,
+        output_tokens=out_tokens,
+        latency_ms=llm_ms,
+        parse_success=parse_error is None,
+        parse_error=parse_error,
+    )
 
     # ── Guard: reject a reply that re-asks the previous question ────────────
     # The prompt states the target field twice (top and, most importantly,
@@ -247,3 +263,63 @@ async def response_generation_node(state: ServiceRequestState) -> dict[str, Any]
         updates["status"] = "WAITING_FOR_USER"
 
     return updates
+
+
+async def _capture_response_llm_call(
+    state: ServiceRequestState,
+    *,
+    gateway: Any,
+    input_tokens: int,
+    output_tokens: int,
+    latency_ms: int,
+    parse_success: bool,
+    parse_error: str | None,
+) -> None:
+    """Record the response-generation LLM call for token/cost analytics.
+
+    Mirrors the supervisor's capture pattern; never raises."""
+    tm = state.get("trace_manager")
+    trace_id = _extract_uuid(state.get("trace_id"))
+    if tm is None or trace_id is None:
+        return
+    try:
+        node_run_id = _extract_uuid(state.get("_trace_node_run_id"))
+        llm_run_id = await tm.start_run(
+            trace_id=trace_id,
+            run_name="response_generation_llm_call",
+            run_type="LLM",
+            parent_run_id=node_run_id,
+        )
+        if llm_run_id is None:
+            return
+        await tm.capture_llm_call(
+            trace_id=trace_id,
+            run_id=llm_run_id,
+            provider=getattr(gateway, "provider_name", "openai"),
+            model=gateway.model,
+            temperature=Decimal("0"),
+            prompt_name="response_generation_prompt",
+            prompt_version="1.0",
+            input_tokens=input_tokens or None,
+            output_tokens=output_tokens or None,
+            total_tokens=(input_tokens + output_tokens) or None,
+            latency_ms=latency_ms or None,
+            parse_success=parse_success,
+            parse_error=parse_error,
+        )
+        await tm.finish_run(
+            llm_run_id,
+            status="SUCCESS" if parse_success else "FAILED",
+            error_message=parse_error,
+        )
+    except Exception:
+        logger.warning("response_generation_node.capture_llm_call.failed", exc_info=True)
+
+
+def _extract_uuid(value: Any) -> UUID | None:
+    if value is None:
+        return None
+    try:
+        return value if isinstance(value, UUID) else UUID(str(value))
+    except (ValueError, AttributeError):
+        return None

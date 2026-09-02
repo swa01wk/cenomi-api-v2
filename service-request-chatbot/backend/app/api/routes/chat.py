@@ -261,6 +261,13 @@ class ServiceRequestChatResponse(BaseModel):
         default=None,
         description="Observability trace ID for this turn.",
     )
+    message_id: str | None = Field(
+        default=None,
+        description=(
+            "Persisted assistant message UUID (chat_messages.id).  Additive "
+            "field: pass it together with trace_id to POST /chat/feedback."
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -383,6 +390,9 @@ async def post_service_request_chat(
             confirmation_status=result.state.confirmation_status,
         ),
         trace_id=str(result.trace_id) if result.trace_id else None,
+        message_id=(
+            str(result.assistant_message_id) if result.assistant_message_id else None
+        ),
     )
 
 
