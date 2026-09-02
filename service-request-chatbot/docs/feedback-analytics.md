@@ -246,6 +246,12 @@ Both agents render through one component chain, so one rating row covers both:
 - **Dashboard:** `AssistantRatingCard` (average, count, 1–5 distribution with
   detractor/promoter colouring), an "N unanswered" badge on top questions, and
   a rating column on the conversations table.
+- **Agent health tab:** the analytics page carries two tabs. *Overview* is the
+  tenant-facing view; *Agent health* is the engineering one — slowest step
+  (p95), platform API reliability, token spend by prompt, and where service
+  requests stall. Backed by
+  `GET /dashboard/assistant-admin/insights?days=N`, which reads `agent_runs`,
+  `agent_tool_calls` and `agent_llm_calls` — tables nothing else surfaces.
 - **Conversation page:** `/dashboard/assistant-admin/conversations/[sessionId]`
   — the full transcript behind a rating. Stats header (questions, average
   rating, unanswered turns, start time) then each turn as a card: question,
