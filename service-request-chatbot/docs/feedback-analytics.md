@@ -1,9 +1,15 @@
-# Agent Feedback & Analytics — Backend Contract (Phase 0–1)
+# Agent Feedback & Analytics
 
-Ticket scope: end-user star ratings (1–5 + comment) under every AI answer and
-after every AI-created SR, plus the turn-outcome classification the analytics
-layer reports on. This doc is the contract to share with the
-`cenomi-frontend-2` team.
+End-user star ratings (1–5 + comment) under every AI answer and after every
+AI-created SR, the turn-outcome classification behind the success/failure
+ratios, and the analytics API and dashboard built on top.
+
+Delivered across two repos:
+
+| Repo | Branch | What |
+|---|---|---|
+| `cenomi-api-v2` | `feature/agent-feedback-analytics` | migration 007, feedback endpoint, `answer_status`, analytics API, assistant-admin dashboard API |
+| `cenomi-frontend-2` | `feature/agent-feedback-analytics` | star row in the Copilot, ratings card + unanswered signal on the dashboard |
 
 ## What changed in this repo
 
@@ -98,39 +104,81 @@ from the JWT and records `user_id` + `session_id` on the row.
 `agent_feedback` + `session_id, message_id, source, sr_id, metadata` and the
 partial unique index; `agent_traces` + `answer_status` (indexed).
 
-## Frontend integration (cenomi-frontend-2)
+## 8. Analytics API
 
-Both chat surfaces render through one component, so one rating row covers
-both agents:
+New router at `/api/v1/analytics` and `/api/v2/analytics`. All four accept
+`from`, `to`, `agent`, `user_id`; the window defaults to the trailing 30 days.
 
-- **Attach point:** `libs/ui-web/src/lib/components/AIChatWidget/SrFabMessages.tsx`
-  — inside the `messages.map(...)` block, after `SrChatUiRenderer`, for
-  `msg.role === 'assistant'`. `msg.traceId` is already stored per message
-  (`useServiceRequestChat.ts`); also store the new `message_id` from the
-  response alongside it.
-- **Help answers (`source: "help_answer"`):** show the 1–5 star row under
-  every assistant answer. Comment box expands after a star is picked; nudge
-  for a comment when rating ≤ 3. Collapse to a "Thanks for your feedback"
-  chip once submitted (`created`/update both count).
-- **SR created (`source: "sr_created"`):** show once, next to
-  `HandoverSuccessActions` (the "View Service Request" card, i.e. when
-  `isComplete && createdSrId`), rating the whole flow. Send
-  `sr_id: createdSrId` and the trace id of the final turn.
-- **API layer:** add `submitChatFeedback()` beside the turn call in
-  `libs/api/src/lib/srChatbot/srChatbotApi.ts` — same
-  `getAiApiBaseUrl()` + `aiRequestHeaders(...)` helpers, POST
-  `/api/v2/chat/feedback`.
-- **i18n:** add EN/AR keys (e.g. `srChatbotRatePrompt`,
-  `srChatbotRateThanks`, `srChatbotRateCommentPlaceholder`); star row must
-  mirror in RTL.
+| Endpoint | Returns |
+|---|---|
+| `GET /analytics/overview` | Turn volume, answered/partial/unanswered split, success and failure ratios, SR funnel, avg + p95 latency, tokens and cost, session time, rating summary, a daily series, and a per-agent breakdown |
+| `GET /analytics/questions` | Paginated question log with each turn's outcome, latency and rating. `answer_status=UNANSWERED` is the FAQ content-gap report; `include_top=true` adds the most-asked questions |
+| `GET /analytics/feedback` | Star distribution, averages by source, plus the paginated comment feed (`max_score=3` for detractors) |
+| `GET /analytics/engagement` | Sessions, avg and median session length, turns per session, hourly session histogram, recent conversations |
 
-## Metric definitions the analytics build on (Phase 3–4)
+`GET /api/v1/observability/metrics/summary` also gained `answered_traces`,
+`partial_traces`, `unanswered_traces`, `answered_rate`, `ratings_count` and
+`avg_rating` (all additive).
 
-- Questions asked = user rows in `chat_messages`.
-- Answered ratio = `answer_status = 'ANSWERED'` ÷ classified traces.
-- SR funnel success = `service_request.created` audit events ÷ SR flows
-  started.
-- Time spent = last − first `chat_messages.created_at` per session
-  (30-min idle cutoff), aggregated per user.
-- CSAT = avg/distribution of `agent_feedback.score` where
+## 9. Assistant-admin dashboard API
+
+`GET /api/v1/dashboard/assistant-admin` and `.../conversations` now serve the
+exact contract the tenant frontend already renders (`{success, data}`
+envelope, `24h`/`7d`/`30d` period keys, 24-slot hourly array, same
+conversation row shape), so no rewrite was needed to point it here.
+
+What changed versus the legacy implementation:
+
+| Field | Was | Now |
+|---|---|---|
+| `accuracy_pct` | `sources_count > 0` groundedness proxy | Real `answer_status = ANSWERED` share |
+| `user_satisfaction_csat_pct` | Derived from the same proxy | Real star ratings, as a share of the 5-point scale |
+| `escalation_rate_pct` | Hard-coded `0` | Share of turns the agent could not answer |
+| `escalated` / `resolved` | Hard-coded `false` | Per-session unanswered turns / SR created |
+| `user_name` | Empty string | Resolved from `users`, else a short id label |
+| `avg_session_length_min` | Sum of response times | Wall-clock first→last message |
+
+Additive fields for the richer view: `summary_strip.avg_rating`,
+`ratings_count`, `rating_distribution`; `top_questions[].not_answered`; and
+`agent`, `duration_seconds`, `avg_rating`, `srs_created` per conversation.
+
+## Frontend (cenomi-frontend-2)
+
+Both agents render through one component chain, so one rating row covers both:
+
+- **Star row:** `ChatFeedbackStars.tsx`, mounted in
+  `AIChatWidget/SrFabMessages.tsx` — under every assistant answer
+  (`source="help_answer"`), and once beside `HandoverSuccessActions` when an
+  SR was created (`source="sr_created"`, carrying `sr_id`). Covers the docked
+  Copilot rail and the floating panel, since both render `SrFabMessages`.
+  Picking a star submits immediately; the comment box then stays open and is
+  nudged for ratings ≤ 3.
+- **Transport:** `postChatFeedback()` in `srChatbotApi.ts`, called via the
+  hook's `submitFeedback` so the AI session token is attached. Rating failures
+  are isolated from the conversation — they never touch the chat error banner.
+- **Dashboard:** `AssistantRatingCard` (average, count, 1–5 distribution with
+  detractor/promoter colouring), an "N unanswered" badge on top questions, and
+  a rating column on the conversations table.
+- **i18n:** EN + AR keys under `srChatbot*` and `assistantAdmin.*`; the star
+  row and card mirror in RTL.
+
+## Metric definitions
+
+- Questions asked = user rows in `chat_messages` (traces with empty input are
+  silent refresh turns and are excluded from the question log).
+- Answered ratio = `answer_status = 'ANSWERED'` ÷ classified traces; failure
+  ratio is `UNANSWERED + FAILED` over the same denominator.
+- SR funnel = `service_request.created` audit events ÷ sessions handled by a
+  workflow agent.
+- Time spent = last − first `chat_messages.created_at` per session, so a
+  one-turn session reads ~0 rather than being dropped.
+- CSAT = average and distribution of `agent_feedback.score` where
   `feedback_type = 'USER_RATING'`, split by `source`.
+
+## Verification performed
+
+Migrations 001→007 and every analytics query, endpoint, and the feedback
+auth/idempotency rules were executed against a live PostgreSQL 18 instance
+with seeded multi-user, multi-day data. Backend: 2,304 unit tests pass with
+no new failures. Frontend: 20 new tests, no new failures and no new
+TypeScript errors.
