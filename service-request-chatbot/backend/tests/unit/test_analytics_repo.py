@@ -391,7 +391,11 @@ async def test_workflow_funnel_counts_sessions_per_stage() -> None:
 
     funnel = await AnalyticsRepository(session).workflow_funnel(WINDOW)
 
-    assert funnel[0] == {"stage": "CREATE_SR", "sessions": 269, "turns": 2577}
+    assert funnel[0]["stage"] == "CREATE_SR"
+    assert funnel[0]["sessions"] == 269
+    assert funnel[0]["turns"] == 2577
+    # The raw stage stays as the key; the label is what a person reads.
+    assert funnel[0]["stage_label"] == "Collecting details"
     assert funnel[1]["sessions"] == 39
 
 

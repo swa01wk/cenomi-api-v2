@@ -22,6 +22,12 @@ from sqlalchemy import Integer, Text, and_, cast, func, literal, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.agent_display import agent_display_name
+from app.observability.display_labels import (
+    node_label,
+    prompt_label,
+    stage_label,
+    tool_label,
+)
 
 from app.db.models import (
     AgentFeedback,
@@ -962,6 +968,7 @@ class AnalyticsRepository:
         return [
             {
                 "node": r.node,
+                "node_label": node_label(r.node),
                 "calls": r.calls or 0,
                 "avg_ms": round(float(r.avg_ms)) if r.avg_ms is not None else 0,
                 "p95_ms": round(float(r.p95_ms)) if r.p95_ms is not None else 0,
@@ -1006,6 +1013,7 @@ class AnalyticsRepository:
             health.append(
                 {
                     "tool": r.tool,
+                    "tool_label": tool_label(r.tool),
                     "calls": calls,
                     "failed": failed,
                     "success_rate": round((calls - failed) / calls, 4) if calls else 0.0,
@@ -1062,6 +1070,7 @@ class AnalyticsRepository:
             by_prompt.append(
                 {
                     "prompt": r.prompt,
+                    "prompt_label": prompt_label(r.prompt),
                     "model": r.model,
                     "calls": calls,
                     "tokens": tokens,
@@ -1104,6 +1113,11 @@ class AnalyticsRepository:
             .order_by(func.count(func.distinct(AgentTrace.session_id)).desc())
         )
         return [
-            {"stage": r.stage, "sessions": r.sessions or 0, "turns": r.turns or 0}
+            {
+                "stage": r.stage,
+                "stage_label": stage_label(r.stage),
+                "sessions": r.sessions or 0,
+                "turns": r.turns or 0,
+            }
             for r in rows
         ]
