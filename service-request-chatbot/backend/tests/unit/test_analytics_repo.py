@@ -428,3 +428,38 @@ async def test_question_log_can_drop_workflow_input_on_request() -> None:
 
     sql = " ".join(session.compiled).lower()
     assert "workflow_stage_before is null" in sql
+
+
+# ── conversation search ────────────────────────────────────────────────────
+
+
+async def test_conversation_search_covers_id_question_and_person() -> None:
+    """The list shows a session id, a name and the questions asked, so all
+    three must be searchable. Names are resolved to ids by the caller."""
+    session = CompilingSession(rows=[])
+    await AnalyticsRepository(session).recent_sessions(
+        WINDOW, search="handover", user_ids=[str(uuid4())]
+    )
+
+    sql = " ".join(session.compiled).lower()
+    assert "ilike" in sql, "no text match"
+    assert "input_message" in sql, "questions are not searched"
+    assert "user_id in" in sql, "the resolved people are not searched"
+
+
+async def test_conversation_search_is_optional() -> None:
+    session = CompilingSession(rows=[])
+    await AnalyticsRepository(session).recent_sessions(WINDOW)
+
+    sql = " ".join(session.compiled).lower()
+    assert "ilike" not in sql
+
+
+async def test_a_name_only_search_still_filters() -> None:
+    # Searching a name that matches nothing in the text must not fall back to
+    # returning every conversation.
+    session = CompilingSession(rows=[])
+    await AnalyticsRepository(session).recent_sessions(WINDOW, user_ids=["abc"])
+
+    sql = " ".join(session.compiled).lower()
+    assert "user_id in" in sql

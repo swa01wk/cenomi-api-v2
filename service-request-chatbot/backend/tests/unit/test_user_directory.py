@@ -101,3 +101,40 @@ async def test_empty_input_skips_the_load_entirely() -> None:
         with reader_patch:
             assert await user_directory.resolve_names([]) == {}
     reader.fetch_all.assert_not_awaited()
+
+
+# ── searching by the name the dashboard displays ───────────────────────────
+
+
+async def test_finds_a_user_by_name_case_insensitively() -> None:
+    reader_patch, _ = _patch_reader()
+    with patch.object(user_directory.settings, "cenomi_database_url", "postgresql://x"):
+        with reader_patch:
+            ids = await user_directory.find_user_ids("QA Super")
+
+    assert ids == [str(user_id_to_uuid("314726"))]
+
+
+async def test_finds_a_user_by_email() -> None:
+    reader_patch, _ = _patch_reader()
+    with patch.object(user_directory.settings, "cenomi_database_url", "postgresql://x"):
+        with reader_patch:
+            ids = await user_directory.find_user_ids("noname@example.com")
+
+    # This row has no name, so email is the only way to reach it.
+    assert ids == [str(user_id_to_uuid("56716"))]
+
+
+async def test_an_unmatched_name_returns_nothing() -> None:
+    reader_patch, _ = _patch_reader()
+    with patch.object(user_directory.settings, "cenomi_database_url", "postgresql://x"):
+        with reader_patch:
+            assert await user_directory.find_user_ids("nobody here") == []
+
+
+async def test_a_blank_query_does_not_load_the_directory() -> None:
+    reader_patch, reader = _patch_reader()
+    with patch.object(user_directory.settings, "cenomi_database_url", "postgresql://x"):
+        with reader_patch:
+            assert await user_directory.find_user_ids("   ") == []
+    reader.fetch_all.assert_not_awaited()

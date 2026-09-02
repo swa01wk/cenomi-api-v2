@@ -18,7 +18,7 @@ from typing import Any
 from uuid import UUID
 
 import structlog
-from sqlalchemy import Integer, Text, and_, cast, func, literal, select
+from sqlalchemy import Integer, Text, and_, cast, func, literal, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.agent_display import agent_display_name
@@ -709,10 +709,41 @@ class AnalyticsRepository:
         return buckets
 
     async def recent_sessions(
-        self, filters: AnalyticsFilters, *, limit: int = 20, offset: int = 0
+        self,
+        filters: AnalyticsFilters,
+        *,
+        search: str | None = None,
+        user_ids: list[str] | None = None,
+        limit: int = 20,
+        offset: int = 0,
     ) -> tuple[list[dict[str, Any]], int]:
-        """Recent conversations with turn counts, outcome and rating."""
+        """Recent conversations with turn counts, outcome and rating.
+
+        ``search`` matches the three things the list actually shows: the
+        session id, the questions asked, and — via *user_ids*, resolved from
+        the platform directory by the caller — the person's name. Names are
+        not stored in these tables, so they cannot be matched in SQL alone.
+        """
         clauses = filters.trace_clauses()
+
+        needle = (search or "").strip()
+        if needle or user_ids:
+            alternatives: list[Any] = []
+            if needle:
+                pattern = f"%{needle}%"
+                alternatives.append(
+                    cast(AgentTrace.session_id, Text()).ilike(pattern)
+                )
+                alternatives.append(
+                    AgentTrace.session_id.in_(
+                        select(AgentTrace.session_id).where(
+                            AgentTrace.input_message.ilike(pattern)
+                        )
+                    )
+                )
+            if user_ids:
+                alternatives.append(AgentTrace.user_id.in_(user_ids))
+            clauses.append(or_(*alternatives))
 
         grouped = (
             select(

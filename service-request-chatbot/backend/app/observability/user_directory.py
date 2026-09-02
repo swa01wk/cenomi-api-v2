@@ -110,3 +110,27 @@ def reset_cache() -> None:
     """Drop the cached index — used by tests and after a directory sync."""
     _cache.by_uuid = {}
     _cache.loaded_at = 0.0
+
+
+async def find_user_ids(query: str) -> list[str]:
+    """Return chat user ids whose platform name or email matches *query*.
+
+    The dashboard searches by the name it displays, but names live in the
+    platform directory rather than the chat tables — there is nothing to match
+    in SQL. Searching the same reverse index that renders those names is what
+    makes "qa super admin" find that user's conversations.
+    """
+    needle = (query or "").strip().lower()
+    if not needle:
+        return []
+
+    if not _cache.is_fresh():
+        _cache.by_uuid = await _load()
+        _cache.loaded_at = time.monotonic()
+
+    return [
+        uid
+        for uid, entry in _cache.by_uuid.items()
+        if needle in (entry.get("name") or "").lower()
+        or needle in (entry.get("email") or "").lower()
+    ]

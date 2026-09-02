@@ -37,7 +37,7 @@ from app.observability.repositories.analytics_repo import (
     AnalyticsFilters,
     AnalyticsRepository,
 )
-from app.observability.user_directory import resolve_names
+from app.observability.user_directory import find_user_ids, resolve_names
 
 log = structlog.get_logger(__name__)
 
@@ -408,20 +408,19 @@ async def assistant_admin_conversations(
     filters = AnalyticsFilters(from_date=now - timedelta(days=days), to_date=now)
 
     try:
-        if q:
-            # Search matches on question text, so resolve the sessions whose
-            # questions match, then page over those conversations.
-            matches, _ = await repo.questions(filters, search=q, limit=_MAX_LIMIT * 5)
-            wanted = {item["session_id"] for item in matches}
-            all_sessions, _ = await repo.recent_sessions(filters, limit=_MAX_LIMIT * 5)
-            filtered = [s for s in all_sessions if s["session_id"] in wanted]
-            total = len(filtered)
-            start = (page - 1) * limit
-            sessions = filtered[start : start + limit]
-        else:
-            sessions, total = await repo.recent_sessions(
-                filters, limit=limit, offset=(page - 1) * limit
-            )
+        # The list shows a session id, a person's name and the questions asked,
+        # so the search covers all three. Names are not in the chat tables —
+        # they come from the platform directory — so they are resolved to user
+        # ids here and matched in SQL alongside the rest. Paging stays in the
+        # database rather than slicing a capped list in memory.
+        user_ids = await find_user_ids(q) if q else []
+        sessions, total = await repo.recent_sessions(
+            filters,
+            search=q,
+            user_ids=user_ids,
+            limit=limit,
+            offset=(page - 1) * limit,
+        )
     except Exception as exc:
         log.exception("dashboard.assistant_admin_conversations.failed", error=str(exc))
         raise HTTPException(
