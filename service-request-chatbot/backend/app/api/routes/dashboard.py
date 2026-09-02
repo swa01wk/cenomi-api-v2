@@ -262,6 +262,71 @@ def _conversation_row(
 
 
 @router.get(
+    "/assistant-admin/conversations/{session_id}",
+    summary="One conversation — the questions asked and the replies given",
+    dependencies=[Depends(_require_service_token)],
+    responses={status.HTTP_404_NOT_FOUND: {"description": "No such conversation."}},
+)
+async def assistant_admin_conversation_detail(
+    session_id: UUID,
+    db: DbSession,
+    include_silent: bool = Query(
+        default=False,
+        description="Include background sync turns, which carry no question.",
+    ),
+) -> dict[str, Any]:
+    """Return the transcript behind a conversation row."""
+    repo = AnalyticsRepository(db)
+    try:
+        turns = await repo.session_transcript(session_id)
+    except Exception as exc:
+        log.exception("dashboard.conversation_detail.failed", error=str(exc))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Could not load the conversation. Please try again.",
+        ) from exc
+
+    if not turns:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"No conversation found for session {session_id}.",
+        )
+
+    visible = turns if include_silent else [t for t in turns if not t["is_silent"]]
+    user_id = turns[0]["user_id"]
+    names = await _resolve_user_names(db, [user_id])
+
+    return {
+        "success": True,
+        "data": {
+            "session_id": str(session_id),
+            "turns": [
+                {
+                    "trace_id": t["trace_id"],
+                    "asked_at": t["at"],
+                    "question": t["question"],
+                    "answer": t["answer"],
+                    "agent": t["agent_label"],
+                    "intent": t["intent"],
+                    "answer_status": t["answer_status"],
+                    "latency_ms": t["latency_ms"],
+                    "rating": t["rating"],
+                    "comment": t["comment"],
+                    "error": t["error"],
+                }
+                for t in visible
+            ],
+            "total_turns": len(turns),
+            "questions": sum(1 for t in turns if not t["is_silent"]),
+            "silent_turns": sum(1 for t in turns if t["is_silent"]),
+            "started_at": turns[0]["at"],
+            "last_activity_at": turns[-1]["at"],
+            "user_name": names.get(user_id) or f"User {user_id[:8]}",
+        },
+    }
+
+
+@router.get(
     "/assistant-admin/conversations",
     summary="Paginated conversation list for the assistant admin dashboard",
     dependencies=[Depends(_require_service_token)],

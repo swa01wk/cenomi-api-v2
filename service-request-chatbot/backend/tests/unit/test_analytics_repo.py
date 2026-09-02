@@ -271,14 +271,15 @@ async def test_recent_sessions_surfaces_rating_comments() -> None:
 async def test_session_transcript_pairs_questions_with_answers() -> None:
     rows = [
         SimpleNamespace(
-            id=uuid4(), created_at=NOW, input_message="How do I submit an SR?",
+            id=uuid4(), created_at=NOW, user_id=uuid4(),
+            input_message="How do I submit an SR?",
             output_message="Follow these steps...", active_agent=None,
             intent="ASK_HELP", status="SUCCESS", answer_status="ANSWERED",
             total_latency_ms=1200, error_message=None,
             score=5, comment="Nice", source="help_answer",
         ),
         SimpleNamespace(
-            id=uuid4(), created_at=NOW, input_message="  ",
+            id=uuid4(), created_at=NOW, user_id=uuid4(), input_message="  ",
             output_message="ok", active_agent="rdd_handover_agent",
             intent=None, status="SUCCESS", answer_status="ANSWERED",
             total_latency_ms=90, error_message=None,

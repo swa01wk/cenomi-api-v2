@@ -482,6 +482,7 @@ class AnalyticsRepository:
             select(
                 AgentTrace.id,
                 AgentTrace.created_at,
+                AgentTrace.user_id,
                 AgentTrace.input_message,
                 AgentTrace.output_message,
                 AgentTrace.active_agent,
@@ -506,6 +507,7 @@ class AnalyticsRepository:
                 {
                     "trace_id": str(r.id),
                     "at": r.created_at,
+                    "user_id": str(r.user_id),
                     "question": question or None,
                     # A blank question means a background sync, not a user turn.
                     "is_silent": question.lower() in _NON_QUESTION_INPUTS,
