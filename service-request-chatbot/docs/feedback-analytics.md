@@ -246,6 +246,12 @@ Both agents render through one component chain, so one rating row covers both:
 - **Dashboard:** `AssistantRatingCard` (average, count, 1–5 distribution with
   detractor/promoter colouring), an "N unanswered" badge on top questions, and
   a rating column on the conversations table.
+- **Conversation page:** `/dashboard/assistant-admin/conversations/[sessionId]`
+  — the full transcript behind a rating. Stats header (questions, average
+  rating, unanswered turns, start time) then each turn as a card: question,
+  reply, latency, outcome, and the stars and comment that turn earned. Reached
+  by clicking a session id in either conversations table. Backed by
+  `GET /dashboard/assistant-admin/conversations/{session_id}`.
 - **i18n:** EN + AR keys under `srChatbot*` and `assistantAdmin.*`; the star
   row and card mirror in RTL.
 
