@@ -142,6 +142,93 @@ Additive fields for the richer view: `summary_strip.avg_rating`,
 `ratings_count`, `rating_distribution`; `top_questions[].not_answered`; and
 `agent`, `duration_seconds`, `avg_rating`, `srs_created` per conversation.
 
+## How Response Accuracy is calculated
+
+**In one line:** of the questions a user actually asked, the share the agent
+answered.
+
+```
+accuracy_pct = ANSWERED questions ÷ classified questions × 100
+```
+
+### Step 1 — decide what counts as a question
+
+Not every trace is a question. The UI fires blank turns for background syncs
+(a document upload, a form-bridge patch, opening an existing SR) and `"none"`
+for action-only turns. A turn counts as a question when:
+
+```sql
+lower(trim(coalesce(input_message, ''))) NOT IN ('', 'none')
+```
+
+On live data that removes ~1,170 of 3,855 traces — about a third.
+
+### Step 2 — classify each question's outcome
+
+Every finished turn is stamped with an `answer_status` on `agent_traces`:
+
+| Status | Meaning | Set when |
+|---|---|---|
+| `ANSWERED` | Answered, grounded in retrieved content | FAQ retrieval returned context, or a workflow turn completed normally |
+| `PARTIAL` | Answered, but with no retrieval grounding | The FAQ node answered from the static prompt alone |
+| `UNANSWERED` | Not answered | The fallback reply was returned, or the supervisor could not resolve an intent |
+| `FAILED` | The turn errored | The graph raised, or a prompt injection was blocked |
+
+### Step 3 — divide
+
+Both sides are restricted to questions (step 1) that carry a status (step 2):
+
+```
+answered  = questions where answer_status = 'ANSWERED'
+classified = questions where answer_status IS NOT NULL
+accuracy   = answered ÷ classified
+```
+
+`PARTIAL` counts as neither a success nor a failure — it sits in the
+denominator, so a rise in ungrounded answers lowers accuracy without being
+labelled an outright failure.
+
+### Worked example
+
+100 traces in the window:
+
+| | Count | Why |
+|---|---|---|
+| Total traces | 100 | Everything processed |
+| − silent turns | 30 | Blank / `"none"` background syncs — not questions |
+| **Questions asked** | **70** | What `questions_count` reports |
+| − unclassified | 0 | Pre-007 turns; backfilled by migration 008 |
+| **Classified** | **70** | The denominator |
+| ANSWERED | 63 | The numerator |
+| PARTIAL | 3 | In the denominator, not the numerator |
+| UNANSWERED | 3 | |
+| FAILED | 1 | |
+
+```
+accuracy_pct     = 63 ÷ 70 = 90.0%
+escalation_pct   = (3 + 1) ÷ 70 = 5.7%     # UNANSWERED + FAILED
+fallback_rate    = 3 ÷ 70 = 4.3%           # UNANSWERED only
+coverage         = 70 ÷ 70 = 100%
+```
+
+### Always read accuracy with its coverage
+
+The percentage is computed over *classified* questions only. If half the
+window predates outcome classification, a 100% figure describes that half and
+says nothing about the rest. Two fields ship alongside it so the number can
+never be read as more than it is:
+
+- `accuracy_sample_size` — how many questions the percentage covers
+- `accuracy_coverage_pct` — that as a share of all questions asked
+
+This is not hypothetical: before migration 008 backfilled history, the
+dashboard reported **100% accuracy** from a sample of **2** while 2,668
+questions sat unclassified. Show the coverage next to the percentage.
+
+### Current live values
+
+`99.5%` accuracy over `2,668` questions at `100%` coverage.
+
 ## Frontend (cenomi-frontend-2)
 
 Both agents render through one component chain, so one rating row covers both:
