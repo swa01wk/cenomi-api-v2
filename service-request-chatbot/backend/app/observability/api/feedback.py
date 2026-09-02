@@ -14,13 +14,16 @@ from __future__ import annotations
 from uuid import UUID
 
 import structlog
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
+from app.core.security import get_auth_context
 from app.db.session import DbSession
 from app.observability.repositories.feedback_repo import FeedbackRepository
 from app.observability.repositories.trace_repo import TraceRepository
 from app.observability.schemas.api_models import FeedbackResponse
+from app.services.chat_orchestration_service import user_id_to_uuid
+from app.types.chat import AuthContext
 
 log = structlog.get_logger(__name__)
 
@@ -60,12 +63,13 @@ async def submit_feedback(
     trace_id: UUID,
     body: FeedbackBody,
     db: DbSession,
+    auth: AuthContext = Depends(get_auth_context),
 ) -> FeedbackResponse:
     """Attach a feedback signal to a trace.
 
     The trace must exist.  ``run_id`` and ``user_id`` are not accepted here
-    (admin-level endpoint; the user identity comes from the auth layer, not
-    the request body).
+    (admin-level endpoint; the reviewer identity comes from the JWT and is
+    recorded on the row when the caller is signed in).
     """
     trace_repo = TraceRepository(db)
     trace = await trace_repo.get(trace_id)
@@ -75,10 +79,17 @@ async def submit_feedback(
             detail=f"Trace {trace_id} not found",
         )
 
+    reviewer_id = (
+        user_id_to_uuid(auth.subject_id)
+        if auth.subject_id not in ("anonymous", "unauthenticated", "")
+        else None
+    )
     feedback_repo = FeedbackRepository(db)
     row = await feedback_repo.create(
         trace_id=trace_id,
         feedback_type=body.feedback_type,
+        user_id=reviewer_id,
+        session_id=trace.session_id,
         score=body.score,
         label=body.label,
         comment=body.comment,

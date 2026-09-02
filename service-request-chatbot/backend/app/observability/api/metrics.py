@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from fastapi import APIRouter
 from sqlalchemy import func, select
 
-from app.db.models import AgentLLMCall, AgentTrace
+from app.db.models import AgentFeedback, AgentLLMCall, AgentTrace
 from app.db.session import DbSession
 
 router = APIRouter(prefix="/observability")
@@ -42,6 +44,38 @@ async def metrics_summary(db: DbSession) -> dict[str, Any]:
     total_tokens: int = int(llm_row.total_tokens)
     total_cost: float = float(llm_row.total_cost)
 
+    # --- answer-status aggregates (007) ---
+    answer_result = await db.execute(
+        select(
+            func.count(AgentTrace.id)
+            .filter(AgentTrace.answer_status == "ANSWERED")
+            .label("answered"),
+            func.count(AgentTrace.id)
+            .filter(AgentTrace.answer_status == "PARTIAL")
+            .label("partial"),
+            func.count(AgentTrace.id)
+            .filter(AgentTrace.answer_status == "UNANSWERED")
+            .label("unanswered"),
+            func.count(AgentTrace.id)
+            .filter(AgentTrace.answer_status.is_not(None))
+            .label("classified"),
+        )
+    )
+    a = answer_result.one()
+    classified: int = a.classified or 0
+    answered_rate: float = (a.answered / classified) if classified > 0 else 0.0
+
+    # --- end-user rating aggregates (007) ---
+    rating_result = await db.execute(
+        select(
+            func.count(AgentFeedback.id).label("ratings_count"),
+            func.avg(AgentFeedback.score).label("avg_rating"),
+        ).where(AgentFeedback.feedback_type == "USER_RATING")
+    )
+    r = rating_result.one()
+    ratings_count: int = r.ratings_count or 0
+    avg_rating: float | None = float(r.avg_rating) if r.avg_rating is not None else None
+
     return {
         "total_traces": total_traces,
         "success_rate": success_rate,
@@ -49,4 +83,11 @@ async def metrics_summary(db: DbSession) -> dict[str, Any]:
         "avg_latency_ms": avg_latency_ms if avg_latency_ms is not None else 0,
         "total_tokens": total_tokens,
         "total_cost": total_cost,
+        # Additive fields — answered/unanswered classification + CSAT.
+        "answered_traces": a.answered or 0,
+        "partial_traces": a.partial or 0,
+        "unanswered_traces": a.unanswered or 0,
+        "answered_rate": answered_rate,
+        "ratings_count": ratings_count,
+        "avg_rating": avg_rating,
     }

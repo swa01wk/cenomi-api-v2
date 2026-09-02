@@ -141,3 +141,58 @@ async def test_list_for_trace_single(
 
     assert len(result) == 1
     assert result[0].feedback_type == "THUMBS_DOWN"
+
+
+# ── upsert_user_rating ─────────────────────────────────────────────────────
+
+
+async def test_upsert_creates_when_no_existing_rating(
+    mock_session, make_execute_result
+) -> None:
+    mock_session.execute.return_value = make_execute_result(scalar=None)
+    repo = FeedbackRepository(mock_session)
+    trace_id, user_id = uuid4(), uuid4()
+
+    row, created = await repo.upsert_user_rating(
+        trace_id=trace_id,
+        user_id=user_id,
+        score=4,
+        comment="good",
+        source="help_answer",
+    )
+
+    assert created is True
+    assert row.feedback_type == "USER_RATING"
+    assert row.score == 4
+    assert row.source == "help_answer"
+    mock_session.add.assert_called_once_with(row)
+
+
+async def test_upsert_updates_existing_rating(
+    mock_session, make_execute_result
+) -> None:
+    trace_id, user_id = uuid4(), uuid4()
+    existing = _make_feedback(
+        trace_id=trace_id,
+        user_id=user_id,
+        feedback_type="USER_RATING",
+        score=2,
+        comment="meh",
+    )
+    mock_session.execute.return_value = make_execute_result(scalar=existing)
+    repo = FeedbackRepository(mock_session)
+
+    row, created = await repo.upsert_user_rating(
+        trace_id=trace_id,
+        user_id=user_id,
+        score=5,
+        comment="fixed now",
+        sr_id="11711",
+    )
+
+    assert created is False
+    assert row is existing
+    assert row.score == 5
+    assert row.comment == "fixed now"
+    assert row.sr_id == "11711"
+    mock_session.add.assert_not_called()

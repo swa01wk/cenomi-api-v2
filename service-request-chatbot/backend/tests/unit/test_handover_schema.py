@@ -463,6 +463,8 @@ class TestServiceRequestGraphState:
         "response_message", "response_ui", "response_decorations",
         # FAQ RAG citations
         "faq_sources",
+        # Turn outcome classification (analytics)
+        "answer_status",
         # UI-layer overrides (not persisted)
         "action_override", "corrected_fields",
         # Runtime-only services (not serialised)

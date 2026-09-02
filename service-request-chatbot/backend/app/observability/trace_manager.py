@@ -107,6 +107,7 @@ class TraceManager:
         workflow_stage_after: str | None = None,
         total_token_count: int | None = None,
         estimated_cost: Decimal | None = None,
+        answer_status: str | None = None,
     ) -> None:
         """Mark a trace as successfully completed."""
         try:
@@ -130,6 +131,7 @@ class TraceManager:
                 # Explicit caller values take precedence; fall back to accumulators
                 total_token_count=total_token_count or accumulated_tokens,
                 estimated_cost=estimated_cost or accumulated_cost,
+                answer_status=answer_status,
             )
             if final_state:
                 await self.capture_state_snapshot(
@@ -171,6 +173,7 @@ class TraceManager:
                 intent=intent,
                 workflow_stage_before=workflow_stage_before,
                 total_latency_ms=latency_ms,
+                answer_status="FAILED",
             )
             if final_state:
                 await self.capture_state_snapshot(
