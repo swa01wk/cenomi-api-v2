@@ -18,7 +18,7 @@ from typing import Any
 from uuid import UUID
 
 import structlog
-from sqlalchemy import Integer, Text, cast, func, select
+from sqlalchemy import Integer, Text, cast, func, literal, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import (
@@ -646,6 +646,12 @@ class AnalyticsRepository:
             select(
                 AgentFeedback.session_id.label("session_id"),
                 func.avg(AgentFeedback.score).label("avg_score"),
+                func.count(AgentFeedback.id).label("ratings_count"),
+                # What the user actually wrote is the most useful cell in the
+                # row — surface it rather than making someone open the trace.
+                func.string_agg(
+                    AgentFeedback.comment, literal(" | ")
+                ).label("comments"),
             )
             .where(
                 AgentFeedback.feedback_type == _USER_RATING,
@@ -676,6 +682,8 @@ class AnalyticsRepository:
                 grouped.c.agent,
                 first_message.c.first_at,
                 rating.c.avg_score,
+                rating.c.ratings_count,
+                rating.c.comments,
                 func.coalesce(created_srs.c.created, 0).label("srs_created"),
             )
             .select_from(grouped)
@@ -707,6 +715,8 @@ class AnalyticsRepository:
                     "avg_rating": (
                         round(float(r.avg_score), 2) if r.avg_score is not None else None
                     ),
+                    "ratings_count": r.ratings_count or 0,
+                    "comment": r.comments,
                 }
             )
         return items, total

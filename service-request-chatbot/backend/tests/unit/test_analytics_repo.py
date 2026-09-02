@@ -246,3 +246,20 @@ def test_filters_emit_only_the_clauses_that_were_set() -> None:
         user_id=uuid4(),
     )
     assert len(full.trace_clauses()) == 4
+
+
+# ── session comments ───────────────────────────────────────────────────────
+
+
+async def test_recent_sessions_surfaces_rating_comments() -> None:
+    """The written feedback is the most useful cell in a conversation row.
+
+    It has to come out of the same query as the rating — asking someone to
+    open the trace to read one word defeats the point of the column.
+    """
+    session = CompilingSession(row=_engagement_row())
+    await AnalyticsRepository(session).recent_sessions(WINDOW)
+
+    sql = " ".join(session.compiled).lower()
+    assert "string_agg" in sql, "comments are not aggregated per session"
+    assert "comment" in sql

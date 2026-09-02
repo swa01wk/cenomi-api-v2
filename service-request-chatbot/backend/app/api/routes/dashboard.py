@@ -37,6 +37,7 @@ from app.observability.repositories.analytics_repo import (
     AnalyticsFilters,
     AnalyticsRepository,
 )
+from app.observability.user_directory import resolve_names
 
 log = structlog.get_logger(__name__)
 
@@ -73,21 +74,40 @@ def _time_label(moment: datetime | None, now: datetime) -> str:
 async def _resolve_user_names(
     db: DbSession, user_ids: list[str]
 ) -> dict[str, str]:
-    """Map chat user ids to usernames where a platform user row exists.
+    """Map chat user ids to display names.
 
-    Chat user ids are uuid5-derived for non-UUID platform subjects, so a row
-    is not guaranteed; callers fall back to a short id label.
+    Two sources, in order: the platform directory (where nearly every real
+    user lives, reached by reversing the uuid5 subject hash), then the local
+    ``users`` table used by login-gated chat.  Anything still unresolved —
+    service accounts, the anonymous stub — falls back to a short id label.
     """
+    names: dict[str, str] = {}
+
+    try:
+        directory = await resolve_names(user_ids)
+        for uid, entry in directory.items():
+            label = entry.get("name") or entry.get("email")
+            if label:
+                names[uid] = label
+    except Exception:
+        # A directory outage must not take the dashboard down with it.
+        log.warning("dashboard.user_directory_failed", exc_info=True)
+
+    missing = [u for u in user_ids if u and u not in names]
     parsed: list[UUID] = []
-    for raw in user_ids:
+    for raw in missing:
         try:
             parsed.append(UUID(raw))
         except (ValueError, AttributeError, TypeError):
             continue
-    if not parsed:
-        return {}
-    rows = await db.execute(select(User.id, User.username).where(User.id.in_(parsed)))
-    return {str(r.id): r.username for r in rows}
+    if parsed:
+        rows = await db.execute(
+            select(User.id, User.username).where(User.id.in_(parsed))
+        )
+        for row in rows:
+            names[str(row.id)] = row.username
+
+    return names
 
 
 async def _period_block(
@@ -219,6 +239,10 @@ def _conversation_row(
         "agent": session["agent"],
         "duration_seconds": session["duration_seconds"],
         "avg_rating": session["avg_rating"],
+        "ratings_count": session.get("ratings_count", 0),
+        # What the user wrote alongside their stars, joined when a session
+        # carries more than one comment.
+        "comment": session.get("comment"),
         "srs_created": session["srs_created"],
     }
 
