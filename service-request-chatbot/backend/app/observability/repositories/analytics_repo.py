@@ -26,6 +26,8 @@ from app.agents.agent_display import agent_display_name
 from app.db.models import (
     AgentFeedback,
     AgentLLMCall,
+    AgentRun,
+    AgentToolCall,
     AgentTrace,
     ChatMessage,
     ServiceRequestChatAuditLog,
@@ -895,3 +897,192 @@ class AnalyticsRepository:
                 }
             )
         return breakdown
+
+    # ------------------------------------------------------------------
+    # Operational insights (agent_runs / agent_tool_calls / agent_llm_calls)
+    # ------------------------------------------------------------------
+
+    async def node_latency(
+        self, filters: AnalyticsFilters, *, limit: int = 10
+    ) -> list[dict[str, Any]]:
+        """Slowest graph nodes — where a turn's time actually goes.
+
+        Ranked by p95 rather than the mean: a node that is usually fast but
+        occasionally stalls is the one users notice, and averaging hides it.
+        """
+        clauses: list[Any] = [AgentRun.latency_ms.is_not(None)]
+        if filters.from_date is not None:
+            clauses.append(AgentRun.started_at >= filters.from_date)
+        if filters.to_date is not None:
+            clauses.append(AgentRun.started_at <= filters.to_date)
+
+        rows = await self._session.execute(
+            select(
+                AgentRun.run_name.label("node"),
+                func.count(AgentRun.id).label("calls"),
+                func.avg(AgentRun.latency_ms).label("avg_ms"),
+                func.percentile_cont(0.95)
+                .within_group(AgentRun.latency_ms.asc())
+                .label("p95_ms"),
+                func.max(AgentRun.latency_ms).label("max_ms"),
+                func.count(AgentRun.id)
+                .filter(AgentRun.status == "FAILED")
+                .label("failed"),
+            )
+            .where(*clauses)
+            .group_by(AgentRun.run_name)
+            .order_by(
+                func.percentile_cont(0.95)
+                .within_group(AgentRun.latency_ms.asc())
+                .desc()
+            )
+            .limit(limit)
+        )
+        return [
+            {
+                "node": r.node,
+                "calls": r.calls or 0,
+                "avg_ms": round(float(r.avg_ms)) if r.avg_ms is not None else 0,
+                "p95_ms": round(float(r.p95_ms)) if r.p95_ms is not None else 0,
+                "max_ms": r.max_ms or 0,
+                "failed": r.failed or 0,
+            }
+            for r in rows
+        ]
+
+    async def tool_health(self, filters: AnalyticsFilters) -> list[dict[str, Any]]:
+        """Platform API calls the agent makes: reliability and latency.
+
+        When a workflow stalls the cause is usually here rather than in the
+        model, so failures are surfaced per endpoint.
+        """
+        clauses: list[Any] = []
+        if filters.from_date is not None:
+            clauses.append(AgentToolCall.created_at >= filters.from_date)
+        if filters.to_date is not None:
+            clauses.append(AgentToolCall.created_at <= filters.to_date)
+
+        rows = await self._session.execute(
+            select(
+                AgentToolCall.tool_name.label("tool"),
+                func.count(AgentToolCall.id).label("calls"),
+                func.count(AgentToolCall.id)
+                .filter(AgentToolCall.success.is_(False))
+                .label("failed"),
+                func.avg(AgentToolCall.latency_ms).label("avg_ms"),
+                func.percentile_cont(0.95)
+                .within_group(AgentToolCall.latency_ms.asc())
+                .label("p95_ms"),
+            )
+            .where(*clauses)
+            .group_by(AgentToolCall.tool_name)
+            .order_by(func.count(AgentToolCall.id).desc())
+        )
+        health: list[dict[str, Any]] = []
+        for r in rows:
+            calls = r.calls or 0
+            failed = r.failed or 0
+            health.append(
+                {
+                    "tool": r.tool,
+                    "calls": calls,
+                    "failed": failed,
+                    "success_rate": round((calls - failed) / calls, 4) if calls else 0.0,
+                    "avg_ms": round(float(r.avg_ms)) if r.avg_ms is not None else 0,
+                    "p95_ms": round(float(r.p95_ms)) if r.p95_ms is not None else 0,
+                }
+            )
+        return health
+
+    async def llm_usage(self, filters: AnalyticsFilters) -> dict[str, Any]:
+        """Token spend and reliability per prompt and model.
+
+        ``cost_coverage`` is reported alongside the cost because pricing is not
+        known for every model — an unpriced call records no cost, so a total
+        without its coverage understates spend silently.
+        """
+        clauses: list[Any] = []
+        if filters.from_date is not None:
+            clauses.append(AgentLLMCall.created_at >= filters.from_date)
+        if filters.to_date is not None:
+            clauses.append(AgentLLMCall.created_at <= filters.to_date)
+
+        rows = await self._session.execute(
+            select(
+                func.coalesce(AgentLLMCall.prompt_name, "unnamed").label("prompt"),
+                func.coalesce(AgentLLMCall.model, "unknown").label("model"),
+                func.count(AgentLLMCall.id).label("calls"),
+                func.coalesce(func.sum(AgentLLMCall.total_tokens), 0).label("tokens"),
+                func.avg(AgentLLMCall.total_tokens).label("avg_tokens"),
+                func.avg(AgentLLMCall.latency_ms).label("avg_ms"),
+                func.count(AgentLLMCall.id)
+                .filter(AgentLLMCall.parse_success.is_(False))
+                .label("parse_failures"),
+                func.coalesce(func.sum(AgentLLMCall.estimated_cost), 0).label("cost"),
+                func.count(AgentLLMCall.id)
+                .filter(AgentLLMCall.estimated_cost.is_not(None))
+                .label("priced"),
+            )
+            .where(*clauses)
+            .group_by("prompt", "model")
+            .order_by(func.coalesce(func.sum(AgentLLMCall.total_tokens), 0).desc())
+        )
+
+        by_prompt: list[dict[str, Any]] = []
+        total_tokens = 0
+        total_calls = 0
+        total_priced = 0
+        for r in rows:
+            tokens = int(r.tokens or 0)
+            calls = r.calls or 0
+            total_tokens += tokens
+            total_calls += calls
+            total_priced += r.priced or 0
+            by_prompt.append(
+                {
+                    "prompt": r.prompt,
+                    "model": r.model,
+                    "calls": calls,
+                    "tokens": tokens,
+                    "avg_tokens": round(float(r.avg_tokens)) if r.avg_tokens else 0,
+                    "avg_ms": round(float(r.avg_ms)) if r.avg_ms is not None else 0,
+                    "parse_failures": r.parse_failures or 0,
+                    "parse_failure_rate": (
+                        round((r.parse_failures or 0) / calls, 4) if calls else 0.0
+                    ),
+                    "cost": float(r.cost or 0),
+                    "priced_calls": r.priced or 0,
+                }
+            )
+
+        # Share of total tokens, so the dominant prompt is obvious.
+        for entry in by_prompt:
+            entry["token_share"] = (
+                round(entry["tokens"] / total_tokens, 4) if total_tokens else 0.0
+            )
+
+        return {
+            "by_prompt": by_prompt,
+            "total_calls": total_calls,
+            "total_tokens": total_tokens,
+            "cost_coverage": (
+                round(total_priced / total_calls, 4) if total_calls else 0.0
+            ),
+        }
+
+    async def workflow_funnel(self, filters: AnalyticsFilters) -> list[dict[str, Any]]:
+        """Sessions that reached each workflow stage — where SR flows stall."""
+        rows = await self._session.execute(
+            select(
+                AgentTrace.workflow_stage_after.label("stage"),
+                func.count(func.distinct(AgentTrace.session_id)).label("sessions"),
+                func.count(AgentTrace.id).label("turns"),
+            )
+            .where(*filters.trace_clauses(), AgentTrace.workflow_stage_after.is_not(None))
+            .group_by(AgentTrace.workflow_stage_after)
+            .order_by(func.count(func.distinct(AgentTrace.session_id)).desc())
+        )
+        return [
+            {"stage": r.stage, "sessions": r.sessions or 0, "turns": r.turns or 0}
+            for r in rows
+        ]

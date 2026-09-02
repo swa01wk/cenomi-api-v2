@@ -2,15 +2,17 @@
 
 Endpoints
 ---------
-GET /analytics/overview     — headline KPIs, daily series, agent breakdown
-GET /analytics/questions    — question log, filterable to the unanswered ones
-GET /analytics/feedback     — star distribution and the comment feed
-GET /analytics/engagement   — sessions, time spent, recent conversations
+GET /analytics/overview       — headline KPIs, daily series, agent breakdown
+GET /analytics/questions      — question log, filterable to the unanswered ones
+GET /analytics/sessions/{id}  — one conversation's transcript with its ratings
+GET /analytics/feedback       — star distribution and the comment feed
+GET /analytics/engagement     — sessions, time spent, recent conversations
+GET /analytics/insights       — node latency, API health, token spend, funnel
 
-All four are read-only aggregates over the agent observability tables and
-accept the same window filters (``from``/``to``/``agent``/``user_id``).
-Defaults to the trailing 30 days when no window is given, so a bare call is
-still a bounded query.
+All are read-only aggregates over the agent observability tables and accept
+the same window filters (``from``/``to``/``agent``/``user_id``). Defaults to
+the trailing 30 days when no window is given, so a bare call is still a
+bounded query.
 """
 
 from __future__ import annotations
@@ -232,6 +234,48 @@ async def analytics_session(
                 for t in rated
             ],
         },
+    }
+
+
+@router.get(
+    "/insights",
+    summary="Operational insights — where time, money and failures actually go",
+    description=(
+        "Reads the tracing tables the dashboard does not otherwise touch: "
+        "per-node latency from agent_runs, platform API reliability from "
+        "agent_tool_calls, token spend and parse reliability from "
+        "agent_llm_calls, and workflow stage drop-off from the traces."
+    ),
+)
+async def analytics_insights(
+    db: DbSession,
+    filters: AnalyticsFilters = Depends(_filters),
+    auth: AuthContext = Depends(get_auth_context),
+) -> dict[str, Any]:
+    """Return operational insights for the window."""
+    repo = AnalyticsRepository(db)
+
+    nodes = await repo.node_latency(filters)
+    tools = await repo.tool_health(filters)
+    llm = await repo.llm_usage(filters)
+    funnel = await repo.workflow_funnel(filters)
+
+    # The headline each section is worth surfacing on its own.
+    slowest = nodes[0] if nodes else None
+    worst_tool = min(tools, key=lambda x: x["success_rate"]) if tools else None
+    top_prompt = llm["by_prompt"][0] if llm["by_prompt"] else None
+
+    return {
+        "window": {"from": filters.from_date, "to": filters.to_date},
+        "highlights": {
+            "slowest_node": slowest,
+            "least_reliable_tool": worst_tool,
+            "biggest_token_consumer": top_prompt,
+        },
+        "node_latency": nodes,
+        "tool_health": tools,
+        "llm_usage": llm,
+        "workflow_funnel": funnel,
     }
 
 

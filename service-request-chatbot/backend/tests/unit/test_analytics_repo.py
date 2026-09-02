@@ -310,3 +310,86 @@ async def test_outcome_counts_ignore_silent_turns() -> None:
     sql = " ".join(session.compiled).lower()
     # The answer_status filters carry the real-question predicate alongside.
     assert sql.count("'none'") >= 2, "outcome counts are not question-scoped"
+
+
+# ── operational insights ───────────────────────────────────────────────────
+
+
+async def test_node_latency_ranks_by_p95_not_average() -> None:
+    """A node that is usually fast but occasionally stalls is the one users
+    notice; ranking by mean hides it."""
+    session = CompilingSession(rows=[])
+    await AnalyticsRepository(session).node_latency(WINDOW)
+
+    sql = " ".join(session.compiled).lower()
+    assert "percentile_cont" in sql
+    assert "order by" in sql
+
+
+async def test_tool_health_reports_success_rate_per_endpoint() -> None:
+    rows = [
+        SimpleNamespace(tool="lease_tenant_api", calls=458, failed=13,
+                        avg_ms=141.0, p95_ms=539.0),
+        SimpleNamespace(tool="sr_api.create", calls=34, failed=2,
+                        avg_ms=3605.0, p95_ms=30008.0),
+    ]
+    session = CompilingSession(rows=rows)
+
+    health = await AnalyticsRepository(session).tool_health(WINDOW)
+
+    assert health[0]["success_rate"] == round(445 / 458, 4)
+    assert health[1]["failed"] == 2
+    assert health[1]["p95_ms"] == 30008
+
+
+async def test_tool_health_survives_an_endpoint_with_no_calls() -> None:
+    session = CompilingSession(
+        rows=[SimpleNamespace(tool="x", calls=0, failed=0, avg_ms=None, p95_ms=None)]
+    )
+    health = await AnalyticsRepository(session).tool_health(WINDOW)
+    # No division by zero, and no None leaking out.
+    assert health[0]["success_rate"] == 0.0
+    assert health[0]["avg_ms"] == 0
+
+
+async def test_llm_usage_shares_and_cost_coverage() -> None:
+    rows = [
+        SimpleNamespace(prompt="handover_extraction_prompt", model="gpt-4o-mini",
+                        calls=1710, tokens=10947468, avg_tokens=6402.0,
+                        avg_ms=1583.0, parse_failures=0, cost=0.0651, priced=64),
+        SimpleNamespace(prompt="supervisor_prompt", model="gpt-4o-mini",
+                        calls=336, tokens=1029418, avg_tokens=3064.0,
+                        avg_ms=2558.0, parse_failures=4, cost=0.0255, priced=49),
+    ]
+    session = CompilingSession(rows=rows)
+
+    usage = await AnalyticsRepository(session).llm_usage(WINDOW)
+
+    assert usage["total_tokens"] == 10947468 + 1029418
+    # The dominant prompt should be obvious without doing the arithmetic.
+    assert usage["by_prompt"][0]["token_share"] > 0.9
+    assert usage["by_prompt"][1]["parse_failure_rate"] == round(4 / 336, 4)
+    # Coverage exposes that most calls carry no price — a bare total would
+    # understate spend silently.
+    assert usage["cost_coverage"] == round((64 + 49) / (1710 + 336), 4)
+
+
+async def test_llm_usage_handles_no_calls() -> None:
+    session = CompilingSession(rows=[])
+    usage = await AnalyticsRepository(session).llm_usage(WINDOW)
+    assert usage["total_tokens"] == 0
+    assert usage["cost_coverage"] == 0.0
+    assert usage["by_prompt"] == []
+
+
+async def test_workflow_funnel_counts_sessions_per_stage() -> None:
+    rows = [
+        SimpleNamespace(stage="CREATE_SR", sessions=269, turns=2577),
+        SimpleNamespace(stage="SR_CREATED", sessions=39, turns=42),
+    ]
+    session = CompilingSession(rows=rows)
+
+    funnel = await AnalyticsRepository(session).workflow_funnel(WINDOW)
+
+    assert funnel[0] == {"stage": "CREATE_SR", "sessions": 269, "turns": 2577}
+    assert funnel[1]["sessions"] == 39
