@@ -112,7 +112,8 @@ async def _period_block(
 
     return {
         "accuracy_pct": accuracy_pct,
-        "questions_count": totals["total_turns"],
+        # Real questions only — silent refresh turns are excluded.
+        "questions_count": totals["questions"],
         # Approximated as the busiest hour's distinct-session count — the
         # closest honest reading of concurrency from turn timestamps.
         "peak_concurrent_users": max(hourly) if hourly else 0,

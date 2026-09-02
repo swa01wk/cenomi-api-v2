@@ -37,6 +37,20 @@ SESSION_IDLE_CUTOFF_MINUTES = 30
 
 _USER_RATING = "USER_RATING"
 
+# Inputs that are not questions a user asked.  The UI sends a blank or
+# whitespace message for silent refresh turns (a document upload, a form-bridge
+# patch, opening an existing SR), and "none" for action-only turns.  Counting
+# them would inflate question volume and dominate the top-questions report —
+# on live data they are roughly a third of all traces.
+_NON_QUESTION_INPUTS: frozenset[str] = frozenset({"", "none"})
+
+
+def _is_real_question() -> Any:
+    """SQL clause matching traces whose input is a question a user typed."""
+    return func.lower(func.trim(func.coalesce(AgentTrace.input_message, ""))).notin_(
+        _NON_QUESTION_INPUTS
+    )
+
 
 @dataclass(frozen=True, slots=True)
 class AnalyticsFilters:
@@ -75,6 +89,11 @@ class AnalyticsRepository:
         result = await self._session.execute(
             select(
                 func.count(AgentTrace.id).label("total_turns"),
+                # Turns the user actually asked something, as opposed to the
+                # silent refresh turns the UI fires in the background.
+                func.count(AgentTrace.id)
+                .filter(_is_real_question())
+                .label("questions"),
                 func.count(AgentTrace.id)
                 .filter(AgentTrace.answer_status == "ANSWERED")
                 .label("answered"),
@@ -117,6 +136,7 @@ class AnalyticsRepository:
 
         return {
             "total_turns": total,
+            "questions": row.questions or 0,
             "answered": answered,
             "partial": row.partial or 0,
             "unanswered": unanswered,
@@ -343,8 +363,7 @@ class AnalyticsRepository:
             clauses.append(AgentTrace.answer_status == answer_status)
         if search:
             clauses.append(AgentTrace.input_message.ilike(f"%{search}%"))
-        # Empty inputs are silent refresh turns, not questions a user asked.
-        clauses.append(func.coalesce(AgentTrace.input_message, "") != "")
+        clauses.append(_is_real_question())
 
         total_result = await self._session.execute(
             select(func.count(AgentTrace.id)).where(*clauses)
@@ -418,7 +437,7 @@ class AnalyticsRepository:
                 .filter(AgentTrace.answer_status.in_(["UNANSWERED", "FAILED"]))
                 .label("not_answered"),
             )
-            .where(*filters.trace_clauses(), func.coalesce(AgentTrace.input_message, "") != "")
+            .where(*filters.trace_clauses(), _is_real_question())
             .group_by(normalized)
             .order_by(func.count(AgentTrace.id).desc())
             .limit(limit)
@@ -523,7 +542,12 @@ class AnalyticsRepository:
                 func.min(ChatMessage.created_at).label("first_at"),
                 func.max(ChatMessage.created_at).label("last_at"),
                 func.count(ChatMessage.id)
-                .filter(ChatMessage.role == "user")
+                .filter(
+                    ChatMessage.role == "user",
+                    func.lower(
+                        func.trim(func.coalesce(ChatMessage.content, ""))
+                    ).notin_(_NON_QUESTION_INPUTS),
+                )
                 .label("user_turns"),
             )
             .where(*clauses)

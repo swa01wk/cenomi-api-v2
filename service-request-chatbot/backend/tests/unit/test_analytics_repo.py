@@ -54,8 +54,8 @@ class CompilingSession:
 
 def _totals_row(**overrides):
     base = dict(
-        total_turns=10, answered=6, partial=1, unanswered=2, failed_answers=1,
-        classified=10, failed_traces=1, sessions=4, users=2,
+        total_turns=10, questions=8, answered=6, partial=1, unanswered=2,
+        failed_answers=1, classified=10, failed_traces=1, sessions=4, users=2,
         avg_latency_ms=900.0, tokens=1000, cost=0.5,
     )
     base.update(overrides)
@@ -71,6 +71,8 @@ async def test_turn_totals_compiles_and_derives_rates() -> None:
 
     assert session.compiled, "no statement was compiled"
     assert result["total_turns"] == 10
+    # Silent refresh turns count as processed turns but not as questions.
+    assert result["questions"] == 8
     assert result["success_rate"] == 0.6
     # Failure = unanswered + failed over the same denominator.
     assert result["failure_rate"] == 0.3
@@ -80,8 +82,9 @@ async def test_turn_totals_compiles_and_derives_rates() -> None:
 async def test_turn_totals_handles_an_empty_window() -> None:
     session = CompilingSession(
         row=_totals_row(
-            total_turns=0, answered=0, partial=0, unanswered=0, failed_answers=0,
-            classified=0, sessions=0, users=0, avg_latency_ms=None, tokens=0, cost=0,
+            total_turns=0, questions=0, answered=0, partial=0, unanswered=0,
+            failed_answers=0, classified=0, sessions=0, users=0,
+            avg_latency_ms=None, tokens=0, cost=0,
         )
     )
     result = await AnalyticsRepository(session).turn_totals(WINDOW)
@@ -200,6 +203,34 @@ async def test_agent_breakdown_labels_unrouted_turns() -> None:
     assert breakdown[0]["answered_rate"] == 0.5
     assert breakdown[1]["answered_rate"] == 0.8
     assert breakdown[1]["avg_latency_ms"] == 0
+
+
+# ── silent-turn exclusion ──────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("method", ["questions", "top_questions"])
+async def test_question_queries_exclude_silent_turns(method: str) -> None:
+    """The UI fires blank and "none" turns for background syncs.
+
+    On live data those are about a third of all traces, and counting them
+    buried the real top questions under an empty string. Both question
+    queries must filter them out in SQL.
+    """
+    session = CompilingSession(row=_engagement_row())
+    await getattr(AnalyticsRepository(session), method)(WINDOW)
+
+    sql = " ".join(session.compiled).lower()
+    assert "trim" in sql, "input is not trimmed before comparison"
+    assert "'none'" in sql, "the 'none' placeholder is not excluded"
+
+
+async def test_turn_totals_counts_questions_separately_from_turns() -> None:
+    session = CompilingSession(row=_totals_row(total_turns=10, questions=8))
+    result = await AnalyticsRepository(session).turn_totals(WINDOW)
+
+    # Latency and cost cover every turn; "questions asked" must not.
+    assert result["total_turns"] == 10
+    assert result["questions"] == 8
 
 
 # ── filters ────────────────────────────────────────────────────────────────
