@@ -262,6 +262,66 @@ def _conversation_row(
 
 
 @router.get(
+    "/assistant-admin/insights",
+    summary="Agent health — node latency, API reliability, token spend, funnel",
+    dependencies=[Depends(_require_service_token)],
+)
+async def assistant_admin_insights(
+    db: DbSession,
+    days: int = Query(
+        default=30, ge=1, le=365, description="Look-back window in days."
+    ),
+) -> dict[str, Any]:
+    """Operational view of the agent, in the dashboard's envelope.
+
+    Reads the tracing tables the tenant-facing metrics do not touch:
+    ``agent_runs`` for per-node latency, ``agent_tool_calls`` for platform API
+    reliability, and ``agent_llm_calls`` for token spend.
+    """
+    now = datetime.now(timezone.utc)
+    repo = AnalyticsRepository(db)
+    filters = AnalyticsFilters(from_date=now - timedelta(days=days), to_date=now)
+
+    try:
+        nodes = await repo.node_latency(filters)
+        tools = await repo.tool_health(filters)
+        llm = await repo.llm_usage(filters)
+        funnel = await repo.workflow_funnel(filters)
+        totals = await repo.turn_totals(filters)
+    except Exception as exc:
+        log.exception("dashboard.assistant_admin_insights.failed", error=str(exc))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Could not build agent health. Please try again.",
+        ) from exc
+
+    return {
+        "success": True,
+        "data": {
+            "window_days": days,
+            "highlights": {
+                "slowest_node": nodes[0] if nodes else None,
+                "least_reliable_tool": (
+                    min(tools, key=lambda x: x["success_rate"]) if tools else None
+                ),
+                "biggest_token_consumer": (
+                    llm["by_prompt"][0] if llm["by_prompt"] else None
+                ),
+            },
+            "node_latency": nodes,
+            "tool_health": tools,
+            "llm_usage": llm,
+            "workflow_funnel": funnel,
+            "turn_totals": {
+                "total_turns": totals["total_turns"],
+                "failed_traces": totals["failed_traces"],
+                "avg_latency_ms": totals["avg_latency_ms"],
+            },
+        },
+    }
+
+
+@router.get(
     "/assistant-admin/conversations/{session_id}",
     summary="One conversation — the questions asked and the replies given",
     dependencies=[Depends(_require_service_token)],
