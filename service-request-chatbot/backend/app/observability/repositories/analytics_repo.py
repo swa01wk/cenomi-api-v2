@@ -18,7 +18,7 @@ from typing import Any
 from uuid import UUID
 
 import structlog
-from sqlalchemy import Integer, Text, cast, func, literal, select
+from sqlalchemy import Integer, Text, and_, cast, func, literal, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.agent_display import agent_display_name
@@ -50,10 +50,26 @@ _NON_QUESTION_INPUTS: frozenset[str] = frozenset({"", "none"})
 
 
 def _is_real_question() -> Any:
-    """SQL clause matching traces whose input is a question a user typed."""
+    """SQL clause matching traces whose input is text a user actually typed."""
     return func.lower(func.trim(func.coalesce(AgentTrace.input_message, ""))).notin_(
         _NON_QUESTION_INPUTS
     )
+
+
+def _is_standalone_question() -> Any:
+    """SQL clause matching turns that are questions rather than form input.
+
+    Once a service-request workflow is running, the user's turns are answers
+    to the agent's prompts — a lease code, a date, "yes, please submit". They
+    are real turns and still count toward volume and accuracy, but they are
+    not questions, and counting them buries the actual questions: on live data
+    "20/08/2026" and "t0111600" outranked everything a user genuinely asked.
+
+    ``workflow_stage_before IS NULL`` separates the two exactly. A help
+    question and the utterance that starts a workflow both arrive with no
+    stage in progress; every field response arrives with one.
+    """
+    return and_(_is_real_question(), AgentTrace.workflow_stage_before.is_(None))
 
 
 @dataclass(frozen=True, slots=True)
@@ -363,6 +379,7 @@ class AnalyticsRepository:
         *,
         answer_status: str | None = None,
         search: str | None = None,
+        questions_only: bool = False,
         limit: int = 50,
         offset: int = 0,
     ) -> tuple[list[dict[str, Any]], int]:
@@ -372,7 +389,11 @@ class AnalyticsRepository:
             clauses.append(AgentTrace.answer_status == answer_status)
         if search:
             clauses.append(AgentTrace.input_message.ilike(f"%{search}%"))
-        clauses.append(_is_real_question())
+        # questions_only drops mid-workflow form input (a date, a lease code,
+        # "yes"), leaving what users actually asked.
+        clauses.append(
+            _is_standalone_question() if questions_only else _is_real_question()
+        )
 
         total_result = await self._session.execute(
             select(func.count(AgentTrace.id)).where(*clauses)
@@ -447,7 +468,7 @@ class AnalyticsRepository:
                 .filter(AgentTrace.answer_status.in_(["UNANSWERED", "FAILED"]))
                 .label("not_answered"),
             )
-            .where(*filters.trace_clauses(), _is_real_question())
+            .where(*filters.trace_clauses(), _is_standalone_question())
             .group_by(normalized)
             .order_by(func.count(AgentTrace.id).desc())
             .limit(limit)

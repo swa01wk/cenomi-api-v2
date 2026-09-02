@@ -393,3 +393,34 @@ async def test_workflow_funnel_counts_sessions_per_stage() -> None:
 
     assert funnel[0] == {"stage": "CREATE_SR", "sessions": 269, "turns": 2577}
     assert funnel[1]["sessions"] == 39
+
+
+# ── questions vs workflow form input ───────────────────────────────────────
+
+
+async def test_top_questions_excludes_mid_workflow_form_input() -> None:
+    """Once a flow is running, a user's turns are field values — a lease code,
+    a date, "yes". On live data those outranked every real question."""
+    session = CompilingSession(rows=[])
+    await AnalyticsRepository(session).top_questions(WINDOW)
+
+    sql = " ".join(session.compiled).lower()
+    assert "workflow_stage_before is null" in sql
+
+
+async def test_question_log_keeps_workflow_input_by_default() -> None:
+    """The log is a debugging record: a wrong answer to "which lease?" is
+    still a turn worth seeing."""
+    session = CompilingSession(rows=[])
+    await AnalyticsRepository(session).questions(WINDOW)
+
+    sql = " ".join(session.compiled).lower()
+    assert "workflow_stage_before is null" not in sql
+
+
+async def test_question_log_can_drop_workflow_input_on_request() -> None:
+    session = CompilingSession(rows=[])
+    await AnalyticsRepository(session).questions(WINDOW, questions_only=True)
+
+    sql = " ".join(session.compiled).lower()
+    assert "workflow_stage_before is null" in sql

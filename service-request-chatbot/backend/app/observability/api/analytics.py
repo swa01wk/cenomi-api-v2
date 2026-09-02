@@ -150,6 +150,13 @@ async def analytics_questions(
     search: str | None = Query(
         default=None, description="Case-insensitive substring match on the question."
     ),
+    questions_only: bool = Query(
+        default=False,
+        description=(
+            "Exclude mid-workflow form input — a lease code, a date, 'yes' — "
+            "leaving only what users actually asked."
+        ),
+    ),
     page: int = Query(default=1, ge=1, description="1-based page number."),
     page_size: int = Query(default=50, ge=1, le=_MAX_PAGE_SIZE),
     include_top: bool = Query(
@@ -165,6 +172,7 @@ async def analytics_questions(
         filters,
         answer_status=answer_status,
         search=search,
+        questions_only=questions_only,
         limit=page_size,
         offset=offset,
     )
