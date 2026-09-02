@@ -185,6 +185,7 @@ async def assistant_admin_dashboard(db: DbSession) -> dict[str, Any]:
             AnalyticsFilters(from_date=now - timedelta(days=1), to_date=now)
         )
         sessions, _ = await repo.recent_sessions(month, limit=10)
+        top_users = await repo.top_users(month, limit=10)
     except Exception as exc:
         log.exception("dashboard.assistant_admin.failed", error=str(exc))
         raise HTTPException(
@@ -192,7 +193,11 @@ async def assistant_admin_dashboard(db: DbSession) -> dict[str, Any]:
             detail="Could not build the dashboard. Please try again.",
         ) from exc
 
-    names = await _resolve_user_names(db, [s["user_id"] for s in sessions if s["user_id"]])
+    names = await _resolve_user_names(
+        db,
+        [s["user_id"] for s in sessions if s["user_id"]]
+        + [u["user_id"] for u in top_users if u["user_id"]],
+    )
 
     # CSAT as a percentage of the 5-star scale, from real end-user ratings.
     avg_rating = ratings["avg_rating"]
@@ -222,6 +227,22 @@ async def assistant_admin_dashboard(db: DbSession) -> dict[str, Any]:
             },
             "recent_conversations": [
                 _conversation_row(session, names, now) for session in sessions
+            ],
+            "top_users": [
+                {
+                    "user_id": u["user_id"],
+                    "user_name": names.get(u["user_id"])
+                    or f"User {u['user_id'][:8]}",
+                    "questions": u["questions"],
+                    "sessions": u["sessions"],
+                    "unanswered": u["unanswered"],
+                    # None, not 0 — an unrated user has not scored the
+                    # assistant badly, they simply have not scored it.
+                    "avg_rating": u["avg_rating"],
+                    "ratings_count": u["ratings_count"],
+                    "last_active_label": _time_label(u["last_active_at"], now),
+                }
+                for u in top_users
             ],
         },
     }
@@ -428,7 +449,11 @@ async def assistant_admin_conversations(
             detail="Could not load conversations. Please try again.",
         ) from exc
 
-    names = await _resolve_user_names(db, [s["user_id"] for s in sessions if s["user_id"]])
+    names = await _resolve_user_names(
+        db,
+        [s["user_id"] for s in sessions if s["user_id"]]
+        + [u["user_id"] for u in top_users if u["user_id"]],
+    )
 
     return {
         "success": True,

@@ -917,6 +917,83 @@ class AnalyticsRepository:
             )
         return items, total
 
+    async def top_users(
+        self, filters: AnalyticsFilters, *, limit: int = 10
+    ) -> list[dict[str, Any]]:
+        """Busiest users, with how the assistant is rated by each.
+
+        Volume alone says who to talk to; volume beside a rating says which of
+        them is being let down. Ranked by questions asked — the rating is the
+        second column precisely because a heavy user with a poor average is
+        the most useful row on the page.
+        """
+        rating = (
+            select(
+                AgentFeedback.user_id.label("user_id"),
+                func.avg(AgentFeedback.score).label("avg_score"),
+                func.count(AgentFeedback.id).label("ratings_count"),
+            )
+            .where(
+                AgentFeedback.feedback_type == _USER_RATING,
+                AgentFeedback.user_id.is_not(None),
+            )
+            .group_by(AgentFeedback.user_id)
+            .subquery()
+        )
+
+        grouped = (
+            select(
+                AgentTrace.user_id.label("user_id"),
+                func.count(AgentTrace.id)
+                .filter(_is_real_question())
+                .label("questions"),
+                func.count(func.distinct(AgentTrace.session_id)).label("sessions"),
+                func.count(AgentTrace.id)
+                .filter(
+                    AgentTrace.answer_status.in_(["UNANSWERED", "FAILED"]),
+                    _is_real_question(),
+                )
+                .label("unanswered"),
+                func.max(AgentTrace.created_at).label("last_active_at"),
+            )
+            .where(*filters.trace_clauses())
+            .group_by(AgentTrace.user_id)
+            .subquery()
+        )
+
+        rows = await self._session.execute(
+            select(
+                grouped.c.user_id,
+                grouped.c.questions,
+                grouped.c.sessions,
+                grouped.c.unanswered,
+                grouped.c.last_active_at,
+                rating.c.avg_score,
+                rating.c.ratings_count,
+            )
+            .select_from(grouped)
+            .outerjoin(rating, rating.c.user_id == grouped.c.user_id)
+            # Users whose turns were all silent syncs are not people to report on.
+            .where(grouped.c.questions > 0)
+            .order_by(grouped.c.questions.desc())
+            .limit(limit)
+        )
+
+        return [
+            {
+                "user_id": str(r.user_id),
+                "questions": r.questions or 0,
+                "sessions": r.sessions or 0,
+                "unanswered": r.unanswered or 0,
+                "last_active_at": r.last_active_at,
+                "avg_rating": (
+                    round(float(r.avg_score), 2) if r.avg_score is not None else None
+                ),
+                "ratings_count": r.ratings_count or 0,
+            }
+            for r in rows
+        ]
+
     async def agent_breakdown(self, filters: AnalyticsFilters) -> list[dict[str, Any]]:
         """Per-agent turn volume, answered share and latency."""
         rows = await self._session.execute(

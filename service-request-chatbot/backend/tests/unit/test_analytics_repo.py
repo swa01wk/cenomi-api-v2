@@ -463,3 +463,36 @@ async def test_a_name_only_search_still_filters() -> None:
 
     sql = " ".join(session.compiled).lower()
     assert "user_id in" in sql
+
+
+# ── top users ──────────────────────────────────────────────────────────────
+
+
+async def test_top_users_pairs_volume_with_rating() -> None:
+    rows = [
+        SimpleNamespace(user_id=uuid4(), questions=2231, sessions=304,
+                        unanswered=3, last_active_at=NOW, avg_score=None,
+                        ratings_count=0),
+        SimpleNamespace(user_id=uuid4(), questions=30, sessions=11,
+                        unanswered=1, last_active_at=NOW, avg_score=3.8,
+                        ratings_count=5),
+    ]
+    session = CompilingSession(rows=rows)
+
+    users = await AnalyticsRepository(session).top_users(WINDOW)
+
+    assert users[0]["questions"] == 2231
+    # An unrated user reports None, not 0 — silence is not a bad score.
+    assert users[0]["avg_rating"] is None
+    assert users[1]["avg_rating"] == 3.8
+    assert users[1]["ratings_count"] == 5
+
+
+async def test_top_users_ranks_by_questions_and_skips_silent_only_users() -> None:
+    session = CompilingSession(rows=[])
+    await AnalyticsRepository(session).top_users(WINDOW)
+
+    sql = " ".join(session.compiled).lower()
+    assert "order by" in sql and "desc" in sql
+    # Someone whose turns were all background syncs is not a person to report.
+    assert "questions > 0" in sql
