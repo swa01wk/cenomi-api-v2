@@ -34,23 +34,46 @@ def test_build_create_lease_picker() -> None:
     assert spec["selection"]["mode"] == "select_lease"
 
 
-def test_should_browse_leases_create_sr_unresolved(monkeypatch) -> None:
-    """The stage/lease conditions still hold — but only when the picker is
-    enabled. It is off by default now (HANDOVER_LEASE_PICKER_ENABLED): the
-    browse chips listed leases the user had not asked for, in front of a
-    question they can simply answer."""
-    state = {"workflow_stage": "CREATE_SR", "collected_data": {}}
-    assert should_browse_leases(state) is False
+def test_create_lease_picker_asks_for_five_latest_activated() -> None:
+    """The picker leads with the 5 most recently activated eligible leases."""
+    spec = build_create_lease_picker()["suggestions"]
+    assert spec["filters"] == {
+        "limit": 5,
+        "offset": 0,
+        "sort_by": "activation_date",
+        "order": "desc",
+    }
 
-    monkeypatch.setattr(settings, "handover_lease_picker_enabled", True)
+
+def test_create_lease_picker_is_searchable() -> None:
+    """Search box is opt-in per resource — the SR inbox picker must not get one."""
+    assert build_create_lease_picker()["suggestions"]["searchable"] is True
+    assert "searchable" not in build_handover_inbox_picker()["suggestions"]
+
+
+def test_build_resource_picker_keeps_non_int_filter_values() -> None:
+    """Filters carry strings (sort_by/order), not just ints."""
+    spec = build_resource_picker(
+        "leases", filters={"limit": 5, "order": "desc"}
+    )["suggestions"]
+    assert spec["filters"]["order"] == "desc"
+
+
+def test_should_browse_leases_create_sr_unresolved(monkeypatch) -> None:
+    """On by default again (HANDOVER_LEASE_PICKER_ENABLED); the flag still
+    turns it off without a code change."""
+    state = {"workflow_stage": "CREATE_SR", "collected_data": {}}
     assert should_browse_leases(state) is True
+
+    monkeypatch.setattr(settings, "handover_lease_picker_enabled", False)
+    assert should_browse_leases(state) is False
 
 
 def test_should_browse_leases_defaults_stage_to_create_sr(monkeypatch) -> None:
-    assert should_browse_leases({"collected_data": {}}) is False
-
-    monkeypatch.setattr(settings, "handover_lease_picker_enabled", True)
     assert should_browse_leases({"collected_data": {}}) is True
+
+    monkeypatch.setattr(settings, "handover_lease_picker_enabled", False)
+    assert should_browse_leases({"collected_data": {}}) is False
 
 
 def test_should_browse_leases_resolved_lease() -> None:

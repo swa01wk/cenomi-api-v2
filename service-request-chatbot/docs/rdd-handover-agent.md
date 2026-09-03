@@ -383,6 +383,50 @@ Handles:
 - Workflow cancel/restart phrases → clears all state
 - Confirmation card response parsing (`yes` / `no` phrases)
 
+### Lease suggestion picker
+
+When CREATE_SR has no lease identifiers yet, `lease_lookup_node` returns
+`IN_PROGRESS` with a `resource_picker` decoration instead of only asking for the
+code. Routing continues to `validation` → `missing_field`, so the user gets the
+lease-code question *and* selectable chips.
+
+Emitted by `build_create_lease_picker()`
+(`app/agents/services/resource_picker_decorations.py`):
+
+```json
+{
+  "suggestions": {
+    "kind": "resource_picker",
+    "resource": "leases",
+    "filters": { "limit": 5, "offset": 0, "sort_by": "activation_date", "order": "desc" },
+    "selection": { "mode": "select_lease" },
+    "searchable": true
+  }
+}
+```
+
+The backend emits the spec only — it never fetches the leases. The frontend
+registry (`libs/api/src/lib/srChatbot/resourcePickerRegistry.ts`) calls the
+platform `GET /leases` list mode directly with `limit`, `offset`, `sort_by`,
+`order` and the typed `search` term, and renders chips + a read-more pager.
+
+| Concern | Owner | Notes |
+|---------|-------|-------|
+| Whether to show the picker | This backend | `should_browse_leases()`, gated by `HANDOVER_LEASE_PICKER_ENABLED` (default **on**) |
+| Page size / ordering | This backend | `filters` in the spec above |
+| Fetching + paging + search UI | Frontend | `ResourcePicker.tsx`, 300 ms debounce, resets to offset 0 per term |
+| Eligibility, ordering, `search` matching | Platform (`cenomi-api`) | `FetchHandoverEligibleLeasesList`, ordered `COALESCE(pms_lease_activation_date, start_date) DESC` |
+
+Because all three own a slice, a change to `sort_by`/`search` semantics needs the
+platform released **before or with** the frontend — the frontend calls
+`GET /leases` directly, so an unrecognised param is ignored silently rather than
+erroring.
+
+Only `rdd_handover_agent` gets this picker. The Fitout Start / End / Trading
+agents use purpose-scoped lookups (`purpose=fitout_confirm` etc.) that
+deliberately include leases which already have a handover SR, and the list query
+hardcodes `has_handover_sr IS NULL` — so it cannot be reused for them as-is.
+
 ### Required fields (17)
 
 | Field | Source | Description |

@@ -229,13 +229,14 @@ class Settings(BaseSettings):
         return stripped
 
     handover_lease_picker_enabled: bool = Field(
-        default=False,
+        default=True,
         validation_alias="HANDOVER_LEASE_PICKER_ENABLED",
         description=(
             "Offer browsable eligible-lease chips when the Handover CREATE flow "
-            "has no lease identifiers yet. Disabled by default: the picker lists "
-            "leases the user has not asked for, and the plain 'what is the lease "
-            "code?' question is the expected prompt. Set true to restore it."
+            "has no lease identifiers yet. The picker shows the 5 most recently "
+            "activated leases with a search box and a read-more pager, so it "
+            "answers 'which lease?' instead of listing leases at random. Set "
+            "false to fall back to the plain lease-code question."
         ),
     )
     llm_confidence_threshold: float = Field(
