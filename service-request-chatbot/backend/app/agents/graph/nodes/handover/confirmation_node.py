@@ -52,7 +52,9 @@ _FIELD_LABELS: dict[str, str] = {
     "title": "Title",
     "description": "Description",
     "startDate": "Inspection Start Date",
+    "inspectionTime": "Inspection Start Time",
     "endDate": "Inspection End Date",
+    "inspectionEndTime": "Inspection End Time",
     "inspection_done_by": "Inspection Done By",
     "notes": "Notes",
     "comments": "Comments",
@@ -83,7 +85,9 @@ _CREATE_SR_EDITABLE: frozenset[str] = frozenset(
         "title",
         "description",
         "startDate",
+        "inspectionTime",
         "endDate",
+        "inspectionEndTime",
         "inspection_done_by",
         "notes",
         "comments",
@@ -211,6 +215,42 @@ _CONFIRM_ACTION_MAP: dict[tuple[str, str], str] = {
     ("RDD_REVIEW", "submit"):       "confirm_rdd_submit",
     ("RDD_REVIEW", "final_approve"): "confirm_rdd_final_approve",
 }
+
+
+# Rows the frontend should render with a native picker rather than a text box.
+# The value on these rows is the raw machine format: YYYY-MM-DD and HH:MM.
+_TYPED_INPUTS: dict[str, str] = {
+    "startDate": "date",
+    "endDate": "date",
+    "inspectionTime": "time",
+    "inspectionEndTime": "time",
+}
+
+# What the payload builder books when no clock was ever given. Shown on the
+# card so the preview states the time the SR will actually carry.
+_DEFAULT_INSPECTION_HHMM = "09:00"
+
+# Clock rows sit directly under the date they belong to.
+_INSPECTION_TIME_ROWS: tuple[tuple[str, str], ...] = (
+    ("startDate", "inspectionTime"),
+    ("endDate", "inspectionEndTime"),
+)
+
+
+def _typed_inspection_inputs(workflow_stage: str) -> bool:
+    """True when the card should carry separate, picker-backed date/time rows."""
+    from app.agents.schemas.handover_schema import short_flow_enabled
+
+    return short_flow_enabled() and workflow_stage == "CREATE_SR"
+
+
+def _with_inspection_time_rows(display_keys: list[str]) -> list[str]:
+    """Insert each clock row immediately after its date row."""
+    keys = list(display_keys)
+    for date_key, time_key in _INSPECTION_TIME_ROWS:
+        if date_key in keys and time_key not in keys:
+            keys.insert(keys.index(date_key) + 1, time_key)
+    return keys
 
 
 # Provenance of short-flow generated values, written by merge_state_node.
@@ -395,18 +435,33 @@ def _build_confirmation_card(
         resolve_start_end_hhmm,
     )
     start_hhmm, end_hhmm = resolve_start_end_hhmm(collected_data)
-    _date_lt_overrides: dict[str, Any] = {}
-    for _date_key, _lt_key, _hhmm in (
-        ("startDate", "startDateLT", start_hhmm),
-        ("endDate", "endDateLT", end_hhmm),
-    ):
-        _raw = collected_data.get(_date_key)
-        if _raw and _hhmm:
-            _, _lt = _normalize_inspection_datetime(
-                _raw, collected_data.get(_lt_key), inspection_time=_hhmm
-            )
-            if _lt:
-                _date_lt_overrides[_date_key] = _lt
+
+    # Short flow: the window is never typed out question-by-question, so the
+    # review card is where a wrong date or clock gets fixed. Give each one its
+    # own row with a real date / time picker instead of folding the clock into
+    # the date's display string, which can only be edited as free text.
+    use_typed_inputs = _typed_inspection_inputs(workflow_stage)
+    if use_typed_inputs:
+        display_keys = _with_inspection_time_rows(display_keys)
+        collected_data = {
+            **collected_data,
+            "inspectionTime": start_hhmm or _DEFAULT_INSPECTION_HHMM,
+            "inspectionEndTime": end_hhmm or start_hhmm or _DEFAULT_INSPECTION_HHMM,
+        }
+        _date_lt_overrides: dict[str, Any] = {}
+    else:
+        _date_lt_overrides = {}
+        for _date_key, _lt_key, _hhmm in (
+            ("startDate", "startDateLT", start_hhmm),
+            ("endDate", "endDateLT", end_hhmm),
+        ):
+            _raw = collected_data.get(_date_key)
+            if _raw and _hhmm:
+                _, _lt = _normalize_inspection_datetime(
+                    _raw, collected_data.get(_lt_key), inspection_time=_hhmm
+                )
+                if _lt:
+                    _date_lt_overrides[_date_key] = _lt
 
     fields: list[dict[str, Any]] = []
     for field_key in display_keys:
@@ -433,6 +488,10 @@ def _build_confirmation_card(
         }
         if field_key in _ENUM_OPTIONS:
             row["options"] = _ENUM_OPTIONS[field_key]
+        if use_typed_inputs and is_editable and field_key in _TYPED_INPUTS:
+            # Tells the frontend to render a native date / time picker and to
+            # round-trip the raw value instead of its display text.
+            row["inputType"] = _TYPED_INPUTS[field_key]
         row.update(_provenance_for(field_key, raw_value, ai_meta))
         fields.append(row)
 

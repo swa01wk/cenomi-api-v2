@@ -9,6 +9,7 @@ TestPartialAnswers          — Whatever the user leaves out is asked again, nar
 TestAutofill                — Generated values, provenance, and no-overwrite rules.
 TestMergeStateAutofill      — merge_state_node writes the values and their provenance.
 TestReviewCard              — Badges, hints and the raised-by / reviewed-next-by rows.
+TestEditableWindow          — The window is fixable on the card: date and time pickers.
 """
 
 from __future__ import annotations
@@ -497,3 +498,90 @@ class TestReviewCard:
         rows = _card(_complete_draft(), {})
         assert "created_by_role" not in rows
         assert rows["checker_role"]["value"] == "FM Manager"
+
+
+# ---------------------------------------------------------------------------
+# TestEditableWindow
+# ---------------------------------------------------------------------------
+
+
+class TestEditableWindow:
+    def test_dates_and_times_are_separate_editable_rows(
+        self, short_flow_on: None
+    ) -> None:
+        rows = _card(_complete_draft(inspectionTime="14:00", inspectionEndTime="18:00"))
+        for key in ("startDate", "inspectionTime", "endDate", "inspectionEndTime"):
+            assert rows[key]["editable"] is True, key
+
+    def test_each_clock_sits_under_its_own_date(self, short_flow_on: None) -> None:
+        from app.agents.graph.nodes.handover.confirmation_node import (
+            _build_confirmation_card,
+        )
+
+        card = _build_confirmation_card(_complete_draft(), "CREATE_SR", None)
+        keys = [f["key"] for f in card["fields"]]
+        assert keys[keys.index("startDate") + 1] == "inspectionTime"
+        assert keys[keys.index("endDate") + 1] == "inspectionEndTime"
+
+    def test_rows_ask_for_native_pickers(self, short_flow_on: None) -> None:
+        rows = _card(_complete_draft())
+        assert rows["startDate"]["inputType"] == "date"
+        assert rows["endDate"]["inputType"] == "date"
+        assert rows["inspectionTime"]["inputType"] == "time"
+        assert rows["inspectionEndTime"]["inputType"] == "time"
+
+    def test_dates_stay_machine_readable_for_the_picker(
+        self, short_flow_on: None
+    ) -> None:
+        """A date input round-trips YYYY-MM-DD, not '06/09/2026 09:00 AM'."""
+        rows = _card(_complete_draft(inspectionTime="14:00"))
+        assert rows["startDate"]["value"] == "2026-09-06"
+        assert rows["endDate"]["value"] == "2026-09-07"
+
+    def test_clock_rows_show_the_time_that_will_be_submitted(
+        self, short_flow_on: None
+    ) -> None:
+        rows = _card(_complete_draft(inspectionTime="14:00", inspectionEndTime="18:00"))
+        assert rows["inspectionTime"]["value"] == "14:00"
+        assert rows["inspectionEndTime"]["value"] == "18:00"
+
+    def test_unanswered_clock_shows_the_real_default(self, short_flow_on: None) -> None:
+        """The payload books 09:00 when no time was given — say so on the card."""
+        rows = _card(_complete_draft())
+        assert rows["inspectionTime"]["value"] == "09:00"
+        assert rows["inspectionEndTime"]["value"] == "09:00"
+
+    def test_inspector_is_a_dropdown(self, short_flow_on: None) -> None:
+        rows = _card(_complete_draft())
+        assert rows["inspection_done_by"]["editable"] is True
+        assert rows["inspection_done_by"]["options"] == ["FM_MANAGER", "OPERATIONS"]
+
+    def test_flag_off_keeps_the_old_single_datetime_row(self) -> None:
+        rows = _card(_complete_draft(inspectionTime="14:00"))
+        assert "inspectionTime" not in rows
+        # Long flow folds the clock into the date's display value.
+        assert rows["startDate"]["value"] == "06/09/2026 2:00 PM"
+        assert "inputType" not in rows["startDate"]
+
+    @pytest.mark.asyncio
+    async def test_edited_date_and_time_come_back_through_the_card(
+        self, short_flow_on: None
+    ) -> None:
+        """A picker sends YYYY-MM-DD / HH:MM — the same shapes merge already stores."""
+        from app.agents.graph.nodes.shared.merge_state_node import merge_state_node
+
+        state = _merge_state(_complete_draft())
+        state["corrected_fields"] = {
+            "startDate": "2026-09-10",
+            "inspectionTime": "14:00",
+            "inspectionEndTime": "18:00",
+        }
+        result = await merge_state_node(state)
+        collected = result["collected_data"]
+
+        assert collected["startDate"] == "2026-09-10"
+        assert collected["inspectionTime"] == "14:00"
+        assert collected["inspectionEndTime"] == "18:00"
+        # The portal's local-time strings follow the edit.
+        assert collected["startDateLT"] == "10/09/2026 2:00 PM"
+        assert collected["endDateLT"] == "07/09/2026 6:00 PM"
