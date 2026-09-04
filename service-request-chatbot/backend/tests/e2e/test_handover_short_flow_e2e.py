@@ -14,7 +14,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from httpx import AsyncClient
 
-from tests.e2e.conftest import post_turn
+from tests.e2e.conftest import _CHAT_ENDPOINT, post_turn
 from tests.e2e.helpers import (
     make_field_extraction_mock,
     make_lease_mock,
@@ -151,3 +151,135 @@ async def test_four_turns_from_lease_to_review(
     # Accountability rows are read-only.
     assert rows["checker_role"]["value"] == "FM Manager"
     assert rows["checker_role"]["editable"] is False
+
+
+async def _post(
+    client: AsyncClient,
+    *,
+    session_id: str,
+    message: str = "",
+    action: str | None = None,
+    corrected_fields: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """POST a turn that can carry an action and inline card edits."""
+    payload: dict[str, Any] = {
+        "user_id": _USER_ID,
+        "message": message,
+        "session_id": session_id,
+        "attachments": [],
+    }
+    if action is not None:
+        payload["action"] = action
+    if corrected_fields is not None:
+        payload["corrected_fields"] = corrected_fields
+    resp = await client.post(_CHAT_ENDPOINT, json=payload)
+    return resp.json()
+
+
+async def _drive_to_review(client: AsyncClient) -> str:
+    """Run the four turns and return the session id sitting on the review card."""
+    with _supervisor(), _supervisor_gateway(), _extraction(
+        {"lease_code": "LC-E2E-001"}
+    ), _gateway(), _lease():
+        body = await post_turn(
+            client, "handover for lease LC-E2E-001", user_id=_USER_ID
+        )
+    session_id = body["session_id"]
+
+    with _extraction({"already_handovered": "initiate_handover"}), _gateway(), _lease():
+        await post_turn(
+            client, "initiate handover", session_id=session_id, user_id=_USER_ID
+        )
+    with _extraction(
+        {
+            "startDate": "2026-09-06",
+            "endDate": "2026-09-07",
+            "inspection_done_by": "FM_MANAGER",
+        }
+    ), _gateway(), _lease():
+        await post_turn(
+            client,
+            "6 Sep to 7 Sep, FM Manager",
+            session_id=session_id,
+            user_id=_USER_ID,
+        )
+    with _extraction({}), _gateway(), _lease():
+        await post_turn(client, "continue", session_id=session_id, user_id=_USER_ID)
+    return session_id
+
+
+@pytest.mark.asyncio
+async def test_every_review_card_edit_reaches_the_submitted_sr(
+    app_client: AsyncClient, short_flow_on: None
+) -> None:
+    """Editing on the card must win over what the flow collected or generated."""
+    from tests.e2e.helpers import make_sr_api_mock
+
+    session_id = await _drive_to_review(app_client)
+
+    edits = {
+        "title": "Nike RP-E2E-01 pre-opening handover",
+        "description": "Snagging round before opening.",
+        "startDate": "2026-09-10",
+        "endDate": "2026-09-12",
+        "inspection_done_by": "OPERATIONS",
+        "notes": "Bring the fitout drawings.",
+        "comments": "Coordinate with the store manager.",
+    }
+
+    sr_api = make_sr_api_mock("SR-EDIT-001")
+    with _extraction({}), _gateway(), _lease(), patch(
+        "app.agents.graph.nodes.handover.api_submission_node."
+        "get_service_request_api_service",
+        sr_api,
+    ):
+        body = await _post(
+            app_client,
+            session_id=session_id,
+            message="yes",
+            action="confirm",
+            corrected_fields=edits,
+        )
+
+    call = sr_api.return_value.create_service_request.await_args
+    envelope = call.kwargs.get("payload") or call.args[0]
+    # The platform body nests the SR fields under "payload".
+    sr = envelope["payload"]
+
+    assert envelope["title"] == edits["title"]
+    assert sr["title"] == edits["title"]
+    assert sr["description"] == edits["description"]
+    assert sr["inspectionDoneBy"] == "OPERATIONS"
+    assert sr["inspection_done_by"] == "OPERATIONS"
+    assert sr["notes"] == edits["notes"]
+    assert sr["comments"] == edits["comments"]
+    assert "2026-09-10" in str(sr["startDate"])
+    assert "2026-09-12" in str(sr["endDate"])
+    # Submitted, not bounced back into collection.
+    assert "SR-EDIT-001" in str(body.get("message") or "") or body.get(
+        "state", {}
+    ).get("workflow_stage") == "SR_CREATED"
+
+
+@pytest.mark.asyncio
+async def test_confirming_without_edits_submits(
+    app_client: AsyncClient, short_flow_on: None
+) -> None:
+    """The clock is never asked for, so it must not block the submit either."""
+    from tests.e2e.helpers import make_sr_api_mock
+
+    session_id = await _drive_to_review(app_client)
+
+    sr_api = make_sr_api_mock("SR-PLAIN-001")
+    with _extraction({}), _gateway(), _lease(), patch(
+        "app.agents.graph.nodes.handover.api_submission_node."
+        "get_service_request_api_service",
+        sr_api,
+    ):
+        await _post(app_client, session_id=session_id, message="yes", action="confirm")
+
+    call = sr_api.return_value.create_service_request.await_args
+    assert call is not None, "the SR was never submitted"
+    sr = (call.kwargs.get("payload") or call.args[0])["payload"]
+    # Defaulted, not blank: 09:00 Riyadh on the start date.
+    assert "09:00" in str(sr["startDateLT"]) or "9:00" in str(sr["startDateLT"])

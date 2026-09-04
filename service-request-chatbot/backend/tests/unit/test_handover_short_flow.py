@@ -585,3 +585,41 @@ class TestEditableWindow:
         # The portal's local-time strings follow the edit.
         assert collected["startDateLT"] == "10/09/2026 2:00 PM"
         assert collected["endDateLT"] == "07/09/2026 6:00 PM"
+
+
+class TestDefaultClocks:
+    def test_fills_both_clocks_when_neither_was_given(self) -> None:
+        assert sr_autofill_service.default_inspection_times({}) == {
+            "inspectionTime": "09:00",
+            "inspectionEndTime": "09:00",
+        }
+
+    def test_end_follows_a_start_the_user_gave(self) -> None:
+        filled = sr_autofill_service.default_inspection_times({"inspectionTime": "14:00"})
+        assert filled == {"inspectionEndTime": "14:00"}
+
+    def test_leaves_both_alone_when_the_user_set_them(self) -> None:
+        assert sr_autofill_service.default_inspection_times(
+            {"inspectionTime": "14:00", "inspectionEndTime": "18:00"}
+        ) == {}
+
+    @pytest.mark.asyncio
+    async def test_merge_state_stores_the_clocks(self, short_flow_on: None) -> None:
+        from app.agents.graph.nodes.shared.merge_state_node import merge_state_node
+
+        result = await merge_state_node(
+            _merge_state(
+                _lease_resolved(
+                    already_handovered="initiate_handover",
+                    startDate="2026-09-06",
+                    endDate="2026-09-07",
+                    inspection_done_by="FM_MANAGER",
+                )
+            )
+        )
+        collected = result["collected_data"]
+        # Stored, not merely displayed — an unset clock reads as a missing
+        # required field and blocks submission.
+        assert collected["inspectionTime"] == "09:00"
+        assert collected["inspectionEndTime"] == "09:00"
+        assert collected["startDateLT"] == "06/09/2026 9:00 AM"

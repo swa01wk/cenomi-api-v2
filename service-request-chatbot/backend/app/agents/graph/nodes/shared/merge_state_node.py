@@ -730,6 +730,14 @@ async def merge_state_node(state: ServiceRequestState) -> dict[str, Any]:
     if short_flow_enabled() and _short_flow_autofill_ready(collected, workflow_stage):
         from app.agents.services.sr_autofill_service import autofill_text_fields
 
+        from app.agents.services.sr_autofill_service import default_inspection_times
+
+        # The clocks are never asked for, so store the default the payload
+        # would use. Left unset they read as a missing required field and
+        # block submission — the user edits the window on the card, hits
+        # Confirm, and is asked for a time instead.
+        collected.update(default_inspection_times(collected))
+
         filled, provenance = await autofill_text_fields(collected, workflow_stage)
         if filled:
             collected.update(filled)

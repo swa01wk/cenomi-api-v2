@@ -126,6 +126,33 @@ def generate_inspection_notes(
     return f"Inspection to be conducted by {inspector_label}."
 
 
+def default_inspection_times(collected: dict[str, Any]) -> dict[str, str]:
+    """Clocks to store for a window the short flow never asked the time for.
+
+    ``inspectionTime`` / ``inspectionEndTime`` are optional, but
+    ``validate_required_fields`` still reports an unset one as a blocking
+    "required" error, and ``api_submission_node`` refuses to submit while any
+    blocking error stands. In the long flow the user is asked, so they are
+    always set; the short flow has to write the value the payload builder would
+    have defaulted to anyway, or nothing can be submitted at all.
+
+    An end clock follows the start clock, matching ``resolve_start_end_hhmm``.
+    """
+    from app.agents.services.payload_builder_service import _DEFAULT_INSPECTION_HOUR
+
+    fallback = f"{_DEFAULT_INSPECTION_HOUR:02d}:00"
+    start = str(collected.get("inspectionTime") or "").strip()
+    end = str(collected.get("inspectionEndTime") or "").strip()
+
+    filled: dict[str, str] = {}
+    if not start:
+        start = fallback
+        filled["inspectionTime"] = start
+    if not end:
+        filled["inspectionEndTime"] = start
+    return filled
+
+
 # ---------------------------------------------------------------------------
 # Field-set helpers
 # ---------------------------------------------------------------------------
