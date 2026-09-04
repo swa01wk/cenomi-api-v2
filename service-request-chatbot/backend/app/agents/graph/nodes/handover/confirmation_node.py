@@ -213,6 +213,102 @@ _CONFIRM_ACTION_MAP: dict[tuple[str, str], str] = {
 }
 
 
+# Provenance of short-flow generated values, written by merge_state_node.
+_AI_FIELD_META_KEY = "_ai_field_meta"
+
+# What each generated source means to the person reading the card.
+_PROVENANCE_HINTS: dict[str, str] = {
+    "template": "Filled in for you — edit if you want different wording.",
+    "ai": "Drafted by the assistant from your answers — please check it.",
+}
+
+# Stages that show who raised the request and who reviews it next.
+_ACCOUNTABILITY_STAGES: frozenset[str] = frozenset(
+    {"CREATE_SR", "CREATE_HANDED_OVER_SR"}
+)
+
+_ROLE_LABELS: dict[str, str] = {
+    "MALL_MANAGER": "Mall Manager",
+    "FM_MANAGER": "FM Manager",
+    "OPERATIONS": "Operations",
+    "DD_ENGINEER": "RDD Engineer",
+    "ADMIN": "Admin",
+}
+
+
+def _provenance_for(
+    field_key: str,
+    raw_value: Any,
+    ai_meta: dict[str, Any],
+) -> dict[str, Any]:
+    """Label a row as generated — unless the user has since changed it.
+
+    The meta records the exact text that was generated, so an edit (typed in
+    chat or on this card) is detected by comparison rather than by trusting a
+    flag that nothing clears.
+    """
+    entry = ai_meta.get(field_key)
+    if not isinstance(entry, dict):
+        return {}
+    if str(entry.get("value") or "") != str(raw_value or ""):
+        # The user replaced it — their words, their row.
+        return {"source": "user"}
+    source = str(entry.get("source") or "template")
+    row: dict[str, Any] = {"generated": True, "source": source}
+    hint = _PROVENANCE_HINTS.get(source)
+    if hint:
+        row["hint"] = hint
+    # Only a genuinely uncertain value earns a number; a deterministic template
+    # is correct by construction and a percentage next to it means nothing.
+    confidence = entry.get("confidence")
+    if source != "template" and isinstance(confidence, (int, float)):
+        row["confidence"] = float(confidence)
+    return row
+
+
+def _accountability_rows(
+    workflow_stage: str,
+    collected_data: dict[str, Any],
+    backend_refs: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    """Read-only 'raised by' / 'reviewed next by' rows for the CREATE stages.
+
+    Roles, not names: the chat backend authenticates a subject id and its roles,
+    and inventing a display name it has never been told would be worse than
+    naming the role accurately.
+    """
+    from app.agents.schemas.handover_schema import short_flow_enabled
+
+    # Part of the short flow's review step. With the flag off the card keeps
+    # exactly the rows it has always had.
+    if not short_flow_enabled() or workflow_stage not in _ACCOUNTABILITY_STAGES:
+        return []
+
+    rows: list[dict[str, Any]] = []
+    creator_role = str((backend_refs or {}).get("user_role") or "").strip().upper()
+    if creator_role:
+        rows.append(
+            {
+                "key": "created_by_role",
+                "label": "Raised By",
+                "value": _ROLE_LABELS.get(creator_role, format_enum_label(creator_role)),
+                "editable": False,
+            }
+        )
+
+    checker = str(collected_data.get("inspection_done_by") or "").strip().upper()
+    if checker:
+        rows.append(
+            {
+                "key": "checker_role",
+                "label": "Reviewed Next By",
+                "value": _ROLE_LABELS.get(checker, format_enum_label(checker)),
+                "editable": False,
+            }
+        )
+    return rows
+
+
 def _build_confirmation_card(
     collected_data: dict[str, Any],
     workflow_stage: str,
@@ -266,6 +362,9 @@ def _build_confirmation_card(
             "OPERATIONS",
         ],
     }
+
+    # Provenance for the fields the short flow generated (see sr_autofill_service).
+    ai_meta: dict[str, Any] = dict(collected_data.get(_AI_FIELD_META_KEY) or {})
 
     display_keys = list(display_fields)
     # Hide document_status on the card unless Meeting Report was uploaded (or
@@ -334,7 +433,10 @@ def _build_confirmation_card(
         }
         if field_key in _ENUM_OPTIONS:
             row["options"] = _ENUM_OPTIONS[field_key]
+        row.update(_provenance_for(field_key, raw_value, ai_meta))
         fields.append(row)
+
+    fields.extend(_accountability_rows(workflow_stage, collected_data, backend_refs))
 
     card: dict[str, Any] = {
         "type": "confirmation_card",

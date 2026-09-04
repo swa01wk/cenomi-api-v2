@@ -7,6 +7,8 @@ TestUnaskedFields           — Generated text / times drop out of the ask loop.
 TestCombinedInspectionAsk   — One question for window + inspector, and its chips.
 TestPartialAnswers          — Whatever the user leaves out is asked again, narrowed.
 TestAutofill                — Generated values, provenance, and no-overwrite rules.
+TestMergeStateAutofill      — merge_state_node writes the values and their provenance.
+TestReviewCard              — Badges, hints and the raised-by / reviewed-next-by rows.
 """
 
 from __future__ import annotations
@@ -343,3 +345,155 @@ class TestAutofill:
             startDate="2026-09-06", endDate="2026-09-07", inspection_done_by="FM_MANAGER"
         )
         assert _short_flow_autofill_ready(collected, "CREATE_SR") is True
+
+
+# ---------------------------------------------------------------------------
+# TestMergeStateAutofill
+# ---------------------------------------------------------------------------
+
+
+def _merge_state(collected: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "session_id": "sess-short-flow",
+        "user_id": "user-1",
+        "active_agent": "rdd_handover_agent",
+        "workflow_stage": "CREATE_SR",
+        "collected_data": collected,
+        "extracted_fields": {},
+        "user_message": "",
+    }
+
+
+class TestMergeStateAutofill:
+    @pytest.mark.asyncio
+    async def test_nothing_written_before_the_window_is_known(
+        self, short_flow_on: None
+    ) -> None:
+        from app.agents.graph.nodes.shared.merge_state_node import merge_state_node
+
+        result = await merge_state_node(
+            _merge_state(_lease_resolved(already_handovered="initiate_handover"))
+        )
+        collected = result["collected_data"]
+        assert collected.get("description") is None
+        assert "_ai_field_meta" not in collected
+
+    @pytest.mark.asyncio
+    async def test_fills_and_records_provenance_once_complete(
+        self, short_flow_on: None
+    ) -> None:
+        from app.agents.graph.nodes.shared.merge_state_node import merge_state_node
+
+        result = await merge_state_node(
+            _merge_state(
+                _lease_resolved(
+                    already_handovered="initiate_handover",
+                    startDate="2026-09-06",
+                    endDate="2026-09-07",
+                    inspection_done_by="FM_MANAGER",
+                )
+            )
+        )
+        collected = result["collected_data"]
+        assert collected["title"] == "handover-t0112136"
+        assert collected["description"]
+        assert collected["notes"]
+        assert collected["comments"]
+        meta = collected["_ai_field_meta"]
+        assert meta["description"]["source"] == "template"
+        # The generated text is kept so a later edit can be detected.
+        assert meta["description"]["value"] == collected["description"]
+
+    @pytest.mark.asyncio
+    async def test_flag_off_leaves_the_fields_alone(self) -> None:
+        from app.agents.graph.nodes.shared.merge_state_node import merge_state_node
+
+        result = await merge_state_node(
+            _merge_state(
+                _lease_resolved(
+                    already_handovered="initiate_handover",
+                    startDate="2026-09-06",
+                    endDate="2026-09-07",
+                    inspection_done_by="FM_MANAGER",
+                )
+            )
+        )
+        collected = result["collected_data"]
+        assert collected.get("description") is None
+        assert "_ai_field_meta" not in collected
+
+
+# ---------------------------------------------------------------------------
+# TestReviewCard
+# ---------------------------------------------------------------------------
+
+
+def _card(collected: dict[str, Any], backend_refs: dict[str, Any] | None = None):
+    from app.agents.graph.nodes.handover.confirmation_node import _build_confirmation_card
+
+    card = _build_confirmation_card(collected, "CREATE_SR", backend_refs)
+    return {f["key"]: f for f in card["fields"]}
+
+
+def _complete_draft(**extra: Any) -> dict[str, Any]:
+    collected = _lease_resolved(
+        already_handovered="initiate_handover",
+        startDate="2026-09-06",
+        endDate="2026-09-07",
+        inspection_done_by="FM_MANAGER",
+        title="handover-t0112136",
+        description="Handover inspection for lease t0112136 - Nike at Riyadh Park.",
+        notes="Inspection scheduled 6 Sep 2026 to 7 Sep 2026, conducted by FM Manager.",
+        comments="No additional comments provided for lease t0112136.",
+    )
+    collected["_ai_field_meta"] = {
+        "description": {
+            "source": "template",
+            "confidence": 1.0,
+            "value": collected["description"],
+        },
+        "notes": {"source": "ai", "confidence": 0.8, "value": collected["notes"]},
+    }
+    collected.update(extra)
+    return collected
+
+class TestReviewCard:
+    def test_generated_rows_are_labelled_and_stay_editable(self) -> None:
+        rows = _card(_complete_draft())
+        assert rows["description"]["generated"] is True
+        assert rows["description"]["source"] == "template"
+        assert rows["description"]["editable"] is True
+        assert "confidence" not in rows["description"]
+
+    def test_ai_rows_carry_a_confidence_and_a_hint(self) -> None:
+        rows = _card(_complete_draft())
+        assert rows["notes"]["source"] == "ai"
+        assert rows["notes"]["confidence"] == 0.8
+        assert "assistant" in rows["notes"]["hint"]
+
+    def test_an_edited_row_is_no_longer_marked_generated(self) -> None:
+        rows = _card(_complete_draft(description="Snagging round before opening"))
+        assert rows["description"]["source"] == "user"
+        assert "generated" not in rows["description"]
+
+    def test_rows_the_user_supplied_carry_no_provenance(self) -> None:
+        rows = _card(_complete_draft())
+        assert "source" not in rows["startDate"]
+
+    def test_flag_off_keeps_the_card_exactly_as_it_was(self) -> None:
+        """No extra rows for the long flow — QA scripts assert the field list."""
+        rows = _card(_complete_draft(), {"user_role": "MALL_MANAGER"})
+        assert "created_by_role" not in rows
+        assert "checker_role" not in rows
+
+    def test_raised_by_and_reviewed_next_by(self, short_flow_on: None) -> None:
+        rows = _card(_complete_draft(), {"user_role": "MALL_MANAGER"})
+        assert rows["created_by_role"]["value"] == "Mall Manager"
+        assert rows["created_by_role"]["editable"] is False
+        assert rows["checker_role"]["value"] == "FM Manager"
+        assert rows["checker_role"]["editable"] is False
+
+    def test_raised_by_is_omitted_when_the_role_is_unknown(self, short_flow_on: None) -> None:
+        rows = _card(_complete_draft(), {})
+        assert "created_by_role" not in rows
+        assert rows["checker_role"]["value"] == "FM Manager"
