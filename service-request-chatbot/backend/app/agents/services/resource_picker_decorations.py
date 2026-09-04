@@ -25,15 +25,22 @@ def build_resource_picker(
     *,
     filters: dict[str, Any] | None = None,
     selection: dict[str, Any] | None = None,
+    searchable: bool = False,
 ) -> dict[str, Any]:
-    """Return a ``response_decorations`` fragment with a resource picker suggestion."""
+    """Return a ``response_decorations`` fragment with a resource picker suggestion.
+
+    ``searchable`` tells the frontend registry to render a search box above the
+    chips; the typed term is forwarded to the resource's fetch as ``search``.
+    """
     spec: dict[str, Any] = {
         "kind": "resource_picker",
         "resource": resource,
-        "filters": dict[str, int](filters or {"limit": 5, "offset": 0}),
+        "filters": dict(filters or {"limit": 5, "offset": 0}),
     }
     if selection:
         spec["selection"] = selection
+    if searchable:
+        spec["searchable"] = True
     return {"suggestions": spec}
 
 
@@ -43,11 +50,22 @@ def build_handover_inbox_picker() -> dict[str, Any]:
 
 
 def build_create_lease_picker() -> dict[str, Any]:
-    """Eligible leases for a new Handover SR when lease is not yet resolved."""
+    """Eligible leases for a new Handover SR when lease is not yet resolved.
+
+    Shows the 5 most recently activated eligible leases.  ``sort_by``/``order``
+    are forwarded to the platform ``GET /leases`` list mode; the user pages
+    through the rest with read-more, or narrows them with the search box.
+    """
     return build_resource_picker(
         "leases",
-        filters={"limit": 5, "offset": 0},
+        filters={
+            "limit": 5,
+            "offset": 0,
+            "sort_by": "activation_date",
+            "order": "desc",
+        },
         selection={"mode": "select_lease"},
+        searchable=True,
     )
 
 
@@ -60,9 +78,11 @@ def should_browse_leases(state: dict[str, Any]) -> bool:
     """
     from app.core.config import settings
 
-    # Off by default — see HANDOVER_LEASE_PICKER_ENABLED. Suggesting arbitrary
-    # leases the user never asked for is noise in front of a question they can
-    # simply answer; disabling falls through to the plain lease-code prompt.
+    # See HANDOVER_LEASE_PICKER_ENABLED. The earlier version of this picker was
+    # disabled because it listed arbitrary leases the user never asked for; it
+    # now leads with the 5 most recently activated ones and offers search, so
+    # it narrows the question instead of padding it. Setting the flag false
+    # falls back to the plain lease-code prompt.
     if not settings.handover_lease_picker_enabled:
         return False
 
