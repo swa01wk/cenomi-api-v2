@@ -332,6 +332,34 @@ _INSPECTION_FIELD_EXPLAINERS: dict[str, str] = {
 }
 
 
+# The two dates that carry a clock. Corrections to these accept "date time".
+_WINDOW_DATE_FIELDS: frozenset[str] = frozenset({"startDate", "endDate"})
+
+# Which stored clock belongs to which half of the window.
+_WINDOW_CLOCK_KEYS: dict[str, str] = {
+    "startDate": "inspectionTime",
+    "endDate": "inspectionEndTime",
+}
+
+
+def _window_clock_display(collected: dict[str, Any], date_field: str) -> str:
+    """The clock stored for one half of the inspection window, as ``h:mm AM/PM``.
+
+    An end with no clock of its own runs on the start clock, matching
+    ``resolve_start_end_hhmm``.
+    """
+    key = _WINDOW_CLOCK_KEYS.get(date_field, "")
+    raw = str(collected.get(key) or "").strip()
+    if not raw and date_field == "endDate":
+        raw = str(collected.get("inspectionTime") or "").strip()
+    if not raw:
+        return ""
+    try:
+        return datetime.strptime(raw, "%H:%M").strftime("%-I:%M %p")
+    except ValueError:
+        return raw
+
+
 def _format_inspection_date(raw: Any) -> str:
     """``2026-09-06`` → ``6 Sep 2026``; falls back to the raw string."""
     parsed = _parse_inspection_date(raw)
@@ -547,11 +575,23 @@ async def missing_field_node(state: ServiceRequestState) -> dict[str, Any]:
             }
         current_value = collected.get(correction_pending_field)
         display_value = format_field_display_value(correction_pending_field, current_value)
+        # The inspection window carries a clock, so state it and let the user
+        # change both halves in one answer. Without this the prompt showed a
+        # bare date, asked for a bare date, and the time looked unchangeable.
+        if correction_pending_field in _WINDOW_DATE_FIELDS:
+            clock = _window_clock_display(collected, correction_pending_field)
+            if display_value not in (None, "", []) and clock:
+                display_value = f"{display_value} {clock}"
         if display_value not in (None, "", []):
             question = f"Current {label}: {display_value}. What would you like to change it to?"
         else:
             question = f"What would you like to set as the {label}?"
-        if correction_pending_field in _SINGLE_DATE_FIELDS:
+        if correction_pending_field in _WINDOW_DATE_FIELDS:
+            question += (
+                " Give the date as DD/MM/YYYY, and add a time if you want to "
+                "change that too — e.g. '21/08/2026 6:00 PM'."
+            )
+        elif correction_pending_field in _SINGLE_DATE_FIELDS:
             question += " Use DD/MM/YYYY format, e.g. '21/08/2026'."
         correction_update: dict[str, Any] = {
             "missing_fields": [correction_pending_field],
@@ -632,13 +672,29 @@ async def missing_field_node(state: ServiceRequestState) -> dict[str, Any]:
                 bad_end = str(collected.get("endDate") or "").strip()
                 start_raw = str(collected.get("startDate") or "").strip()
                 if bad_end and start_raw:
-                    next_question = (
-                        f"The end date you entered "
-                        f"({_format_base_date_for_display(bad_end)}) is not after the "
-                        f"start date ({_format_base_date_for_display(start_raw)}). "
-                        f"Please enter an end date later than "
-                        f"{_format_base_date_for_display(start_raw)}, in DD/MM/YYYY format."
-                    )
+                    start_display = _format_base_date_for_display(start_raw)
+                    end_display = _format_base_date_for_display(bad_end)
+                    if start_display == end_display:
+                        # A one-day inspection is legitimate — the clock is what
+                        # is wrong, so ask about the clock rather than repeating
+                        # a date question the user already answered correctly.
+                        start_clock = _window_clock_display(collected, "startDate")
+                        end_clock = _window_clock_display(collected, "endDate")
+                        next_question = (
+                            f"The inspection starts and ends on {start_display}, "
+                            f"so the end time ({end_clock or 'not set'}) has to be "
+                            f"later than the start time ({start_clock or 'not set'}). "
+                            f"Give a later time on the same day — e.g. "
+                            f"'{start_display} 6:00 PM' — or a later end date."
+                        )
+                    else:
+                        next_question = (
+                            f"The end date you entered ({end_display}) is not after "
+                            f"the start date ({start_display}). Please enter an end "
+                            f"date later than {start_display} in DD/MM/YYYY format, "
+                            f"or the same date with a later time — e.g. "
+                            f"'{start_display} 6:00 PM'."
+                        )
                     verbatim_question = True
         elif error_field and error_field not in _effective_backend_fields:
             next_field = error_field

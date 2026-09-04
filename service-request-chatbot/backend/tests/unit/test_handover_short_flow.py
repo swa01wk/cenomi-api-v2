@@ -10,6 +10,7 @@ TestAutofill                — Generated values, provenance, and no-overwrite r
 TestMergeStateAutofill      — merge_state_node writes the values and their provenance.
 TestReviewCard              — Badges, hints and the raised-by / reviewed-next-by rows.
 TestEditableWindow          — The window is fixable on the card: date and time pickers.
+TestSameDayWindow           — A one-day inspection, separated by its clock.
 """
 
 from __future__ import annotations
@@ -623,3 +624,141 @@ class TestDefaultClocks:
         assert collected["inspectionTime"] == "09:00"
         assert collected["inspectionEndTime"] == "09:00"
         assert collected["startDateLT"] == "06/09/2026 9:00 AM"
+
+
+# ---------------------------------------------------------------------------
+# TestSameDayWindow
+# ---------------------------------------------------------------------------
+
+
+class TestSameDayWindow:
+    def test_same_day_passes_when_the_end_time_is_later(self) -> None:
+        from app.agents.services.validation_service import validate_start_end_date
+
+        result = validate_start_end_date(
+            "2026-08-21", "2026-08-21", start_time="10:00", end_time="22:00"
+        )
+        assert result["status"] == "PASSED"
+
+    def test_same_day_fails_when_the_end_time_is_not_later(self) -> None:
+        from app.agents.services.validation_service import validate_start_end_date
+
+        result = validate_start_end_date(
+            "2026-08-21", "2026-08-21", start_time="22:00", end_time="10:00"
+        )
+        assert result["status"] == "FAILED"
+        assert "end time" in result["message"]
+
+    def test_same_day_without_clocks_still_fails(self) -> None:
+        """Nothing separates the two, so the old rule stands."""
+        from app.agents.services.validation_service import validate_start_end_date
+
+        assert (
+            validate_start_end_date("2026-08-21", "2026-08-21")["status"] == "FAILED"
+        )
+
+    def test_backwards_dates_still_fail_whatever_the_clock(self) -> None:
+        from app.agents.services.validation_service import validate_start_end_date
+
+        result = validate_start_end_date(
+            "2026-08-22", "2026-08-21", start_time="10:00", end_time="23:00"
+        )
+        assert result["status"] == "FAILED"
+
+    def test_draft_validation_accepts_a_one_day_inspection(
+        self, short_flow_on: None
+    ) -> None:
+        from app.agents.services.validation_service import ValidationService
+
+        collected = _lease_resolved(
+            already_handovered="initiate_handover",
+            startDate="2026-08-21",
+            endDate="2026-08-21",
+            inspectionTime="10:00",
+            inspectionEndTime="22:00",
+            inspection_done_by="FM_MANAGER",
+            title="handover-t0112136",
+            description="Handover inspection.",
+            notes="Notes.",
+            comments="Comments.",
+        )
+        errors = ValidationService().validate_draft(collected, "CREATE_SR", [])
+        assert errors == []
+
+    @pytest.mark.asyncio
+    async def test_end_time_given_with_the_end_date_is_kept_apart(
+        self, short_flow_on: None
+    ) -> None:
+        """'21/08/2026 10 pm' answering the end date sets the END clock only."""
+        from app.agents.graph.nodes.shared.merge_state_node import merge_state_node
+
+        state = _merge_state(
+            _lease_resolved(
+                already_handovered="initiate_handover",
+                startDate="2026-08-21",
+                inspectionTime="10:00",
+                endDate="2026-09-07",
+                inspection_done_by="FM_MANAGER",
+            )
+        )
+        state["active_field"] = "endDate"
+        state["user_message"] = "21/08/2026 10 pm"
+        state["extracted_fields"] = {
+            "endDate": {"value": "2026-08-21", "confidence": 1.0},
+            "inspectionTime": {"value": "22:00", "confidence": 1.0},
+        }
+        collected = (await merge_state_node(state))["collected_data"]
+
+        assert collected["endDate"] == "2026-08-21"
+        assert collected["inspectionTime"] == "10:00"
+        assert collected["inspectionEndTime"] == "22:00"
+        assert collected["endDateLT"] == "21/08/2026 10:00 PM"
+
+    @pytest.mark.asyncio
+    async def test_correction_prompt_states_the_time_and_invites_one(
+        self, short_flow_on: None
+    ) -> None:
+        collected = _lease_resolved(
+            already_handovered="initiate_handover",
+            startDate="2026-08-21",
+            endDate="2026-09-07",
+            inspectionTime="10:00",
+            inspectionEndTime="09:00",
+            inspection_done_by="FM_MANAGER",
+        )
+        state = _state(collected)
+        state["correction_pending_field"] = "endDate"
+        result = await missing_field_node(state)
+
+        message = result["response_message"]
+        assert "Current Inspection End Date: 07/09/2026 9:00 AM" in message
+        assert "add a time" in message
+        assert "6:00 PM" in message
+
+    @pytest.mark.asyncio
+    async def test_same_day_re_ask_talks_about_the_clock_not_the_date(
+        self, short_flow_on: None
+    ) -> None:
+        collected = _lease_resolved(
+            already_handovered="initiate_handover",
+            startDate="2026-08-21",
+            endDate="2026-08-21",
+            inspectionTime="22:00",
+            inspectionEndTime="10:00",
+            inspection_done_by="FM_MANAGER",
+        )
+        state = _state(collected)
+        state["validation_errors"] = [
+            {
+                "field": "endDate",
+                "validation_type": "date_range",
+                "blocking": True,
+                "status": "FAILED",
+            }
+        ]
+        result = await missing_field_node(state)
+
+        message = result["response_message"]
+        assert "starts and ends on 21/08/2026" in message
+        assert "10:00 AM" in message and "10:00 PM" in message
+        assert "6:00 PM" in message

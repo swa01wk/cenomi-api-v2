@@ -253,11 +253,37 @@ def validate_date_formats(data: dict[str, Any]) -> list[ValidationResult]:
     return results
 
 
-def validate_start_end_date(start_date: Any, end_date: Any) -> ValidationResult:
-    """Validate that ``startDate`` is strictly before ``endDate``.
+def _parse_hhmm(value: Any) -> tuple[int, int] | None:
+    """Parse ``HH:MM`` (24-hour) into ``(hour, minute)``; ``None`` when unusable."""
+    text = str(value or "").strip()
+    if not text:
+        return None
+    parts = text.split(":")
+    if len(parts) < 2:
+        return None
+    try:
+        hour, minute = int(parts[0]), int(parts[1])
+    except ValueError:
+        return None
+    if 0 <= hour <= 23 and 0 <= minute <= 59:
+        return hour, minute
+    return None
 
-    Both values must be ISO-8601 date strings (``YYYY-MM-DD``).
-    Equal dates are considered invalid (start must be *before* end).
+
+def validate_start_end_date(
+    start_date: Any,
+    end_date: Any,
+    start_time: Any = None,
+    end_time: Any = None,
+) -> ValidationResult:
+    """Validate that the inspection ends after it starts.
+
+    Dates accept ``YYYY-MM-DD``, full ISO-8601, or ``DD/MM/YYYY``.
+
+    A one-day inspection is a real booking — 21/08 10:00 to 21/08 22:00 — so
+    when both clocks are known the same calendar date passes as long as the end
+    time is later. Without times there is nothing to separate two equal dates,
+    and the pair is rejected as before.
     """
     start = _parse_date(start_date, "startDate")
     end = _parse_date(end_date, "endDate")
@@ -287,16 +313,49 @@ def validate_start_end_date(start_date: Any, end_date: Any) -> ValidationResult:
             blocking=True,
         )
 
-    passed = start < end
+    if start < end:
+        return _result(
+            field="endDate",
+            validation_type="date_range",
+            passed=True,
+            message=f"Start date ({start}) is before end date ({end}).",
+            blocking=True,
+        )
+
+    if start == end:
+        start_hhmm = _parse_hhmm(start_time)
+        end_hhmm = _parse_hhmm(end_time)
+        if start_hhmm and end_hhmm:
+            if end_hhmm > start_hhmm:
+                return _result(
+                    field="endDate",
+                    validation_type="date_range",
+                    passed=True,
+                    message=(
+                        f"Same-day inspection on {start}, "
+                        f"{start_time} to {end_time}."
+                    ),
+                    blocking=True,
+                )
+            return _result(
+                field="endDate",
+                validation_type="date_range",
+                passed=False,
+                message=(
+                    f"The inspection starts and ends on {start}, so the end "
+                    f"time ({end_time}) must be later than the start time "
+                    f"({start_time}). Give a later time, or a later end date."
+                ),
+                blocking=True,
+            )
+
     return _result(
         field="endDate",
         validation_type="date_range",
-        passed=passed,
+        passed=False,
         message=(
             f"The end date ({end}) must be after the start date ({start}). "
-            "Please provide a later end date."
-            if not passed
-            else f"Start date ({start}) is before end date ({end})."
+            "Please provide a later end date, or the same date with a later time."
         ),
         blocking=True,
     )
@@ -623,7 +682,15 @@ class ValidationService:
 
         # 3. startDate < endDate (only when both fields are present)
         if data.get("startDate") and data.get("endDate"):
-            r = validate_start_end_date(data["startDate"], data["endDate"])
+            r = validate_start_end_date(
+                data["startDate"],
+                data["endDate"],
+                # Stored clocks, so a same-day window can be told apart from a
+                # backwards one. Absent (long flow, before the time question)
+                # they are None and equal dates fail as they always did.
+                start_time=data.get("inspectionTime"),
+                end_time=data.get("inspectionEndTime") or data.get("inspectionTime"),
+            )
             if r["status"] == "FAILED":
                 errors.append(r)
 
