@@ -552,6 +552,22 @@ class TestEditableWindow:
         assert rows["inspectionTime"]["value"] == "09:00"
         assert rows["inspectionEndTime"]["value"] == "09:00"
 
+    def test_lease_code_is_read_only_once_resolved(self, short_flow_on: None) -> None:
+        """The card must not offer what chat refuses to change."""
+        rows = _card(_complete_draft(lease_id=7001))
+        assert rows["lease_code"]["editable"] is False
+        assert rows["lease_code"]["value"] == "t0112136"
+
+    def test_lease_code_stays_editable_before_a_lease_is_resolved(
+        self, short_flow_on: None
+    ) -> None:
+        draft = _complete_draft()
+        draft.pop("lease_id", None)
+        assert _card(draft)["lease_code"]["editable"] is True
+
+    def test_flag_off_leaves_lease_code_editable(self) -> None:
+        assert _card(_complete_draft(lease_id=7001))["lease_code"]["editable"] is True
+
     def test_inspector_is_a_dropdown(self, short_flow_on: None) -> None:
         rows = _card(_complete_draft())
         assert rows["inspection_done_by"]["editable"] is True

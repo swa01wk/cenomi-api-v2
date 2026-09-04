@@ -237,6 +237,22 @@ _INSPECTION_TIME_ROWS: tuple[tuple[str, str], ...] = (
 )
 
 
+def _lease_locked_on_card(workflow_stage: str, collected_data: dict[str, Any]) -> bool:
+    """True once the lease is settled and must not be edited on the card.
+
+    Asked in chat, the assistant already refuses: "Lease Code comes from the
+    lease record and can't be edited here" (see missing_field_node). An
+    editable box on the review card offered exactly what chat refuses, on the
+    field every identifier on the request hangs off. Read-only once the lookup
+    has resolved a lease_id; to use a different lease, start a new request.
+    """
+    from app.agents.schemas.handover_schema import AI_FILLED_STAGES, short_flow_enabled
+
+    if not short_flow_enabled() or workflow_stage not in AI_FILLED_STAGES:
+        return False
+    return bool(collected_data.get("lease_id"))
+
+
 def _typed_inspection_inputs(workflow_stage: str) -> bool:
     """True when the card should carry separate, picker-backed date/time rows."""
     from app.agents.schemas.handover_schema import short_flow_enabled
@@ -389,6 +405,9 @@ def _build_confirmation_card(
         "COMPLETED",
     }:
         editable.discard("guideLineLink")
+
+    if _lease_locked_on_card(workflow_stage, collected_data):
+        editable.discard("lease_code")
 
     # Enum fields that must render as a <select> dropdown on the frontend.
     _ENUM_OPTIONS: dict[str, list[str]] = {
