@@ -20,6 +20,11 @@ from typing import Any
 from app.agents.graph.state import ServiceRequestState
 from app.observability.decorators import trace_node
 
+# Provenance of every field the short flow generated, kept alongside the values
+# in collected_data (persisted with the draft) so the review card can label
+# them and detect a later user edit.
+_AI_FIELD_META_KEY = "_ai_field_meta"
+
 # RDD upload type codes (mirrored from handover_schema to avoid circular import).
 _RDD_DOC_TYPE_MEETING = "DR_SR_HANDOVER_REPORT"
 _RDD_DOC_TYPE_REJECTED = "SR_REJECTED_HANDOVER_REPORT"
@@ -118,6 +123,14 @@ _EXPLICIT_YEAR_RE = re.compile(r"\b(?:19|20)\d{2}\b")
 # Any digit in the user's message means they may have typed a date. Used to gate
 # year coercion so a bare "yes"/"confirm" never rewrites a backend-supplied date.
 _DATE_TOKEN_RE = re.compile(r"\d")
+
+# Phrases the extractor resolves against today's date rather than reading a
+# year off the message.
+_RELATIVE_DATE_RE = re.compile(
+    r"\b(today|tomorrow|day after tomorrow|next\s+(week|month|mon|tue|wed|thu|fri|sat|sun)\w*"
+    r"|in\s+\d+\s+days?|\d+\s+days?\s+from\s+now)\b",
+    re.IGNORECASE,
+)
 
 
 def _coerce_year_if_absent(value: str, message_has_year: bool) -> str:
@@ -413,7 +426,13 @@ async def merge_state_node(state: ServiceRequestState) -> dict[str, Any]:
     user_message: str = state.get("user_message") or ""
     message_has_date_token: bool = bool(_DATE_TOKEN_RE.search(user_message))
     can_coerce_year: bool = bool(user_message.strip()) and message_has_date_token
-    message_has_year: bool = bool(_EXPLICIT_YEAR_RE.search(user_message))
+    # A relative phrase ("in 3 days", "next Monday") is resolved by the
+    # extractor against today's date, so its year is already deliberate —
+    # coercing it to the current year would move a New Year window back into
+    # the year that is ending.
+    message_has_year: bool = bool(_EXPLICIT_YEAR_RE.search(user_message)) or bool(
+        _RELATIVE_DATE_RE.search(user_message)
+    )
 
     # ── Apply inline edits from the confirmation card first ────────────────
     # corrected_fields come directly from the user's UI interaction, so they
@@ -701,6 +720,24 @@ async def merge_state_node(state: ServiceRequestState) -> dict[str, Any]:
     # Silence unused-var warning when the CREATE_HANDED_OVER_SR branch runs.
     _ = title_needs_default
 
+    # ── Short flow: fill the fields the bot no longer asks for ────────────────
+    # Runs only once everything the user *is* asked for has landed, so the
+    # generated description / notes can name the real inspection window. Never
+    # overwrites a value the user typed or edited on the review card — see
+    # ``autofill_text_fields``.
+    from app.agents.schemas.handover_schema import short_flow_enabled
+
+    if short_flow_enabled() and _short_flow_autofill_ready(collected, workflow_stage):
+        from app.agents.services.sr_autofill_service import autofill_text_fields
+
+        filled, provenance = await autofill_text_fields(collected, workflow_stage)
+        if filled:
+            collected.update(filled)
+            meta: dict[str, Any] = dict(collected.get(_AI_FIELD_META_KEY) or {})
+            for field_name, entry in provenance.items():
+                meta[field_name] = {**entry, "value": filled[field_name]}
+            collected[_AI_FIELD_META_KEY] = meta
+
     # ── Auto-compute expected_handover_date from unit_readiness_date ──────────
     # FM_REVIEW: expected_handover_date = unit_readiness_date + 7 days.
     # Skipped for CREATE_HANDED_OVER_SR — expected_handover_date is not used
@@ -872,6 +909,33 @@ async def merge_state_node(state: ServiceRequestState) -> dict[str, Any]:
         patch["workflow_stage"] = "CREATE_HANDED_OVER_SR"
         patch["sub_category"] = "HANDED_OVER"
     return patch
+
+
+def _short_flow_autofill_ready(collected: dict[str, Any], workflow_stage: str) -> bool:
+    """True once the user has supplied everything the short flow asks for.
+
+    Generating earlier would describe an inspection whose window is not known
+    yet, and the text would then have to be regenerated (or, worse, kept) once
+    the dates arrive.
+    """
+    # Local import: handover_schema imports BACKEND_COMPUTED_FIELDS from this
+    # module, so a module-level import here would close the cycle.
+    from app.agents.schemas.handover_schema import AI_FILLED_STAGES, INSPECTION_FIELD_GROUP
+
+    if workflow_stage not in AI_FILLED_STAGES:
+        return False
+    if not str(collected.get("lease_code") or "").strip():
+        return False
+    if workflow_stage == "CREATE_SR":
+        required_now: tuple[str, ...] = INSPECTION_FIELD_GROUP
+    else:
+        required_now = (
+            "actual_shop_handover_date",
+            "actual_fitout_start_date",
+            "actual_fitout_end_date",
+            "actual_trading_date",
+        )
+    return all(collected.get(f) not in (None, "", []) for f in required_now)
 
 
 def _was_skipped(value: object) -> bool:
