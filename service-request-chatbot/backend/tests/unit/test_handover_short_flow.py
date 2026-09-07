@@ -164,6 +164,33 @@ class TestCombinedInspectionAsk:
         assert result["status"] == "WAITING_FOR_USER"
 
     @pytest.mark.asyncio
+    async def test_names_every_field_the_question_asks_for(
+        self, short_flow_on: None
+    ) -> None:
+        """The form highlights what it is told; one name would dim the rest."""
+        collected = _lease_resolved(already_handovered="initiate_handover")
+        result = await missing_field_node(_state(collected))
+        assert result["response_ui"]["fields"] == [
+            "startDate",
+            "endDate",
+            "inspection_done_by",
+        ]
+        # The single field stays: it is the scroll target and binds bare answers.
+        assert result["response_ui"]["field"] == "startDate"
+
+    @pytest.mark.asyncio
+    async def test_named_fields_narrow_with_the_answers(
+        self, short_flow_on: None
+    ) -> None:
+        collected = _lease_resolved(
+            already_handovered="initiate_handover",
+            startDate="2026-09-06",
+        )
+        result = await missing_field_node(_state(collected))
+        assert result["response_ui"]["fields"] == ["endDate", "inspection_done_by"]
+        assert result["response_ui"]["field"] == "endDate"
+
+    @pytest.mark.asyncio
     async def test_offers_two_windows_and_both_roles(self, short_flow_on: None) -> None:
         collected = _lease_resolved(already_handovered="initiate_handover")
         result = await missing_field_node(_state(collected))

@@ -102,6 +102,12 @@ async def test_four_turns_from_lease_to_review(
     message2 = body2.get("message") or ""
     assert "Inspection details" in message2
     assert (body2.get("ui") or {}).get("field") == "startDate"
+    # The form guides the user to all three, not just the scroll target.
+    assert (body2.get("ui") or {}).get("fields") == [
+        "startDate",
+        "endDate",
+        "inspection_done_by",
+    ]
     labels2 = _chip_labels(body2)
     assert len(labels2) == 4
     assert labels2[-2:] == ["FM Manager", "Operations"]

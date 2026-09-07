@@ -468,7 +468,12 @@ def _build_inspection_group_ask(
         "response_message": question,
         "response_ui": {
             "type": "text_question",
+            # ``field`` is the one to scroll to and bind a bare answer to;
+            # ``fields`` is everything this question asks for, so the form can
+            # guide the user to all of them instead of spotlighting one and
+            # dimming the other two the same question is asking about.
             "field": primary,
+            "fields": list(group_missing),
             "message": question,
             "verbatim": True,
         },
