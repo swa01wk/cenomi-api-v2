@@ -17,7 +17,9 @@ from __future__ import annotations
 
 import json
 import time
+from datetime import datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import structlog
 from pydantic import ValidationError
@@ -27,6 +29,9 @@ from app.agents.prompts.handover_extraction_prompt import HANDOVER_EXTRACTION_SY
 from app.agents.schemas.handover_schema import ExtractionTraceMeta, HandoverExtractedFields
 
 log = structlog.get_logger(__name__)
+
+# Users, the portal and the platform all think in Riyadh wall time.
+_PORTAL_TZ = ZoneInfo("Asia/Riyadh")
 
 
 class FieldExtractionService:
@@ -170,6 +175,12 @@ class FieldExtractionService:
         included as an explicit hint for the LLM.
         """
         parts: list[str] = []
+
+        # Anchor for relative dates ("today", "tomorrow", "in three days").
+        # Sent per call rather than baked into the system prompt so it is
+        # correct on a process that has been up for days.
+        today = datetime.now(_PORTAL_TZ).date()
+        parts.append(f"Today's date: {today.isoformat()} ({today:%A})")
 
         # Include the last bot question as conversation context when available.
         if recent_history:

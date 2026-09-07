@@ -247,6 +247,67 @@ USER_SUPPLIED_FIELDS: frozenset[str] = ALLOWED_EXTRACTED_FIELDS - BACKEND_DERIVE
 OPTIONAL_FIELDS: frozenset[str] = frozenset(
     {"description", "comments", "notes", "inspectionTime", "inspectionEndTime", "title"}
 )
+
+# ── Short flow (HANDOVER_SHORT_FLOW_ENABLED) ─────────────────────────────────
+# The three inspection fields are asked as ONE question instead of three
+# consecutive turns.  Members keep their own keys, validation rules and payload
+# mapping — only the *ask* is merged, and a partial answer re-asks whatever is
+# still open (see ``missing_field_node._build_inspection_group_ask``).
+INSPECTION_FIELD_GROUP: tuple[str, ...] = (
+    "startDate",
+    "endDate",
+    "inspection_done_by",
+)
+
+# Fields the short flow fills on the user's behalf (deterministic template,
+# optionally LLM-polished) instead of asking for them.  They stay in
+# ``required_fields`` so validation and the payload builder still see real
+# values; only the question loop skips them, and every one of them remains
+# editable on the review card.
+AI_FILLED_FIELDS: frozenset[str] = frozenset(
+    {"title", "description", "notes", "comments"}
+)
+
+# Inspection clock times. The short flow keeps them collectable — a user who
+# types "6 Sep 2pm" still gets 14:00 — but never spends a turn asking for them;
+# the payload builder defaults an unanswered time to 09:00 as it always has.
+_SHORT_FLOW_UNASKED_TIME_FIELDS: frozenset[str] = frozenset(
+    {"inspectionTime", "inspectionEndTime"}
+)
+
+# Everything the short flow declines to ask for: generated text plus the times.
+SHORT_FLOW_UNASKED_FIELDS: frozenset[str] = (
+    AI_FILLED_FIELDS | _SHORT_FLOW_UNASKED_TIME_FIELDS
+)
+
+# Stages where the short flow applies. FM_REVIEW / RDD_REVIEW ask their own
+# comments question and are untouched.
+AI_FILLED_STAGES: frozenset[str] = frozenset({"CREATE_SR", "CREATE_HANDED_OVER_SR"})
+
+
+def short_flow_enabled() -> bool:
+    """True when the four-turn CREATE flow is switched on.
+
+    Read through ``get_settings()`` (cached) at call time rather than captured
+    at import, so tests can toggle the flag with the usual settings override.
+    """
+    from app.core.config import get_settings
+
+    return bool(get_settings().handover_short_flow_enabled)
+
+
+def ai_filled_fields_for(stage_name: str) -> frozenset[str]:
+    """Text fields the short flow generates rather than asks for."""
+    if not short_flow_enabled() or stage_name not in AI_FILLED_STAGES:
+        return frozenset()
+    return AI_FILLED_FIELDS
+
+
+def unasked_fields_for(stage_name: str) -> frozenset[str]:
+    """Every field the short flow skips in the question loop for *stage_name*."""
+    if not short_flow_enabled() or stage_name not in AI_FILLED_STAGES:
+        return frozenset()
+    return SHORT_FLOW_UNASKED_FIELDS
 # ``title`` is optional — merge_state_node / payload_builder auto-generate a
 # default ("handover-{lease}-{slug}" for Path A, "Already Trading - {lease}"
 # for Path B) when the user skips.
@@ -358,10 +419,16 @@ def get_missing_fields(stage_name: str, collected: dict) -> list[str]:
             return value is None
         return _is_missing(value)
 
+    # Short flow: fields the system fills are never "missing" from the user's
+    # point of view — autofill writes the text ones once the inspection group
+    # resolves, times default in the payload builder, and the review card is
+    # where all of them are checked and edited.
+    unasked = unasked_fields_for(stage_name)
+
     missing = [
         f
         for f in get_required_fields(stage_name)
-        if _is_missing_for_field(f, collected.get(f))
+        if f not in unasked and _is_missing_for_field(f, collected.get(f))
     ]
 
     return missing

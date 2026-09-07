@@ -28,13 +28,19 @@ from app.agents.schemas.fitout_confirm_schema import (
     get_missing_fields as fitout_confirm_get_missing_fields,
 )
 from app.agents.schemas.handover_schema import (
+    INSPECTION_FIELD_GROUP,
     RDD_DOC_TYPE_MEETING,
     RDD_DOC_TYPE_OTHER,
     RDD_DOC_TYPE_REJECTED,
     STAGE_REGISTRY,
     get_missing_fields as handover_get_missing_fields,
+    short_flow_enabled,
 )
 from app.agents.services.display_formatters import format_field_display_value
+from app.agents.services.inspection_suggestions_service import (
+    build_inspection_decorations,
+    parse_date as _parse_inspection_date,
+)
 from app.agents.services.missing_field_service import (
     HANDOVER_FIELD_QUESTIONS,
     get_missing_fields,
@@ -310,6 +316,172 @@ def _has_rdd_mandatory_upload(documents: list[dict[str, Any]]) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Combined inspection question (short flow)
+# ---------------------------------------------------------------------------
+
+# Agents whose CREATE_SR stage collects the inspection window. Path B
+# (CREATE_HANDED_OVER_SR) records historical dates instead and is untouched.
+_INSPECTION_GROUP_AGENTS: frozenset[str] = frozenset({"rdd_handover_agent"})
+
+# One line per field, shown under the question so the user knows what each
+# value means without having to ask.
+_INSPECTION_FIELD_EXPLAINERS: dict[str, str] = {
+    "startDate": "**Start date** — when the inspection begins.",
+    "endDate": "**End date** — when it is expected to finish (must be after the start).",
+    "inspection_done_by": "**Done by** — who conducts it: FM Manager or Operations.",
+}
+
+
+# The two dates that carry a clock. Corrections to these accept "date time".
+_WINDOW_DATE_FIELDS: frozenset[str] = frozenset({"startDate", "endDate"})
+
+# Which stored clock belongs to which half of the window.
+_WINDOW_CLOCK_KEYS: dict[str, str] = {
+    "startDate": "inspectionTime",
+    "endDate": "inspectionEndTime",
+}
+
+
+def _window_clock_display(collected: dict[str, Any], date_field: str) -> str:
+    """The clock stored for one half of the inspection window, as ``h:mm AM/PM``.
+
+    An end with no clock of its own runs on the start clock, matching
+    ``resolve_start_end_hhmm``.
+    """
+    key = _WINDOW_CLOCK_KEYS.get(date_field, "")
+    raw = str(collected.get(key) or "").strip()
+    if not raw and date_field == "endDate":
+        raw = str(collected.get("inspectionTime") or "").strip()
+    if not raw:
+        return ""
+    try:
+        return datetime.strptime(raw, "%H:%M").strftime("%-I:%M %p")
+    except ValueError:
+        return raw
+
+
+def _format_inspection_date(raw: Any) -> str:
+    """``2026-09-06`` → ``6 Sep 2026``; falls back to the raw string."""
+    parsed = _parse_inspection_date(raw)
+    if parsed is None:
+        return str(raw or "").strip()
+    return f"{parsed.day} {parsed:%b %Y}"
+
+
+def _should_ask_inspection_group(
+    active_agent: str | None,
+    workflow_stage: str,
+    user_missing: list[str],
+) -> bool:
+    """True when the inspection fields should be asked as one question."""
+    if not short_flow_enabled():
+        return False
+    if (active_agent or "") not in _INSPECTION_GROUP_AGENTS:
+        return False
+    if workflow_stage != "CREATE_SR":
+        return False
+    # Only when the group is genuinely next in line. Stage order puts the
+    # handover type first, and jumping the queue would ask for inspection
+    # dates before the user has said whether this is even a new handover.
+    return bool(user_missing) and user_missing[0] in INSPECTION_FIELD_GROUP
+
+
+def _build_inspection_group_question(
+    collected: dict[str, Any],
+    group_missing: list[str],
+) -> str:
+    """Compose the question for whichever inspection fields are still open.
+
+    The wording changes with the remaining subset: the first ask invites all
+    three values in one line, while a re-ask states what is already booked and
+    asks only for the gap — so a user who answered two of three never sees the
+    same question twice.
+    """
+    start_display = _format_inspection_date(collected.get("startDate"))
+    end_display = _format_inspection_date(collected.get("endDate"))
+
+    known_bits: list[str] = []
+    if "startDate" not in group_missing and start_display:
+        known_bits.append(f"start **{start_display}**")
+    if "endDate" not in group_missing and end_display:
+        known_bits.append(f"end **{end_display}**")
+    if "inspection_done_by" not in group_missing and collected.get("inspection_done_by"):
+        label = format_field_display_value(
+            "inspection_done_by", collected.get("inspection_done_by")
+        )
+        known_bits.append(f"inspected by **{label}**")
+
+    lead = ""
+    if known_bits:
+        lead = "Got " + ", ".join(known_bits) + ". "
+
+    if len(group_missing) == 1:
+        only = group_missing[0]
+        if only == "startDate":
+            ask = "When should the inspection start?"
+        elif only == "endDate":
+            ask = "When is the inspection expected to finish?"
+        else:
+            ask = "Who is conducting the inspection?"
+        return f"{lead}{ask}"
+
+    if set(group_missing) == {"startDate", "endDate"}:
+        ask = (
+            "What is the inspection window? One line is fine — "
+            "e.g. *6 Sep to 7 Sep*."
+        )
+    elif set(group_missing) == {"endDate", "inspection_done_by"}:
+        ask = (
+            "When does it finish, and who is conducting it? One line is fine — "
+            "e.g. *7 Sep, FM Manager*."
+        )
+    else:
+        ask = (
+            "**Inspection details** — give me the window and who is inspecting. "
+            "One line is fine, e.g. *6 Sep to 7 Sep, FM Manager*."
+        )
+
+    explainers = "\n".join(
+        _INSPECTION_FIELD_EXPLAINERS[f]
+        for f in INSPECTION_FIELD_GROUP
+        if f in group_missing and f in _INSPECTION_FIELD_EXPLAINERS
+    )
+    return f"{lead}{ask}\n\n{explainers}" if explainers else f"{lead}{ask}"
+
+
+def _build_inspection_group_ask(
+    collected: dict[str, Any],
+    group_missing: list[str],
+    all_missing: list[str],
+) -> dict[str, Any]:
+    """State patch asking for every still-missing inspection field at once.
+
+    ``active_field`` is set to the first open member so that a bare single
+    answer still binds through the normal remap path; the other members are
+    picked up by the extractor's multi-field rules, and anything the user
+    leaves out is asked again next turn with narrowed chips.
+    """
+    question = _build_inspection_group_question(collected, group_missing)
+    primary = group_missing[0]
+    updates: dict[str, Any] = {
+        "missing_fields": list(all_missing),
+        "response_message": question,
+        "response_ui": {
+            "type": "text_question",
+            "field": primary,
+            "message": question,
+            "verbatim": True,
+        },
+        "status": "WAITING_FOR_USER",
+        "active_field": primary,
+    }
+    decorations = build_inspection_decorations(collected, set(group_missing))
+    if decorations:
+        updates["response_decorations"] = decorations
+    return updates
+
+
+# ---------------------------------------------------------------------------
 # Node
 # ---------------------------------------------------------------------------
 
@@ -403,11 +575,23 @@ async def missing_field_node(state: ServiceRequestState) -> dict[str, Any]:
             }
         current_value = collected.get(correction_pending_field)
         display_value = format_field_display_value(correction_pending_field, current_value)
+        # The inspection window carries a clock, so state it and let the user
+        # change both halves in one answer. Without this the prompt showed a
+        # bare date, asked for a bare date, and the time looked unchangeable.
+        if correction_pending_field in _WINDOW_DATE_FIELDS:
+            clock = _window_clock_display(collected, correction_pending_field)
+            if display_value not in (None, "", []) and clock:
+                display_value = f"{display_value} {clock}"
         if display_value not in (None, "", []):
             question = f"Current {label}: {display_value}. What would you like to change it to?"
         else:
             question = f"What would you like to set as the {label}?"
-        if correction_pending_field in _SINGLE_DATE_FIELDS:
+        if correction_pending_field in _WINDOW_DATE_FIELDS:
+            question += (
+                " Give the date as DD/MM/YYYY, and add a time if you want to "
+                "change that too — e.g. '21/08/2026 6:00 PM'."
+            )
+        elif correction_pending_field in _SINGLE_DATE_FIELDS:
             question += " Use DD/MM/YYYY format, e.g. '21/08/2026'."
         correction_update: dict[str, Any] = {
             "missing_fields": [correction_pending_field],
@@ -488,13 +672,29 @@ async def missing_field_node(state: ServiceRequestState) -> dict[str, Any]:
                 bad_end = str(collected.get("endDate") or "").strip()
                 start_raw = str(collected.get("startDate") or "").strip()
                 if bad_end and start_raw:
-                    next_question = (
-                        f"The end date you entered "
-                        f"({_format_base_date_for_display(bad_end)}) is not after the "
-                        f"start date ({_format_base_date_for_display(start_raw)}). "
-                        f"Please enter an end date later than "
-                        f"{_format_base_date_for_display(start_raw)}, in DD/MM/YYYY format."
-                    )
+                    start_display = _format_base_date_for_display(start_raw)
+                    end_display = _format_base_date_for_display(bad_end)
+                    if start_display == end_display:
+                        # A one-day inspection is legitimate — the clock is what
+                        # is wrong, so ask about the clock rather than repeating
+                        # a date question the user already answered correctly.
+                        start_clock = _window_clock_display(collected, "startDate")
+                        end_clock = _window_clock_display(collected, "endDate")
+                        next_question = (
+                            f"The inspection starts and ends on {start_display}, "
+                            f"so the end time ({end_clock or 'not set'}) has to be "
+                            f"later than the start time ({start_clock or 'not set'}). "
+                            f"Give a later time on the same day — e.g. "
+                            f"'{start_display} 6:00 PM' — or a later end date."
+                        )
+                    else:
+                        next_question = (
+                            f"The end date you entered ({end_display}) is not after "
+                            f"the start date ({start_display}). Please enter an end "
+                            f"date later than {start_display} in DD/MM/YYYY format, "
+                            f"or the same date with a later time — e.g. "
+                            f"'{start_display} 6:00 PM'."
+                        )
                     verbatim_question = True
         elif error_field and error_field not in _effective_backend_fields:
             next_field = error_field
@@ -541,6 +741,13 @@ async def missing_field_node(state: ServiceRequestState) -> dict[str, Any]:
             return ask
         # If the decoration couldn't build (missing session/sr_id), fall
         # through to the user_missing branch below.
+
+    elif _should_ask_inspection_group(active_agent, workflow_stage, user_missing):
+        # Short flow: the inspection window and the inspector are one question,
+        # not three turns. Returns directly — the shared question-building code
+        # below assumes a single field per ask.
+        group_missing = [f for f in INSPECTION_FIELD_GROUP if f in user_missing]
+        return _build_inspection_group_ask(collected, group_missing, all_missing)
 
     elif user_missing:
         # All backend fields are resolved; ask for the first user-supplied gap.

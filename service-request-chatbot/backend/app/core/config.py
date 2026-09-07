@@ -239,6 +239,26 @@ class Settings(BaseSettings):
             "false to fall back to the plain lease-code question."
         ),
     )
+    handover_short_flow_enabled: bool = Field(
+        default=False,
+        validation_alias="HANDOVER_SHORT_FLOW_ENABLED",
+        description=(
+            "Collapse the Path A CREATE_SR ask loop from nine questions to "
+            "four turns: handover type, one combined inspection question "
+            "(start date + end date + inspector), documents, then preview. "
+            "Set false to keep the field-per-turn flow."
+        ),
+    )
+    handover_ai_autofill_enabled: bool = Field(
+        default=False,
+        validation_alias="HANDOVER_AI_AUTOFILL_ENABLED",
+        description=(
+            "Let an LLM draft the handover description and notes instead of "
+            "using the deterministic templates. Requires "
+            "HANDOVER_SHORT_FLOW_ENABLED; falls back to the templates on any "
+            "error or timeout. The title is always template-generated."
+        ),
+    )
     llm_confidence_threshold: float = Field(
         default=0.6,
         validation_alias="LLM_CONFIDENCE_THRESHOLD",
