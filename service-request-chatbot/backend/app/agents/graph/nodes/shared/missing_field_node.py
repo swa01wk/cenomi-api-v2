@@ -36,6 +36,7 @@ from app.agents.schemas.handover_schema import (
     get_missing_fields as handover_get_missing_fields,
     short_flow_enabled,
 )
+from app.agents.services import guided_tour_service
 from app.agents.services.display_formatters import format_field_display_value
 from app.agents.services.inspection_suggestions_service import (
     build_inspection_decorations,
@@ -313,6 +314,26 @@ def _has_rdd_mandatory_upload(documents: list[dict[str, Any]]) -> bool:
         if not role_val or role_val in _RDD_UPLOAD_ROLES:
             return True
     return False
+
+
+def _should_ask_guided_tour(
+    collected: dict[str, Any],
+    workflow_cfg: Any,
+    all_missing: list[str],
+) -> bool:
+    """True when the guided-tour choice is still owed for this draft.
+
+    Only worth asking when there is something to collect: a stage with nothing
+    outstanding is about to show its review card, and a question about how to
+    fill a form the user has already filled is noise.
+    """
+    if not guided_tour_service.is_enabled():
+        return False
+    if workflow_cfg is not None and not getattr(workflow_cfg, "guided_tour_gate", True):
+        return False
+    if guided_tour_service.answered(collected):
+        return False
+    return bool(all_missing)
 
 
 # ---------------------------------------------------------------------------
@@ -721,6 +742,14 @@ async def missing_field_node(state: ServiceRequestState) -> dict[str, Any]:
                 break
         # If all trigger fields are already present the lease lookup simply
         # hasn't run yet — nothing more to ask; leave next_field as None.
+
+    elif _should_ask_guided_tour(collected, workflow_cfg, all_missing):
+        # Asked once per draft, before the first field question of any
+        # collection stage — after the lease is resolved on CREATE, and
+        # straight away on the review stages, which have no lease to find.
+        ask = guided_tour_service.build_question_response(collected)
+        ask["missing_fields"] = list(all_missing)
+        return ask
 
     # RDD: once the guideline link is captured, prompt for the doc upload
     # BEFORE asking for the date fields (actual_handover_date, fitout_*,

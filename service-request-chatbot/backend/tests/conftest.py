@@ -15,6 +15,7 @@ import pytest
 _FLAG_DEFAULTS: dict[str, object] = {
     "handover_short_flow_enabled": False,
     "handover_ai_autofill_enabled": False,
+    "guided_tour_choice_enabled": False,
 }
 
 

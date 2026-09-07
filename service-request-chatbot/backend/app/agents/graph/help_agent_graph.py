@@ -99,6 +99,7 @@ from app.agents.graph.nodes.fitout_confirm.fitout_confirm_api_submission_node im
 from app.agents.graph.nodes.handover.handover_entry_node import handover_entry_node
 from app.agents.graph.nodes.handover.fm_review_entry_node import fm_review_entry_node
 from app.agents.graph.nodes.handover.rdd_review_entry_node import rdd_review_entry_node
+from app.agents.services import guided_tour_service as _guided_tour_service
 from app.agents.graph.nodes.shared.field_extraction_node import field_extraction_node
 from app.agents.graph.nodes.shared.merge_state_node import merge_state_node
 from app.agents.graph.nodes.shared.lease_lookup_node import lease_lookup_node
@@ -570,6 +571,12 @@ def _route_after_handover_entry(state: dict[str, Any]) -> str:
     # Check confirmation_status BEFORE stale WAITING_FOR_USER so that a confirm
     # action set this turn is never shadowed by a persisted WAITING_FOR_USER value
     # from the previous save_state.  Mirrors the same guard in _route_after_fm_entry.
+
+    # The guided-tour choice is not a collectable field, so extraction has
+    # nothing to bind it to. Chip or typed, it goes straight to merge_state,
+    # which records it for every workflow.
+    if _guided_tour_service.has_pending_answer(state):
+        return "merge_state"
     if state.get("confirmation_status") == "CONFIRMED":
         return "merge_state"
     if state.get("action_override") == "continue_milestone":
@@ -593,6 +600,12 @@ def _route_after_fm_entry(state: dict[str, Any]) -> str:
     # Check fm_action / confirmation_status BEFORE stale status so that an
     # approve or confirm action set this turn is never shadowed by a persisted
     # WAITING_FOR_USER value from the previous save_state.
+
+    # The guided-tour choice is not a collectable field, so extraction has
+    # nothing to bind it to. Chip or typed, it goes straight to merge_state,
+    # which records it for every workflow.
+    if _guided_tour_service.has_pending_answer(state):
+        return "merge_state"
     if state.get("confirmation_status") == "CONFIRMED":
         return "merge_state"
     backend_refs = state.get("backend_refs") or {}
@@ -611,6 +624,12 @@ def _route_after_rdd_entry(state: dict[str, Any]) -> str:
     #
     # Single-turn confirm already set CONFIRMED — skip extraction and go
     # straight through merge → validation → rdd_confirmation → payload builder.
+
+    # The guided-tour choice is not a collectable field, so extraction has
+    # nothing to bind it to. Chip or typed, it goes straight to merge_state,
+    # which records it for every workflow.
+    if _guided_tour_service.has_pending_answer(state):
+        return "merge_state"
     if state.get("confirmation_status") == "CONFIRMED":
         return "merge_state"
     # Status chips write document_status into collected_data directly (see
@@ -653,6 +672,12 @@ def _route_after_rdd_confirmation(state: dict[str, Any]) -> str:
 
 
 def _route_after_work_permit_entry(state: dict[str, Any]) -> str:
+
+    # The guided-tour choice is not a collectable field, so extraction has
+    # nothing to bind it to. Chip or typed, it goes straight to merge_state,
+    # which records it for every workflow.
+    if _guided_tour_service.has_pending_answer(state):
+        return "merge_state"
     if state.get("status") == "WAITING_FOR_USER":
         return "response_generation"
     if state.get("action_override") == "cancel":
@@ -676,6 +701,12 @@ def _route_after_fitout_confirm_entry(state: dict[str, Any]) -> str:
     # short-circuited to response_generation, which re-emitted the previous
     # question instead of submitting — the flow looped on the date prompt and
     # never produced a success message or View Service Request button.
+
+    # The guided-tour choice is not a collectable field, so extraction has
+    # nothing to bind it to. Chip or typed, it goes straight to merge_state,
+    # which records it for every workflow.
+    if _guided_tour_service.has_pending_answer(state):
+        return "merge_state"
     if state.get("confirmation_status") == "CONFIRMED":
         return "merge_state"
     if state.get("action_override") == "continue_milestone":

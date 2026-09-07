@@ -478,6 +478,13 @@ async def merge_state_node(state: ServiceRequestState) -> dict[str, Any]:
                 value = _to_date_only(value)
             collected[field_name] = value
 
+    # The guided-tour choice. Recorded here rather than in each agent's entry
+    # node so every workflow — handover, work permit, fitout confirmation and
+    # whatever registers next — inherits it from one place.
+    from app.agents.services import guided_tour_service
+
+    guided_tour_service.apply_answer(collected, dict(state))
+
     corrections: list[dict[str, Any]] = list(collected.get("_corrections") or [])
 
     # On the CONFIRMED path (user confirmed the card), corrected_fields contain

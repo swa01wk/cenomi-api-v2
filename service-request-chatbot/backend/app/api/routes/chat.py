@@ -224,6 +224,15 @@ class ChatStatePayload(BaseModel):
             "are-you-sure before cancelling; the UI should show Yes/No."
         ),
     )
+    guided_tour: str | None = Field(
+        default=None,
+        description=(
+            "'guided' when the user asked the assistant to walk them through "
+            "the form, 'open' when they asked to keep it editable, null before "
+            "they have chosen. The assistant asks the same questions either "
+            "way; this only governs whether the form is locked and spotlighted."
+        ),
+    )
 
 
 class ServiceRequestChatResponse(BaseModel):
@@ -388,6 +397,7 @@ async def post_service_request_chat(
             sr_id=result.state.sr_id,
             action_result=result.state.action_result,
             confirmation_status=result.state.confirmation_status,
+            guided_tour=result.state.guided_tour,
         ),
         trace_id=str(result.trace_id) if result.trace_id else None,
         message_id=(

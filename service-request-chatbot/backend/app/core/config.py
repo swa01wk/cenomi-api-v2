@@ -239,6 +239,17 @@ class Settings(BaseSettings):
             "false to fall back to the plain lease-code question."
         ),
     )
+    guided_tour_choice_enabled: bool = Field(
+        default=False,
+        validation_alias="GUIDED_TOUR_CHOICE_ENABLED",
+        description=(
+            "Ask the user once per draft whether they want the assistant to "
+            "guide them through the form. Answering no leaves the form "
+            "editable — the assistant asks the same questions either way, and "
+            "anything typed into the form syncs back to the draft silently. "
+            "Applies to every service-request workflow that collects fields."
+        ),
+    )
     handover_short_flow_enabled: bool = Field(
         default=False,
         validation_alias="HANDOVER_SHORT_FLOW_ENABLED",
