@@ -109,8 +109,10 @@ async def test_four_turns_from_lease_to_review(
         "inspection_done_by",
     ]
     labels2 = _chip_labels(body2)
+    # Each chip is a whole answer: a window paired with an inspector.
     assert len(labels2) == 4
-    assert labels2[-2:] == ["FM Manager", "Operations"]
+    assert all("FM Manager" in x or "Operations" in x for x in labels2)
+    assert all("→" in x for x in labels2)
 
     # ── Turn 3: window + inspector in one message ─────────────────────────
     with _extraction(

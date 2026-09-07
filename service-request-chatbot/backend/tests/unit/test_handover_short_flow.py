@@ -191,16 +191,42 @@ class TestCombinedInspectionAsk:
         assert result["response_ui"]["field"] == "endDate"
 
     @pytest.mark.asyncio
-    async def test_offers_two_windows_and_both_roles(self, short_flow_on: None) -> None:
+    async def test_every_chip_answers_the_whole_question(
+        self, short_flow_on: None
+    ) -> None:
+        """One tap should finish the step, not start a second question."""
         collected = _lease_resolved(already_handovered="initiate_handover")
         result = await missing_field_node(_state(collected))
         labels = _chip_labels(result)
         assert len(labels) == 4
-        assert labels[-2:] == ["FM Manager", "Operations"]
+        assert all("FM Manager" in x or "Operations" in x for x in labels)
+        assert all("→" in x for x in labels)
 
-    def test_window_chips_are_today_plus_three_and_two(self) -> None:
+    def test_chips_pair_each_window_with_each_inspector(self) -> None:
         options = build_inspection_options(
-            {}, {"startDate", "endDate"}, today=date(2026, 9, 4)
+            {},
+            {"startDate", "endDate", "inspection_done_by"},
+            today=date(2026, 9, 7),
+        )
+        assert [o["label"] for o in options] == [
+            "10 Sep → 11 Sep · FM Manager",
+            "10 Sep → 11 Sep · Operations",
+            "9 Sep → 10 Sep · FM Manager",
+            "9 Sep → 10 Sep · Operations",
+        ]
+        assert [o["value"] for o in options] == [
+            "Start 10/09/2026, End 11/09/2026, FM Manager",
+            "Start 10/09/2026, End 11/09/2026, Operations",
+            "Start 09/09/2026, End 10/09/2026, FM Manager",
+            "Start 09/09/2026, End 10/09/2026, Operations",
+        ]
+
+    def test_window_chips_drop_the_inspector_once_it_is_known(self) -> None:
+        """No point re-offering a choice the user has already made."""
+        options = build_inspection_options(
+            {"inspection_done_by": "FM_MANAGER"},
+            {"startDate", "endDate"},
+            today=date(2026, 9, 4),
         )
         assert [o["value"] for o in options] == [
             "Start 07/09/2026, End 08/09/2026",

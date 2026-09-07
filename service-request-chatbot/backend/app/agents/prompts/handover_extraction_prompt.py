@@ -289,7 +289,11 @@ user supplies and simply omit the rest — the bot asks again for what is left.
   User: "6 Sep to 7 Sep, FM Manager"
   → Extract `startDate: "2026-09-06"`, `endDate: "2026-09-07"`, `inspection_done_by: "FM_MANAGER"`
 
-- Same question, User: "Start 07/09/2026, End 08/09/2026"   ← a quick-pick chip
+- Same question, User: "Start 10/09/2026, End 11/09/2026, FM Manager"  ← a quick-pick chip
+  → Extract `startDate: "2026-09-10"`, `endDate: "2026-09-11"`,
+    `inspection_done_by: "FM_MANAGER"` — the whole question answered in one tap
+
+- Same question, User: "Start 07/09/2026, End 08/09/2026"   ← a window-only chip
   → Extract `startDate: "2026-09-07"` AND `endDate: "2026-09-08"`; omit `inspection_done_by`
 
 - Same question, User: "End 08/09/2026"                      ← end-only chip
