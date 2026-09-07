@@ -179,3 +179,88 @@ async def test_flag_off_asks_nothing(app_client: AsyncClient) -> None:
     assert "guide you through the form" not in (body.get("message") or "")
     assert (body.get("ui") or {}).get("field") == "already_handovered"
     assert body["state"].get("guided_tour") is None
+
+
+@pytest.mark.asyncio
+async def test_form_edits_survive_the_document_and_review_steps(
+    app_client: AsyncClient, tour_on: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The live report: pick the handover type, tap an inspection chip, then
+    edit the form — and watch the assistant put its own values back.
+
+    Both idle waits after the inspection question — the optional-document card
+    and the review card — leave no active_field, which used to send the turn
+    past merge_state to response_generation. The edit was dropped there and the
+    next apply pushed the older value back over the form.
+    """
+    from app.core.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "handover_short_flow_enabled", True)
+
+    session_id, _ = await _resolve_lease(app_client)
+
+    with _extraction({}), _gateway(), _lease():
+        await _post(app_client, session_id=session_id, action=tour.ACTION_OPEN)
+
+    with _extraction({"already_handovered": "initiate_handover"}), _gateway(), _lease():
+        await _post(
+            app_client, session_id=session_id, message="initiate handover"
+        )
+
+    # The inspection chip answers the whole question in one tap.
+    with _extraction(
+        {
+            "startDate": "2026-09-10",
+            "endDate": "2026-09-11",
+            "inspection_done_by": "FM_MANAGER",
+        }
+    ), _gateway(), _lease():
+        after_chip = await _post(
+            app_client,
+            session_id=session_id,
+            message="Start 10/09/2026, End 11/09/2026, FM Manager",
+        )
+
+    # Now sitting on the optional-document card — an idle wait, no active field.
+    assert (after_chip.get("ui") or {}).get("type") == "document_requirement"
+
+    # The user edits the form while that card is up.
+    with _extraction({}), _gateway(), _lease():
+        after_edit = await _post(
+            app_client,
+            session_id=session_id,
+            corrected_fields={
+                "title": "Zara RP-E2E-01 pre-opening handover",
+                "description": "Snagging round before opening.",
+                "startDate": "2026-09-15",
+                "endDate": "2026-09-16",
+                "inspection_done_by": "OPERATIONS",
+            },
+        )
+
+    def _preview(body: dict[str, Any]) -> dict[str, Any]:
+        return {
+            f["key"]: f["value"] for f in (body.get("draft_preview") or {}).get("fields", [])
+        }
+
+    kept = _preview(after_edit)
+    assert kept["title"] == "Zara RP-E2E-01 pre-opening handover"
+    assert kept["description"] == "Snagging round before opening."
+    assert "2026-09-15" in str(kept["startDate"])
+    # draft_preview display-formats the enum for the form bridge.
+    assert str(kept["inspection_done_by"]).upper() == "OPERATIONS"
+
+    # Continue past the documents: the review card must show what the user
+    # typed, not what the assistant had collected.
+    with _extraction({}), _gateway(), _lease():
+        review = await _post(
+            app_client, session_id=session_id, message="continue"
+        )
+
+    ui = review.get("ui") or {}
+    assert ui.get("type") == "confirmation_card"
+    rows = {f["key"]: f["value"] for f in ui["fields"]}
+    assert rows["title"] == "Zara RP-E2E-01 pre-opening handover"
+    assert rows["description"] == "Snagging round before opening."
+    assert "2026-09-15" in str(rows["startDate"])
+    assert rows["inspection_done_by"] == "OPERATIONS"
