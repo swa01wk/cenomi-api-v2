@@ -28,6 +28,7 @@ from app.agents.schemas.fitout_confirm_schema import (
     get_missing_fields as fitout_confirm_get_missing_fields,
 )
 from app.agents.schemas.handover_schema import (
+    HANDED_OVER_FIELD_GROUP,
     INSPECTION_FIELD_GROUP,
     RDD_REVIEW_FIELD_GROUP,
     RDD_DOC_TYPE_MEETING,
@@ -509,6 +510,117 @@ def _build_inspection_group_ask(
 
 
 # ---------------------------------------------------------------------------
+# Combined Already Trading question (Path B)
+# ---------------------------------------------------------------------------
+
+_HANDED_OVER_EXPLAINERS: dict[str, str] = {
+    "actual_shop_handover_date": "**Shop handover** — when the unit was handed to the tenant.",
+    "actual_fitout_start_date": "**Fit-out start** — when fit-out work began.",
+    "actual_fitout_end_date": "**Fit-out end** — when fit-out work finished.",
+    "actual_trading_date": "**Trading** — when the store opened for business.",
+}
+
+# Sample values for the "one line is fine" example, so it shows the fields
+# actually being asked for rather than a fixed four.
+_HANDED_OVER_EXAMPLE_DATES: dict[str, str] = {
+    "actual_shop_handover_date": "20/08/2026",
+    "actual_fitout_start_date": "27/08/2026",
+    "actual_fitout_end_date": "30/09/2026",
+    "actual_trading_date": "10/10/2026",
+}
+
+_HANDED_OVER_SHORT_LABELS: dict[str, str] = {
+    "actual_shop_handover_date": "handover",
+    "actual_fitout_start_date": "fit-out start",
+    "actual_fitout_end_date": "fit-out end",
+    "actual_trading_date": "trading",
+}
+
+
+def _should_ask_handed_over_group(
+    active_agent: str | None,
+    workflow_stage: str,
+    user_missing: list[str],
+) -> bool:
+    """True when Path B's four actual dates should be asked as one question."""
+    if not short_flow_enabled():
+        return False
+    if (active_agent or "") not in _INSPECTION_GROUP_AGENTS:
+        return False
+    if workflow_stage != "CREATE_HANDED_OVER_SR":
+        return False
+    return bool(user_missing) and user_missing[0] in HANDED_OVER_FIELD_GROUP
+
+
+def _build_handed_over_group_question(
+    collected: dict[str, Any],
+    group_missing: list[str],
+) -> str:
+    """Compose the question for whichever Already Trading dates are open.
+
+    No suggestions here, by design: these are dates the unit already lived
+    through, and only the Mall Manager knows them.
+    """
+    known = [
+        f"{_HANDED_OVER_SHORT_LABELS[f]} **{_format_inspection_date(collected[f])}**"
+        for f in HANDED_OVER_FIELD_GROUP
+        if f not in group_missing and collected.get(f)
+    ]
+    lead = "Got " + ", ".join(known) + ". " if known else ""
+
+    if len(group_missing) == 1:
+        only = group_missing[0]
+        ask = {
+            "actual_shop_handover_date": "When was the unit handed over?",
+            "actual_fitout_start_date": "When did fit-out start?",
+            "actual_fitout_end_date": "When did fit-out finish?",
+            "actual_trading_date": "When did the store open for business?",
+        }[only]
+        return f"{lead}{ask} Use DD/MM/YYYY."
+
+    # The example lists exactly the dates still wanted, in the order they are
+    # read — four of them on the first ask, two when two have already landed.
+    example = ", ".join(
+        _HANDED_OVER_EXAMPLE_DATES[f]
+        for f in HANDED_OVER_FIELD_GROUP
+        if f in group_missing
+    )
+    ask = (
+        "**The dates so far** — this unit is already trading, so I need what "
+        f"actually happened. One line is fine, in order: '{example}'."
+    )
+    explainers = "\n".join(
+        _HANDED_OVER_EXPLAINERS[f]
+        for f in HANDED_OVER_FIELD_GROUP
+        if f in group_missing and f in _HANDED_OVER_EXPLAINERS
+    )
+    return f"{lead}{ask}\n\n{explainers}" if explainers else f"{lead}{ask}"
+
+
+def _build_handed_over_group_ask(
+    collected: dict[str, Any],
+    group_missing: list[str],
+    all_missing: list[str],
+) -> dict[str, Any]:
+    """State patch asking for every still-missing Already Trading date at once."""
+    question = _build_handed_over_group_question(collected, group_missing)
+    primary = group_missing[0]
+    return {
+        "missing_fields": list(all_missing),
+        "response_message": question,
+        "response_ui": {
+            "type": "text_question",
+            "field": primary,
+            "fields": list(group_missing),
+            "message": question,
+            "verbatim": True,
+        },
+        "status": "WAITING_FOR_USER",
+        "active_field": primary,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Combined RDD review question
 # ---------------------------------------------------------------------------
 
@@ -888,6 +1000,12 @@ async def missing_field_node(state: ServiceRequestState) -> dict[str, Any]:
             return ask
         # If the decoration couldn't build (missing session/sr_id), fall
         # through to the user_missing branch below.
+
+    elif _should_ask_handed_over_group(active_agent, workflow_stage, user_missing):
+        # Already Trading: all four actual dates in one question. Nothing is
+        # suggested — only the Mall Manager knows what already happened.
+        group_missing = [f for f in HANDED_OVER_FIELD_GROUP if f in user_missing]
+        return _build_handed_over_group_ask(collected, group_missing, all_missing)
 
     elif _should_ask_rdd_group(active_agent, workflow_stage, user_missing):
         # RDD review: the meeting outcome and the milestone dates are one

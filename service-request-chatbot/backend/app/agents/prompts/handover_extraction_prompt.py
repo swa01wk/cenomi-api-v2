@@ -306,6 +306,27 @@ user supplies and simply omit the rest — the bot asks again for what is left.
 - Same question, User: "FM team"
   → Extract `inspection_done_by: "FM_MANAGER"` only — do NOT guess dates
 
+**The combined Already Trading question (Path B)**
+
+Path B records a unit that is already open, so all four dates come from the
+user in one line, in this order unless they name them: shop handover, fit-out
+start, fit-out end, trading.
+
+- Question: "**The dates so far** — this unit is already trading, so I need
+  what actually happened."
+  User: "20/08/2026, 27/08/2026, 30/09/2026, 10/10/2026"
+  → Extract `actual_shop_handover_date: "2026-08-20"`,
+    `actual_fitout_start_date: "2026-08-27"`,
+    `actual_fitout_end_date: "2026-09-30"`,
+    `actual_trading_date: "2026-10-10"`
+
+- Same question, User: "handed over 20 Aug, fitout 27 Aug to 30 Sep, trading 10 Oct"
+  → the same four values
+
+- Same question, User: "20 Aug and 27 Aug"
+  → Extract `actual_shop_handover_date` and `actual_fitout_start_date` only;
+    the bot asks for the rest
+
 **The combined RDD review question**
 
 RDD review asks for the Handover Meeting Report outcome and the milestone dates
