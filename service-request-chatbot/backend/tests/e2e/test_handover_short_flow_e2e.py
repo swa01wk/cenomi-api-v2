@@ -102,9 +102,17 @@ async def test_four_turns_from_lease_to_review(
     message2 = body2.get("message") or ""
     assert "Inspection details" in message2
     assert (body2.get("ui") or {}).get("field") == "startDate"
+    # The form guides the user to all three, not just the scroll target.
+    assert (body2.get("ui") or {}).get("fields") == [
+        "startDate",
+        "endDate",
+        "inspection_done_by",
+    ]
     labels2 = _chip_labels(body2)
+    # Each chip is a whole answer: a window paired with an inspector.
     assert len(labels2) == 4
-    assert labels2[-2:] == ["FM Manager", "Operations"]
+    assert all("FM Manager" in x or "Operations" in x for x in labels2)
+    assert all("→" in x for x in labels2)
 
     # ── Turn 3: window + inspector in one message ─────────────────────────
     with _extraction(

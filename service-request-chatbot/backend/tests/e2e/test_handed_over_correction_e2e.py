@@ -208,8 +208,11 @@ async def test_path_b_corrected_date_is_stored_and_flow_resumes(
         {"actual_shop_handover_date": {"value": "2026-01-05", "confidence": 1.0}},
     )
     card_fields = {f["key"]: f["value"] for f in applied["ui"].get("fields", [])}
-    assert card_fields.get("actual_shop_handover_date") == "05/01/2026", card_fields
+    # These rows are editable now, so they carry the raw ISO date the input
+    # round-trips; the client formats it for display. They were read-only
+    # display strings when this test was written.
+    assert card_fields.get("actual_shop_handover_date") == "2026-01-05", card_fields
     # The other three dates must survive untouched.
-    assert card_fields.get("actual_fitout_start_date") == "12/01/2026", card_fields
-    assert card_fields.get("actual_fitout_end_date") == "01/02/2026", card_fields
-    assert card_fields.get("actual_trading_date") == "05/02/2026", card_fields
+    assert card_fields.get("actual_fitout_start_date") == "2026-01-12", card_fields
+    assert card_fields.get("actual_fitout_end_date") == "2026-02-01", card_fields
+    assert card_fields.get("actual_trading_date") == "2026-02-05", card_fields

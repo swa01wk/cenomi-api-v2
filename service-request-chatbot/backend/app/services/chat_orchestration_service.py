@@ -144,6 +144,10 @@ class ChatTurnState:
     sr_id: str | None = None
     action_result: str | None = None  # "success" | "failed" | None
     confirmation_status: str | None = None
+    # "guided" | "open" — whether the user asked the assistant to drive the
+    # form. The client locks or unlocks the form on this; it cannot infer the
+    # mode from the active field, which is named in both modes.
+    guided_tour: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -622,6 +626,15 @@ class ChatOrchestrationService:
             if cleared_fields:
                 draft_preview["cleared_fields"] = cleared_fields
 
+        # Published on every turn so the form knows whether to lock itself.
+        from app.agents.services import guided_tour_service
+
+        guided_tour_mode: str | None = (
+            guided_tour_service.mode(collected)
+            if guided_tour_service.answered(collected)
+            else None
+        )
+
         decorations: dict[str, Any] = dict(result_state.get("response_decorations") or {})
         response_ui = finalize_response_ui(
             response_ui,
@@ -645,6 +658,7 @@ class ChatOrchestrationService:
                 sr_id=sr_id,
                 action_result=action_result,
                 confirmation_status=result_state.get("confirmation_status"),
+                guided_tour=guided_tour_mode,
             ),
             trace_id=trace_id,
             draft_preview=draft_preview,

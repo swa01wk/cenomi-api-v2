@@ -28,7 +28,9 @@ from app.agents.schemas.fitout_confirm_schema import (
     get_missing_fields as fitout_confirm_get_missing_fields,
 )
 from app.agents.schemas.handover_schema import (
+    HANDED_OVER_FIELD_GROUP,
     INSPECTION_FIELD_GROUP,
+    RDD_REVIEW_FIELD_GROUP,
     RDD_DOC_TYPE_MEETING,
     RDD_DOC_TYPE_OTHER,
     RDD_DOC_TYPE_REJECTED,
@@ -36,6 +38,7 @@ from app.agents.schemas.handover_schema import (
     get_missing_fields as handover_get_missing_fields,
     short_flow_enabled,
 )
+from app.agents.services import guided_tour_service
 from app.agents.services.display_formatters import format_field_display_value
 from app.agents.services.inspection_suggestions_service import (
     build_inspection_decorations,
@@ -315,6 +318,75 @@ def _has_rdd_mandatory_upload(documents: list[dict[str, Any]]) -> bool:
     return False
 
 
+# Stages whose work belongs to a reviewer, not to whoever raised the request.
+_HANDOFF_STAGES: dict[str, str] = {
+    "FM_REVIEW": "the FM team",
+    "RDD_REVIEW": "the RDD team",
+}
+
+
+def _handoff_response(
+    workflow_stage: str,
+    role: str,
+    collected: dict[str, Any],
+    backend_refs: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Say the request has moved on, rather than asking for the next stage's fields.
+
+    Approving on FM advances the SR to RDD review, and the session followed it
+    there — so a Mall or FM Manager was asked for the guideline link, which is
+    the RDD Project Manager's job on a request no longer theirs.
+
+    The permission hook that should have caught this (``validate_permission``)
+    reads ``state["role"]``, which nothing sets, so it has never run. Rather
+    than arm a blocking validator mid-flight, the collection loop simply
+    declines to ask: the role is already on ``backend_refs`` for the review
+    card's "Raised By" row.
+    """
+    from app.agents.schemas.handover_schema import role_can_act_on_stage
+
+    if workflow_stage not in _HANDOFF_STAGES:
+        return None
+    if not role or role_can_act_on_stage(role, workflow_stage):
+        return None
+
+    sr_id = str(backend_refs.get("sr_id") or collected.get("service_request_id") or "")
+    owner = _HANDOFF_STAGES[workflow_stage]
+    subject = f"Service Request {sr_id}" if sr_id else "This service request"
+    message = (
+        f"{subject} is with {owner} now — the next step is theirs, so there is "
+        f"nothing further for you to fill in here. You will see it move on as "
+        f"they work through it."
+    )
+    return {
+        "missing_fields": [],
+        "response_message": message,
+        "response_ui": {"type": "message", "message": message, "verbatim": True},
+        "status": "WAITING_FOR_USER",
+        "active_field": None,
+    }
+
+
+def _should_ask_guided_tour(
+    collected: dict[str, Any],
+    workflow_cfg: Any,
+    all_missing: list[str],
+) -> bool:
+    """True when the guided-tour choice is still owed for this draft.
+
+    Only worth asking when there is something to collect: a stage with nothing
+    outstanding is about to show its review card, and a question about how to
+    fill a form the user has already filled is noise.
+    """
+    if not guided_tour_service.is_enabled():
+        return False
+    if workflow_cfg is not None and not getattr(workflow_cfg, "guided_tour_gate", True):
+        return False
+    if guided_tour_service.answered(collected):
+        return False
+    return bool(all_missing)
+
+
 # ---------------------------------------------------------------------------
 # Combined inspection question (short flow)
 # ---------------------------------------------------------------------------
@@ -428,17 +500,17 @@ def _build_inspection_group_question(
     if set(group_missing) == {"startDate", "endDate"}:
         ask = (
             "What is the inspection window? One line is fine — "
-            "e.g. *6 Sep to 7 Sep*."
+            "e.g. '6 Sep to 7 Sep'."
         )
     elif set(group_missing) == {"endDate", "inspection_done_by"}:
         ask = (
             "When does it finish, and who is conducting it? One line is fine — "
-            "e.g. *7 Sep, FM Manager*."
+            "e.g. '7 Sep, FM Manager'."
         )
     else:
         ask = (
             "**Inspection details** — give me the window and who is inspecting. "
-            "One line is fine, e.g. *6 Sep to 7 Sep, FM Manager*."
+            "One line is fine, e.g. '6 Sep to 7 Sep, FM Manager'."
         )
 
     explainers = "\n".join(
@@ -468,7 +540,12 @@ def _build_inspection_group_ask(
         "response_message": question,
         "response_ui": {
             "type": "text_question",
+            # ``field`` is the one to scroll to and bind a bare answer to;
+            # ``fields`` is everything this question asks for, so the form can
+            # guide the user to all of them instead of spotlighting one and
+            # dimming the other two the same question is asking about.
             "field": primary,
+            "fields": list(group_missing),
             "message": question,
             "verbatim": True,
         },
@@ -476,6 +553,229 @@ def _build_inspection_group_ask(
         "active_field": primary,
     }
     decorations = build_inspection_decorations(collected, set(group_missing))
+    if decorations:
+        updates["response_decorations"] = decorations
+    return updates
+
+
+# ---------------------------------------------------------------------------
+# Combined Already Trading question (Path B)
+# ---------------------------------------------------------------------------
+
+_HANDED_OVER_EXPLAINERS: dict[str, str] = {
+    "actual_shop_handover_date": "**Shop handover** — when the unit was handed to the tenant.",
+    "actual_fitout_start_date": "**Fit-out start** — when fit-out work began.",
+    "actual_fitout_end_date": "**Fit-out end** — when fit-out work finished.",
+    "actual_trading_date": "**Trading** — when the store opened for business.",
+}
+
+# Sample values for the "one line is fine" example, so it shows the fields
+# actually being asked for rather than a fixed four.
+_HANDED_OVER_EXAMPLE_DATES: dict[str, str] = {
+    "actual_shop_handover_date": "20/08/2026",
+    "actual_fitout_start_date": "27/08/2026",
+    "actual_fitout_end_date": "30/09/2026",
+    "actual_trading_date": "10/10/2026",
+}
+
+_HANDED_OVER_SHORT_LABELS: dict[str, str] = {
+    "actual_shop_handover_date": "handover",
+    "actual_fitout_start_date": "fit-out start",
+    "actual_fitout_end_date": "fit-out end",
+    "actual_trading_date": "trading",
+}
+
+
+def _should_ask_handed_over_group(
+    active_agent: str | None,
+    workflow_stage: str,
+    user_missing: list[str],
+) -> bool:
+    """True when Path B's four actual dates should be asked as one question."""
+    if not short_flow_enabled():
+        return False
+    if (active_agent or "") not in _INSPECTION_GROUP_AGENTS:
+        return False
+    if workflow_stage != "CREATE_HANDED_OVER_SR":
+        return False
+    return bool(user_missing) and user_missing[0] in HANDED_OVER_FIELD_GROUP
+
+
+def _build_handed_over_group_question(
+    collected: dict[str, Any],
+    group_missing: list[str],
+) -> str:
+    """Compose the question for whichever Already Trading dates are open.
+
+    No suggestions here, by design: these are dates the unit already lived
+    through, and only the Mall Manager knows them.
+    """
+    known = [
+        f"{_HANDED_OVER_SHORT_LABELS[f]} **{_format_inspection_date(collected[f])}**"
+        for f in HANDED_OVER_FIELD_GROUP
+        if f not in group_missing and collected.get(f)
+    ]
+    lead = "Got " + ", ".join(known) + ". " if known else ""
+
+    if len(group_missing) == 1:
+        only = group_missing[0]
+        ask = {
+            "actual_shop_handover_date": "When was the unit handed over?",
+            "actual_fitout_start_date": "When did fit-out start?",
+            "actual_fitout_end_date": "When did fit-out finish?",
+            "actual_trading_date": "When did the store open for business?",
+        }[only]
+        return f"{lead}{ask} Use DD/MM/YYYY."
+
+    # The example lists exactly the dates still wanted, in the order they are
+    # read — four of them on the first ask, two when two have already landed.
+    example = ", ".join(
+        _HANDED_OVER_EXAMPLE_DATES[f]
+        for f in HANDED_OVER_FIELD_GROUP
+        if f in group_missing
+    )
+    ask = (
+        "**The dates so far** — this unit is already trading, so I need what "
+        f"actually happened. One line is fine, in order: '{example}'."
+    )
+    explainers = "\n".join(
+        _HANDED_OVER_EXPLAINERS[f]
+        for f in HANDED_OVER_FIELD_GROUP
+        if f in group_missing and f in _HANDED_OVER_EXPLAINERS
+    )
+    return f"{lead}{ask}\n\n{explainers}" if explainers else f"{lead}{ask}"
+
+
+def _build_handed_over_group_ask(
+    collected: dict[str, Any],
+    group_missing: list[str],
+    all_missing: list[str],
+) -> dict[str, Any]:
+    """State patch asking for every still-missing Already Trading date at once."""
+    question = _build_handed_over_group_question(collected, group_missing)
+    primary = group_missing[0]
+    return {
+        "missing_fields": list(all_missing),
+        "response_message": question,
+        "response_ui": {
+            "type": "text_question",
+            "field": primary,
+            "fields": list(group_missing),
+            "message": question,
+            "verbatim": True,
+        },
+        "status": "WAITING_FOR_USER",
+        "active_field": primary,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Combined RDD review question
+# ---------------------------------------------------------------------------
+
+_RDD_FIELD_EXPLAINERS: dict[str, str] = {
+    "document_status": (
+        "**Outcome** — Approve if the Handover Meeting Report stands as it is, "
+        "Approve with changes if it needs amendments."
+    ),
+    "actual_handover_date": "**Handover** — the date the unit was actually handed over.",
+    "fitout_start_date": "**Fit-out start** — the date fit-out work actually began.",
+    "fitout_end_date": "**Fit-out end** — the date fit-out work actually finished.",
+}
+
+_RDD_STATUS_WORDS: dict[str, str] = {
+    "APPROVED": "Approved",
+    "APPROVED_WITH_CHANGES": "Approved with changes",
+    "DISAPPROVED": "Disapproved",
+}
+
+
+def _should_ask_rdd_group(
+    active_agent: str | None,
+    workflow_stage: str,
+    user_missing: list[str],
+) -> bool:
+    """True when the RDD outcome and dates should be asked as one question."""
+    if not short_flow_enabled():
+        return False
+    if (active_agent or "") not in _INSPECTION_GROUP_AGENTS:
+        return False
+    if workflow_stage != "RDD_REVIEW":
+        return False
+    # Only once the group is genuinely next: the guideline link and the
+    # mandatory upload both come first.
+    return bool(user_missing) and user_missing[0] in RDD_REVIEW_FIELD_GROUP
+
+
+def _build_rdd_group_question(
+    collected: dict[str, Any],
+    group_missing: list[str],
+) -> str:
+    """Compose the question for whichever RDD fields are still open."""
+    known: list[str] = []
+    if "document_status" not in group_missing and collected.get("document_status"):
+        label = _RDD_STATUS_WORDS.get(
+            str(collected["document_status"]).upper(), str(collected["document_status"])
+        )
+        known.append(f"**{label}**")
+    for field_name, word in (
+        ("actual_handover_date", "handover"),
+        ("fitout_start_date", "fit-out start"),
+        ("fitout_end_date", "fit-out end"),
+    ):
+        if field_name not in group_missing and collected.get(field_name):
+            known.append(f"{word} **{_format_inspection_date(collected[field_name])}**")
+
+    lead = "Got " + ", ".join(known) + ". " if known else ""
+
+    if len(group_missing) == 1:
+        only = group_missing[0]
+        ask = {
+            "document_status": "What is the outcome of the Handover Meeting Report?",
+            "actual_handover_date": "What was the actual handover date?",
+            "fitout_start_date": "When did fit-out actually start?",
+            "fitout_end_date": "When did fit-out actually finish?",
+        }[only]
+        return f"{lead}{ask}"
+
+    ask = (
+        "**Report outcome and milestone dates** — the outcome, the actual "
+        "handover date, and the fit-out window. One line is fine, e.g. "
+        "'approved, 10 Sep, 30 Sep to 10 Nov'."
+    )
+    explainers = "\n".join(
+        _RDD_FIELD_EXPLAINERS[f]
+        for f in RDD_REVIEW_FIELD_GROUP
+        if f in group_missing and f in _RDD_FIELD_EXPLAINERS
+    )
+    tail = "\n\nThe trading date is worked out from the fit-out end date."
+    return f"{lead}{ask}\n\n{explainers}{tail}" if explainers else f"{lead}{ask}"
+
+
+async def _build_rdd_group_ask(
+    collected: dict[str, Any],
+    group_missing: list[str],
+    all_missing: list[str],
+) -> dict[str, Any]:
+    """State patch asking for every still-missing RDD review field at once."""
+    from app.agents.services.rdd_suggestions_service import build_rdd_decorations
+
+    question = _build_rdd_group_question(collected, group_missing)
+    primary = group_missing[0]
+    updates: dict[str, Any] = {
+        "missing_fields": list(all_missing),
+        "response_message": question,
+        "response_ui": {
+            "type": "text_question",
+            "field": primary,
+            "fields": list(group_missing),
+            "message": question,
+            "verbatim": True,
+        },
+        "status": "WAITING_FOR_USER",
+        "active_field": primary,
+    }
+    decorations = await build_rdd_decorations(collected, set(group_missing))
     if decorations:
         updates["response_decorations"] = decorations
     return updates
@@ -640,6 +940,19 @@ async def missing_field_node(state: ServiceRequestState) -> dict[str, Any]:
     # the concrete original date in the user-facing message).
     verbatim_question = False
 
+    # ── Priority -0.5: the stage belongs to someone else ──────────────────
+    # Checked before anything is asked, including the guided-tour choice: a
+    # user who cannot act on this stage should be told so, not walked through
+    # another team's fields.
+    handoff = _handoff_response(
+        workflow_stage,
+        str((state.get("backend_refs") or {}).get("user_role") or ""),
+        collected,
+        dict(state.get("backend_refs") or {}),
+    )
+    if handoff is not None:
+        return handoff
+
     # ── Priority 0: non-required blocking validation errors ───────────────
     # "required" failures mean a field is simply absent — those are handled by
     # the backend_missing / user_missing branches below which know how to ask
@@ -717,6 +1030,14 @@ async def missing_field_node(state: ServiceRequestState) -> dict[str, Any]:
         # If all trigger fields are already present the lease lookup simply
         # hasn't run yet — nothing more to ask; leave next_field as None.
 
+    elif _should_ask_guided_tour(collected, workflow_cfg, all_missing):
+        # Asked once per draft, before the first field question of any
+        # collection stage — after the lease is resolved on CREATE, and
+        # straight away on the review stages, which have no lease to find.
+        ask = guided_tour_service.build_question_response(collected)
+        ask["missing_fields"] = list(all_missing)
+        return ask
+
     # RDD: once the guideline link is captured, prompt for the doc upload
     # BEFORE asking for the date fields (actual_handover_date, fitout_*,
     # trading_date). Those dates are nested on the Meeting Report row per the
@@ -741,6 +1062,19 @@ async def missing_field_node(state: ServiceRequestState) -> dict[str, Any]:
             return ask
         # If the decoration couldn't build (missing session/sr_id), fall
         # through to the user_missing branch below.
+
+    elif _should_ask_handed_over_group(active_agent, workflow_stage, user_missing):
+        # Already Trading: all four actual dates in one question. Nothing is
+        # suggested — only the Mall Manager knows what already happened.
+        group_missing = [f for f in HANDED_OVER_FIELD_GROUP if f in user_missing]
+        return _build_handed_over_group_ask(collected, group_missing, all_missing)
+
+    elif _should_ask_rdd_group(active_agent, workflow_stage, user_missing):
+        # RDD review: the meeting outcome and the milestone dates are one
+        # question. Returns directly — the shared question-building code below
+        # assumes a single field per ask.
+        group_missing = [f for f in RDD_REVIEW_FIELD_GROUP if f in user_missing]
+        return await _build_rdd_group_ask(collected, group_missing, all_missing)
 
     elif _should_ask_inspection_group(active_agent, workflow_stage, user_missing):
         # Short flow: the inspection window and the inspector are one question,

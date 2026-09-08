@@ -11,6 +11,7 @@ TestMergeStateAutofill      — merge_state_node writes the values and their pro
 TestReviewCard              — Badges, hints and the raised-by / reviewed-next-by rows.
 TestEditableWindow          — The window is fixable on the card: date and time pickers.
 TestSameDayWindow           — A one-day inspection, separated by its clock.
+TestClockEditedOnTheForm    — The picker is one control; its clock half must stick.
 """
 
 from __future__ import annotations
@@ -164,16 +165,69 @@ class TestCombinedInspectionAsk:
         assert result["status"] == "WAITING_FOR_USER"
 
     @pytest.mark.asyncio
-    async def test_offers_two_windows_and_both_roles(self, short_flow_on: None) -> None:
+    async def test_names_every_field_the_question_asks_for(
+        self, short_flow_on: None
+    ) -> None:
+        """The form highlights what it is told; one name would dim the rest."""
+        collected = _lease_resolved(already_handovered="initiate_handover")
+        result = await missing_field_node(_state(collected))
+        assert result["response_ui"]["fields"] == [
+            "startDate",
+            "endDate",
+            "inspection_done_by",
+        ]
+        # The single field stays: it is the scroll target and binds bare answers.
+        assert result["response_ui"]["field"] == "startDate"
+
+    @pytest.mark.asyncio
+    async def test_named_fields_narrow_with_the_answers(
+        self, short_flow_on: None
+    ) -> None:
+        collected = _lease_resolved(
+            already_handovered="initiate_handover",
+            startDate="2026-09-06",
+        )
+        result = await missing_field_node(_state(collected))
+        assert result["response_ui"]["fields"] == ["endDate", "inspection_done_by"]
+        assert result["response_ui"]["field"] == "endDate"
+
+    @pytest.mark.asyncio
+    async def test_every_chip_answers_the_whole_question(
+        self, short_flow_on: None
+    ) -> None:
+        """One tap should finish the step, not start a second question."""
         collected = _lease_resolved(already_handovered="initiate_handover")
         result = await missing_field_node(_state(collected))
         labels = _chip_labels(result)
         assert len(labels) == 4
-        assert labels[-2:] == ["FM Manager", "Operations"]
+        assert all("FM Manager" in x or "Operations" in x for x in labels)
+        assert all("→" in x for x in labels)
 
-    def test_window_chips_are_today_plus_three_and_two(self) -> None:
+    def test_chips_pair_each_window_with_each_inspector(self) -> None:
         options = build_inspection_options(
-            {}, {"startDate", "endDate"}, today=date(2026, 9, 4)
+            {},
+            {"startDate", "endDate", "inspection_done_by"},
+            today=date(2026, 9, 7),
+        )
+        assert [o["label"] for o in options] == [
+            "10 Sep → 11 Sep · FM Manager",
+            "10 Sep → 11 Sep · Operations",
+            "9 Sep → 10 Sep · FM Manager",
+            "9 Sep → 10 Sep · Operations",
+        ]
+        assert [o["value"] for o in options] == [
+            "Start 10/09/2026, End 11/09/2026, FM Manager",
+            "Start 10/09/2026, End 11/09/2026, Operations",
+            "Start 09/09/2026, End 10/09/2026, FM Manager",
+            "Start 09/09/2026, End 10/09/2026, Operations",
+        ]
+
+    def test_window_chips_drop_the_inspector_once_it_is_known(self) -> None:
+        """No point re-offering a choice the user has already made."""
+        options = build_inspection_options(
+            {"inspection_done_by": "FM_MANAGER"},
+            {"startDate", "endDate"},
+            today=date(2026, 9, 4),
         )
         assert [o["value"] for o in options] == [
             "Start 07/09/2026, End 08/09/2026",
@@ -778,3 +832,69 @@ class TestSameDayWindow:
         assert "starts and ends on 21/08/2026" in message
         assert "10:00 AM" in message and "10:00 PM" in message
         assert "6:00 PM" in message
+
+
+# ---------------------------------------------------------------------------
+# TestClockEditedOnTheForm
+# ---------------------------------------------------------------------------
+
+
+class TestClockEditedOnTheForm:
+    """The form's date-and-time picker is a single control.
+
+    Changing only its clock sends the LT display string on its own. That is
+    the user's newest word on the field, so it has to win over the clock the
+    flow stored earlier — otherwise the date half of an edit sticks and the
+    time half silently reverts.
+    """
+
+    @staticmethod
+    def _booked() -> dict[str, Any]:
+        return _lease_resolved(
+            already_handovered="initiate_handover",
+            startDate="2026-09-15",
+            endDate="2026-09-16",
+            inspectionTime="09:00",
+            inspectionEndTime="09:00",
+            startDateLT="15/09/2026 9:00 AM",
+            endDateLT="16/09/2026 9:00 AM",
+            inspection_done_by="FM_MANAGER",
+        )
+
+    async def _merge(self, corrected: dict[str, Any]) -> dict[str, Any]:
+        from app.agents.graph.nodes.shared.merge_state_node import merge_state_node
+
+        state = _merge_state(self._booked())
+        state["corrected_fields"] = corrected
+        return (await merge_state_node(state))["collected_data"]
+
+    @pytest.mark.asyncio
+    async def test_a_new_start_time_sticks(self, short_flow_on: None) -> None:
+        collected = await self._merge({"startDateLT": "15/09/2026 2:00 PM"})
+        assert collected["inspectionTime"] == "14:00"
+        assert collected["startDateLT"] == "15/09/2026 2:00 PM"
+
+    @pytest.mark.asyncio
+    async def test_a_new_end_time_sticks(self, short_flow_on: None) -> None:
+        collected = await self._merge({"endDateLT": "16/09/2026 6:30 PM"})
+        assert collected["inspectionEndTime"] == "18:30"
+        assert collected["endDateLT"] == "16/09/2026 6:30 PM"
+        # The end clock is its own: the start must not follow it.
+        assert collected["inspectionTime"] == "09:00"
+
+    @pytest.mark.asyncio
+    async def test_both_halves_of_one_edit_survive(self, short_flow_on: None) -> None:
+        collected = await self._merge(
+            {"startDate": "2026-09-20", "startDateLT": "20/09/2026 11:15 AM"}
+        )
+        assert collected["startDate"] == "2026-09-20"
+        assert collected["inspectionTime"] == "11:15"
+        assert collected["startDateLT"] == "20/09/2026 11:15 AM"
+
+    @pytest.mark.asyncio
+    async def test_an_unrelated_edit_leaves_the_clock_alone(
+        self, short_flow_on: None
+    ) -> None:
+        collected = await self._merge({"comments": "Coordinate with the store."})
+        assert collected["inspectionTime"] == "09:00"
+        assert collected["startDateLT"] == "15/09/2026 9:00 AM"

@@ -99,6 +99,7 @@ from app.agents.graph.nodes.fitout_confirm.fitout_confirm_api_submission_node im
 from app.agents.graph.nodes.handover.handover_entry_node import handover_entry_node
 from app.agents.graph.nodes.handover.fm_review_entry_node import fm_review_entry_node
 from app.agents.graph.nodes.handover.rdd_review_entry_node import rdd_review_entry_node
+from app.agents.services import guided_tour_service as _guided_tour_service
 from app.agents.graph.nodes.shared.field_extraction_node import field_extraction_node
 from app.agents.graph.nodes.shared.merge_state_node import merge_state_node
 from app.agents.graph.nodes.shared.lease_lookup_node import lease_lookup_node
@@ -532,6 +533,35 @@ _RDD_DIRECT_SET_CHIP_ACTIONS: frozenset[str] = frozenset(
 )
 
 
+def _form_patch_target(state: dict[str, Any]) -> str | None:
+    """Where a turn carrying inline form edits belongs, or ``None``.
+
+    ``corrected_fields`` is the form bridge's silent patch: the user typed into
+    the SR form and the edit is riding back to the draft. Only ``merge_state``
+    writes it into ``collected_data``, so such a turn must never be
+    short-circuited to ``response_generation`` — that node cannot write the
+    draft, so the edit is dropped without a trace and the next apply pushes the
+    assistant's older value back over what the user typed.
+
+    Live symptom: with the form left open, edits made while the document card
+    or the review card was up (both idle waits with no ``active_field``)
+    vanished, and the review card showed the values the assistant had collected
+    rather than the ones on screen.
+
+    A patch that carries no message has nothing for the extractor to read, so
+    it goes straight to ``merge_state``; one that arrives alongside a typed
+    message still goes through extraction, which flows into ``merge_state``
+    anyway.
+    """
+    if not (state.get("corrected_fields") or {}):
+        return None
+    return (
+        "field_extraction"
+        if str(state.get("user_message") or "").strip()
+        else "merge_state"
+    )
+
+
 def _waiting_short_circuit_target(state: dict[str, Any]) -> str:
     """Where a turn goes when the persisted ``status`` is WAITING_FOR_USER.
 
@@ -554,6 +584,10 @@ def _waiting_short_circuit_target(state: dict[str, Any]) -> str:
     """
     from app.agents.services.field_correction_service import detect_correction_intent
 
+    patch_target = _form_patch_target(state)
+    if patch_target:
+        return patch_target
+
     if detect_correction_intent(
         state.get("user_message") or "",
         state.get("collected_data") or {},
@@ -570,6 +604,12 @@ def _route_after_handover_entry(state: dict[str, Any]) -> str:
     # Check confirmation_status BEFORE stale WAITING_FOR_USER so that a confirm
     # action set this turn is never shadowed by a persisted WAITING_FOR_USER value
     # from the previous save_state.  Mirrors the same guard in _route_after_fm_entry.
+
+    # The guided-tour choice is not a collectable field, so extraction has
+    # nothing to bind it to. Chip or typed, it goes straight to merge_state,
+    # which records it for every workflow.
+    if _guided_tour_service.has_pending_answer(state):
+        return "merge_state"
     if state.get("confirmation_status") == "CONFIRMED":
         return "merge_state"
     if state.get("action_override") == "continue_milestone":
@@ -586,13 +626,19 @@ def _route_after_handover_entry(state: dict[str, Any]) -> str:
         return _waiting_short_circuit_target(state)
     if state.get("action_override") == "cancel":
         return "merge_state"
-    return "field_extraction"
+    return _form_patch_target(state) or "field_extraction"
 
 
 def _route_after_fm_entry(state: dict[str, Any]) -> str:
     # Check fm_action / confirmation_status BEFORE stale status so that an
     # approve or confirm action set this turn is never shadowed by a persisted
     # WAITING_FOR_USER value from the previous save_state.
+
+    # The guided-tour choice is not a collectable field, so extraction has
+    # nothing to bind it to. Chip or typed, it goes straight to merge_state,
+    # which records it for every workflow.
+    if _guided_tour_service.has_pending_answer(state):
+        return "merge_state"
     if state.get("confirmation_status") == "CONFIRMED":
         return "merge_state"
     backend_refs = state.get("backend_refs") or {}
@@ -600,7 +646,7 @@ def _route_after_fm_entry(state: dict[str, Any]) -> str:
         return "merge_state"
     if state.get("status") == "WAITING_FOR_USER":
         return _waiting_short_circuit_target(state)
-    return "field_extraction"
+    return _form_patch_target(state) or "field_extraction"
 
 
 def _route_after_rdd_entry(state: dict[str, Any]) -> str:
@@ -611,6 +657,12 @@ def _route_after_rdd_entry(state: dict[str, Any]) -> str:
     #
     # Single-turn confirm already set CONFIRMED — skip extraction and go
     # straight through merge → validation → rdd_confirmation → payload builder.
+
+    # The guided-tour choice is not a collectable field, so extraction has
+    # nothing to bind it to. Chip or typed, it goes straight to merge_state,
+    # which records it for every workflow.
+    if _guided_tour_service.has_pending_answer(state):
+        return "merge_state"
     if state.get("confirmation_status") == "CONFIRMED":
         return "merge_state"
     # Status chips write document_status into collected_data directly (see
@@ -631,7 +683,7 @@ def _route_after_rdd_entry(state: dict[str, Any]) -> str:
         return "response_generation"
     if state.get("status") == "WAITING_FOR_USER":
         return _waiting_short_circuit_target(state)
-    return "field_extraction"
+    return _form_patch_target(state) or "field_extraction"
 
 
 def _route_after_confirmation(state: dict[str, Any]) -> str:
@@ -653,11 +705,17 @@ def _route_after_rdd_confirmation(state: dict[str, Any]) -> str:
 
 
 def _route_after_work_permit_entry(state: dict[str, Any]) -> str:
+
+    # The guided-tour choice is not a collectable field, so extraction has
+    # nothing to bind it to. Chip or typed, it goes straight to merge_state,
+    # which records it for every workflow.
+    if _guided_tour_service.has_pending_answer(state):
+        return "merge_state"
     if state.get("status") == "WAITING_FOR_USER":
-        return "response_generation"
+        return _form_patch_target(state) or "response_generation"
     if state.get("action_override") == "cancel":
         return "merge_state"
-    return "field_extraction"
+    return _form_patch_target(state) or "field_extraction"
 
 
 def _route_after_work_permit_confirmation(state: dict[str, Any]) -> str:
@@ -676,6 +734,12 @@ def _route_after_fitout_confirm_entry(state: dict[str, Any]) -> str:
     # short-circuited to response_generation, which re-emitted the previous
     # question instead of submitting — the flow looped on the date prompt and
     # never produced a success message or View Service Request button.
+
+    # The guided-tour choice is not a collectable field, so extraction has
+    # nothing to bind it to. Chip or typed, it goes straight to merge_state,
+    # which records it for every workflow.
+    if _guided_tour_service.has_pending_answer(state):
+        return "merge_state"
     if state.get("confirmation_status") == "CONFIRMED":
         return "merge_state"
     if state.get("action_override") == "continue_milestone":
@@ -683,10 +747,10 @@ def _route_after_fitout_confirm_entry(state: dict[str, Any]) -> str:
     if state.get("confirmation_status") == "REJECTED":
         return "field_extraction"
     if state.get("status") == "WAITING_FOR_USER":
-        return "response_generation"
+        return _form_patch_target(state) or "response_generation"
     if state.get("action_override") == "cancel":
         return "merge_state"
-    return "field_extraction"
+    return _form_patch_target(state) or "field_extraction"
 
 
 def _route_after_fitout_confirm_confirmation(state: dict[str, Any]) -> str:
