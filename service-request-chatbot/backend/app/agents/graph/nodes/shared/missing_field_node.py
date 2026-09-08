@@ -450,17 +450,17 @@ def _build_inspection_group_question(
     if set(group_missing) == {"startDate", "endDate"}:
         ask = (
             "What is the inspection window? One line is fine — "
-            "e.g. *6 Sep to 7 Sep*."
+            "e.g. '6 Sep to 7 Sep'."
         )
     elif set(group_missing) == {"endDate", "inspection_done_by"}:
         ask = (
             "When does it finish, and who is conducting it? One line is fine — "
-            "e.g. *7 Sep, FM Manager*."
+            "e.g. '7 Sep, FM Manager'."
         )
     else:
         ask = (
             "**Inspection details** — give me the window and who is inspecting. "
-            "One line is fine, e.g. *6 Sep to 7 Sep, FM Manager*."
+            "One line is fine, e.g. '6 Sep to 7 Sep, FM Manager'."
         )
 
     explainers = "\n".join(
@@ -580,7 +580,7 @@ def _build_rdd_group_question(
     ask = (
         "**Report outcome and milestone dates** — the outcome, the actual "
         "handover date, and the fit-out window. One line is fine, e.g. "
-        "*approved, 10 Sep, 30 Sep to 10 Nov*."
+        "'approved, 10 Sep, 30 Sep to 10 Nov'."
     )
     explainers = "\n".join(
         _RDD_FIELD_EXPLAINERS[f]

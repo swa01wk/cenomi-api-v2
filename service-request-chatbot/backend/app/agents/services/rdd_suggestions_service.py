@@ -21,6 +21,12 @@ number, and the reviewer has already seen it.
     fitout_end_date       = expected handover + free_period calendar days
     trading_date          = derived downstream (fit-out end + 8 days)
 
+Only 2,016 of 14,203 leases carry a free period, so the fit-out end falls back
+to the lease's own planned or contract fit-out end when the agreed period is
+zero. When neither is set — the common case — no end date is offered rather
+than one invented from a rule nobody wrote down, and the reviewer is asked for
+it on its own.
+
 Working days are Sunday-Thursday: the Saudi weekend is Friday and Saturday.
 Read-only, best effort, and never load-bearing — no platform database, no lease
 row, or no expected handover date simply means fewer suggestions, and the
@@ -45,8 +51,11 @@ _SUGGEST_SQL = """
     SELECT
         cenomi.add_working_days(:anchor, :fitout_start_wd)::date
             AS fitout_start_date,
-        (:anchor + (COALESCE(free_period, 0) * INTERVAL '1 day'))::date
-            AS fitout_end_date,
+        CASE
+            WHEN COALESCE(free_period, 0) > 0
+                THEN (:anchor + (free_period * INTERVAL '1 day'))::date
+            ELSE COALESCE(planned_fitout_end_date, base_fitout_end_date)::date
+        END AS fitout_end_date,
         COALESCE(free_period, 0) AS free_period
     FROM cenomi.leases
     WHERE lease_id = :lease_id
@@ -144,9 +153,14 @@ async def suggest_rdd_dates(collected: dict[str, Any]) -> dict[str, str]:
         "fitout_start_date": _as_iso_date(row.get("fitout_start_date")),
         "fitout_end_date": _as_iso_date(row.get("fitout_end_date")),
     }
-    # A lease with no agreed free period puts fit-out end on the handover day
-    # itself, which is not a window anyone would book. Offer the rest.
-    if suggested["fitout_end_date"] and suggested["fitout_end_date"] <= anchor:
+    # An end that is not after the start is not a window anyone could book, and
+    # would fail validation the moment it was accepted. That happens two ways:
+    # a lease with no agreed free period puts the end on the handover day
+    # itself, and a fallback planned end can predate the computed start. Offer
+    # the rest and ask for the end on its own.
+    end = suggested.get("fitout_end_date") or ""
+    start = suggested.get("fitout_start_date") or ""
+    if end and (end <= anchor or (start and end <= start)):
         suggested.pop("fitout_end_date")
     log.info(
         "rdd_suggestions.built",

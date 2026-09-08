@@ -245,3 +245,74 @@ class TestChips:
         self, no_platform_db: None
     ) -> None:
         assert await rdd.build_rdd_decorations({}, {"fitout_end_date"}) == {}
+
+class TestWindowSanity:
+    """A suggested window that ends before it starts is worse than none."""
+
+    @staticmethod
+    async def _suggest(monkeypatch: pytest.MonkeyPatch, row: dict[str, Any]) -> dict:
+        class _Reader:
+            def __init__(self, *_a: Any, **_k: Any) -> None:
+                pass
+
+            async def fetch_all(self, *_a: Any, **_k: Any) -> list[dict]:
+                return [row]
+
+            async def dispose(self) -> None:
+                return None
+
+        import app.indexer.readers.pg_reader as pg
+
+        monkeypatch.setattr(pg, "CenomiPgReader", _Reader)
+        from app.core.config import get_settings
+
+        monkeypatch.setattr(
+            get_settings(), "cenomi_database_url", "postgresql+asyncpg://x/y"
+        )
+        return await rdd.suggest_rdd_dates(
+            {"expected_handover_date": "2026-09-17", "lease_id": 1}
+        )
+
+    @pytest.mark.asyncio
+    async def test_drops_an_end_that_predates_the_start(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A lease's planned end can sit before the computed fit-out start."""
+        suggested = await self._suggest(
+            monkeypatch,
+            {
+                "fitout_start_date": date(2026, 10, 7),
+                "fitout_end_date": date(2026, 9, 23),
+                "free_period": 0,
+            },
+        )
+        assert "fitout_end_date" not in suggested
+        assert suggested["fitout_start_date"] == "2026-10-07"
+
+    @pytest.mark.asyncio
+    async def test_drops_an_end_on_the_handover_day(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        suggested = await self._suggest(
+            monkeypatch,
+            {
+                "fitout_start_date": date(2026, 10, 7),
+                "fitout_end_date": date(2026, 9, 17),
+                "free_period": 0,
+            },
+        )
+        assert "fitout_end_date" not in suggested
+
+    @pytest.mark.asyncio
+    async def test_keeps_a_window_that_makes_sense(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        suggested = await self._suggest(
+            monkeypatch,
+            {
+                "fitout_start_date": date(2026, 10, 7),
+                "fitout_end_date": date(2026, 11, 20),
+                "free_period": 61,
+            },
+        )
+        assert suggested["fitout_end_date"] == "2026-11-20"
