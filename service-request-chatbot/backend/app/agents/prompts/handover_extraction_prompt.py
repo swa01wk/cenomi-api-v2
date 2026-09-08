@@ -306,6 +306,38 @@ user supplies and simply omit the rest — the bot asks again for what is left.
 - Same question, User: "FM team"
   → Extract `inspection_done_by: "FM_MANAGER"` only — do NOT guess dates
 
+**The combined RDD review question**
+
+RDD review asks for the Handover Meeting Report outcome and the milestone dates
+in one question. Read every value the user gives and omit the rest; the bot
+asks again for what is left. `trading_date` is never extracted — the system
+derives it from `fitout_end_date` — so ignore a fourth date rather than
+inventing a field for it.
+
+The dates are given in this order unless the user names them: actual handover,
+fit-out start, fit-out end.
+
+- Question: "**Report outcome and milestone dates** — the outcome, the actual
+  handover date, and the fit-out window."
+  User: "approved, 10 Sep, 30 Sep to 10 Nov"
+  → Extract `document_status: "APPROVED"`, `actual_handover_date: "2026-09-10"`,
+    `fitout_start_date: "2026-09-30"`, `fitout_end_date: "2026-11-10"`
+
+- Same question, User: "Approved. handover 10/09/2026, fitout start 30/09/2026,
+  fitout end 10/11/2026"   ← a quick-pick chip
+  → the same four values
+
+- Same question, User: "approved 20 sept 27 sept 30 sept 10 oct"
+  → Extract `document_status: "APPROVED"`, `actual_handover_date: "2026-09-20"`,
+    `fitout_start_date: "2026-09-27"`, `fitout_end_date: "2026-09-30"` —
+    the fourth date is the trading date, which the system computes: omit it
+
+- Same question, User: "approve with changes"
+  → Extract `document_status: "APPROVED_WITH_CHANGES"` only
+
+- Same question, User: "handover was the 20th, fitout 27 Sep to 30 Sep"
+  → Extract the three dates; omit `document_status`
+
 Always prefer extracting MORE fields over fewer when values are explicitly stated.
 Never skip a clearly-stated field just because it was not the one being asked about.
 

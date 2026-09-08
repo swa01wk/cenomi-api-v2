@@ -253,6 +253,16 @@ OPTIONAL_FIELDS: frozenset[str] = frozenset(
 # consecutive turns.  Members keep their own keys, validation rules and payload
 # mapping — only the *ask* is merged, and a partial answer re-asks whatever is
 # still open (see ``missing_field_node._build_inspection_group_ask``).
+# RDD review asks for the meeting outcome and the milestone dates together.
+# ``trading_date`` is absent on purpose: merge_state derives it from the
+# fit-out end date, so it is shown but never asked.
+RDD_REVIEW_FIELD_GROUP: tuple[str, ...] = (
+    "document_status",
+    "actual_handover_date",
+    "fitout_start_date",
+    "fitout_end_date",
+)
+
 INSPECTION_FIELD_GROUP: tuple[str, ...] = (
     "startDate",
     "endDate",

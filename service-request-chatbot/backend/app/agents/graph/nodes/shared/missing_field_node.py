@@ -29,6 +29,7 @@ from app.agents.schemas.fitout_confirm_schema import (
 )
 from app.agents.schemas.handover_schema import (
     INSPECTION_FIELD_GROUP,
+    RDD_REVIEW_FIELD_GROUP,
     RDD_DOC_TYPE_MEETING,
     RDD_DOC_TYPE_OTHER,
     RDD_DOC_TYPE_REJECTED,
@@ -508,6 +509,118 @@ def _build_inspection_group_ask(
 
 
 # ---------------------------------------------------------------------------
+# Combined RDD review question
+# ---------------------------------------------------------------------------
+
+_RDD_FIELD_EXPLAINERS: dict[str, str] = {
+    "document_status": (
+        "**Outcome** — Approve if the Handover Meeting Report stands as it is, "
+        "Approve with changes if it needs amendments."
+    ),
+    "actual_handover_date": "**Handover** — the date the unit was actually handed over.",
+    "fitout_start_date": "**Fit-out start** — the date fit-out work actually began.",
+    "fitout_end_date": "**Fit-out end** — the date fit-out work actually finished.",
+}
+
+_RDD_STATUS_WORDS: dict[str, str] = {
+    "APPROVED": "Approved",
+    "APPROVED_WITH_CHANGES": "Approved with changes",
+    "DISAPPROVED": "Disapproved",
+}
+
+
+def _should_ask_rdd_group(
+    active_agent: str | None,
+    workflow_stage: str,
+    user_missing: list[str],
+) -> bool:
+    """True when the RDD outcome and dates should be asked as one question."""
+    if not short_flow_enabled():
+        return False
+    if (active_agent or "") not in _INSPECTION_GROUP_AGENTS:
+        return False
+    if workflow_stage != "RDD_REVIEW":
+        return False
+    # Only once the group is genuinely next: the guideline link and the
+    # mandatory upload both come first.
+    return bool(user_missing) and user_missing[0] in RDD_REVIEW_FIELD_GROUP
+
+
+def _build_rdd_group_question(
+    collected: dict[str, Any],
+    group_missing: list[str],
+) -> str:
+    """Compose the question for whichever RDD fields are still open."""
+    known: list[str] = []
+    if "document_status" not in group_missing and collected.get("document_status"):
+        label = _RDD_STATUS_WORDS.get(
+            str(collected["document_status"]).upper(), str(collected["document_status"])
+        )
+        known.append(f"**{label}**")
+    for field_name, word in (
+        ("actual_handover_date", "handover"),
+        ("fitout_start_date", "fit-out start"),
+        ("fitout_end_date", "fit-out end"),
+    ):
+        if field_name not in group_missing and collected.get(field_name):
+            known.append(f"{word} **{_format_inspection_date(collected[field_name])}**")
+
+    lead = "Got " + ", ".join(known) + ". " if known else ""
+
+    if len(group_missing) == 1:
+        only = group_missing[0]
+        ask = {
+            "document_status": "What is the outcome of the Handover Meeting Report?",
+            "actual_handover_date": "What was the actual handover date?",
+            "fitout_start_date": "When did fit-out actually start?",
+            "fitout_end_date": "When did fit-out actually finish?",
+        }[only]
+        return f"{lead}{ask}"
+
+    ask = (
+        "**Report outcome and milestone dates** — the outcome, the actual "
+        "handover date, and the fit-out window. One line is fine, e.g. "
+        "*approved, 10 Sep, 30 Sep to 10 Nov*."
+    )
+    explainers = "\n".join(
+        _RDD_FIELD_EXPLAINERS[f]
+        for f in RDD_REVIEW_FIELD_GROUP
+        if f in group_missing and f in _RDD_FIELD_EXPLAINERS
+    )
+    tail = "\n\nThe trading date is worked out from the fit-out end date."
+    return f"{lead}{ask}\n\n{explainers}{tail}" if explainers else f"{lead}{ask}"
+
+
+async def _build_rdd_group_ask(
+    collected: dict[str, Any],
+    group_missing: list[str],
+    all_missing: list[str],
+) -> dict[str, Any]:
+    """State patch asking for every still-missing RDD review field at once."""
+    from app.agents.services.rdd_suggestions_service import build_rdd_decorations
+
+    question = _build_rdd_group_question(collected, group_missing)
+    primary = group_missing[0]
+    updates: dict[str, Any] = {
+        "missing_fields": list(all_missing),
+        "response_message": question,
+        "response_ui": {
+            "type": "text_question",
+            "field": primary,
+            "fields": list(group_missing),
+            "message": question,
+            "verbatim": True,
+        },
+        "status": "WAITING_FOR_USER",
+        "active_field": primary,
+    }
+    decorations = await build_rdd_decorations(collected, set(group_missing))
+    if decorations:
+        updates["response_decorations"] = decorations
+    return updates
+
+
+# ---------------------------------------------------------------------------
 # Node
 # ---------------------------------------------------------------------------
 
@@ -775,6 +888,13 @@ async def missing_field_node(state: ServiceRequestState) -> dict[str, Any]:
             return ask
         # If the decoration couldn't build (missing session/sr_id), fall
         # through to the user_missing branch below.
+
+    elif _should_ask_rdd_group(active_agent, workflow_stage, user_missing):
+        # RDD review: the meeting outcome and the milestone dates are one
+        # question. Returns directly — the shared question-building code below
+        # assumes a single field per ask.
+        group_missing = [f for f in RDD_REVIEW_FIELD_GROUP if f in user_missing]
+        return await _build_rdd_group_ask(collected, group_missing, all_missing)
 
     elif _should_ask_inspection_group(active_agent, workflow_stage, user_missing):
         # Short flow: the inspection window and the inspector are one question,
