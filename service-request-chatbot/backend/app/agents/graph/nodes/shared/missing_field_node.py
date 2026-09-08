@@ -318,6 +318,55 @@ def _has_rdd_mandatory_upload(documents: list[dict[str, Any]]) -> bool:
     return False
 
 
+# Stages whose work belongs to a reviewer, not to whoever raised the request.
+_HANDOFF_STAGES: dict[str, str] = {
+    "FM_REVIEW": "the FM team",
+    "RDD_REVIEW": "the RDD team",
+}
+
+
+def _handoff_response(
+    workflow_stage: str,
+    role: str,
+    collected: dict[str, Any],
+    backend_refs: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Say the request has moved on, rather than asking for the next stage's fields.
+
+    Approving on FM advances the SR to RDD review, and the session followed it
+    there — so a Mall or FM Manager was asked for the guideline link, which is
+    the RDD Project Manager's job on a request no longer theirs.
+
+    The permission hook that should have caught this (``validate_permission``)
+    reads ``state["role"]``, which nothing sets, so it has never run. Rather
+    than arm a blocking validator mid-flight, the collection loop simply
+    declines to ask: the role is already on ``backend_refs`` for the review
+    card's "Raised By" row.
+    """
+    from app.agents.schemas.handover_schema import role_can_act_on_stage
+
+    if workflow_stage not in _HANDOFF_STAGES:
+        return None
+    if not role or role_can_act_on_stage(role, workflow_stage):
+        return None
+
+    sr_id = str(backend_refs.get("sr_id") or collected.get("service_request_id") or "")
+    owner = _HANDOFF_STAGES[workflow_stage]
+    subject = f"Service Request {sr_id}" if sr_id else "This service request"
+    message = (
+        f"{subject} is with {owner} now — the next step is theirs, so there is "
+        f"nothing further for you to fill in here. You will see it move on as "
+        f"they work through it."
+    )
+    return {
+        "missing_fields": [],
+        "response_message": message,
+        "response_ui": {"type": "message", "message": message, "verbatim": True},
+        "status": "WAITING_FOR_USER",
+        "active_field": None,
+    }
+
+
 def _should_ask_guided_tour(
     collected: dict[str, Any],
     workflow_cfg: Any,
@@ -890,6 +939,19 @@ async def missing_field_node(state: ServiceRequestState) -> dict[str, Any]:
     # When True, response_generation must not LLM-rewrite the question (keeps
     # the concrete original date in the user-facing message).
     verbatim_question = False
+
+    # ── Priority -0.5: the stage belongs to someone else ──────────────────
+    # Checked before anything is asked, including the guided-tour choice: a
+    # user who cannot act on this stage should be told so, not walked through
+    # another team's fields.
+    handoff = _handoff_response(
+        workflow_stage,
+        str((state.get("backend_refs") or {}).get("user_role") or ""),
+        collected,
+        dict(state.get("backend_refs") or {}),
+    )
+    if handoff is not None:
+        return handoff
 
     # ── Priority 0: non-required blocking validation errors ───────────────
     # "required" failures mean a field is simply absent — those are handled by
