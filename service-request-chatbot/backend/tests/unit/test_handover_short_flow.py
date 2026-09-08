@@ -11,6 +11,7 @@ TestMergeStateAutofill      — merge_state_node writes the values and their pro
 TestReviewCard              — Badges, hints and the raised-by / reviewed-next-by rows.
 TestEditableWindow          — The window is fixable on the card: date and time pickers.
 TestSameDayWindow           — A one-day inspection, separated by its clock.
+TestClockEditedOnTheForm    — The picker is one control; its clock half must stick.
 """
 
 from __future__ import annotations
@@ -831,3 +832,69 @@ class TestSameDayWindow:
         assert "starts and ends on 21/08/2026" in message
         assert "10:00 AM" in message and "10:00 PM" in message
         assert "6:00 PM" in message
+
+
+# ---------------------------------------------------------------------------
+# TestClockEditedOnTheForm
+# ---------------------------------------------------------------------------
+
+
+class TestClockEditedOnTheForm:
+    """The form's date-and-time picker is a single control.
+
+    Changing only its clock sends the LT display string on its own. That is
+    the user's newest word on the field, so it has to win over the clock the
+    flow stored earlier — otherwise the date half of an edit sticks and the
+    time half silently reverts.
+    """
+
+    @staticmethod
+    def _booked() -> dict[str, Any]:
+        return _lease_resolved(
+            already_handovered="initiate_handover",
+            startDate="2026-09-15",
+            endDate="2026-09-16",
+            inspectionTime="09:00",
+            inspectionEndTime="09:00",
+            startDateLT="15/09/2026 9:00 AM",
+            endDateLT="16/09/2026 9:00 AM",
+            inspection_done_by="FM_MANAGER",
+        )
+
+    async def _merge(self, corrected: dict[str, Any]) -> dict[str, Any]:
+        from app.agents.graph.nodes.shared.merge_state_node import merge_state_node
+
+        state = _merge_state(self._booked())
+        state["corrected_fields"] = corrected
+        return (await merge_state_node(state))["collected_data"]
+
+    @pytest.mark.asyncio
+    async def test_a_new_start_time_sticks(self, short_flow_on: None) -> None:
+        collected = await self._merge({"startDateLT": "15/09/2026 2:00 PM"})
+        assert collected["inspectionTime"] == "14:00"
+        assert collected["startDateLT"] == "15/09/2026 2:00 PM"
+
+    @pytest.mark.asyncio
+    async def test_a_new_end_time_sticks(self, short_flow_on: None) -> None:
+        collected = await self._merge({"endDateLT": "16/09/2026 6:30 PM"})
+        assert collected["inspectionEndTime"] == "18:30"
+        assert collected["endDateLT"] == "16/09/2026 6:30 PM"
+        # The end clock is its own: the start must not follow it.
+        assert collected["inspectionTime"] == "09:00"
+
+    @pytest.mark.asyncio
+    async def test_both_halves_of_one_edit_survive(self, short_flow_on: None) -> None:
+        collected = await self._merge(
+            {"startDate": "2026-09-20", "startDateLT": "20/09/2026 11:15 AM"}
+        )
+        assert collected["startDate"] == "2026-09-20"
+        assert collected["inspectionTime"] == "11:15"
+        assert collected["startDateLT"] == "20/09/2026 11:15 AM"
+
+    @pytest.mark.asyncio
+    async def test_an_unrelated_edit_leaves_the_clock_alone(
+        self, short_flow_on: None
+    ) -> None:
+        collected = await self._merge({"comments": "Coordinate with the store."})
+        assert collected["inspectionTime"] == "09:00"
+        assert collected["startDateLT"] == "15/09/2026 9:00 AM"

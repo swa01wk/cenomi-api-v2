@@ -485,6 +485,27 @@ async def merge_state_node(state: ServiceRequestState) -> dict[str, Any]:
 
     guided_tour_service.apply_answer(collected, dict(state))
 
+    # The form's date-and-time picker is one control, and changing only its
+    # clock arrives as the LT display string alone ("15/09/2026 2:00 PM").
+    # That is the user's newest word on the field, so it has to set the stored
+    # clock too — otherwise _sync_inspection_lt_fields rebuilds the LT from the
+    # older inspectionTime further down and the edit reverts to 9:00 AM while
+    # the date half of the same edit sticks.
+    if corrected:
+        from app.agents.services.payload_builder_service import (
+            extract_hhmm_from_datetime,
+        )
+
+        for _lt_key, _time_key in (
+            ("startDateLT", "inspectionTime"),
+            ("endDateLT", "inspectionEndTime"),
+        ):
+            if _lt_key not in corrected:
+                continue
+            _hhmm = extract_hhmm_from_datetime(str(corrected[_lt_key] or ""))
+            if _hhmm:
+                collected[_time_key] = _hhmm
+
     corrections: list[dict[str, Any]] = list(collected.get("_corrections") or [])
 
     # On the CONFIRMED path (user confirmed the card), corrected_fields contain
