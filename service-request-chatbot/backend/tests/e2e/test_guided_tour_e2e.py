@@ -279,3 +279,77 @@ async def test_form_edits_survive_the_document_and_review_steps(
     assert refreshed.get("type") == "confirmation_card"
     refreshed_rows = {f["key"]: f["value"] for f in refreshed["fields"]}
     assert refreshed_rows["title"] == "Edited while the card was open"
+
+@pytest.mark.asyncio
+async def test_path_b_takes_its_dates_from_the_form(
+    app_client: AsyncClient, tour_on: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Already Trading: the four dates typed into the form reach the draft.
+
+    Path B has no inspection window and no derived dates — everything on the
+    card came from the user, so a correction made on the form is the only
+    version that matters.
+    """
+    from app.core.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "handover_short_flow_enabled", True)
+
+    session_id, _ = await _resolve_lease(app_client)
+
+    with _extraction({}), _gateway(), _lease():
+        await _post(app_client, session_id=session_id, action=tour.ACTION_OPEN)
+
+    with _extraction({}), _gateway(), _lease():
+        after_type = await _post(
+            app_client,
+            session_id=session_id,
+            action="select_handover_type_already_trading",
+        )
+    assert after_type["state"]["workflow_stage"] == "CREATE_HANDED_OVER_SR"
+    # One question for all four dates, and nothing suggested for them.
+    assert (after_type.get("ui") or {}).get("fields") == [
+        "actual_shop_handover_date",
+        "actual_fitout_start_date",
+        "actual_fitout_end_date",
+        "actual_trading_date",
+    ]
+    assert not (after_type.get("ui") or {}).get("suggestions")
+
+    # The user types them into the form instead of the chat.
+    edits = {
+        "actual_shop_handover_date": "2026-08-20",
+        "actual_fitout_start_date": "2026-08-27",
+        "actual_fitout_end_date": "2026-09-30",
+        "actual_trading_date": "2026-10-10",
+    }
+    with _extraction({}), _gateway(), _lease():
+        after_form = await _post(
+            app_client, session_id=session_id, corrected_fields=edits
+        )
+
+    preview = {
+        f["key"]: f["value"]
+        for f in (after_form.get("draft_preview") or {}).get("fields", [])
+    }
+    for key, iso in edits.items():
+        # draft_preview display-formats dates for the form bridge.
+        year, month, day = iso.split("-")
+        assert str(preview[key]) in (iso, f"{day}/{month}/{year}"), (
+            key,
+            preview[key],
+        )
+
+    # And a correction made once the card is up survives onto the card.
+    with _extraction({}), _gateway(), _lease():
+        corrected = await _post(
+            app_client,
+            session_id=session_id,
+            corrected_fields={"actual_trading_date": "2026-10-15"},
+        )
+    ui = corrected.get("ui") or {}
+    if ui.get("type") == "confirmation_card":
+        rows = {f["key"]: f for f in ui["fields"]}
+        assert "2026-10-15" in str(rows["actual_trading_date"]["value"])
+        # Editable on the card, with a picker rather than a text box.
+        assert rows["actual_trading_date"]["editable"] is True
+        assert rows["actual_trading_date"]["inputType"] == "date"

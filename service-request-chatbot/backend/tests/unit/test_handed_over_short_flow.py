@@ -140,3 +140,54 @@ class TestNarrowing:
             )
         )
         assert result["status"] == "IN_PROGRESS"
+
+class TestReviewCard:
+    """The card is where a mistyped date gets fixed."""
+
+    @staticmethod
+    def _rows(short_flow: bool = True) -> dict[str, Any]:
+        from app.agents.graph.nodes.handover.confirmation_node import (
+            _build_confirmation_card,
+        )
+
+        collected = _resolved(
+            title="Already Trading - t0112136",
+            actual_shop_handover_date="2026-08-20",
+            actual_fitout_start_date="2026-08-27",
+            actual_fitout_end_date="2026-09-30",
+            actual_trading_date="2026-10-10",
+            comments="Opened on schedule.",
+        )
+        card = _build_confirmation_card(collected, "CREATE_HANDED_OVER_SR", None)
+        return {f["key"]: f for f in card["fields"]}
+
+    def test_every_supplied_date_is_editable(self, short_flow_on: None) -> None:
+        rows = self._rows()
+        for key in HANDED_OVER_FIELD_GROUP:
+            assert rows[key]["editable"] is True, key
+
+    def test_the_dates_get_pickers_and_raw_values(self, short_flow_on: None) -> None:
+        rows = self._rows()
+        assert rows["actual_trading_date"]["inputType"] == "date"
+        # A picker round-trips the raw value, not a display string.
+        assert rows["actual_trading_date"]["value"] == "2026-10-10"
+
+    def test_no_clock_rows_on_this_path(self, short_flow_on: None) -> None:
+        """Path B's dates carry no time — that is Path A's inspection window."""
+        rows = self._rows()
+        assert "inspectionTime" not in rows
+        assert "inspectionEndTime" not in rows
+
+    def test_the_lease_stays_read_only(self, short_flow_on: None) -> None:
+        assert self._rows()["lease_code"]["editable"] is False
+
+    def test_the_dates_are_editable_in_the_long_flow_too(self) -> None:
+        """Read-only actual dates were a gap on this card, not a flag choice.
+
+        Only the picker rides with the short flow; without it the row is a
+        text field, which the client shows as DD/MM/YYYY like every other
+        editable date.
+        """
+        rows = self._rows()
+        assert rows["actual_trading_date"]["editable"] is True
+        assert "inputType" not in rows["actual_trading_date"]

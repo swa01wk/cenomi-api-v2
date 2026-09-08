@@ -131,7 +131,19 @@ _FM_REVIEW_DISPLAY_FIELDS: tuple[str, ...] = (
     "comments",
 )
 
-_HANDED_OVER_EDITABLE: frozenset[str] = frozenset({"title", "comments"})
+# Path B records what already happened, and the review card is where a
+# mistyped date gets fixed — so every date the user supplied is editable here,
+# as they are on the Path A card.
+_HANDED_OVER_EDITABLE: frozenset[str] = frozenset(
+    {
+        "title",
+        "actual_shop_handover_date",
+        "actual_fitout_start_date",
+        "actual_fitout_end_date",
+        "actual_trading_date",
+        "comments",
+    }
+)
 
 _HANDED_OVER_DISPLAY_FIELDS: tuple[str, ...] = (
     "lease_code",
@@ -224,6 +236,10 @@ _TYPED_INPUTS: dict[str, str] = {
     "endDate": "date",
     "inspectionTime": "time",
     "inspectionEndTime": "time",
+    "actual_shop_handover_date": "date",
+    "actual_fitout_start_date": "date",
+    "actual_fitout_end_date": "date",
+    "actual_trading_date": "date",
 }
 
 # What the payload builder books when no clock was ever given. Shown on the
@@ -253,11 +269,24 @@ def _lease_locked_on_card(workflow_stage: str, collected_data: dict[str, Any]) -
     return bool(collected_data.get("lease_id"))
 
 
-def _typed_inspection_inputs(workflow_stage: str) -> bool:
-    """True when the card should carry separate, picker-backed date/time rows."""
-    from app.agents.schemas.handover_schema import short_flow_enabled
+def _typed_date_inputs(workflow_stage: str) -> bool:
+    """True when the card's date rows should carry native pickers.
 
-    return short_flow_enabled() and workflow_stage == "CREATE_SR"
+    Both create stages: Path A's inspection window and Path B's four actual
+    dates are all fixed on this card, and a picker round-trips the raw value
+    instead of asking the user to retype a display string.
+    """
+    from app.agents.schemas.handover_schema import AI_FILLED_STAGES, short_flow_enabled
+
+    return short_flow_enabled() and workflow_stage in AI_FILLED_STAGES
+
+
+def _typed_inspection_inputs(workflow_stage: str) -> bool:
+    """True when the card splits the inspection window into date and time rows.
+
+    Path A only — Path B's dates carry no clock.
+    """
+    return _typed_date_inputs(workflow_stage) and workflow_stage == "CREATE_SR"
 
 
 def _with_inspection_time_rows(display_keys: list[str]) -> list[str]:
@@ -459,8 +488,8 @@ def _build_confirmation_card(
     # review card is where a wrong date or clock gets fixed. Give each one its
     # own row with a real date / time picker instead of folding the clock into
     # the date's display string, which can only be edited as free text.
-    use_typed_inputs = _typed_inspection_inputs(workflow_stage)
-    if use_typed_inputs:
+    use_typed_dates = _typed_date_inputs(workflow_stage)
+    if _typed_inspection_inputs(workflow_stage):
         display_keys = _with_inspection_time_rows(display_keys)
         collected_data = {
             **collected_data,
@@ -507,7 +536,7 @@ def _build_confirmation_card(
         }
         if field_key in _ENUM_OPTIONS:
             row["options"] = _ENUM_OPTIONS[field_key]
-        if use_typed_inputs and is_editable and field_key in _TYPED_INPUTS:
+        if use_typed_dates and is_editable and field_key in _TYPED_INPUTS:
             # Tells the frontend to render a native date / time picker and to
             # round-trip the raw value instead of its display text.
             row["inputType"] = _TYPED_INPUTS[field_key]
