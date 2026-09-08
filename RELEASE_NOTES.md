@@ -2,6 +2,160 @@
 
 ---
 
+## v1.6.0 — September 8, 2026
+
+> **Theme:** Three new capabilities — the notification agent, end-user feedback with a real analytics dashboard, and the RAG knowledge indexer — alongside a help agent that knows which mall you are looking at, and an RDD handover flow shortened from nine questions to four.
+
+Seventy-five commits since v1.5.1: 217 files, +35,745 / −1,764, 138 of them new. Everything user-facing in the handover flow sits behind a flag that defaults **off**, so deploying this release changes nothing until an environment opts in.
+
+### New
+
+#### Notification agent (TC-3520, TC-3662, TC-3721)
+
+The assistant can now read the user's platform inbox and act on what is in it.
+
+- **Inbox fetch and grouping.** MSP notifications are fetched, fanned out per source and returned as a grouped `notification_list` payload the Copilot panel renders directly.
+- **`OPEN_NOTIFICATION` handoff.** Opening a notification resolves `active_notification_id` to `backend_refs.sr_id` and an `active_agent`, then hands to the existing `sr_status_sync` pipeline — so "open this one" lands the user inside the right SR flow rather than restating the notification.
+- **Deictic conversation.** With viewing context, "what is this about?" and "mark it read" work against the open notification without the user repeating an ID.
+- **Inbox read API** for the panel, plus a mock inbox (`NOTIFICATIONS_USE_MOCK`) that mirrors production read semantics so local dev does not drift.
+
+Three nodes, split per the reconciled spec: `list_notifications_node` (filters → MSP fan-out → grouped payload), `open_notification_node` (the routing shim), and `notification_entry_node` (explain / mark-read). `SUB_CATEGORY_TO_AGENT` is derived from the agent registry rather than redeclared, so sub-category routing has one source of truth.
+
+The lifecycle and archival design is documented rather than half-built: `docs/specs/notification-lifecycle-and-archival-plan.md` records the `action_state` / `source_operation_id` model and the five product decisions taken, `docs/notification-lifecycle-implementation.md` the as-built pilot scope, and `docs/specs/notification-lifecycle-full-rollout-plan.md` the wave order for the remaining categories. The heavy lifting lives in the platform Go API; this repo carries the governing documents and the agent-side parity fix.
+
+#### Agent feedback and analytics
+
+Users can now say whether an answer was any good, and we can finally read the answer back.
+
+- **Star ratings.** `POST /chat/feedback` (v1 and v2) takes 1–5 stars and an optional comment against a turn's `trace_id`. A signed-in user is required — ratings are always attributable, same rule as the SR flow. The Copilot renders the row under every help answer and after every AI-created SR.
+- **Durable turn identity.** Every chat response now carries `message_id` (the persisted `chat_messages.id`) and `trace_id`, on the SR turn, the sync help turn and the SSE `done` event alike. The MSP help path previously returned a throwaway UUID.
+- **Turn-outcome classification.** `answer_status` records answered-vs-not per turn, which is what the success and failure ratios are actually built on.
+- **Analytics API and assistant-admin dashboard** on top of the observability tables that had been recording every turn while nothing read them. The dashboard previously ran on stubs: accuracy was a "did retrieval return anything" proxy, CSAT was derived from that same proxy, and escalation, resolved and `user_name` were hard-coded. All four now come from real data.
+- **Conversation detail.** A transcript endpoint, real user names, rating comments, a genuine message preview, human-readable agent and node names, top users with their overall rating, and an agent-health tab.
+
+Migrations `007_feedback_analytics` and `008_backfill_answer_status`.
+
+#### RAG knowledge indexer (ticket 3547)
+
+The repo previously only **read** the `cenomi-help-index`. It can now write it.
+
+`python -m app.indexer.cli` with `--full` / `--incremental` / `--reconcile` / `--source` / `--since` / `--dry-run`; exit 0 ok, 1 all-failed, 2 partial. The Docker CMD defaults to `--incremental`.
+
+| Source | What it indexes |
+|---|---|
+| `help_content` | breadcrumb-prefixed chunks |
+| `mall_info` | one embedding per parsed section, GLA column overriding the stale JSON, timing merged into the overview |
+| `key_contact` | manager emails from the mall JSON plus grouped tenant-contact roles |
+| `event` | mall fan-out, bug-compatible with the legacy job |
+| `user_guide`, `download_center` | PDF sources, behind default-false flags |
+
+Change detection runs off Postgres `updated_at` watermarks in a new `indexer_watermarks` table (migration `006`), never by reading vectors back from Search. Deletes are scoped by OData before upsert and ids are deterministic, so retries are idempotent.
+
+An admin HTTP surface came with it — `GET /api/v1/indexer/status` (+v2) returns per-source cursor, last run, last status, upsert and delete counts, last error and `reindex_pending`, plus a re-index trigger and a Postman collection. The lean API image deliberately lacks the `[indexer]` extra, so indexing never runs in-process.
+
+#### Help agent knows which page you are on
+
+"Who is the mall manager?" was unanswerable across 20 malls — the widget knew the user was on `/propertydetails?propertyId=3691`, but that never reached the agent. `ServiceRequestChatRequest` declared neither `context` nor `language`, so a payload the frontend had always been sending was silently dropped by Pydantic. Both are now declared and forwarded, `_MSPChatContext` carries `property_id` and `mall_name`, and `faq_node` resolves the active mall — by name if the widget sends one, otherwise by looking `property_id` up against the index.
+
+The resolved mall is stated to the model as page context and appended to the embedded query so that mall's cards rank up. The bias is **skipped** when the question already names a mall: layering "(Yasmeen Mall)" onto "who is the mall manager of Tala Mall" produced a query matching neither and buried the card actually asked for.
+
+#### Handover create in four turns (`HANDOVER_SHORT_FLOW_ENABLED`)
+
+**Before** — handover type → title → description → start date → start time → end date → end time → done by → notes → comments → documents
+
+**After** — handover type → **inspection details** → documents → review & submit
+
+The inspection question asks for the window and the inspector at once, with a "what it is" line per field and quick-pick chips: two windows (today +3/+4 and +2/+3) crossed with FM Manager / Operations. Chips narrow as fields fill — once a start date exists the end-date chips anchor to it — and anything left out is asked again next turn with only the remaining chips. A user who opens with everything ("handover for t0112136, 7–8 Sep, FM Manager") reaches the documents step in a single turn.
+
+`title`, `description`, `notes`, `comments` and the two clocks are filled instead of asked. Each is shown on the review card labelled with where it came from, and each is editable. The title stays template-generated (`handover-{lease}-{slug}`) because it is a platform lookup key users search on; `HANDOVER_AI_AUTOFILL_ENABLED` lets an LLM draft the description and notes instead, falling back to the templates on any error or timeout.
+
+#### RDD review in one question
+
+The RDD Project Manager's side collapses the same way. Document status, actual handover date and the fit-out window become a single question with two chips — **Approve** and **Approve with changes** — each carrying suggested dates. The trading date is calculated rather than asked, and the whole answer can be typed in one go ("approved 20 sept 27 sept 30 sept 10 oct").
+
+Suggestions are computed per lease, anchored on the **expected handover date** and stepped with `cenomi.add_working_days` (Sunday–Thursday), preferring the lease's free period, then its planned dates, then the base offsets. A suggested fit-out window closes on its own start date rather than dangling.
+
+#### Already Trading (Path B) in one question
+
+The four actual dates — shop handover, fit-out start, fit-out end, trading — are asked together, with **no** suggestions, since these are dates the user is recording rather than planning. All four can be typed at once, and all four are editable on the review card. The lease code is read-only there.
+
+#### Guided tour choice (`GUIDED_TOUR_CHOICE_ENABLED`)
+
+After lease selection the user is asked once per draft whether they want to be guided. The assistant behaves identically either way — it asks, the user answers. The difference is the form: **guided** locks it and walks the user field by field; **open** leaves it enabled, and any field the user edits mid-conversation is synced back to the assistant. The choice is remembered per draft, and the gate is applied in every workflow entry route, not just handover create — the mechanism is shared so the confirmation SRs can adopt it unchanged.
+
+#### Lease picker is back (`HANDOVER_LEASE_PICKER_ENABLED`, now default on)
+
+It was disabled for answering "what is the lease code?" with leases the user had not asked about. It returns in a form that narrows the question instead of padding it: the five most recently activated eligible leases first, a new `searchable` flag on the `resource_picker` contract so the frontend renders a search box and forwards the typed term, and correct `has_more` behind the read-more paging that already existed.
+
+### Fixed
+
+#### Help agent / FAQ
+
+| Symptom | Cause |
+|---|---|
+| A question asked mid-collection was answered as a field value — "Help me with Dashboard" became a lease lookup that replied "Sorry, I couldn't find a lease matching that information" | Once `active_agent` is set, `_route_after_load` skips the supervisor on every later turn. A deterministic detector now routes clear help phrasing to `faq_node`, which writes only `response_message` / `status`, so the draft survives and the answer ends by restating the open question. Free-text fields (notes, comments, title, description) are exempt — a question is a legitimate note there |
+| Source citations shown twice, with disagreeing counts | Inline `[Source: …]` markers capped at 3 were appended to the answer text while the uncapped `faq_sources` array rendered chips separately |
+| "Who should I contact for operations at Mall of Arabia?" answered with the Mall Manager | Only one `key_contact` card could ever reach the model — `_deduplicate` interleaved its first pass then drained groups one at a time, and `help_content` / `mall_info` come first in `_QUERY_CONFIG` |
+| Deactivated staff returned as a mall's Key Contact | `_ROLE_CONTACTS_SQL` joined `cenomi.users` without checking account state; now filtered to `user_status = 'ACTIVE'` and `invite_status = 'JOINED'` |
+| Two mall managers returned where production returns one | A regression from the seven-role Key Contact allowlist: `MALL_MANAGER` had previously been read from the mall JSON overview, not `tenant_contacts` |
+
+Key Contact indexing is now a strict seven-role allowlist enforced **at index time**, so a non-allowlisted contact can never be retrieved, summarised or cited as a fallback — it is never indexed at all.
+
+#### Notifications
+
+- **Reading a notification no longer hides it from the agent.** Every agent-inbox row is action-required, so the read filter could only ever remove rows whose action was still owed — opening a lease-activation notification made it vanish from "Needs your action" while the bell kept it. Read now drives only the unread badge; a row leaves the inbox when the action is taken.
+- **Honest counts and page ranges.** `action_required_count` summed the rows of the page just fetched, so the badge said 5 while "load more" kept producing rows. Handover now badges 598. A group carries the `limit` it was fetched with, so a card renders "11–20 of 598" instead of a figure frozen at "10/598".
+
+#### Dashboard and analytics
+
+- Recent Conversations returned 500 with `NameError: top_users is not defined` — the edit that added top users matched an identical line in the sibling handler. Route smoke tests now execute every dashboard handler with the repository stubbed; the existing tests covered the pure helpers and the SQL but never ran the handler bodies, which is exactly how this reached the branch.
+- Conversation search matches name and session id, not only message text.
+- A conversation is attributed to the agent it **ended** on.
+- Silent refresh turns are excluded from question metrics, and form input counts as a turn rather than a question.
+
+#### Handover and RDD
+
+| Symptom | Cause |
+|---|---|
+| Dates showed as null on the review card | The draft held two date shapes; the card's native date inputs need ISO, so the draft is normalised on write |
+| A clock changed on the form's date-time picker was lost | The client diff dropped the `*LT` keys, and the backend then rebuilt them from the stale `inspectionTime` — both sides fixed |
+| Submission blocked in the short flow | Unset clocks raised blocking `required` errors; they now default |
+| A one-day inspection was rejected | Same-day windows are valid when the end time is later, so validation became clock-aware |
+| The assistant overwrote edits made while it was waiting | A stale `WAITING_FOR_USER` short-circuited the turn to `response_generation`, which cannot write `collected_data`, so `corrected_fields` were discarded |
+| The review card stayed frozen at the values it was built with | Silent turns dropped the rebuilt card |
+| An FM user walked into the RDD review stage after approving | No stage handoff — the flow now stops and says whose turn it is. (Noted in passing: `validate_permission` is dead code, `state["role"]` is never set. Tracked separately.) |
+| Handover-type chips lingered after the type was chosen | Chips are now replaced whenever a turn shows something |
+| Markup in agent copy rendered literally | The chat renderer supports `**bold**` and links only; the italics were removed rather than the renderer widened |
+| A milestone cancellation left the active and correction-pending fields armed | Both are now cleared |
+
+### Behind flags
+
+| Flag | Default | Effect |
+|---|---|---|
+| `HANDOVER_SHORT_FLOW_ENABLED` | off | Four-turn Path A, one-question RDD review, one-question Path B |
+| `HANDOVER_AI_AUTOFILL_ENABLED` | off | LLM-drafted description and notes instead of the templates |
+| `GUIDED_TOUR_CHOICE_ENABLED` | off | The guided / open form choice after lease selection |
+| `HANDOVER_LEASE_PICKER_ENABLED` | **on** | The eligible-lease picker, with recency, search and paging |
+| `NOTIFICATIONS_USE_MOCK` | off | In-memory notification inbox for local dev |
+| `LLM_PROVIDER`, `EMBEDDING_PROVIDER` | `openai` | Provider selection; `vertex_ai` needs the `[vertex_ai]` extra and `VERTEX_AI_*` |
+| `INDEXER_*` | — | Chunk size, watermark lag and per-source enablement for the indexer job |
+
+### Migrations
+
+`006_indexer_watermarks`, `007_feedback_analytics`, `008_backfill_answer_status`. All additive.
+
+### Tests
+
+106 unit files and 13 e2e files on the branch. The handover work adds `test_handover_short_flow`, `test_guided_tour_gate`, `test_rdd_short_flow`, `test_handed_over_short_flow`, `test_stage_handoff` and two e2e suites; the new capabilities add indexer (10 files), notification (4), analytics and dashboard (5) and LLM/embedding adapter coverage. A new `tests/conftest.py` pins the three handover flags to their shipped defaults (all off), so the suite no longer passes or fails depending on whose local `.env` it runs against; a test wanting the other behaviour opts in explicitly.
+
+### Known issues
+
+- `validate_permission` never fires: `state["role"]` is not set anywhere. Stage handoff is enforced by the flow instead. Tracked for a separate change.
+- The mid-flow help interrupt covers pre-submission `CREATE_SR` only — the `sr_id` check in `_route_after_load` comes first, so FM and RDD review of an existing SR are not covered.
+- Turn serialisation is per-process, which covers a single uvicorn worker. Multi-worker deployments need a Postgres advisory lock on `session_id`.
+
+---
+
 ## v1.5.1 — August 17, 2026
 
 > **Theme:** Mid-flow field corrections and concurrent-turn safety, plus nine live-testing defects across the handover, Already Trading and fitout confirmation flows — most of them variations on "the bot discarded my answer and asked again".
