@@ -23,9 +23,9 @@ number, and the reviewer has already seen it.
 
 Only 2,016 of 14,203 leases carry a free period, so the fit-out end falls back
 to the lease's own planned or contract fit-out end when the agreed period is
-zero. When neither is set — the common case — no end date is offered rather
-than one invented from a rule nobody wrote down, and the reviewer is asked for
-it on its own.
+zero, and to the fit-out start date when neither is set. A same-day window is
+not a real plan, but it is a date the reviewer widens rather than a blank they
+have to fill, and it satisfies the RDD ordering rule.
 
 Working days are Sunday-Thursday: the Saudi weekend is Friday and Saturday.
 Read-only, best effort, and never load-bearing — no platform database, no lease
@@ -153,15 +153,22 @@ async def suggest_rdd_dates(collected: dict[str, Any]) -> dict[str, str]:
         "fitout_start_date": _as_iso_date(row.get("fitout_start_date")),
         "fitout_end_date": _as_iso_date(row.get("fitout_end_date")),
     }
-    # An end that is not after the start is not a window anyone could book, and
-    # would fail validation the moment it was accepted. That happens two ways:
-    # a lease with no agreed free period puts the end on the handover day
-    # itself, and a fallback planned end can predate the computed start. Offer
-    # the rest and ask for the end on its own.
-    end = suggested.get("fitout_end_date") or ""
+    # An end that falls before the window opens is not a date anyone could
+    # book — a lease with no agreed free period puts it on the handover day,
+    # and a fallback planned end can predate the computed start. Drop those,
+    # then close the window on its start date: a same-day fit-out passes the
+    # RDD ordering rule (earlier <= later) and gives the reviewer a date to
+    # widen rather than a blank to fill.
     start = suggested.get("fitout_start_date") or ""
-    if end and (end <= anchor or (start and end <= start)):
-        suggested.pop("fitout_end_date")
+    end = suggested.get("fitout_end_date") or ""
+    if end and (end < anchor or (start and end < start)):
+        end = ""
+    if not end and start:
+        end = start
+    if end:
+        suggested["fitout_end_date"] = end
+    else:
+        suggested.pop("fitout_end_date", None)
     log.info(
         "rdd_suggestions.built",
         lease_code=lease_code,

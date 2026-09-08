@@ -274,7 +274,7 @@ class TestWindowSanity:
         )
 
     @pytest.mark.asyncio
-    async def test_drops_an_end_that_predates_the_start(
+    async def test_an_end_that_predates_the_start_closes_on_the_start(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A lease's planned end can sit before the computed fit-out start."""
@@ -286,22 +286,42 @@ class TestWindowSanity:
                 "free_period": 0,
             },
         )
-        assert "fitout_end_date" not in suggested
         assert suggested["fitout_start_date"] == "2026-10-07"
+        assert suggested["fitout_end_date"] == "2026-10-07"
 
     @pytest.mark.asyncio
-    async def test_drops_an_end_on_the_handover_day(
+    async def test_no_agreed_period_gives_a_same_day_window(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """Nothing to derive an end from — offer the start, not a blank."""
         suggested = await self._suggest(
             monkeypatch,
             {
                 "fitout_start_date": date(2026, 10, 7),
-                "fitout_end_date": date(2026, 9, 17),
+                "fitout_end_date": None,
                 "free_period": 0,
             },
         )
-        assert "fitout_end_date" not in suggested
+        assert suggested["fitout_end_date"] == "2026-10-07"
+
+    @pytest.mark.asyncio
+    async def test_a_same_day_window_passes_the_rdd_ordering_rule(self) -> None:
+        """earlier <= later, so the reviewer can accept it and widen later."""
+        from app.agents.services.validation_service import validate_rdd_date_order
+
+        errors = [
+            r
+            for r in validate_rdd_date_order(
+                {
+                    "actual_handover_date": "2026-09-17",
+                    "fitout_start_date": "2026-10-07",
+                    "fitout_end_date": "2026-10-07",
+                    "trading_date": "2026-10-15",
+                }
+            )
+            if r["status"] == "FAILED"
+        ]
+        assert errors == []
 
     @pytest.mark.asyncio
     async def test_keeps_a_window_that_makes_sense(
