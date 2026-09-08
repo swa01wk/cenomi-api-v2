@@ -120,6 +120,8 @@ _USER_TIME_FIELDS: frozenset[str] = frozenset(
 
 _EXPLICIT_YEAR_RE = re.compile(r"\b(?:19|20)\d{2}\b")
 
+_ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
 # Any digit in the user's message means they may have typed a date. Used to gate
 # year coercion so a bare "yes"/"confirm" never rewrites a backend-supplied date.
 _DATE_TOKEN_RE = re.compile(r"\d")
@@ -168,6 +170,26 @@ def _to_date_only(value: Any) -> Any:
         except ValueError:
             return value
     return value
+
+
+def _to_iso_date(value: Any) -> Any:
+    """Normalise any supplied date to ``YYYY-MM-DD``.
+
+    The portal form sends DD/MM/YYYY, and storing that verbatim left the review
+    card's date pickers empty — a native date input accepts ISO and nothing
+    else, so it silently renders a blank for anything it cannot parse. The
+    draft therefore keeps one canonical shape; display formatting is the
+    client's job.
+    """
+    text = _to_date_only(value)
+    if not isinstance(text, str) or not text.strip():
+        return text
+    if _ISO_DATE_RE.match(text):
+        return text
+    from app.agents.services.validation_service import _parse_date
+
+    parsed = _parse_date(text, "date")
+    return parsed.isoformat() if parsed is not None else text
 
 
 def _salvage_inspection_time(
@@ -475,7 +497,7 @@ async def merge_state_node(state: ServiceRequestState) -> dict[str, Any]:
             if field_name in _USER_DATE_FIELDS and field_name not in _USER_TIME_FIELDS:
                 if field_name in ("startDate", "endDate") and isinstance(value, str):
                     _salvage_inspection_time(collected, {}, value, field_name)
-                value = _to_date_only(value)
+                value = _to_iso_date(value)
             collected[field_name] = value
 
     # The guided-tour choice. Recorded here rather than in each agent's entry
@@ -621,12 +643,12 @@ async def merge_state_node(state: ServiceRequestState) -> dict[str, Any]:
         ):
             if field_name in ("startDate", "endDate"):
                 _salvage_inspection_time(collected, extracted, new_value, field_name)
-            new_value = _to_date_only(new_value)
+            new_value = _to_iso_date(new_value)
             new_value = _coerce_year_if_absent(new_value, message_has_year)
         elif field_name in _USER_DATE_FIELDS:
             if field_name in ("startDate", "endDate") and isinstance(new_value, str):
                 _salvage_inspection_time(collected, extracted, new_value, field_name)
-            new_value = _to_date_only(new_value)
+            new_value = _to_iso_date(new_value)
 
         current_value = collected.get(field_name)
 

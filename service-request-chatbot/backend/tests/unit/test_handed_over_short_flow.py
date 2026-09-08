@@ -191,3 +191,72 @@ class TestReviewCard:
         rows = self._rows()
         assert rows["actual_trading_date"]["editable"] is True
         assert "inputType" not in rows["actual_trading_date"]
+
+class TestStoredDateShape:
+    """The draft keeps one canonical date shape: ISO.
+
+    The portal form sends DD/MM/YYYY. Stored verbatim, it reached the review
+    card's native date pickers, which accept ISO and nothing else — so every
+    date the user had just typed rendered as an empty dd/mm/yyyy box.
+    """
+
+    @staticmethod
+    async def _merge(corrected: dict[str, Any]) -> dict[str, Any]:
+        from app.agents.graph.nodes.shared.merge_state_node import merge_state_node
+
+        state = {
+            "session_id": "s",
+            "user_id": "u",
+            "active_agent": "rdd_handover_agent",
+            "workflow_stage": "CREATE_HANDED_OVER_SR",
+            "collected_data": _resolved(),
+            "extracted_fields": {},
+            "user_message": "",
+            "corrected_fields": corrected,
+        }
+        return (await merge_state_node(state))["collected_data"]
+
+    @pytest.mark.asyncio
+    async def test_a_form_date_is_stored_as_iso(self, short_flow_on: None) -> None:
+        collected = await self._merge({"actual_trading_date": "16/09/2026"})
+        assert collected["actual_trading_date"] == "2026-09-16"
+
+    @pytest.mark.asyncio
+    async def test_an_iso_date_is_left_alone(self, short_flow_on: None) -> None:
+        collected = await self._merge({"actual_trading_date": "2026-09-16"})
+        assert collected["actual_trading_date"] == "2026-09-16"
+
+    @pytest.mark.asyncio
+    async def test_the_card_hands_the_picker_a_value_it_accepts(
+        self, short_flow_on: None
+    ) -> None:
+        from app.agents.graph.nodes.handover.confirmation_node import (
+            _build_confirmation_card,
+        )
+
+        collected = await self._merge(
+            {
+                "actual_shop_handover_date": "08/09/2026",
+                "actual_fitout_start_date": "09/09/2026",
+                "actual_fitout_end_date": "14/09/2026",
+                "actual_trading_date": "16/09/2026",
+            }
+        )
+        rows = {
+            f["key"]: f
+            for f in _build_confirmation_card(
+                collected, "CREATE_HANDED_OVER_SR", None
+            )["fields"]
+        }
+        for key in HANDED_OVER_FIELD_GROUP:
+            assert rows[key]["inputType"] == "date"
+            # A native date input renders blank for anything but ISO.
+            assert str(rows[key]["value"]).count("-") == 2, key
+
+    @pytest.mark.asyncio
+    async def test_junk_is_left_for_validation_to_reject(
+        self, short_flow_on: None
+    ) -> None:
+        """Not a date: keep what was sent so the error names the real value."""
+        collected = await self._merge({"actual_trading_date": "not a date"})
+        assert collected["actual_trading_date"] == "not a date"
