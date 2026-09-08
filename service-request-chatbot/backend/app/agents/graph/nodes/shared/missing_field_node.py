@@ -781,6 +781,51 @@ async def _build_rdd_group_ask(
     return updates
 
 
+_FITOUT_CONFIRM_AGENTS: frozenset[str] = frozenset(
+    {
+        "rdd_fitout_start_agent",
+        "rdd_fitout_end_agent",
+        "rdd_trading_confirmation_agent",
+    }
+)
+
+
+def _fitout_card_refresh(state: dict[str, Any]) -> dict[str, Any] | None:
+    """Rebuild the fitout confirmation card for the draft as it now stands.
+
+    The card's rows follow the milestone answer: Yes shows the actual date, No
+    shows the revised planned dates and the delay reason. But the card is only
+    ever built when the draft is complete, so flipping the answer on the card
+    left it showing the retired Actual date and never offering the fields it
+    had just made necessary.
+
+    Returns ``None`` for every other workflow, so this rides along only where a
+    card is genuinely on screen and its rows depend on a value the user can
+    still change.
+    """
+    if (state.get("active_agent") or "") not in _FITOUT_CONFIRM_AGENTS:
+        return None
+    sub_category = state.get("sub_category") or ""
+    from app.agents.schemas.fitout_confirm_schema import SUBCAT_CONFIG
+
+    if sub_category not in SUBCAT_CONFIG:
+        return None
+    from app.agents.graph.nodes.fitout_confirm.fitout_confirm_confirmation_node import (
+        _build_confirmation_card,
+    )
+
+    card = _build_confirmation_card(
+        dict(state.get("collected_data") or {}),
+        sub_category,
+        state.get("workflow_stage") or "CREATE_SR",
+    )
+    # Incomplete: this card is for filling in, not for submitting.
+    card.pop("confirmAction", None)
+    card.pop("confirmLabel", None)
+    card["message"] = "Fill in the remaining details below, or answer in the chat."
+    return card
+
+
 # ---------------------------------------------------------------------------
 # Node
 # ---------------------------------------------------------------------------
@@ -1294,6 +1339,21 @@ async def missing_field_node(state: ServiceRequestState) -> dict[str, Any]:
                     ],
                 }
             }
+        # A fitout confirmation card already on screen must follow the branch
+        # the user just chose. Flipping "Fitout Complete Done?" to No retires
+        # the Actual date row and introduces the revised planned dates and the
+        # delay reason; without this the card kept showing the Actual date and
+        # never offered the fields being asked for. The rebuilt card rides on
+        # the turn as ``refresh_card`` so the client swaps it in place, while
+        # the question and its chips stay on the turn itself.
+        if state.get("confirmation_status") == "PENDING":
+            refreshed_card = _fitout_card_refresh(state)
+            if refreshed_card is not None:
+                updates["response_ui"] = {
+                    **updates["response_ui"],
+                    "refresh_card": refreshed_card,
+                }
+
         # A question offers answers, not stage actions. sr_status_sync merges
         # the FM/RDD action chip into response_decorations on every turn of an
         # open SR ("Save Progress" while the review is incomplete, "Approve

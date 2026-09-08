@@ -902,22 +902,41 @@ async def merge_state_node(state: ServiceRequestState) -> dict[str, Any]:
         _sync_inspection_lt_fields(collected)
 
     # CREATE_SR / APPROVE_SR: when the user answers the yes/no radio in this
-    # session (via extracted_fields — not silent form corrected_fields), mark
-    # confirmed and clear the opposite branch so planned/actual dates are
-    # re-collected.  Form pre-fill alone must not skip the chat yes/no step.
+    # session, mark confirmed and clear the opposite branch so the planned or
+    # actual dates are re-collected.
     #
-    # Only confirm when the bot was asking for the radio (active_field).  Lease
-    # turns often re-extract a form-synced trading_done/fitout_*_done value and
-    # must NOT flip ``_approve_radio_confirmed`` or we skip straight to planned
-    # dates.
+    # Two ways to answer, and both are the user:
+    #
+    # * typed or chipped in chat — extracted_fields, and only while the bot was
+    #   actually asking for the radio (active_field). Lease turns re-extract a
+    #   form-synced value and must not flip the flag.
+    # * chosen on the form or the review card — corrected_fields. The bridge
+    #   sends those only for genuine edits; it returns early while applying the
+    #   assistant's own values, so an AI apply cannot reach here. active_field
+    #   is deliberately not required: the card is edited while some other field
+    #   is being asked for.
+    #
+    # Pre-fill still must not count, and does not: hydrating an open SR
+    # populates through lease lookup, which resets the flag, not through
+    # corrected_fields. Before this, a user who picked No on the form set the
+    # value but never the flag, so get_missing_fields kept reporting the radio
+    # missing and the assistant asked the same yes/no question forever.
     if (
         workflow_stage in ("CREATE_SR", "APPROVE_SR")
         and active_agent in _FITOUT_AGENTS
     ):
         active_field_now = str(state.get("active_field") or "").strip()
         extracted_keys = set((state.get("extracted_fields") or {}).keys())
-        radio_answered = extracted_keys & _FITOUT_RADIO_FIELDS
-        if radio_answered and active_field_now in _FITOUT_RADIO_FIELDS:
+        radio_typed = (
+            extracted_keys & _FITOUT_RADIO_FIELDS
+            if active_field_now in _FITOUT_RADIO_FIELDS
+            else set()
+        )
+        radio_picked = set(
+            (state.get("corrected_fields") or {}).keys()
+        ) & _FITOUT_RADIO_FIELDS
+        radio_answered = radio_typed | radio_picked
+        if radio_answered:
             collected["_approve_radio_confirmed"] = True
             for radio_key in radio_answered:
                 new_radio = str(collected.get(radio_key) or "").strip().lower()
