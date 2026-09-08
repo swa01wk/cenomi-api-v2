@@ -235,8 +235,18 @@ async def response_generation_node(state: ServiceRequestState) -> dict[str, Any]
             llm_message[:120],
         )
         if asking_field:
-            label = FIELD_LABELS.get(asking_field, asking_field.replace("_", " "))
-            llm_message = f"Thanks — that's been updated. Please provide the {label}."
+            # The collecting node already wrote a proper question for this
+            # field — chips and all — and it is sitting in the UI payload.
+            # Prefer it over a sentence assembled from the field name, which
+            # reached users as "Please provide the fitout complete done."
+            node_question = (current_ui or {}).get("message")
+            if node_question:
+                llm_message = str(node_question)
+            else:
+                label = FIELD_LABELS.get(asking_field, asking_field.replace("_", " "))
+                llm_message = (
+                    f"Thanks — that's been updated. Please provide the {label}."
+                )
         else:
             # No field is being collected (e.g. the pre-submission upload gate,
             # which leaves response_message None). The turn has nothing left to
