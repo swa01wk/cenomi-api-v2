@@ -264,3 +264,18 @@ async def test_form_edits_survive_the_document_and_review_steps(
     assert rows["description"] == "Snagging round before opening."
     assert "2026-09-15" in str(rows["startDate"])
     assert rows["inspection_done_by"] == "OPERATIONS"
+
+    # An edit made while the review card is on screen must come back as a
+    # refreshed card, not be quietly absorbed — the client has a card rendered
+    # from an earlier turn and needs the new one to replace it.
+    with _extraction({}), _gateway(), _lease():
+        after_card_edit = await _post(
+            app_client,
+            session_id=session_id,
+            corrected_fields={"title": "Edited while the card was open"},
+        )
+
+    refreshed = after_card_edit.get("ui") or {}
+    assert refreshed.get("type") == "confirmation_card"
+    refreshed_rows = {f["key"]: f["value"] for f in refreshed["fields"]}
+    assert refreshed_rows["title"] == "Edited while the card was open"
