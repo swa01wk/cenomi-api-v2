@@ -25,9 +25,9 @@
 | FAQ retrieval | `_deduplicate` interleaves across all groups; inline `[Source: …]` markers removed; structured LLM answers coerced |
 | Key Contacts | Seven-role allowlist enforced at index time; `MALL_MANAGER` sourced from `tenant_contacts`; only `ACTIVE`/`JOINED` users indexed |
 | Lease picker | Re-enabled with recency ordering, `searchable` flag on the `resource_picker` contract, correct `has_more`; `HANDOVER_LEASE_PICKER_ENABLED` now defaults **on** |
-| Handover create | Nine questions → four turns behind `HANDOVER_SHORT_FLOW_ENABLED`; AI/template autofill of `title`, `description`, `notes`, `comments` and the clocks |
-| RDD review | Document status + actual handover + fit-out window as one question with date-carrying chips; trading date computed |
-| Path B | Four actual dates asked in one question, no suggestions, all four editable on the review card |
+| Handover create | Path A: 9 questions → **4** behind `HANDOVER_SHORT_FLOW_ENABLED`; AI/template autofill of `title`, `description`, `notes`, `comments` and the clocks |
+| RDD review | 5 questions → **2**: document status + actual handover + fit-out window collapse into one question with date-carrying chips; trading date computed as fit-out end + 8 days |
+| Path B | 5 questions → **2**: the four actual dates asked in one question, no suggestions, all four editable on the review card |
 | Guided tour | Per-draft guided/open form choice, gated in all five workflow entry routes, behind `GUIDED_TOUR_CHOICE_ENABLED` |
 | Stage handoff | An FM user is stopped at the RDD boundary instead of being walked into a stage that is not theirs |
 | Migrations | `006_indexer_watermarks`, `007_feedback_analytics`, `008_backfill_answer_status` |

@@ -8,6 +8,16 @@
 
 Seventy-five commits since v1.5.1: 217 files, +35,745 / −1,764, 138 of them new. Everything user-facing in the handover flow sits behind a flag that defaults **off**, so deploying this release changes nothing until an environment opts in.
 
+**Step reduction at a glance** — every flow the RDD handover touches, behind `HANDOVER_SHORT_FLOW_ENABLED`:
+
+| Flow | Who | Questions before | Questions after |
+|---|---|---|---|
+| Handover create — Path A | Mall Manager | 9 | **4** |
+| RDD review | RDD Project Manager | 5 | **2** |
+| Already Trading — Path B | Mall Manager | 5 | **2** |
+
+In each case the collapsed question can also be answered in a single typed message, so a user who knows what they want reaches the review card in one turn.
+
 ### New
 
 #### Notification agent (TC-3520, TC-3662, TC-3721)
@@ -71,11 +81,19 @@ The inspection question asks for the window and the inspector at once, with a "w
 
 #### RDD review in one question
 
-The RDD Project Manager's side collapses the same way. Document status, actual handover date and the fit-out window become a single question with two chips — **Approve** and **Approve with changes** — each carrying suggested dates. The trading date is calculated rather than asked, and the whole answer can be typed in one go ("approved 20 sept 27 sept 30 sept 10 oct").
+**Before** — document status → actual handover date → fit-out start date → fit-out end date → trading date → documents → review & submit
+
+**After** — **review outcome and its dates** (one question) → documents → review & submit
+
+The RDD Project Manager's side collapses the same way: five questions become one. Document status, actual handover date and the fit-out window become a single question with two chips — **Approve** and **Approve with changes** — each carrying suggested dates. The trading date is calculated rather than asked, and the whole answer can be typed in one go ("approved 20 sept 27 sept 30 sept 10 oct").
 
 Suggestions are computed per lease, anchored on the **expected handover date** and stepped with `cenomi.add_working_days` (Sunday–Thursday), preferring the lease's free period, then its planned dates, then the base offsets. A suggested fit-out window closes on its own start date rather than dangling.
 
 #### Already Trading (Path B) in one question
+
+**Before** — actual shop handover date → actual fit-out start date → actual fit-out end date → actual trading date → comments → documents → review & submit
+
+**After** — **the four actual dates** (one question) → documents → review & submit
 
 The four actual dates — shop handover, fit-out start, fit-out end, trading — are asked together, with **no** suggestions, since these are dates the user is recording rather than planning. All four can be typed at once, and all four are editable on the review card. The lease code is read-only there.
 
