@@ -97,6 +97,18 @@ Suggestions are computed per lease, anchored on the **expected handover date** a
 
 The four actual dates — shop handover, fit-out start, fit-out end, trading — are asked together, with **no** suggestions, since these are dates the user is recording rather than planning. All four can be typed at once, and all four are editable on the review card. The lease code is read-only there.
 
+#### The form and the assistant stay in sync, both ways
+
+The chat and the Service Request form are two views of one draft. Previously they drifted: the assistant wrote into a form the user could not touch, and anything typed into the form was invisible to the conversation. Three paths now keep them together.
+
+**Assistant → form.** A question names *every* field it asks for, not just the one being bound. The turn carries `ui.field` (the single scroll-and-bind target) alongside `ui.fields` (all fields the question covers), so a combined question like the inspection ask highlights the start date, end date and inspector together rather than pointing at one and leaving the user to guess at the rest.
+
+**Form → assistant.** With the form left open, a field the user edits mid-conversation is sent as a silent turn carrying `corrected_fields` — no user bubble, but a real turn: the backend merges it, re-validates, rebuilds the review card and advances the flow if that answer was what the current question wanted. A form answer now visibly moves the flow on to its next step.
+
+**Review card → form.** An edit made on the review card is pushed back into the form as it is made, on blur, so the card and the form beneath it never disagree. Editable rows are typed — a date row gets a date picker, an enum row its chips — and the fields that must not be edited, notably the lease code, are read-only.
+
+The mechanism is deliberately generic rather than handover-specific: field groups, `ui.fields`, silent `corrected_fields` turns and the card rebuild are shared machinery, applied here to handover create, FM review, RDD review and Already Trading, and available unchanged to the three confirmation SRs as they are shortened.
+
 #### Guided tour choice (`GUIDED_TOUR_CHOICE_ENABLED`)
 
 After lease selection the user is asked once per draft whether they want to be guided. The assistant behaves identically either way — it asks, the user answers. The difference is the form: **guided** locks it and walks the user field by field; **open** leaves it enabled, and any field the user edits mid-conversation is synced back to the assistant. The choice is remembered per draft, and the gate is applied in every workflow entry route, not just handover create — the mechanism is shared so the confirmation SRs can adopt it unchanged.
@@ -145,6 +157,26 @@ Key Contact indexing is now a strict seven-role allowlist enforced **at index ti
 | Handover-type chips lingered after the type was chosen | Chips are now replaced whenever a turn shows something |
 | Markup in agent copy rendered literally | The chat renderer supports `**bold**` and links only; the italics were removed rather than the renderer widened |
 | A milestone cancellation left the active and correction-pending fields armed | Both are now cleared |
+
+#### Frontend (`cenomi-frontend-2`)
+
+Sixteen commits on the companion branch, most of them the client half of the two-way sync above.
+
+| Symptom | Cause |
+|---|---|
+| An answer given in the form was accepted but the flow did not move — and a stray "Save Progress" chip appeared under the question | A silent turn suppressed the assistant bubble wholesale, including the step it had moved to. It now shows what the turn actually produced, and chips are gated on the turn carrying UI of its own |
+| The review card stayed frozen at the values it was built with while notes and comments updated around it | Silent turns dropped the rebuilt card instead of replacing it |
+| A time changed on the date-time picker was lost | The form-to-chat diff dropped the `*LT` keys, so the clock never left the client |
+| A date picked from the calendar never reached the assistant | The bridge watched form values but not the date keys |
+| …and then the watcher sent *today's* date the moment a calendar opened | The picker writes today into the field on open, before the user has chosen. The watcher now stands down while a calendar is on screen |
+| The four Already Trading dates never reached the assistant from the form | They were missing from the draft-to-form key map |
+| Title and comments typed into the Already Trading form did not sync | `ServiceReqForms` carried the `data-agentic-*` markers for every sub-category except `HANDED_OVER` |
+| Editing the review card left the form beneath it stale | The card had no write path back into the form |
+| Chips from the previous question lingered after the next one | Chips were only replaced when the new turn brought its own |
+| Editable fields on chat cards did not look editable | Styling only — they now read as inputs |
+| Handover-type chips stayed on screen after Already Trading was chosen | Same lingering-chip cause as above |
+
+The lease picker gained search and recency ordering on this side too, and RDD create intents from the Copilot now open the matching new-SR form.
 
 ### Behind flags
 

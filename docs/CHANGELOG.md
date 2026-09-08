@@ -29,6 +29,7 @@
 | RDD review | 5 questions → **2**: document status + actual handover + fit-out window collapse into one question with date-carrying chips; trading date computed as fit-out end + 8 days |
 | Path B | 5 questions → **2**: the four actual dates asked in one question, no suggestions, all four editable on the review card |
 | Guided tour | Per-draft guided/open form choice, gated in all five workflow entry routes, behind `GUIDED_TOUR_CHOICE_ENABLED` |
+| Form ↔ assistant sync | Two-way: `ui.fields` names every field a question asks for; a field edited in the open form is sent as a silent `corrected_fields` turn that merges, re-validates, rebuilds the card and advances the flow; a review-card edit is pushed back into the form on blur |
 | Stage handoff | An FM user is stopped at the RDD boundary instead of being walked into a stage that is not theirs |
 | Migrations | `006_indexer_watermarks`, `007_feedback_analytics`, `008_backfill_answer_status` |
 | Pipelines | CI/CD scripts reworked for deployment handling and variable management |
@@ -127,6 +128,25 @@
 | Other | `test_lease_picker_toggle`, `test_milestone_cancel_clears_state`, `test_upload_delete_hydrate`, `test_config_base_url_validation` |
 
 `tests/conftest.py` (new) pins `handover_short_flow_enabled`, `handover_ai_autofill_enabled` and `guided_tour_choice_enabled` to their shipped defaults (**off**), so a flagged path is never exercised by accident from a developer's local `.env`; a flag-on test opts in explicitly.
+
+#### Companion frontend branch — `cenomi-frontend-2` @ `feature/rdd-handover-short-flow`
+
+The client half of the two-way form ↔ assistant sync. 16 commits; the same work rebased onto dev lives on `feature/rdd-handover-short-flow-dev`.
+
+| File | What changed |
+|---|---|
+| `serviceRequestChatbot/useServiceRequestChat.ts` | `activeFields` (all fields a question asks for, not just the bound one), `guidedTour` state, card refresh on silent turns, `silentTurnCarriesUi` gating so a silent turn shows what it produced, chips follow the turn |
+| `serviceRequestChatbot/refreshCardMessage.ts` *(new)* | Replaces the on-screen review card when the draft changes underneath it |
+| `serviceRequestChatbot/silentTurnMessage.ts` | `silentTurnCarriesUi` — does this silent turn carry UI worth showing? |
+| `serviceRequestChatbot/handoverDateFormKeys.ts` *(new)* | The date keys the bridge watches |
+| `serviceRequestChatbot/HandoverAgenticBridge.tsx` | Date-key watcher (`DATE_WATCH_INTERVAL_MS = 500`) that stands down while a calendar is open (`OPEN_CALENDAR_SELECTOR`), so the picker's write-today-on-open never reaches the assistant as an answer |
+| `serviceRequestChatbot/ConfirmationCard.tsx` | `buildFieldDraft`, `buildCorrectedFields`, `draftPatchForField`, commit on blur, typed inputs per row, Path B date formatting |
+| `serviceRequestChatbot/AgenticFormikFieldShell.tsx` | `isPrimary` vs `isActive` — the scroll target against the highlighted set; the shell stands down when the form is open |
+| `serviceRequestChatbot/handoverDraftFormMapper.ts` | `startDateLT` / `endDateLT` and the four Path B date keys added to the draft ↔ form map |
+| `serviceRequestForms/ServiceReqForms.tsx` | `data-agentic-*` markers extended to `HANDED_OVER`, which had been the only sub-category without them |
+| `serviceRequestChatbot/{ResourcePicker,agenticSrNavigation,serviceRequestAgenticRegistry,resolveActiveFieldFromResponse}.ts(x)` | Lease picker search and recency; RDD create intents routed to the matching new-SR form |
+| `chatbot-ui/chatbotUi.css`, `serviceRequestChatbot/agenticFormikFieldHighlight.css` | Editable card fields read as inputs; a softer highlight ring |
+| New specs | `AgenticFormikFieldShell.spec.tsx`, `ResourcePicker.spec.tsx`, `agenticSrNavigation.spec.ts`, `handoverDateWatch.spec.ts`, `refreshCardMessage.spec.ts` — 3 suites, ~40 specs, no change to the type-error or failing-spec baseline |
 
 ### Known issues (non-blocking, tracked for follow-up)
 
