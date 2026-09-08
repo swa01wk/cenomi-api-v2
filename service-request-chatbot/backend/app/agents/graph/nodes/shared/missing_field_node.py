@@ -1294,6 +1294,20 @@ async def missing_field_node(state: ServiceRequestState) -> dict[str, Any]:
                     ],
                 }
             }
+        # A question offers answers, not stage actions. sr_status_sync merges
+        # the FM/RDD action chip into response_decorations on every turn of an
+        # open SR ("Save Progress" while the review is incomplete, "Approve
+        # Review" once it is ready), and a question that sets no chips of its
+        # own inherited it: the chip rendered directly under "Please share the
+        # unit readiness date" as though it were the answer, and clicking it
+        # abandoned the question. Drop only the chips — the preview promotion
+        # and the document card belong to the SR, not to this question, and
+        # must survive.
+        if "response_decorations" not in updates:
+            inherited = dict(state.get("response_decorations") or {})
+            if inherited.pop("suggestions", None) is not None:
+                updates["response_decorations"] = inherited
+
     else:
         # Fields complete — if FM/RDD still need documents, ask for upload
         # instead of silently advancing (document_count was skipped above).
