@@ -78,10 +78,15 @@ async def test_any_other_reason_says_ineligible_rather_than_missing() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_genuinely_unmatched_code_still_says_not_found() -> None:
-    # No reason from the platform is a real miss, and the user should re-check.
-    message = await _message(None)
+@pytest.mark.parametrize("reason", [None, "not_found"])
+async def test_a_genuinely_unmatched_code_still_says_not_found(reason: str | None) -> None:
+    # A real miss, and the user should re-check. "not_found" is one of the
+    # platform's own reason values, so a blanket "any reason means the lease
+    # exists" rule announced a genuine miss as "found but not eligible" —
+    # observed on t0108880, which the RBAC property scope had filtered out.
+    message = await _message(reason)
     assert "zero matches" in message or "double-check" in message
+    assert "not currently eligible" not in message
 
 
 @pytest.mark.asyncio

@@ -28,6 +28,7 @@ from app.agents.services.display_formatters import (
     format_field_display_value,
 )
 from app.agents.services.review_decorations_service import (
+    _uploaded_doc_row,
     build_document_upload_ask_response,
     build_mm_optional_upload_continue_suggestions,
     is_fm_review_ready,
@@ -695,6 +696,11 @@ async def confirmation_node(state: ServiceRequestState) -> dict[str, Any]:
                     "label": gate_label,
                     "required": False,
                     "status": "uploaded" if already_uploaded else "missing",
+                    # Without the id the card cannot delete what it shows, and
+                    # without the name it renders "Uploaded  Other" — the tick
+                    # and file name vanish the moment this card is rebuilt over
+                    # the one the client filled in locally after the upload.
+                    **_uploaded_doc_row(documents, "SR_HANDOVER_OTHER"),
                 }
             ],
             "uploadContext": {

@@ -514,9 +514,12 @@ async def lease_lookup_node(
         # sent them to re-check a code that was correct — they had just picked
         # it from the form's own Lease ID list. Only a genuinely unmatched
         # lookup keeps the not-found wording.
+        # ``not_found`` is itself one of the platform's reasons, so it must be
+        # excluded here — otherwise a genuine miss is announced as "found but
+        # not eligible", which is worse than the wording this branch replaced.
         if result.reason == "activation_pending":
             no_match_msg = _ACTIVATION_PENDING_MESSAGE
-        elif result.reason:
+        elif result.reason and result.reason != "not_found":
             log.info("lease_lookup.ineligible", reason=result.reason)
             no_match_msg = _NOT_ELIGIBLE_MESSAGE
         else:
