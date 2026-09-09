@@ -89,6 +89,18 @@ _NO_MATCH_ACCESS_MESSAGE = (
     "Trading Confirmation is available to Mall Managers and Operations for leases "
     "in their property scope."
 )
+_ACTIVATION_PENDING_MESSAGE = (
+    "State plainly that the lease was found but is not activated yet, so a "
+    "handover cannot be raised for it, and that it becomes available once the "
+    "activation date has passed. Do not say the lease could not be found, and "
+    "do not ask the user to re-check the code — the code was correct. Offer to "
+    "continue with a different lease."
+)
+_NOT_ELIGIBLE_MESSAGE = (
+    "State plainly that the lease was found but is not currently eligible for "
+    "a handover request. Do not say it could not be found and do not ask the "
+    "user to re-check the code. Offer to continue with a different lease."
+)
 _HANDOVER_EXISTS_MESSAGE = (
     "The lease already has an active Handover Service Request in progress. "
     "A new Handover SR cannot be created until the existing one is completed or cancelled. "
@@ -495,11 +507,24 @@ async def lease_lookup_node(
         # and the platform did not return the lease row (legacy empty matches).
         if not purpose and result.reason == "handover_exists":
             return _handover_exists_block()
-        no_match_msg = (
-            _NO_MATCH_ACCESS_MESSAGE
-            if purpose == "trading_confirm"
-            else _NO_MATCH_MESSAGE
-        )
+        # An empty result is not the same as a wrong code. The platform filters
+        # the list and says why: a lease with no activation date on record is
+        # withheld as ``activation_pending``, and that covers most of the
+        # estate. Telling the user "I couldn't find a lease matching that code"
+        # sent them to re-check a code that was correct — they had just picked
+        # it from the form's own Lease ID list. Only a genuinely unmatched
+        # lookup keeps the not-found wording.
+        if result.reason == "activation_pending":
+            no_match_msg = _ACTIVATION_PENDING_MESSAGE
+        elif result.reason:
+            log.info("lease_lookup.ineligible", reason=result.reason)
+            no_match_msg = _NOT_ELIGIBLE_MESSAGE
+        else:
+            no_match_msg = (
+                _NO_MATCH_ACCESS_MESSAGE
+                if purpose == "trading_confirm"
+                else _NO_MATCH_MESSAGE
+            )
         return {
             "status": "WAITING_FOR_USER",
             "response_message": no_match_msg,

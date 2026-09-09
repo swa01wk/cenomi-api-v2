@@ -186,6 +186,12 @@ _NON_FIELD_VALIDATION_TYPES: frozenset[str] = frozenset({
 
 # Fitout confirmation agents use fitout_confirm_schema.get_missing_fields instead
 # of handover_get_missing_fields — their required fields are completely different.
+# The shape stage action chips take ("Save Progress", "Approve Review",
+# "Submit Report"). A resource_picker carries a different kind, which is how a
+# question's own answer options are told apart from a way out of the question.
+_STAGE_ACTION_SUGGESTION_KIND = "labeled_options"
+
+
 _FITOUT_CONFIRM_AGENTS: frozenset[str] = frozenset({
     "rdd_fitout_start_agent",
     "rdd_fitout_end_agent",
@@ -1360,12 +1366,19 @@ async def missing_field_node(state: ServiceRequestState) -> dict[str, Any]:
         # Review" once it is ready), and a question that sets no chips of its
         # own inherited it: the chip rendered directly under "Please share the
         # unit readiness date" as though it were the answer, and clicking it
-        # abandoned the question. Drop only the chips — the preview promotion
-        # and the document card belong to the SR, not to this question, and
-        # must survive.
+        # abandoned the question.
+        #
+        # Only those action chips are dropped. A ``resource_picker`` — the
+        # eligible-lease list offered under "share the lease code" — is the
+        # answer to the question rather than a way out of it, and dropping it
+        # took the lease suggestions off that turn entirely. Everything else
+        # (preview promotion, the document card) describes the SR rather than
+        # this question and travels with it as before.
         if "response_decorations" not in updates:
             inherited = dict(state.get("response_decorations") or {})
-            if inherited.pop("suggestions", None) is not None:
+            suggestions = inherited.get("suggestions") or {}
+            if suggestions.get("kind") == _STAGE_ACTION_SUGGESTION_KIND:
+                inherited.pop("suggestions", None)
                 updates["response_decorations"] = inherited
 
     else:

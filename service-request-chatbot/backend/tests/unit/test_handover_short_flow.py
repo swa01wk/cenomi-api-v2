@@ -659,15 +659,19 @@ class TestEditableWindow:
 
 
 class TestDefaultClocks:
+    # The end clock is a working day after the start, not a copy of it: an
+    # inspection that begins and ends at the same instant is refused by
+    # validate_start_end_date on a same-day window, so copying handed the user
+    # a blocking error about a time they were never asked for.
     def test_fills_both_clocks_when_neither_was_given(self) -> None:
         assert sr_autofill_service.default_inspection_times({}) == {
             "inspectionTime": "09:00",
-            "inspectionEndTime": "09:00",
+            "inspectionEndTime": "17:00",
         }
 
     def test_end_follows_a_start_the_user_gave(self) -> None:
         filled = sr_autofill_service.default_inspection_times({"inspectionTime": "14:00"})
-        assert filled == {"inspectionEndTime": "14:00"}
+        assert filled == {"inspectionEndTime": "22:00"}
 
     def test_leaves_both_alone_when_the_user_set_them(self) -> None:
         assert sr_autofill_service.default_inspection_times(
@@ -692,7 +696,7 @@ class TestDefaultClocks:
         # Stored, not merely displayed — an unset clock reads as a missing
         # required field and blocks submission.
         assert collected["inspectionTime"] == "09:00"
-        assert collected["inspectionEndTime"] == "09:00"
+        assert collected["inspectionEndTime"] == "17:00"
         assert collected["startDateLT"] == "06/09/2026 9:00 AM"
 
 

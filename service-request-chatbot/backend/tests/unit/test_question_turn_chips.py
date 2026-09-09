@@ -107,6 +107,33 @@ async def test_a_question_with_its_own_chips_keeps_them() -> None:
 
 
 @pytest.mark.asyncio
+async def test_the_lease_picker_survives_the_question_it_answers() -> None:
+    """The eligible-lease list is the answer, not a way out of the question.
+
+    lease_lookup attaches it and hands the turn on to this node, which asks
+    "please share the lease code". Stripping every inherited suggestion took
+    the lease suggestions off that first turn: the user was asked for a code
+    with nothing to pick from.
+    """
+    from app.agents.services.resource_picker_decorations import (
+        build_create_lease_picker,
+    )
+
+    picker = build_create_lease_picker()
+    state = _fm_state(
+        workflow_stage="CREATE_SR",
+        collected_data={},
+        backend_refs={},
+        response_decorations=dict(picker),
+    )
+    result = await missing_field_node(state)  # type: ignore[arg-type]
+
+    assert (result.get("response_ui") or {}).get("field") == "lease_code"
+    suggestions = _effective(result, state).get("suggestions") or {}
+    assert suggestions.get("kind") == "resource_picker", suggestions
+
+
+@pytest.mark.asyncio
 async def test_a_turn_that_inherited_no_chips_is_left_alone() -> None:
     # Nothing to strip: the node must not invent an empty decorations dict and
     # overwrite what the rest of the turn built.
