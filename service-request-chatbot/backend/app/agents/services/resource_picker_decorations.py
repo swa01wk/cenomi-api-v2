@@ -49,32 +49,52 @@ def build_handover_inbox_picker() -> dict[str, Any]:
     return build_resource_picker("service_requests", filters=_HANDOVER_INBOX_SR_FILTERS)
 
 
-def build_create_lease_picker() -> dict[str, Any]:
-    """Eligible leases for a new Handover SR when lease is not yet resolved.
+# Each fitout confirmation confirms the *next* milestone, so the platform lists
+# only leases that already carry the one before it: the shop handed over before
+# fit-out can start, fit-out started before it can end, fit-out ended before
+# trading can begin. ``purpose`` is what tells GET /leases which rule to apply.
+LEASE_PICKER_PURPOSE_BY_AGENT: dict[str, str] = {
+    "rdd_fitout_start_agent": "fitout_confirm",
+    "rdd_fitout_end_agent": "fitout_end",
+    "rdd_trading_confirmation_agent": "trading_confirm",
+}
 
-    Shows the 5 most recently activated eligible leases.  ``sort_by``/``order``
-    are forwarded to the platform ``GET /leases`` list mode; the user pages
-    through the rest with read-more, or narrows them with the search box.
+
+def build_create_lease_picker(purpose: str | None = None) -> dict[str, Any]:
+    """Leases this workflow can be raised against, when none is resolved yet.
+
+    Shows the 5 most recent, pages with read-more and narrows with the search
+    box. Without *purpose* these are the handover-eligible leases (newest
+    activated first); with one they are the leases holding that workflow's
+    prerequisite milestone, newest milestone first.
     """
+    filters: dict[str, Any] = {
+        "limit": 5,
+        "offset": 0,
+        "sort_by": "activation_date",
+        "order": "desc",
+    }
+    if purpose:
+        filters["purpose"] = purpose
     return build_resource_picker(
         "leases",
-        filters={
-            "limit": 5,
-            "offset": 0,
-            "sort_by": "activation_date",
-            "order": "desc",
-        },
+        filters=filters,
         selection={"mode": "select_lease"},
         searchable=True,
     )
 
 
-def should_browse_leases(state: dict[str, Any]) -> bool:
-    """True when Handover CREATE should offer eligible-lease browse chips.
+def lease_picker_purpose(state: dict[str, Any]) -> str | None:
+    """The ``purpose`` this state's lease picker must carry, if any."""
+    return LEASE_PICKER_PURPOSE_BY_AGENT.get(str(state.get("active_agent") or ""))
 
-    Only offered for the Handover agent (rdd_handover_agent).  Fitout/Trading
-    confirmation agents use purpose-scoped lease lookups and must not show the
-    generic Handover SR picker.
+
+def should_browse_leases(state: dict[str, Any]) -> bool:
+    """True when a CREATE turn should offer lease browse chips.
+
+    Handover and the three fitout confirmations each get their own list — the
+    workflow decides which leases are candidates, and ``lease_picker_purpose``
+    carries that to the platform.
     """
     from app.core.config import settings
 
@@ -86,8 +106,12 @@ def should_browse_leases(state: dict[str, Any]) -> bool:
     if not settings.handover_lease_picker_enabled:
         return False
 
-    active_agent = state.get("active_agent") or ""
-    if active_agent not in ("rdd_handover_agent", ""):
+    # The workflow must be known. An unpinned session used to qualify, and was
+    # shown handover's leases by default — the wrong list for whatever it
+    # turned out to be. When we do not know the workflow, we do not know which
+    # leases are the right ones.
+    agent = str(state.get("active_agent") or "")
+    if agent != "rdd_handover_agent" and agent not in LEASE_PICKER_PURPOSE_BY_AGENT:
         return False
     if (state.get("workflow_stage") or "CREATE_SR") != "CREATE_SR":
         return False

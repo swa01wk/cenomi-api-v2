@@ -67,14 +67,17 @@ async def test_missing_field_in_progress_when_fields_done_and_no_doc_error() -> 
 
 
 @pytest.mark.asyncio
-async def test_approve_without_docs_asks_upload() -> None:
+async def test_approve_without_docs_is_allowed() -> None:
+    """FM documents are optional, so approve must not wait for one.
+
+    This used to return the upload card and drop the action, which left a
+    reviewer with nothing to attach unable to approve at all.
+    """
     result = await fm_review_entry_node(
         _fm_state(action_override="approve_fm_review")
     )
-    assert result["status"] == "WAITING_FOR_USER"
-    deco = result.get("response_decorations") or {}
-    assert deco.get("document_requirement") is not None
-    assert "fm_action" not in (result.get("backend_refs") or {})
+    assert result["backend_refs"]["fm_action"] == "approve"
+    assert result.get("status") != "WAITING_FOR_USER"
 
 
 @pytest.mark.asyncio
@@ -95,17 +98,17 @@ async def test_approve_with_docs_sets_fm_action() -> None:
 
 
 @pytest.mark.asyncio
-async def test_confirm_approve_without_docs_asks_upload() -> None:
+async def test_confirm_approve_without_docs_is_allowed() -> None:
     result = await fm_review_entry_node(
         _fm_state(action_override="confirm_fm_approve")
     )
-    assert result["status"] == "WAITING_FOR_USER"
-    assert result.get("confirmation_status") is None
-    assert (result.get("response_decorations") or {}).get("document_requirement")
+    assert result["backend_refs"]["fm_action"] == "approve"
+    assert result["confirmation_status"] == "CONFIRMED"
 
 
 @pytest.mark.asyncio
-async def test_confirmation_node_blocks_fm_approve_without_docs() -> None:
+async def test_confirmation_node_lets_fm_approve_without_docs() -> None:
+    """A staged approve reaches the confirmation card with no documents attached."""
     result = await confirmation_node(
         _fm_state(
             backend_refs={
@@ -115,10 +118,7 @@ async def test_confirmation_node_blocks_fm_approve_without_docs() -> None:
             }
         )
     )
-    assert result["status"] == "WAITING_FOR_USER"
-    assert result.get("response_ui", {}).get("type") != "confirmation_card"
-    deco = result.get("response_decorations") or {}
-    assert deco.get("document_requirement") is not None
+    assert result.get("response_ui", {}).get("type") == "confirmation_card"
 
 
 @pytest.mark.asyncio

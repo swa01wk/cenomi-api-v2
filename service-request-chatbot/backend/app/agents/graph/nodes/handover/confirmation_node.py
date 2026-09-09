@@ -19,6 +19,7 @@ Non-responsibilities
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 from app.agents.graph.state import ServiceRequestState
@@ -243,6 +244,28 @@ _TYPED_INPUTS: dict[str, str] = {
     "actual_trading_date": "date",
 }
 
+# The review cards' own date rows. Each holds a plain calendar date with no
+# clock folded into it, so each can take a real picker — without one the row
+# was a free-text box seeded with "27/09/2026", leaving the reviewer to retype
+# a display string by hand to change a date.
+#
+# ``startDate`` / ``endDate`` are deliberately absent here: at review stages
+# their value is the merged "06/09/2026 9:00 AM" display string, which a native
+# date input cannot hold and would silently render blank.
+_REVIEW_TYPED_INPUTS: dict[str, str] = {
+    "unit_readiness_date": "date",
+    "expected_handover_date": "date",
+    "actual_handover_date": "date",
+    "fitout_start_date": "date",
+    "fitout_end_date": "date",
+}
+
+# Stages whose card is a review of an existing SR rather than a draft.
+_REVIEW_CARD_STAGES: frozenset[str] = frozenset({"FM_REVIEW", "RDD_REVIEW"})
+
+# What a native date input will accept, and nothing else.
+_ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
 # What the payload builder books when no clock was ever given. Shown on the
 # card so the preview states the time the SR will actually carry.
 _DEFAULT_INSPECTION_HHMM = "09:00"
@@ -280,6 +303,37 @@ def _typed_date_inputs(workflow_stage: str) -> bool:
     from app.agents.schemas.handover_schema import AI_FILLED_STAGES, short_flow_enabled
 
     return short_flow_enabled() and workflow_stage in AI_FILLED_STAGES
+
+
+def _picker_value(input_type: str, value: Any) -> Any | None:
+    """*value* in the shape the native input speaks, or None to skip the picker.
+
+    A date input accepts YYYY-MM-DD and nothing else — hand it anything else
+    and it renders an empty ``dd/mm/yyyy`` with no complaint. The platform
+    stores these dates as display strings ("28/09/2026"), so a reopened SR's
+    card showed three blank pickers where its dates should have been.
+
+    Returning None leaves the row as text, which is the safe failure: a value
+    the picker cannot hold is still a value the reviewer must be able to see.
+    """
+    if value in (None, ""):
+        # Nothing to bind; an empty picker is the correct empty state.
+        return value
+    if input_type != "date":
+        return value
+    from app.agents.graph.nodes.shared.merge_state_node import _to_iso_date
+
+    iso = _to_iso_date(value)
+    return iso if _ISO_DATE_RE.match(str(iso)) else None
+
+
+def _typed_input_map(workflow_stage: str) -> dict[str, str]:
+    """Which rows this stage's card renders with a native picker."""
+    if workflow_stage in _REVIEW_CARD_STAGES:
+        return _REVIEW_TYPED_INPUTS
+    if _typed_date_inputs(workflow_stage):
+        return _TYPED_INPUTS
+    return {}
 
 
 def _typed_inspection_inputs(workflow_stage: str) -> bool:
@@ -477,6 +531,23 @@ def _build_confirmation_card(
         ):
             display_keys = [k for k in display_keys if k != "document_status"]
 
+        # A disapproved handover records no dates — the RDD form has no fields
+        # for them and the flow no longer asks — so the card must not list four
+        # empty rows the reviewer cannot fill. Mirrors
+        # RDD_REJECTED_UNASKED_FIELDS, with trading_date alongside them since
+        # it is only ever derived from the fit-out end.
+        from app.agents.schemas.handover_schema import (
+            RDD_REJECTED_STATUS,
+            RDD_REJECTED_UNASKED_FIELDS,
+        )
+
+        if (
+            str(collected_data.get("document_status") or "").strip().upper()
+            == RDD_REJECTED_STATUS
+        ):
+            hidden = RDD_REJECTED_UNASKED_FIELDS | {"trading_date"}
+            display_keys = [k for k in display_keys if k not in hidden]
+
     # Start and end times are independent. inspectionTime is the start clock;
     # endDateLT keeps an end-specific time when the user gave one.
     from app.agents.services.payload_builder_service import (  # local import avoids circular deps
@@ -489,7 +560,7 @@ def _build_confirmation_card(
     # review card is where a wrong date or clock gets fixed. Give each one its
     # own row with a real date / time picker instead of folding the clock into
     # the date's display string, which can only be edited as free text.
-    use_typed_dates = _typed_date_inputs(workflow_stage)
+    typed_inputs = _typed_input_map(workflow_stage)
     if _typed_inspection_inputs(workflow_stage):
         display_keys = _with_inspection_time_rows(display_keys)
         collected_data = {
@@ -537,10 +608,14 @@ def _build_confirmation_card(
         }
         if field_key in _ENUM_OPTIONS:
             row["options"] = _ENUM_OPTIONS[field_key]
-        if use_typed_dates and is_editable and field_key in _TYPED_INPUTS:
+        if is_editable and field_key in typed_inputs:
             # Tells the frontend to render a native date / time picker and to
             # round-trip the raw value instead of its display text.
-            row["inputType"] = _TYPED_INPUTS[field_key]
+            _typed = typed_inputs[field_key]
+            _bound = _picker_value(_typed, display_value)
+            if _bound is not None:
+                row["inputType"] = _typed
+                row["value"] = _bound
         row.update(_provenance_for(field_key, raw_value, ai_meta))
         fields.append(row)
 
@@ -643,6 +718,22 @@ async def confirmation_node(state: ServiceRequestState) -> dict[str, Any]:
                 logger.info(
                     "confirmation_node: FM fields complete — showing upload/review turn "
                     "(no fm_action yet, docs not ready)"
+                )
+                return build_document_upload_ask_response(state)
+            # Ready, but the reviewer may have more to attach. Hold on the
+            # upload card — which now carries a Continue chip — until they say
+            # they are done. The first document used to make the review
+            # "ready" and drop them straight onto the confirmation card while
+            # they were still choosing the second, with no way back.
+            from app.agents.services.review_decorations_service import (
+                FM_UPLOAD_GATE_DONE,
+                FM_UPLOAD_GATE_KEY,
+            )
+
+            if collected_data.get(FM_UPLOAD_GATE_KEY) != FM_UPLOAD_GATE_DONE:
+                logger.info(
+                    "confirmation_node: FM docs ready — holding on the upload "
+                    "card until the reviewer continues"
                 )
                 return build_document_upload_ask_response(state)
             # All conditions met; proceed to show the confirmation card.

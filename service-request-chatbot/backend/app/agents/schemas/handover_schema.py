@@ -361,6 +361,13 @@ RDD_UPLOAD_DOC_TYPES: frozenset[str] = frozenset(
 RDD_MEETING_STATUSES: frozenset[str] = frozenset({"APPROVED", "APPROVED_WITH_CHANGES"})
 RDD_REJECTED_STATUS = "DISAPPROVED"
 
+# Dates the RDD review collects only when the handover is going ahead. On a
+# disapproved report there is nothing to record and no field on the form to
+# record it in, so they are never asked and never block submission.
+RDD_REJECTED_UNASKED_FIELDS: frozenset[str] = frozenset(
+    {"actual_handover_date", "fitout_start_date", "fitout_end_date"}
+)
+
 ALL_DOCUMENT_TYPES: frozenset[str] = frozenset(
     FM_ALLOWED_DOCUMENTS + RDD_ALLOWED_DOCUMENTS + HANDED_OVER_ALLOWED_DOCUMENTS
 )
@@ -443,6 +450,17 @@ def get_missing_fields(stage_name: str, collected: dict) -> list[str]:
     # resolves, times default in the payload builder, and the review card is
     # where all of them are checked and edited.
     unasked = unasked_fields_for(stage_name)
+
+    # A disapproved handover has no dates to record, and the RDD form offers
+    # nowhere to enter them. Asking anyway left the reviewer with three
+    # questions they could not answer from the form in front of them —
+    # actual handover, fit-out start and fit-out end — after rejecting the
+    # report. They are required only where the handover is going ahead.
+    if stage_name == "RDD_REVIEW" and (
+        str(collected.get("document_status") or "").strip().upper()
+        == RDD_REJECTED_STATUS
+    ):
+        unasked = unasked | RDD_REJECTED_UNASKED_FIELDS
 
     missing = [
         f

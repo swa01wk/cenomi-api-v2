@@ -40,6 +40,18 @@ from app.types.chat import AuthContext
 get_compiled_graph = get_compiled_help_graph
 
 
+def _is_on_a_service_request_form(msp_context: dict[str, Any] | None) -> bool:
+    """True when the page context names a specific Service Request type.
+
+    The chat widget publishes the SR form's own help labels, so a turn sent
+    from a Service Request page already says which SR the user is working on.
+    Their reviewer inbox is a different job and does not belong on top of it.
+    """
+    if not isinstance(msp_context, dict):
+        return False
+    return bool(str(msp_context.get("help_subcategory") or "").strip())
+
+
 def _build_auth_context(role: str | None) -> AuthContext:
     """Build an AuthContext from a role string using the ROLE_PERMISSION_MAP.
 
@@ -428,10 +440,25 @@ class ChatOrchestrationService:
             user_role = derive_user_role(auth_context)
             if user_role:
                 backend_refs["user_role"] = user_role
-            if not sr_id and notification_ref is None and not chat_session.active_agent:
+            if (
+                not sr_id
+                and notification_ref is None
+                and not chat_session.active_agent
+                and not _is_on_a_service_request_form(msp_context)
+            ):
                 # Only show the Handover reviewer inbox when there is no active
                 # workflow.  Fitout/Trading confirmation agents in CREATE_SR stage
                 # have no sr_id yet but must not see the Handover SR picker.
+                #
+                # ``chat_session.active_agent`` is empty on the FIRST turn of a
+                # new session, so that check alone let the inbox through exactly
+                # when it does the most damage: an RDD Project Manager opening
+                # the Fitout Start Confirmation form and asking for one got the
+                # correct question plus five pending *handover* SRs underneath
+                # it, and tapping one moved the session into that handover —
+                # which then asked for the handover report's guideline link.
+                # Being on a Service Request form is the answer: that page says
+                # what they came to do, and it is not triage their queue.
                 inbox_deco = build_inbox_decorations(auth_context)
                 if inbox_deco:
                     initial_state["response_decorations"] = inbox_deco
