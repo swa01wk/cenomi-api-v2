@@ -36,6 +36,7 @@ from app.agents.services.lease_lookup_service import (
 )
 from app.agents.services.resource_picker_decorations import (
     build_create_lease_picker,
+    lease_picker_purpose,
     should_browse_leases,
 )
 from app.agents.services.review_decorations_service import (
@@ -403,7 +404,7 @@ async def lease_lookup_node(
                 "status": "IN_PROGRESS",
                 "response_decorations": merge_decorations(
                     state.get("response_decorations"),
-                    build_create_lease_picker(),
+                    build_create_lease_picker(lease_picker_purpose(state)),
                 ),
             }
         return {

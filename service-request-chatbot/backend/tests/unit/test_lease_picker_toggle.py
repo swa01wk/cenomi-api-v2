@@ -61,9 +61,16 @@ class TestLeasePickerToggle:
         )
         assert built.handover_lease_picker_enabled is False
 
-    def test_other_agents_still_excluded(self) -> None:
-        """Re-enabling must not widen the picker to fitout / work-permit agents."""
-        assert should_browse_leases(_state(active_agent="rdd_fitout_start_agent")) is False
+    def test_a_workflow_without_a_lease_list_is_still_excluded(self) -> None:
+        """Re-enabling must not widen the picker to workflows with no list.
+
+        The three fitout confirmations now have their own — each scoped by
+        ``purpose`` to the leases holding its prerequisite milestone — but a
+        work permit has none, and neither does a session whose workflow is not
+        yet known.
+        """
+        assert should_browse_leases(_state(active_agent="work_permit_agent")) is False
+        assert should_browse_leases(_state(active_agent="")) is False
 
     def test_resolved_lease_still_excluded(self) -> None:
         assert should_browse_leases(_state(collected_data={"lease_id": 9001})) is False
