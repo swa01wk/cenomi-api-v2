@@ -38,6 +38,10 @@ from app.observability.decorators import trace_node
 
 logger = logging.getLogger(__name__)
 
+# Validation failures that mean the value is malformed rather than merely
+# wrong, so the field is cleared and re-asked instead of left on the form.
+_MALFORMED_VALUE_TYPES: frozenset[str] = frozenset({"date_format", "url"})
+
 _validation_service = ValidationService()
 
 # Fitout confirmation agents have their own required-field schema; skip the
@@ -117,12 +121,18 @@ async def validation_node(state: ServiceRequestState) -> dict[str, Any]:
     # draft_preview / Formik after the bot re-asks. Without this, a bogus
     # entry (e.g. lease code typed into startDate) stays visible in the
     # form even though the AI rejected it, and the next valid answer looks
-    # to the bridge like "no change" for the field it re-asked. Only clear
-    # date_format failures — required / ordering / enum errors are handled
-    # by the normal collection flow.
+    # to the bridge like "no change" for the field it re-asked.
+    #
+    # Only failures that mean "this value is not a value of this kind" clear
+    # the field. ``url`` joined ``date_format`` after "abcd@gmail.com" was
+    # refused as a guideline link and still appeared in the form — the AI said
+    # it needed http:// or https:// while the form showed the address it had
+    # just rejected. Required / ordering / enum errors are left alone: those
+    # are about what the value means, not what it is, and the normal
+    # collection flow handles them.
     cleared_fields: list[str] = []
     for err in blocking_errors:
-        if err.get("validation_type") == "date_format":
+        if err.get("validation_type") in _MALFORMED_VALUE_TYPES:
             field_name = err.get("field")
             if field_name and field_name in collected_data:
                 collected_data.pop(field_name, None)

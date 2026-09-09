@@ -39,7 +39,6 @@ from app.agents.schemas.work_permit_schema import (
 from app.types.service_request import ValidationIssueDTO
 
 # Minimum number of documents required at FM_REVIEW before save/approve.
-_FM_MIN_DOCUMENT_COUNT = 1
 
 logger = logging.getLogger(__name__)
 
@@ -208,7 +207,12 @@ def validate_inspection_done_by(value: Any) -> ValidationResult:
 def validate_guideline_link(value: Any) -> ValidationResult:
     """Validate that ``guideLineLink`` is an absolute http(s) URL."""
     text = str(value or "").strip()
-    passed = text.startswith("http://") or text.startswith("https://")
+    # Schemes are case-insensitive (RFC 3986 §3.1), and a pasted "HTTPS://..."
+    # is a perfectly good link. Matching case-sensitively rejected it and — now
+    # that a refused URL is cleared from the draft — would have wiped it from
+    # the form too.
+    scheme = text.lower()
+    passed = scheme.startswith("http://") or scheme.startswith("https://")
     return _result(
         field="guideLineLink",
         validation_type="url",
@@ -323,7 +327,23 @@ def validate_start_end_date(
         )
 
     if start == end:
-        start_hhmm = _parse_hhmm(start_time)
+        # Judge the window that would actually be submitted. A clock the user
+        # never set is not unknown — the payload builder books it at
+        # _DEFAULT_INSPECTION_HOUR — so validating against "not set" rejected a
+        # booking that would have gone through unchanged.
+        #
+        # On an RDD review that was a dead end: the SR arrived with a same-day
+        # window and no start clock, the stage offers no field to set one, and
+        # every end time the reviewer typed was refused for not beating a start
+        # time that did not exist:
+        #
+        #   end time (6:00 PM) has to be later than the start time (not set)
+        from app.agents.services.payload_builder_service import (
+            _DEFAULT_INSPECTION_HOUR,
+        )
+
+        _default_hhmm = f"{_DEFAULT_INSPECTION_HOUR:02d}:00"
+        start_hhmm = _parse_hhmm(start_time) or _parse_hhmm(_default_hhmm)
         end_hhmm = _parse_hhmm(end_time)
         if start_hhmm and end_hhmm:
             if end_hhmm > start_hhmm:
@@ -333,7 +353,7 @@ def validate_start_end_date(
                     passed=True,
                     message=(
                         f"Same-day inspection on {start}, "
-                        f"{start_time} to {end_time}."
+                        f"{start_time or _default_hhmm} to {end_time}."
                     ),
                     blocking=True,
                 )
@@ -344,7 +364,8 @@ def validate_start_end_date(
                 message=(
                     f"The inspection starts and ends on {start}, so the end "
                     f"time ({end_time}) must be later than the start time "
-                    f"({start_time}). Give a later time, or a later end date."
+                    f"({start_time or _default_hhmm}). Give a later time, or a "
+                    "later end date."
                 ),
                 blocking=True,
             )
@@ -487,7 +508,12 @@ def validate_document_count(
     Rules
     -----
     FM_REVIEW:
-        At least one document must be uploaded (any FM-allowed type).
+        No requirement. All three FM documents (Handover Checklist, Site
+        Survey, COP Checklist / Other) are optional — the upload card marks
+        every row ``required: False`` — so a reviewer with nothing to attach
+        must still be able to save and approve. This used to raise a blocking
+        ``document_count`` error, which held the flow on the upload card with
+        no way past it.
     RDD_REVIEW:
         ``DR_SR_HANDOVER_REPORT`` must be present in the uploaded documents.
     Other stages:
@@ -495,24 +521,7 @@ def validate_document_count(
     """
     results: list[ValidationResult] = []
 
-    if workflow_stage == "FM_REVIEW":
-        count = len(documents or [])
-        passed = count >= _FM_MIN_DOCUMENT_COUNT
-        results.append(
-            _result(
-                field="_documents",
-                validation_type="document_count",
-                passed=passed,
-                message=(
-                    "At least one FM document must be uploaded before saving or approving."
-                    if not passed
-                    else f"{count} FM document(s) uploaded."
-                ),
-                blocking=True,
-            )
-        )
-
-    elif workflow_stage == "RDD_REVIEW":
+    if workflow_stage == "RDD_REVIEW":
         doc_types = {
             (doc.get("document_type") or doc.get("type") or doc.get("document_type_id") or "")
             for doc in (documents or [])
@@ -636,7 +645,26 @@ class ValidationService:
 
         # 1. Required fields
         if stage_def:
-            for r in validate_required_fields(data, stage_def.required_fields):
+            required = stage_def.required_fields
+            # A disapproved handover records no dates — the RDD form has no
+            # field for them — so they must not be asked for (handled in
+            # get_missing_fields) and must not block the submission either.
+            # Without this the reviewer was asked nothing and could still not
+            # submit, which is the worse half of the same bug.
+            if workflow_stage == "RDD_REVIEW":
+                from app.agents.schemas.handover_schema import (
+                    RDD_REJECTED_STATUS,
+                    RDD_REJECTED_UNASKED_FIELDS,
+                )
+
+                if (
+                    str(data.get("document_status") or "").strip().upper()
+                    == RDD_REJECTED_STATUS
+                ):
+                    required = tuple(
+                        f for f in required if f not in RDD_REJECTED_UNASKED_FIELDS
+                    )
+            for r in validate_required_fields(data, required):
                 if r["status"] == "FAILED":
                     errors.append(r)
 
@@ -681,7 +709,19 @@ class ValidationService:
                 errors.append(r)
 
         # 3. startDate < endDate (only when both fields are present)
-        if data.get("startDate") and data.get("endDate"):
+        #
+        # A create-time rule. The reviewer of an existing SR did not choose
+        # this window and has no field to change it: an FM-created SR whose
+        # start and end are the same instant left the approver blocked on
+        # "the end time has to be later than the start time" with nothing to
+        # act on. The window was accepted when the SR was raised; re-litigating
+        # it at review only stops the approval.
+        _REVIEW_STAGES = ("FM_REVIEW", "RDD_REVIEW", "APPROVE_SR")
+        if (
+            workflow_stage not in _REVIEW_STAGES
+            and data.get("startDate")
+            and data.get("endDate")
+        ):
             r = validate_start_end_date(
                 data["startDate"],
                 data["endDate"],
