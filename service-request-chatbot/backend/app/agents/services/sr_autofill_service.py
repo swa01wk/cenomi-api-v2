@@ -136,7 +136,17 @@ def default_inspection_times(collected: dict[str, Any]) -> dict[str, str]:
     always set; the short flow has to write the value the payload builder would
     have defaulted to anyway, or nothing can be submitted at all.
 
-    An end clock follows the start clock, matching ``resolve_start_end_hhmm``.
+    The end clock is a working day after the start, not a copy of it. Copying
+    it wrote an inspection that begins and ends at the same instant, and
+    ``validate_start_end_date`` rightly rejects that on a same-day window — so
+    a user who picked one day for both dates was handed a blocking error the
+    flow had created itself, about a time it never asked them for:
+
+        The inspection starts and ends on 11/09/2026, so the end time
+        (9:00 AM) has to be later than the start time (9:00 AM).
+
+    Nothing they could change on the dates cleared it. A default window of
+    09:00-17:00 is a real inspection and passes on its own.
     """
     from app.agents.services.payload_builder_service import _DEFAULT_INSPECTION_HOUR
 
@@ -149,8 +159,28 @@ def default_inspection_times(collected: dict[str, Any]) -> dict[str, str]:
         start = fallback
         filled["inspectionTime"] = start
     if not end:
-        filled["inspectionEndTime"] = start
+        filled["inspectionEndTime"] = _end_clock_for(start)
     return filled
+
+
+# How long an unstated inspection is assumed to run. Only ever applied to a
+# clock the user was never asked for; an end time they gave is left alone.
+_DEFAULT_INSPECTION_HOURS = 8
+_LAST_MINUTE_OF_DAY = "23:59"
+
+
+def _end_clock_for(start_hhmm: str) -> str:
+    """A default end clock later than *start_hhmm*, on the same day."""
+    try:
+        hour, minute = (int(part) for part in start_hhmm.split(":", 1))
+    except (ValueError, TypeError):
+        return _LAST_MINUTE_OF_DAY
+    end_hour = hour + _DEFAULT_INSPECTION_HOURS
+    if end_hour > 23:
+        # A late start would roll past midnight; stop at the end of the day so
+        # the window stays same-day and still ends after it began.
+        return _LAST_MINUTE_OF_DAY if (hour, minute) != (23, 59) else _LAST_MINUTE_OF_DAY
+    return f"{end_hour:02d}:{minute:02d}"
 
 
 # ---------------------------------------------------------------------------
