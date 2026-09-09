@@ -161,6 +161,40 @@ def build_inbox_decorations(auth: AuthContext | None) -> dict[str, Any]:
     return build_handover_inbox_picker()
 
 
+def _uploaded_doc_row(
+    documents: list[dict[str, Any]], doc_type: str
+) -> dict[str, Any]:
+    """The identifying half of a document row: its id and file name, if uploaded.
+
+    A row without ``document_id`` cannot be deleted. The card reads
+    ``documentId ?? document_id``, finds neither, and falls to its local-only
+    branch: the row clears on screen, no DELETE is ever sent, and the next turn
+    re-renders the document from state — it "comes back after a second". Zero
+    DELETE requests reached the backend across a whole session of trying.
+    """
+    for doc in documents:
+        dt = str(doc.get("document_type_id") or doc.get("document_type") or "")
+        if dt != doc_type:
+            continue
+        document_id = str(doc.get("document_id") or "").strip()
+        if not document_id:
+            continue
+        row: dict[str, Any] = {"document_id": document_id}
+        # Three spellings reach us: the platform upload response says
+        # ``filename``, the draft stores ``file_name``, and rows patched from
+        # the client carry ``fileName``. Reading only two of them sent the card
+        # out with an id and no name — and the client, seeing a named row go
+        # nameless, overwrote the name it already had, so the tick and the file
+        # name vanished from the chat card and the form at once.
+        file_name = (
+            doc.get("file_name") or doc.get("fileName") or doc.get("filename")
+        )
+        if file_name:
+            row["file_name"] = file_name
+        return row
+    return {}
+
+
 def _uploaded_type_ids(
     documents: list[dict[str, Any]],
     role_filter: str | tuple[str, ...] | None = None,
@@ -251,6 +285,7 @@ def _document_requirement_block(
                 else False  # FM needs any one of the three — none individually mandatory
             ),
             "status": "uploaded" if doc_type in uploaded else "missing",
+            **_uploaded_doc_row(documents, doc_type),
         }
         for doc_type in relevant
     ]
@@ -717,6 +752,7 @@ def build_create_sr_attachment_decorations(state: dict[str, Any]) -> dict[str, A
             "label": _DOC_LABELS.get("SR_HANDOVER_OTHER", "Other"),
             "required": False,
             "status": "uploaded" if "SR_HANDOVER_OTHER" in uploaded else "missing",
+            **_uploaded_doc_row(documents, "SR_HANDOVER_OTHER"),
         }
     ]
 

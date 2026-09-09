@@ -141,4 +141,43 @@ async def validation_node(state: ServiceRequestState) -> dict[str, Any]:
     }
     if cleared_fields:
         result["collected_data"] = collected_data
+
+    # A confirmation the flow refuses is void, and must not fire later.
+    #
+    # Reported live on SR 320998. The user set an end date before the start,
+    # clicked Confirm & Submit, and was correctly refused — but
+    # ``confirmation_status`` stayed CONFIRMED. Seven seconds later a silent
+    # form-sync turn carried a valid date, validation passed, and every entry
+    # route sends a standing CONFIRMED straight to merge_state and on to
+    # submission. The SR was created by a background sync, from a confirmation
+    # that had already been turned down.
+    #
+    # The exemption in _route_after_validation is mirrored exactly: an optional
+    # field reported missing does not refuse a confirmed draft, so it must not
+    # void the confirmation either.
+    if has_blocking and state.get("confirmation_status") == "CONFIRMED":
+        if active_agent in _FITOUT_CONFIRM_AGENTS:
+            from app.agents.schemas.fitout_confirm_schema import (
+                OPTIONAL_FIELDS as _OPTIONAL,
+            )
+        else:
+            from app.agents.schemas.handover_schema import (
+                OPTIONAL_FIELDS as _OPTIONAL,
+            )
+        refusing = [
+            e
+            for e in blocking_errors
+            if not (
+                e.get("validation_type") == "required"
+                and e.get("field") in _OPTIONAL
+            )
+        ]
+        if refusing:
+            logger.info(
+                "validation_node: voiding a confirmation refused by %d error(s)"
+                " — the user must confirm again",
+                len(refusing),
+            )
+            result["confirmation_status"] = None
+
     return result

@@ -771,14 +771,21 @@ class TestHttpLeaseLookupParamBuilding:
         params = svc._build_params(LeaseLookupQuery(brand="Nike", mall="Riyadh Park"))
         assert params == {"brand": "Nike", "mall": "Riyadh Park"}
 
-    def test_all_params(self) -> None:
+    def test_a_lease_code_travels_without_the_other_identifiers(self) -> None:
+        # The platform ANDs every identifier onto the code, and the code is
+        # already unique, so brand/mall/company can only narrow it wrongly.
+        # Live case: "Brand Taxi Mall Rental" was split into brand='Brand Taxi'
+        # and mall='Mall Rental', and the bogus mall filtered the lease away.
         svc = HttpLeaseLookupService.__new__(HttpLeaseLookupService)
         params = svc._build_params(
             LeaseLookupQuery(lease_code="t0001", brand="Nike", mall="Riyadh Park")
         )
-        assert "lease_code" in params
-        assert "brand" in params
-        assert "mall" in params
+        assert params == {"lease_code": "t0001"}
+
+    def test_brand_and_mall_still_narrow_a_codeless_search(self) -> None:
+        svc = HttpLeaseLookupService.__new__(HttpLeaseLookupService)
+        params = svc._build_params(LeaseLookupQuery(brand="Nike", mall="Riyadh Park"))
+        assert params == {"brand": "Nike", "mall": "Riyadh Park"}
 
     def test_none_fields_excluded(self) -> None:
         svc = HttpLeaseLookupService.__new__(HttpLeaseLookupService)
