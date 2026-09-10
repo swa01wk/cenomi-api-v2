@@ -970,7 +970,8 @@ async def missing_field_node(state: ServiceRequestState) -> dict[str, Any]:
     # Handover schema owns stage-aware missing logic (e.g. conditional document_status).
     # Fitout confirm agents have their own required-field logic driven by sub_category.
     if (active_agent or "") == "work_permit_agent":
-        all_missing: list[str] = get_missing_fields(collected, list(required))
+        from app.agents.schemas.work_permit_schema import get_missing_fields as wp_get_missing
+        all_missing: list[str] = wp_get_missing(workflow_stage or "CREATE_WORK_PERMIT", collected)
     elif active_agent in _FITOUT_CONFIRM_AGENTS:
         sub_category: str = state.get("sub_category") or ""  # type: ignore[assignment]
         all_missing = fitout_confirm_get_missing_fields(workflow_stage, sub_category, collected)

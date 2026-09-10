@@ -65,11 +65,11 @@ class TestLeasePickerToggle:
         """Re-enabling must not widen the picker to workflows with no list.
 
         The three fitout confirmations now have their own — each scoped by
-        ``purpose`` to the leases holding its prerequisite milestone — but a
-        work permit has none, and neither does a session whose workflow is not
-        yet known.
+        ``purpose`` to the leases holding its prerequisite milestone. Work Permit
+        create shares Handover's eligible-lease list. An unknown session still
+        must not be offered handover leases.
         """
-        assert should_browse_leases(_state(active_agent="work_permit_agent")) is False
+        assert should_browse_leases(_state(active_agent="notification_agent")) is False
         assert should_browse_leases(_state(active_agent="")) is False
 
     def test_resolved_lease_still_excluded(self) -> None:

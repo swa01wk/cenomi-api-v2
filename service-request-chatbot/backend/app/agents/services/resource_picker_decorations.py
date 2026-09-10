@@ -84,6 +84,9 @@ def build_create_lease_picker(purpose: str | None = None) -> dict[str, Any]:
     )
 
 
+_LEASE_BROWSE_STAGES: frozenset[str] = frozenset({"CREATE_SR", "CREATE_WORK_PERMIT"})
+
+
 def lease_picker_purpose(state: dict[str, Any]) -> str | None:
     """The ``purpose`` this state's lease picker must carry, if any."""
     return LEASE_PICKER_PURPOSE_BY_AGENT.get(str(state.get("active_agent") or ""))
@@ -92,9 +95,9 @@ def lease_picker_purpose(state: dict[str, Any]) -> str | None:
 def should_browse_leases(state: dict[str, Any]) -> bool:
     """True when a CREATE turn should offer lease browse chips.
 
-    Handover and the three fitout confirmations each get their own list — the
-    workflow decides which leases are candidates, and ``lease_picker_purpose``
-    carries that to the platform.
+    Handover, Work Permit create, and the three fitout confirmations each get
+    a list. ``lease_picker_purpose`` carries the fitout rule to the platform;
+    handover and Work Permit use the same eligible-lease list (no purpose).
     """
     from app.core.config import settings
 
@@ -106,14 +109,21 @@ def should_browse_leases(state: dict[str, Any]) -> bool:
     if not settings.handover_lease_picker_enabled:
         return False
 
+    collected = state.get("collected_data") or {}
+    if collected.get("lease_id"):
+        return False
+
+    agent = str(state.get("active_agent") or "")
+    stage = state.get("workflow_stage") or "CREATE_SR"
+
+    # Work Permit create shares Handover's eligible-lease picker.
+    if agent == "work_permit_agent" or stage == "CREATE_WORK_PERMIT":
+        return stage in _LEASE_BROWSE_STAGES
+
     # The workflow must be known. An unpinned session used to qualify, and was
     # shown handover's leases by default — the wrong list for whatever it
     # turned out to be. When we do not know the workflow, we do not know which
     # leases are the right ones.
-    agent = str(state.get("active_agent") or "")
     if agent != "rdd_handover_agent" and agent not in LEASE_PICKER_PURPOSE_BY_AGENT:
         return False
-    if (state.get("workflow_stage") or "CREATE_SR") != "CREATE_SR":
-        return False
-    collected = state.get("collected_data") or {}
-    return not collected.get("lease_id")
+    return stage == "CREATE_SR"

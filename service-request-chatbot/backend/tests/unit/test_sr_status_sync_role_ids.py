@@ -100,6 +100,28 @@ class TestMapOperationsToStageNumericIds:
         ops = [{"assigned_role": 12, "status": "IN_PROGRESS"}]
         assert _map_operations_to_stage(ops, None) == "RDD_REVIEW"
 
+    def test_work_permit_dd_does_not_map_to_rdd_review(self) -> None:
+        ops = [{"assigned_role": "DD_ENGINEER", "status": "IN_PROGRESS"}]
+        stage = _map_operations_to_stage(
+            ops,
+            None,
+            sub_category="CONSTRUCTION_HOT",
+            platform_status="IN_PROCESS",
+            category="WORK_PERMIT",
+        )
+        assert stage == "WP_DD_REVIEW"
+
+    def test_handover_dd_still_maps_to_rdd_review_with_category(self) -> None:
+        ops = [{"assigned_role": "DD_ENGINEER", "status": "IN_PROGRESS"}]
+        stage = _map_operations_to_stage(
+            ops,
+            None,
+            sub_category="HANDOVER",
+            platform_status="IN_PROCESS",
+            category="FIT_OUT_AND_HANDOVER",
+        )
+        assert stage == "RDD_REVIEW"
+
 
 # ---------------------------------------------------------------------------
 # sr_status_sync_node — numeric role ID routing

@@ -169,7 +169,7 @@ class TestRDDReviewStage:
         "actual_handover_date",
         "fitout_start_date",
         "fitout_end_date",
-        "comments",  # Fix 4: comments re-added as required (optional value allowed)
+        "comments",
     )
     _EXPECTED_DOCS = (
         "DR_SR_HANDOVER_REPORT",         # mandatory
@@ -290,8 +290,8 @@ class TestDocumentRegistries:
         assert frozenset(RDD_REQUIRED_DOCUMENTS) <= frozenset(RDD_REVIEW_STAGE.required_documents)
 
     def test_all_document_types_includes_handed_over(self) -> None:
-        """ALL_DOCUMENT_TYPES must include Path B doc type SR_HANDED_OVER_OTHER."""
-        assert "SR_HANDED_OVER_OTHER" in ALL_DOCUMENT_TYPES
+        """ALL_DOCUMENT_TYPES must include Path B's allowed Other upload type."""
+        assert "SR_HANDOVER_OTHER" in ALL_DOCUMENT_TYPES
 
     def test_all_document_types_is_union(self) -> None:
         from app.agents.schemas.handover_schema import HANDED_OVER_ALLOWED_DOCUMENTS

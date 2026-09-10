@@ -547,6 +547,11 @@ EXTRACTABLE_FIELDS: frozenset[str] = frozenset(
         "planned_trading_date",
         # Optional shared field
         "delay_reason",
+        # Work Permit fields — FieldExtractionService still validates against this set.
+        "work_permit_type",
+        "start_date",
+        "end_date",
+        "contractor_name",
     }
 )
 

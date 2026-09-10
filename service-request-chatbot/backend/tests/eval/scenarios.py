@@ -2,7 +2,9 @@
 
 TIER STRUCTURE
 --------------
-  Tier 0  Smoke   — S200–S206: per-agent smoke scenarios (~2 min)
+  Tier 0  Smoke   — S200–S207: per-agent smoke scenarios (~2 min)
+                    (S207 Work Permit create)
+  Tier 1  Core    — S1–S15:  CREATE_SR happy path, basic flows
   Tier 1  Core    — S1–S15:  CREATE_SR happy path, basic flows
                     + S63, S64  HANDED_OVER Path B core / Path A fix
                     + S220, S221, S224  Handover Type prompt / chip /
@@ -34,7 +36,9 @@ TIER STRUCTURE
                     + S241  RDD correction vs stale WAITING_FOR_USER routing
   (Tier 4/5/6 live in lifecycle_scenarios.py)
   Tier 8  FitoutConfirm Core+Edge — S70–S82: FIT_OUT_CONFIRM_FOS/END/TRADING
-  Tier 9  Notification agent — S250–S255: inbox listing, NL filters,
+  Tier 9  Work Permit create/RBAC — S240–S244 (lifecycle hops L240–L245)
+                    (flat WP IDs overlap TIER2 S240–S244; run via --tier 9)
+  notif   Notification agent — S250–S255: inbox listing, NL filters,
                     supervisor routing, free-text guard, audience scoping
 
 DYNAMIC DATES
@@ -3912,6 +3916,138 @@ _S206 = Scenario(
 )
 
 
+_S207 = Scenario(
+    id=207,
+    name="Smoke — Work Permit CREATE packed",
+    goal="Minimal end-to-end Work Permit create (CONSTRUCTION_HOT) → WP_CREATED",
+    tier=0,
+    turns=[
+        Turn(
+            message=(
+                f"I need a construction hot work permit for lease t0105712. "
+                f"Description: Smoke test hot work. "
+                f"Start {_START_A}, end {_END_A}. Contractor ABC Contractors. No comments."
+            ),
+            note="All WP create fields packed; confirmation card expected",
+            expect_ui_type="confirmation_card",
+        ),
+        Turn(
+            message="Confirm",
+            note="WP submitted → WP_CREATED; SR is not auto-approved (L1 is DD_ENGINEER)",
+            action="confirm",
+            expect_workflow_stage="WP_CREATED",
+            expect_keywords=["submitted", "reference", "successfully"],
+        ),
+    ],
+    tags=["smoke", "work-permit", "create"],
+)
+
+
+# =============================================================================
+# TIER 9 — Work Permit create + intent / RBAC (S240–S244)
+# Lifecycle hops live in lifecycle_scenarios.py (L240–L245).
+#
+# Python names are ``_WP_S*`` so they do not overwrite TIER2 ``_S240``–``_S244``
+# (RDD document-status / correction scenarios that already occupy those IDs).
+# Run this suite with ``--tier 9``, not via the default SCENARIOS list.
+# =============================================================================
+
+_WP_S240 = Scenario(
+    id=240,
+    name="supervisor_classifies_create_work_permit",
+    goal="User asks for a work permit → CREATE_WORK_PERMIT_SR and CREATE_WORK_PERMIT stage",
+    tier=9,
+    turns=[
+        Turn(
+            message="I need a work permit for construction at Jawharat Jeddah",
+            note="Supervisor must classify CREATE_WORK_PERMIT_SR",
+            expect_workflow_stage="CREATE_WORK_PERMIT",
+            expect_keywords=["work permit", "lease", "permit"],
+        ),
+    ],
+    tags=["work-permit", "intent-classification", "tier9"],
+)
+
+_WP_S241 = Scenario(
+    id=241,
+    name="work_permit_create_hot_packed",
+    goal="Packed CONSTRUCTION_HOT create shows confirmation card then WP_CREATED",
+    tier=9,
+    turns=[
+        Turn(
+            message=(
+                f"Create a construction hot work permit for lease t0105712. "
+                f"Description: Welding on unit FF050. "
+                f"Start {_START_A}, end {_END_A}. Contractor ABC Contractors. No comments."
+            ),
+            note="Packed create; confirmation card",
+            expect_ui_type="confirmation_card",
+            expect_workflow_stage="CREATE_WORK_PERMIT",
+        ),
+        Turn(
+            message="Confirm",
+            action="confirm",
+            note="Submitted; not auto-approved because L1 is DD_ENGINEER",
+            expect_workflow_stage="WP_CREATED",
+            expect_keywords=["submitted", "reference"],
+        ),
+    ],
+    tags=["work-permit", "happy-path", "create", "tier9"],
+)
+
+_WP_S242 = Scenario(
+    id=242,
+    name="work_permit_create_rbac_fm_denied",
+    goal="FM_MANAGER cannot raise a Work Permit SR",
+    tier=9,
+    user_email="khalid@cenomi.com",
+    turns=[
+        Turn(
+            message="I need a work permit for construction hot work on lease t0105712",
+            note="FM_MANAGER must be denied CREATE_WORK_PERMIT_SR",
+            expect_keywords=["not permit", "not allowed", "role", "mall manager"],
+        ),
+    ],
+    tags=["work-permit", "rbac", "fm-manager", "tier9"],
+)
+
+_WP_S243 = Scenario(
+    id=243,
+    name="work_permit_create_rbac_dd_denied",
+    goal="DD_ENGINEER cannot raise a Work Permit SR (review only)",
+    tier=9,
+    user_email="sara@cenomi.com",
+    turns=[
+        Turn(
+            message="I need a work permit for construction hot work on lease t0105712",
+            note="DD_ENGINEER must be denied CREATE_WORK_PERMIT_SR",
+            expect_keywords=["not permit", "not allowed", "role"],
+        ),
+    ],
+    tags=["work-permit", "rbac", "dd-engineer", "tier9"],
+)
+
+_WP_S244 = Scenario(
+    id=244,
+    name="work_permit_invalid_type_recovery",
+    goal="Unrecognized permit type is not accepted as work_permit_type; bot asks again",
+    tier=9,
+    turns=[
+        Turn(
+            message="I need a work permit for lease t0105712",
+            note="Agent starts CREATE_WORK_PERMIT",
+            expect_workflow_stage="CREATE_WORK_PERMIT",
+        ),
+        Turn(
+            message="the explosive demolition permit",
+            note="Not a valid enum; bot must not set work_permit_type to that string",
+            expect_keywords=["hot", "cold", "roof", "maintenance", "operations", "type"],
+        ),
+    ],
+    tags=["work-permit", "validation", "tier9"],
+)
+
+
 # =============================================================================
 # TIER 6 — Fitout Confirmation SR happy path scenarios (S73–S74, S83)
 # TIER 7 — Fitout Confirmation SR edge + battle scenarios (S70–S72, S75–S82)
@@ -4484,8 +4620,8 @@ _S255 = Scenario(
 # Tier buckets and master list
 # =============================================================================
 
-#: Tier 0 — Per-agent smoke (6 scenarios, ~2 min): FAQ + Handover A/B + FOS/END/TRADING
-TIER0_SCENARIOS: list[Scenario] = [_S200, _S201, _S203, _S204, _S205, _S206]
+#: Tier 0 — Per-agent smoke (7 scenarios, ~2 min): FAQ + Handover A/B + FOS/END/TRADING + WP
+TIER0_SCENARIOS: list[Scenario] = [_S200, _S201, _S203, _S204, _S205, _S206, _S207]
 
 #: CREATE_SR core regression guard — run before committing
 TIER1_SCENARIOS: list[Scenario] = [
@@ -4613,7 +4749,10 @@ FITOUT_CONFIRM_SCENARIOS: list[Scenario] = (
     + FITOUT_APPROVE_SCENARIOS
 )
 
-#: Tier 9 — Notification agent (listing, filters, routing, audience scoping).
+#: Tier 9 — Work Permit create / intent / RBAC (lifecycle hops in lifecycle_scenarios.py)
+TIER9_SCENARIOS: list[Scenario] = [_WP_S240, _WP_S241, _WP_S242, _WP_S243, _WP_S244]
+
+#: Notification agent (listing, filters, routing, audience scoping).
 #: Needs a seeded inbox; see the tier header for what each role must have.
 TIER9_NOTIFICATION_SCENARIOS: list[Scenario] = [
     _S250, _S251, _S252, _S253, _S254, _S255,

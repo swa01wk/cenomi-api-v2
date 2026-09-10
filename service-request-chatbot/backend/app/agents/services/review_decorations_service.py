@@ -23,7 +23,14 @@ from app.agents.services.resource_picker_decorations import build_handover_inbox
 from app.types.chat import AuthContext
 
 # Primary graph roles checked for stage entry guards and decoration targeting.
-_GRAPH_ROLES: tuple[str, ...] = ("FM_MANAGER", "OPERATIONS", "DD_ENGINEER", "MALL_MANAGER", "ADMIN")
+_GRAPH_ROLES: tuple[str, ...] = (
+    "FM_MANAGER",
+    "OPERATIONS",
+    "OPERATION_EXECUTIVES",
+    "DD_ENGINEER",
+    "MALL_MANAGER",
+    "ADMIN",
+)
 
 _DOC_LABELS: dict[str, str] = {
     "SR_HANDOVER_CHECKLIST": "Handover Checklist",
@@ -197,6 +204,26 @@ def payload_to_collected_data(payload: dict[str, Any]) -> dict[str, Any]:
         derived = _handover_type_for_sub_category(payload.get("sub_category"))
         if derived:
             mapped["already_handovered"] = derived
+
+    # Work Permit inner payload (planneddate, contractor, subtype).
+    from app.agents.schemas.work_permit_schema import (
+        VALID_WORK_PERMIT_TYPES,
+        ddmmyyyy_to_iso,
+    )
+
+    for wp_key in ("contractor_name", "phone", "work_type", "work_location", "comments"):
+        if wp_key in payload and payload[wp_key] not in (None, "") and not mapped.get(wp_key):
+            mapped[wp_key] = payload[wp_key]
+    planned = payload.get("planneddate")
+    if isinstance(planned, dict):
+        if planned.get("worktimedate") and not mapped.get("start_date"):
+            mapped["start_date"] = ddmmyyyy_to_iso(planned.get("worktimedate"))
+        if planned.get("completionworkdate") and not mapped.get("end_date"):
+            mapped["end_date"] = ddmmyyyy_to_iso(planned.get("completionworkdate"))
+    sub = payload.get("sub_category") or payload.get("work_permit_type")
+    if sub in VALID_WORK_PERMIT_TYPES:
+        mapped["work_permit_type"] = sub
+        mapped["sub_category"] = sub
     return mapped
 
 

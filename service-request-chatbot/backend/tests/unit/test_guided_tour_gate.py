@@ -200,7 +200,7 @@ class TestEveryWorkflow:
             _state(
                 _lease_resolved(),
                 active_agent="work_permit_agent",
-                workflow_stage="CREATE_SR",
+                workflow_stage="CREATE_WORK_PERMIT",
             )
         )
         assert "guide you through the form" in result["response_message"]
