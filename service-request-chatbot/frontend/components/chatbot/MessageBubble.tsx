@@ -1,3 +1,9 @@
+"use client";
+
+import { useState } from "react";
+import { submitFeedback } from "@/lib/api/observability-client";
+import { getStoredUser } from "@/lib/api/auth-client";
+
 type Props = {
   role: "user" | "assistant";
   text: string;
@@ -8,6 +14,25 @@ type Props = {
 
 export function MessageBubble({ role, text, traceId, showTrace, isLoading }: Props) {
   const isUser = role === "user";
+  const [thumb, setThumb] = useState<"up" | "down" | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  async function sendThumb(label: "THUMBS_UP" | "THUMBS_DOWN") {
+    if (!traceId || busy) return;
+    setBusy(true);
+    try {
+      await submitFeedback(traceId, {
+        feedback_type: "TURN_THUMBS",
+        label,
+        user_id: getStoredUser()?.userId,
+      });
+      setThumb(label === "THUMBS_UP" ? "up" : "down");
+    } catch {
+      // Non-blocking — chat must keep working
+    } finally {
+      setBusy(false);
+    }
+  }
 
   return (
     <div className={`flex ${isUser ? "justify-end" : "justify-start"}`}>
@@ -29,6 +54,29 @@ export function MessageBubble({ role, text, traceId, showTrace, isLoading }: Pro
             <span className="whitespace-pre-wrap">{text}</span>
           )}
         </div>
+        {!isUser && !isLoading && traceId && (
+          <div className="flex gap-1 px-1">
+            <button
+              type="button"
+              disabled={busy || thumb !== null}
+              onClick={() => sendThumb("THUMBS_UP")}
+              className={`text-xs ${thumb === "up" ? "text-emerald-600" : "text-zinc-400 hover:text-zinc-600"}`}
+              aria-label="Thumbs up"
+            >
+              Useful
+            </button>
+            <span className="text-zinc-300">·</span>
+            <button
+              type="button"
+              disabled={busy || thumb !== null}
+              onClick={() => sendThumb("THUMBS_DOWN")}
+              className={`text-xs ${thumb === "down" ? "text-red-600" : "text-zinc-400 hover:text-zinc-600"}`}
+              aria-label="Thumbs down"
+            >
+              Not useful
+            </button>
+          </div>
+        )}
         {showTrace && traceId && (
           <span className="px-1 font-mono text-[10px] text-zinc-400 dark:text-zinc-600">
             trace: {traceId}

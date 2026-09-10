@@ -30,9 +30,7 @@ from __future__ import annotations
 import json
 import re
 import time
-from decimal import Decimal
 from typing import Any
-from uuid import UUID
 
 import structlog
 
@@ -43,6 +41,7 @@ from app.agents.services.context_builder import build_agent_context, format_cont
 from app.integrations.factory import get_search_repository
 from app.integrations.search.base import SearchResult
 from app.observability.decorators import trace_node
+from app.observability.llm_capture import capture_complete_json
 
 log = structlog.get_logger(__name__)
 
@@ -308,18 +307,17 @@ async def faq_node(state: ServiceRequestState) -> dict[str, Any]:
 
     parsed: Any = None
     in_tokens = out_tokens = llm_ms = 0
-    parse_error: str | None = None
     try:
         parsed, in_tokens, out_tokens, llm_ms = await gateway.complete_json(
             system_prompt=FAQ_SYSTEM_PROMPT,
             user_message=user_content,
         )
+        parse_ok = isinstance(parsed, dict) and bool(parsed.get("message"))
         if isinstance(parsed, dict) and parsed.get("message"):
             raw_message = parsed["message"]
             if isinstance(raw_message, str):
                 answer = raw_message.strip()
             else:
-                # Model ignored the string contract and nested structured data.
                 log.warning(
                     "faq_node.structured_message_coerced",
                     message_type=type(raw_message).__name__,
@@ -327,22 +325,43 @@ async def faq_node(state: ServiceRequestState) -> dict[str, Any]:
                 answer = _render_structured(raw_message).strip() or _FALLBACK_MESSAGE
         else:
             log.warning("faq_node.unexpected_llm_shape", parsed=parsed)
+        await capture_complete_json(
+            state,
+            run_name="faq_llm_call",
+            prompt_name="faq_prompt",
+            gateway=gateway,
+            input_tokens=in_tokens,
+            output_tokens=out_tokens,
+            latency_ms=llm_ms,
+            structured_output={"message": answer[:500]},
+            parse_success=parse_ok,
+        )
     except json.JSONDecodeError as exc:
-        parse_error = f"JSONDecodeError: {exc}"
         log.warning("faq_node.json_parse_error", error=str(exc))
+        await capture_complete_json(
+            state,
+            run_name="faq_llm_call",
+            prompt_name="faq_prompt",
+            gateway=gateway,
+            input_tokens=0,
+            output_tokens=0,
+            latency_ms=0,
+            parse_success=False,
+            parse_error=str(exc),
+        )
     except Exception as exc:
-        parse_error = str(exc)
         log.exception("faq_node.llm_failed", error=str(exc))
-
-    await _capture_faq_llm_call(
-        state,
-        gateway=gateway,
-        input_tokens=in_tokens,
-        output_tokens=out_tokens,
-        latency_ms=llm_ms,
-        parse_success=parse_error is None,
-        parse_error=parse_error,
-    )
+        await capture_complete_json(
+            state,
+            run_name="faq_llm_call",
+            prompt_name="faq_prompt",
+            gateway=gateway,
+            input_tokens=in_tokens,
+            output_tokens=out_tokens,
+            latency_ms=llm_ms,
+            parse_success=False,
+            parse_error=str(exc),
+        )
 
     log.info(
         "faq_node.answered",
@@ -384,62 +403,3 @@ async def faq_node(state: ServiceRequestState) -> dict[str, Any]:
         "faq_sources": [],
         "answer_status": answer_status,
     }
-
-
-async def _capture_faq_llm_call(
-    state: ServiceRequestState,
-    *,
-    gateway: Any,
-    input_tokens: int,
-    output_tokens: int,
-    latency_ms: int,
-    parse_success: bool,
-    parse_error: str | None,
-) -> None:
-    """Record the FAQ answer LLM call so help-agent token/cost analytics are
-    complete.  Mirrors the supervisor's capture pattern; never raises."""
-    tm = state.get("trace_manager")
-    trace_id = _extract_uuid(state.get("trace_id"))
-    if tm is None or trace_id is None:
-        return
-    try:
-        node_run_id = _extract_uuid(state.get("_trace_node_run_id"))
-        llm_run_id = await tm.start_run(
-            trace_id=trace_id,
-            run_name="faq_llm_call",
-            run_type="LLM",
-            parent_run_id=node_run_id,
-        )
-        if llm_run_id is None:
-            return
-        await tm.capture_llm_call(
-            trace_id=trace_id,
-            run_id=llm_run_id,
-            provider=getattr(gateway, "provider_name", "openai"),
-            model=gateway.model,
-            temperature=Decimal("0"),
-            prompt_name="faq_prompt",
-            prompt_version="1.0",
-            input_tokens=input_tokens or None,
-            output_tokens=output_tokens or None,
-            total_tokens=(input_tokens + output_tokens) or None,
-            latency_ms=latency_ms or None,
-            parse_success=parse_success,
-            parse_error=parse_error,
-        )
-        await tm.finish_run(
-            llm_run_id,
-            status="SUCCESS" if parse_success else "FAILED",
-            error_message=parse_error,
-        )
-    except Exception:
-        log.warning("faq_node.capture_llm_call.failed", exc_info=True)
-
-
-def _extract_uuid(value: Any) -> UUID | None:
-    if value is None:
-        return None
-    try:
-        return value if isinstance(value, UUID) else UUID(str(value))
-    except (ValueError, AttributeError):
-        return None

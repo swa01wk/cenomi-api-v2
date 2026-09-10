@@ -1,93 +1,95 @@
-"""Metrics endpoint for admin dashboards — computed live from the database."""
+"""Metrics endpoints for admin dashboards — computed live from the database."""
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
+from uuid import UUID
 
-from fastapi import APIRouter
-from sqlalchemy import func, select
+from fastapi import APIRouter, Query
 
-from app.db.models import AgentFeedback, AgentLLMCall, AgentTrace
+from app.api.routes.session_analytics import close_idle_sessions
 from app.db.session import DbSession
+from app.observability.analytics_queries import (
+    compute_feedback,
+    compute_funnel,
+    compute_summary,
+    compute_users,
+    parse_window,
+)
 
 router = APIRouter(prefix="/observability")
 
 
+def _window(
+    from_ts: datetime | None, to_ts: datetime | None
+) -> tuple[datetime, datetime]:
+    return parse_window(from_ts, to_ts)
+
+
 @router.get("/metrics/summary")
-async def metrics_summary(db: DbSession) -> dict[str, Any]:
-    """Return aggregate observability metrics computed from agent_traces and agent_llm_calls."""
-
-    # --- trace-level aggregates (single pass) ---
-    trace_result = await db.execute(
-        select(
-            func.count(AgentTrace.id).label("total_traces"),
-            func.count(AgentTrace.id).filter(AgentTrace.status == "SUCCESS").label("success_count"),
-            func.count(AgentTrace.id).filter(AgentTrace.status == "FAILED").label("failed_traces"),
-            func.avg(AgentTrace.total_latency_ms).label("avg_latency_ms"),
-        )
+async def metrics_summary(
+    db: DbSession,
+    from_ts: datetime | None = Query(default=None, alias="from"),
+    to_ts: datetime | None = Query(default=None, alias="to"),
+    agent: str | None = None,
+    user_id: UUID | None = None,
+) -> dict[str, Any]:
+    """Graph health plus product KPIs for the requested window (default 7d)."""
+    await close_idle_sessions(db)
+    start, end = _window(from_ts, to_ts)
+    return await compute_summary(
+        db, start=start, end=end, agent=agent, user_id=user_id
     )
-    t = trace_result.one()
-    total_traces: int = t.total_traces or 0
-    success_count: int = t.success_count or 0
-    failed_traces: int = t.failed_traces or 0
-    avg_latency_ms: float | None = float(t.avg_latency_ms) if t.avg_latency_ms is not None else None
-    success_rate: float = (success_count / total_traces) if total_traces > 0 else 0.0
 
-    # --- LLM-call token / cost aggregates ---
-    llm_result = await db.execute(
-        select(
-            func.coalesce(func.sum(AgentLLMCall.total_tokens), 0).label("total_tokens"),
-            func.coalesce(func.sum(AgentLLMCall.estimated_cost), 0).label("total_cost"),
-        )
+
+@router.get("/metrics/users")
+async def metrics_users(
+    db: DbSession,
+    from_ts: datetime | None = Query(default=None, alias="from"),
+    to_ts: datetime | None = Query(default=None, alias="to"),
+    agent: str | None = None,
+    user_id: UUID | None = None,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=25, ge=1, le=100),
+) -> dict[str, Any]:
+    """Per-user tokens, cost, sessions, and feedback."""
+    await close_idle_sessions(db)
+    start, end = _window(from_ts, to_ts)
+    return await compute_users(
+        db,
+        start=start,
+        end=end,
+        agent=agent,
+        user_id=user_id,
+        page=page,
+        page_size=page_size,
     )
-    llm_row = llm_result.one()
-    total_tokens: int = int(llm_row.total_tokens)
-    total_cost: float = float(llm_row.total_cost)
 
-    # --- answer-status aggregates (007) ---
-    answer_result = await db.execute(
-        select(
-            func.count(AgentTrace.id)
-            .filter(AgentTrace.answer_status == "ANSWERED")
-            .label("answered"),
-            func.count(AgentTrace.id)
-            .filter(AgentTrace.answer_status == "PARTIAL")
-            .label("partial"),
-            func.count(AgentTrace.id)
-            .filter(AgentTrace.answer_status == "UNANSWERED")
-            .label("unanswered"),
-            func.count(AgentTrace.id)
-            .filter(AgentTrace.answer_status.is_not(None))
-            .label("classified"),
-        )
+
+@router.get("/metrics/funnel")
+async def metrics_funnel(
+    db: DbSession,
+    from_ts: datetime | None = Query(default=None, alias="from"),
+    to_ts: datetime | None = Query(default=None, alias="to"),
+    agent: str | None = None,
+    user_id: UUID | None = None,
+) -> dict[str, Any]:
+    """SR-creation funnel and last-stage drop-off."""
+    await close_idle_sessions(db)
+    start, end = _window(from_ts, to_ts)
+    return await compute_funnel(
+        db, start=start, end=end, agent=agent, user_id=user_id
     )
-    a = answer_result.one()
-    classified: int = a.classified or 0
-    answered_rate: float = (a.answered / classified) if classified > 0 else 0.0
 
-    # --- end-user rating aggregates (007) ---
-    rating_result = await db.execute(
-        select(
-            func.count(AgentFeedback.id).label("ratings_count"),
-            func.avg(AgentFeedback.score).label("avg_rating"),
-        ).where(AgentFeedback.feedback_type == "USER_RATING")
-    )
-    r = rating_result.one()
-    ratings_count: int = r.ratings_count or 0
-    avg_rating: float | None = float(r.avg_rating) if r.avg_rating is not None else None
 
-    return {
-        "total_traces": total_traces,
-        "success_rate": success_rate,
-        "failed_traces": failed_traces,
-        "avg_latency_ms": avg_latency_ms if avg_latency_ms is not None else 0,
-        "total_tokens": total_tokens,
-        "total_cost": total_cost,
-        # Additive fields — answered/unanswered classification + CSAT.
-        "answered_traces": a.answered or 0,
-        "partial_traces": a.partial or 0,
-        "unanswered_traces": a.unanswered or 0,
-        "answered_rate": answered_rate,
-        "ratings_count": ratings_count,
-        "avg_rating": avg_rating,
-    }
+@router.get("/metrics/feedback")
+async def metrics_feedback(
+    db: DbSession,
+    from_ts: datetime | None = Query(default=None, alias="from"),
+    to_ts: datetime | None = Query(default=None, alias="to"),
+    user_id: UUID | None = None,
+) -> dict[str, Any]:
+    """Thumbs, usefulness, CSAT, and not-useful reasons."""
+    start, end = _window(from_ts, to_ts)
+    return await compute_feedback(db, start=start, end=end, user_id=user_id)

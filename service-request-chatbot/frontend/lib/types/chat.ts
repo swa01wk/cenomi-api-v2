@@ -218,6 +218,10 @@ export type ChatServiceResponse = {
   rddStatus?: string | null;
   /** FM review status — "IN_PROCESS" | "APPROVED" | null */
   fmStatus?: string | null;
+  /** Outcome of a platform-mutating turn */
+  actionResult?: "success" | "failed" | null;
+  /** True when the graph emitted workflow_complete on this turn */
+  workflowComplete?: boolean;
 };
 
 // ─── Local UI message ─────────────────────────────────────────────────────────
