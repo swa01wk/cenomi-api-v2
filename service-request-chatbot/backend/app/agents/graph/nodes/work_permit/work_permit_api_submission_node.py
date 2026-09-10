@@ -16,6 +16,7 @@ from app.agents.graph.state import ServiceRequestState
 from app.agents.schemas.work_permit_schema import (
     STAGE_LABELS,
     WP_APPROVED,
+    WP_CREATED,
     WP_REJECTED,
     WP_REVIEW_STAGES,
     in_progress_roles,
@@ -129,17 +130,52 @@ async def work_permit_api_submission_node(state: ServiceRequestState) -> dict[st
     if is_review:
         return await _review_result(svc, backend_refs, payload, result.sr_id)
 
+    return await _create_result(svc, backend_refs, payload, result.sr_id)
+
+
+async def _create_result(
+    svc: Any,
+    backend_refs: dict[str, Any],
+    payload: dict[str, Any],
+    sr_id: str,
+) -> dict[str, Any]:
+    """Map POST outcome. GET detects platform auto-approve (e.g. MM Operations)."""
+    stage = WP_CREATED
+    try:
+        get_result = await svc.get_service_request(sr_id)
+        if not getattr(get_result, "error", None):
+            ops = list(getattr(get_result, "service_request_operations", None) or [])
+            backend_refs["sr_operations"] = ops
+            backend_refs["platform_sr_status"] = getattr(get_result, "status", None)
+            mapped = map_wp_operations_to_stage(
+                ops,
+                sub_category=payload.get("sub_category"),
+                platform_status=getattr(get_result, "status", None),
+                current_stage=WP_CREATED,
+            )
+            if mapped in {WP_APPROVED, WP_REJECTED}:
+                stage = mapped
+    except Exception:
+        logger.warning("work_permit_api_submission_node: post-create GET failed", exc_info=True)
+
+    if stage == WP_APPROVED:
+        msg = (
+            f"Your Work Permit Service Request has been successfully submitted "
+            f"and auto-approved. Your reference number is **{sr_id}**."
+        )
+    else:
+        msg = (
+            f"Your Work Permit Service Request has been successfully submitted. "
+            f"Your reference number is **{sr_id}**. "
+            "It will be routed to the next reviewer when required."
+        )
     return {
         "backend_refs": backend_refs,
         "status": "SUBMITTED",
-        "workflow_stage": "WP_CREATED",
+        "workflow_stage": stage,
         "confirmation_status": None,
         "confirmation_required": False,
-        "response_message": (
-            f"Your Work Permit Service Request has been successfully submitted. "
-            f"Your reference number is **{result.sr_id}**. "
-            "It will be routed to the next reviewer when required."
-        ),
+        "response_message": msg,
     }
 
 

@@ -112,7 +112,6 @@ def _make_result(
         status_code=status_code,
         error=error,
         reason=reason,
-        existing_handover_sr_id=existing_handover_sr_id,
     )
 
 
@@ -170,25 +169,27 @@ class TestNoIdentifiers:
         assert "response_ui" not in result
 
     @pytest.mark.asyncio
-    async def test_work_permit_no_identifiers_returns_waiting(self) -> None:
+    async def test_work_permit_browse_returns_in_progress(self) -> None:
         state = _state(collected_data={}, workflow_stage="CREATE_WORK_PERMIT")
         svc = _MockService(_make_result([]))
         result = await lease_lookup_node(state, service=svc)
-        assert result["status"] == "WAITING_FOR_USER"
+        assert result["status"] == "IN_PROGRESS"
 
     @pytest.mark.asyncio
-    async def test_work_permit_no_identifiers_asks_for_lease_code(self) -> None:
+    async def test_work_permit_browse_emits_leases_picker(self) -> None:
         state = _state(collected_data={}, workflow_stage="CREATE_WORK_PERMIT")
         svc = _MockService(_make_result([]))
         result = await lease_lookup_node(state, service=svc)
-        assert result["response_ui"]["field"] == "lease_code"
+        spec = result["response_decorations"]["suggestions"]
+        assert spec["kind"] == "resource_picker"
+        assert spec["resource"] == "leases"
 
     @pytest.mark.asyncio
-    async def test_work_permit_no_identifiers_response_ui_type_is_text_question(self) -> None:
+    async def test_work_permit_browse_defers_text_question(self) -> None:
         state = _state(collected_data={}, workflow_stage="CREATE_WORK_PERMIT")
         svc = _MockService(_make_result([]))
         result = await lease_lookup_node(state, service=svc)
-        assert result["response_ui"]["type"] == "text_question"
+        assert "response_ui" not in result
 
     @pytest.mark.asyncio
     async def test_no_identifiers_service_not_called(self) -> None:

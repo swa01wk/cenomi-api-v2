@@ -36,6 +36,7 @@ from app.agents.registry import lookup_agent
 from app.agents.schemas.supervisor_schema import SupervisorDecision
 from app.agents.schemas.work_permit_schema import (
     WP_APPROVED,
+    WP_CREATED,
     WP_DD_REVIEW,
     WP_FM_REVIEW,
     WP_MM_OPS_REVIEW,
@@ -449,6 +450,81 @@ class TestWpReviewSubmission:
         result = await work_permit_api_submission_node(state)
         assert result["status"] == "FAILED"
         assert "permission" in result["response_message"].lower()
+
+    async def test_operations_create_auto_approve_maps_to_wp_approved(self) -> None:
+        mock_create = AsyncMock()
+        mock_create.sr_id = "10099"
+        mock_create.error = None
+        mock_create.correlation_id = None
+        mock_create.status_code = 201
+
+        mock_get = ServiceRequestGetResult(
+            success=True,
+            sr_id="10099",
+            status="APPROVED",
+            service_request_operations=_ops(("MALL_MANAGER", "FINISHED")),
+        )
+
+        state = {
+            "workflow_stage": "CREATE_WORK_PERMIT",
+            "confirmation_status": "CONFIRMED",
+            "validation_errors": [],
+            "backend_refs": {
+                "create_payload": {
+                    "service_category": "WORK_PERMIT",
+                    "sub_category": "OPERATIONS",
+                    "payload": {},
+                }
+            },
+            "auth_context": _auth("MALL_MANAGER"),
+        }
+
+        with patch(
+            "app.agents.graph.nodes.work_permit.work_permit_api_submission_node.get_service_request_api_service"
+        ) as factory:
+            svc = AsyncMock()
+            svc.create_service_request.return_value = mock_create
+            svc.get_service_request.return_value = mock_get
+            factory.return_value = svc
+            result = await work_permit_api_submission_node(state)
+
+        assert result["status"] == "SUBMITTED"
+        assert result["workflow_stage"] == WP_APPROVED
+        assert "auto-approved" in result["response_message"].lower()
+
+    async def test_create_stays_wp_created_when_post_create_get_fails(self) -> None:
+        mock_create = AsyncMock()
+        mock_create.sr_id = "10100"
+        mock_create.error = None
+        mock_create.correlation_id = None
+        mock_create.status_code = 201
+
+        state = {
+            "workflow_stage": "CREATE_WORK_PERMIT",
+            "confirmation_status": "CONFIRMED",
+            "validation_errors": [],
+            "backend_refs": {
+                "create_payload": {
+                    "service_category": "WORK_PERMIT",
+                    "sub_category": "OPERATIONS",
+                    "payload": {},
+                }
+            },
+            "auth_context": _auth("MALL_MANAGER"),
+        }
+
+        with patch(
+            "app.agents.graph.nodes.work_permit.work_permit_api_submission_node.get_service_request_api_service"
+        ) as factory:
+            svc = AsyncMock()
+            svc.create_service_request.return_value = mock_create
+            svc.get_service_request.side_effect = RuntimeError("GET failed")
+            factory.return_value = svc
+            result = await work_permit_api_submission_node(state)
+
+        assert result["status"] == "SUBMITTED"
+        assert result["workflow_stage"] == WP_CREATED
+        assert "auto-approved" not in result["response_message"].lower()
 
 
 @pytest.mark.asyncio

@@ -49,4 +49,14 @@ def test_should_browse_leases_resolved_lease() -> None:
 
 def test_should_browse_leases_work_permit_stage() -> None:
     state = {"workflow_stage": "CREATE_WORK_PERMIT", "collected_data": {}}
+    assert should_browse_leases(state) is True
+
+
+def test_should_browse_leases_work_permit_resolved() -> None:
+    state = {"workflow_stage": "CREATE_WORK_PERMIT", "collected_data": {"lease_id": 1}}
+    assert should_browse_leases(state) is False
+
+
+def test_should_browse_leases_wp_review_stage() -> None:
+    state = {"workflow_stage": "WP_DD_REVIEW", "collected_data": {}}
     assert should_browse_leases(state) is False

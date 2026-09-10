@@ -274,6 +274,42 @@ class TestWorkPermitValidation:
         count_errors = [e for e in errors if e["validation_type"] == "document_count"]
         assert len(count_errors) == 0
 
+    def test_invalid_start_date_format_is_date_format_error(self) -> None:
+        svc = ValidationService()
+        data = self._complete_wp_data()
+        data["start_date"] = "t0105712"
+        errors = svc.validate_draft(data, workflow_stage="CREATE_WORK_PERMIT")
+        fmt_errors = [
+            e
+            for e in errors
+            if e["validation_type"] == "date_format" and e["field"] == "start_date"
+        ]
+        assert len(fmt_errors) == 1
+
+    def test_end_date_before_start_date_is_date_range_error(self) -> None:
+        svc = ValidationService()
+        data = self._complete_wp_data()
+        data["start_date"] = "2026-08-20"
+        data["end_date"] = "2026-08-10"
+        errors = svc.validate_draft(data, workflow_stage="CREATE_WORK_PERMIT")
+        range_errors = [
+            e
+            for e in errors
+            if e["validation_type"] == "date_range" and e["field"] == "end_date"
+        ]
+        assert len(range_errors) == 1
+
+    def test_same_day_start_and_end_is_valid(self) -> None:
+        svc = ValidationService()
+        data = self._complete_wp_data()
+        data["start_date"] = "2026-08-20"
+        data["end_date"] = "2026-08-20"
+        errors = svc.validate_draft(data, workflow_stage="CREATE_WORK_PERMIT")
+        date_errors = [
+            e for e in errors if e["validation_type"] in {"date_format", "date_range"}
+        ]
+        assert len(date_errors) == 0
+
 
 # ===========================================================================
 # TestWorkPermitSubmissionGuard

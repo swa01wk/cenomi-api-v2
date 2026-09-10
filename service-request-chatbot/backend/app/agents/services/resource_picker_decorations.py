@@ -51,9 +51,17 @@ def build_create_lease_picker() -> dict[str, Any]:
     )
 
 
+_LEASE_BROWSE_STAGES: frozenset[str] = frozenset({"CREATE_SR", "CREATE_WORK_PERMIT"})
+
+
 def should_browse_leases(state: dict[str, Any]) -> bool:
-    """True when Handover CREATE should offer eligible-lease browse chips."""
-    if (state.get("workflow_stage") or "CREATE_SR") != "CREATE_SR":
+    """True when CREATE should offer eligible-lease browse chips.
+
+    Handover ``CREATE_SR`` and Work Permit ``CREATE_WORK_PERMIT`` share the
+    same lease picker. Fitout confirmation stages stay excluded.
+    """
+    stage = state.get("workflow_stage") or "CREATE_SR"
+    if stage not in _LEASE_BROWSE_STAGES:
         return False
     collected = state.get("collected_data") or {}
     return not collected.get("lease_id")

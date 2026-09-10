@@ -68,6 +68,9 @@ _SINGLE_DATE_FIELDS: tuple[str, ...] = (
     "actual_fitout_start_date",
     "actual_fitout_end_date",
     "actual_trading_date",
+    # Work Permit create (snake_case — not Handover startDate/endDate).
+    "start_date",
+    "end_date",
 )
 
 _STAGE_DOCUMENT_ALLOWLIST: dict[str, frozenset[str]] = {
@@ -297,6 +300,54 @@ def validate_start_end_date(start_date: Any, end_date: Any) -> ValidationResult:
             "Please provide a later end date."
             if not passed
             else f"Start date ({start}) is before end date ({end})."
+        ),
+        blocking=True,
+    )
+
+
+def validate_wp_date_range(start_date: Any, end_date: Any) -> ValidationResult:
+    """Work Permit dates: ``start_date`` must not be after ``end_date``.
+
+    Same-day permits are valid (unlike Handover ``startDate < endDate``).
+    """
+    start = _parse_date(start_date, "start_date")
+    end = _parse_date(end_date, "end_date")
+
+    if start is None and end is None:
+        return _result(
+            field="start_date",
+            validation_type="date_range",
+            passed=False,
+            message="Cannot validate date range: both start and end dates are missing or unparseable.",
+            blocking=True,
+        )
+    if start is None:
+        return _result(
+            field="start_date",
+            validation_type="date_range",
+            passed=False,
+            message="Cannot validate date range: start date is missing or unparseable.",
+            blocking=True,
+        )
+    if end is None:
+        return _result(
+            field="end_date",
+            validation_type="date_range",
+            passed=False,
+            message="Cannot validate date range: end date is missing or unparseable.",
+            blocking=True,
+        )
+
+    passed = start <= end
+    return _result(
+        field="end_date",
+        validation_type="date_range",
+        passed=passed,
+        message=(
+            f"The end date ({end}) must be on or after the start date ({start}). "
+            "Please provide a later end date."
+            if not passed
+            else f"Start date ({start}) is on or before end date ({end})."
         ),
         blocking=True,
     )
@@ -624,6 +675,18 @@ class ValidationService:
         # 3. startDate < endDate (only when both fields are present)
         if data.get("startDate") and data.get("endDate"):
             r = validate_start_end_date(data["startDate"], data["endDate"])
+            if r["status"] == "FAILED":
+                errors.append(r)
+
+        # 3b. Work Permit start_date ≤ end_date (same-day permits are allowed).
+        # Skip when either value already failed format so we don't double-report.
+        if (
+            data.get("start_date")
+            and data.get("end_date")
+            and _parse_date(data["start_date"], "start_date") is not None
+            and _parse_date(data["end_date"], "end_date") is not None
+        ):
+            r = validate_wp_date_range(data["start_date"], data["end_date"])
             if r["status"] == "FAILED":
                 errors.append(r)
 
