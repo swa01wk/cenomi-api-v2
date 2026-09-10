@@ -12,6 +12,7 @@ import structlog
 
 from app.agents.graph.state import ServiceRequestState
 from app.agents.schemas.sales_data_schema import ADMIN_ACTION_LABELS
+from app.agents.services.permission_service import graph_permission_guard
 from app.agents.services.sales_data_api_client import SalesDataApiClient
 from app.core.request_context import get_current_bearer_token
 from app.observability.decorators import trace_node
@@ -74,6 +75,11 @@ async def admin_status_update_node(state: ServiceRequestState) -> dict[str, Any]
             "status": "WAITING_FOR_USER",
             "response_message": "Missing lease ID or action. Please try again.",
         }
+
+    denied = graph_permission_guard(state, "APPROVE_SALES_DATA")
+    if denied:
+        log.warning("admin_status_update.permission_denied")
+        return denied
 
     token = get_current_bearer_token()
     client = SalesDataApiClient(bearer_token=token)

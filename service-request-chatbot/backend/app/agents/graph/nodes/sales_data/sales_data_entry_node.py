@@ -277,6 +277,32 @@ async def sales_data_entry_node(state: ServiceRequestState) -> dict[str, Any]:
             ),
         }
 
+    # ── 0a2. Approval acknowledgement (informational, terminal) ────────────
+    # Opening a SALES_DATA_APPROVED notification must not seed the upload
+    # flow — it's a done-deal notice, not an action request.
+    if intent == "ACKNOWLEDGE_APPROVAL":
+        log.info("sales_data_entry.acknowledge_approval")
+        notif = _notification_context(state)
+        lease = notif.get("lease_code") or ""
+        period = notif.get("period_hint") or ""
+        where = f" for **{lease}**" if lease else ""
+        if period:
+            where += f" ({period})"
+        message = (
+            f"Good news — your sales data{where} has been approved by the "
+            "Sales Data Team. No further action is needed."
+        )
+        return {
+            "active_agent": None,
+            "intent": None,
+            "workflow_stage": None,
+            "collected_data": {},
+            "backend_refs": {},
+            "status": "WAITING_FOR_USER",
+            "response_message": message,
+            "response_ui": {"type": "message", "message": message},
+        }
+
     # ── 0b. CSV month vs the month the tenant asked for ────────────────────
     if (
         workflow_stage == "AWAITING_PERIOD_MISMATCH_CONFIRM"

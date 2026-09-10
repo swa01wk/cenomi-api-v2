@@ -43,10 +43,22 @@ _SUPPORTING_DOC_KEYS: frozenset[str] = frozenset(
 _ADMIN_KEYS: frozenset[str] = frozenset(
     {
         "SALES_DATA_SUBMITTED",
+        # Tenant -> admin "uploaded" events. These are currently not
+        # ActionRequired on the Go side (sales_data_usecase.go tenant branch)
+        # so they don't surface in the agent inbox today, but if that ever
+        # changes, Opening them must land the admin in review, not upload.
+        "SALES_DATA_UPLOADED_SUPPORTING_DOCUMENT",
+        "SALES_DATA_UPLOADED_AUDITED_SALES_DATA",
+        "SALES_DATA_REUPLOADED",
         "ADMIN_REVIEW",
         "REVIEW_SALES_DATA",
     }
 )
+
+# Admin -> tenant approval notice. ActionRequired=true (same branch as the
+# NEED_* keys) so it IS openable from the tenant's inbox, but it's purely
+# informational -- Opening it must not seed an upload flow.
+_APPROVAL_KEYS: frozenset[str] = frozenset({"SALES_DATA_APPROVED"})
 
 _PERIOD_AS_OF_RE = re.compile(
     r"as of\s+(?:month\s+)?([A-Za-z]+(?:\s+\d{4})?)",
@@ -95,6 +107,8 @@ def sales_data_intent_for_ref(ref: dict[str, Any]) -> str:
     token = str(
         ref.get("key") or ref.get("sub_category") or ref.get("notification_type") or ""
     ).strip().upper()
+    if token in _APPROVAL_KEYS:
+        return "ACKNOWLEDGE_APPROVAL"
     if token in _SUPPORTING_DOC_KEYS or token.endswith(
         "NEED_UPLOAD_SUPPORTING_DOCUMENT"
     ) or token.endswith("NEED_UPLOAD_AUDITED_SALES"):

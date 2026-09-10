@@ -24,6 +24,7 @@ from app.agents.schemas.sales_data_schema import (
     TENANT_ACTION_STATUSES,
     TENANT_RESPONSE_STATUS,
 )
+from app.agents.services.permission_service import graph_permission_guard
 from app.agents.services.sales_data_api_client import SalesDataApiClient
 from app.api.routes.supporting_doc_upload import get_uploaded_doc
 from app.core.request_context import get_current_bearer_token
@@ -307,6 +308,11 @@ async def supporting_doc_upload_node(state: ServiceRequestState) -> dict[str, An
     filename = cached["filename"]
     content_type = cached.get("content_type") or "application/octet-stream"
     raw: bytes = cached["raw"]
+
+    denied = graph_permission_guard(state, "SUBMIT_SALES_DATA_SUPPORTING_DOC")
+    if denied:
+        log.warning("supporting_doc_upload.permission_denied")
+        return denied
 
     token = get_current_bearer_token()
     client = SalesDataApiClient(bearer_token=token)

@@ -294,6 +294,49 @@ async def test_cancel_supporting_doc_keeps_doc_flow() -> None:
 
 
 @pytest.mark.asyncio
+async def test_acknowledge_approval_is_informational_not_upload() -> None:
+    """Opening a SALES_DATA_APPROVED notification must not seed the upload
+    flow — it's a done-deal notice. Regression guard for the gap found while
+    comparing the Sales Data notification-open path against RDD/Handover."""
+    from app.agents.graph.nodes.sales_data.sales_data_entry_node import (
+        sales_data_entry_node,
+    )
+
+    result = await sales_data_entry_node(
+        _state(
+            intent="ACKNOWLEDGE_APPROVAL",
+            corrected_fields={
+                "notification_context": {
+                    "lease_code": "LC-1001",
+                    "period_hint": "month August",
+                    "source": "notification",
+                }
+            },
+        )
+    )
+    assert result["workflow_stage"] is None
+    assert result["active_agent"] is None
+    assert result["status"] == "WAITING_FOR_USER"
+    assert result["response_ui"]["type"] == "message"
+    message = result["response_message"].lower()
+    assert "approved" in message
+    assert "lc-1001" in message
+    assert "upload" not in message
+
+
+@pytest.mark.asyncio
+async def test_acknowledge_approval_without_lease_code_still_terminal() -> None:
+    from app.agents.graph.nodes.sales_data.sales_data_entry_node import (
+        sales_data_entry_node,
+    )
+
+    result = await sales_data_entry_node(_state(intent="ACKNOWLEDGE_APPROVAL"))
+    assert result["workflow_stage"] is None
+    assert result["status"] == "WAITING_FOR_USER"
+    assert "approved" in result["response_message"].lower()
+
+
+@pytest.mark.asyncio
 async def test_upload_again_routes_to_doc_flow() -> None:
     from app.agents.graph.nodes.sales_data.sales_data_entry_node import (
         sales_data_entry_node,

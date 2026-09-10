@@ -12,6 +12,7 @@ import structlog
 
 from app.agents.graph.state import ServiceRequestState
 from app.agents.schemas.sales_data_schema import ASK_UPLOAD_LABELS, STATUS_LABELS, TENANT_RESPONSE_STATUS
+from app.agents.services.permission_service import graph_permission_guard
 from app.agents.services.sales_data_api_client import SalesDataApiClient
 from app.core.request_context import get_current_bearer_token
 from app.observability.decorators import trace_node
@@ -66,6 +67,11 @@ async def supporting_doc_submission_node(state: ServiceRequestState) -> dict[str
     }
     if collected.get("sales_amt") is not None:
         payload["sales_amt"] = collected["sales_amt"]
+
+    denied = graph_permission_guard(state, "SUBMIT_SALES_DATA_SUPPORTING_DOC")
+    if denied:
+        log.warning("supporting_doc_submission.permission_denied")
+        return denied
 
     token = get_current_bearer_token()
     client = SalesDataApiClient(bearer_token=token)

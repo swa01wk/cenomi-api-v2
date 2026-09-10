@@ -12,6 +12,7 @@ from typing import Any
 import structlog
 
 from app.agents.graph.state import ServiceRequestState
+from app.agents.services.permission_service import graph_permission_guard
 from app.agents.services.sales_data_api_client import SalesDataApiClient
 from app.core.request_context import get_current_bearer_token
 from app.observability.decorators import trace_node
@@ -31,6 +32,11 @@ async def manual_entry_submission_node(state: ServiceRequestState) -> dict[str, 
         "sales_period_end": str(collected.get("sales_period_end", "")).strip(),
         "sales_amt": float(collected.get("sales_amt", 0)),
     }]
+
+    denied = graph_permission_guard(state, "SUBMIT_SALES_DATA")
+    if denied:
+        log.warning("manual_entry_submission.permission_denied")
+        return denied
 
     token = get_current_bearer_token()
     client = SalesDataApiClient(bearer_token=token)
