@@ -444,6 +444,22 @@ class Settings(BaseSettings):
         description="Blob container for PDF sources; blob name = str(document_id).",
     )
 
+    analytics_idle_timeout_seconds: int = Field(
+        default=600,
+        validation_alias="ANALYTICS_IDLE_TIMEOUT_SECONDS",
+        description="Mark IN_PROGRESS sessions idle after this many seconds without activity.",
+    )
+    analytics_heartbeat_min_interval_seconds: int = Field(
+        default=15,
+        validation_alias="ANALYTICS_HEARTBEAT_MIN_INTERVAL_SECONDS",
+        description="Ignore heartbeat active-ms increments faster than this interval.",
+    )
+    analytics_max_active_delta_ms: int = Field(
+        default=120_000,
+        validation_alias="ANALYTICS_MAX_ACTIVE_DELTA_MS",
+        description="Clamp a single heartbeat client_active_delta_ms to this maximum.",
+    )
+
     @computed_field  # type: ignore[prop-decorator]
     @property
     def cors_origins_list(self) -> list[str]:

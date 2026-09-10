@@ -196,3 +196,74 @@ async def test_upsert_updates_existing_rating(
     assert row.comment == "fixed now"
     assert row.sr_id == "11711"
     mock_session.add.assert_not_called()
+
+
+async def test_create_session_feedback_without_trace(mock_session: AsyncMock) -> None:
+    repo = FeedbackRepository(mock_session)
+    session_id = uuid4()
+    result = await repo.create(
+        feedback_type="FLOW_USEFUL",
+        session_id=session_id,
+        label="USEFUL",
+        metadata={"reason": None},
+    )
+    assert result.trace_id is None
+    assert result.session_id == session_id
+    assert result.feedback_type == "FLOW_USEFUL"
+    mock_session.add.assert_called_once()
+
+
+async def test_upsert_flow_useful_creates_when_missing(
+    mock_session: AsyncMock, make_execute_result: object
+) -> None:
+    mock_session.execute.return_value = make_execute_result(scalar=None)  # type: ignore[operator]
+    repo = FeedbackRepository(mock_session)
+    session_id = uuid4()
+    row = await repo.upsert_flow_useful(
+        session_id=session_id,
+        user_id=uuid4(),
+        label="USEFUL",
+        comment=None,
+        sr_id="SR-9",
+        metadata={},
+    )
+    assert row.session_id == session_id
+    assert row.label == "USEFUL"
+    assert row.sr_id == "SR-9"
+
+
+async def test_upsert_flow_useful_updates_existing(
+    mock_session: AsyncMock, make_execute_result: object
+) -> None:
+    existing = _make_feedback(
+        trace_id=None,
+        session_id=uuid4(),
+        feedback_type="FLOW_USEFUL",
+        label="USEFUL",
+    )
+    mock_session.execute.return_value = make_execute_result(scalar=existing)  # type: ignore[operator]
+    repo = FeedbackRepository(mock_session)
+    row = await repo.upsert_flow_useful(
+        session_id=existing.session_id,
+        user_id=uuid4(),
+        label="NOT_USEFUL",
+        comment="too long",
+        sr_id="SR-2",
+        metadata={"reason": "TOO_MANY_STEPS"},
+    )
+    assert row is existing
+    assert row.label == "NOT_USEFUL"
+    assert row.comment == "too long"
+    assert row.sr_id == "SR-2"
+    assert row.metadata_ == {"reason": "TOO_MANY_STEPS"}
+    mock_session.add.assert_not_called()
+
+
+async def test_get_thumbs_for_trace(
+    mock_session: AsyncMock, make_execute_result: object
+) -> None:
+    existing = _make_feedback(feedback_type="TURN_THUMBS", label="THUMBS_UP")
+    mock_session.execute.return_value = make_execute_result(scalar=existing)  # type: ignore[operator]
+    repo = FeedbackRepository(mock_session)
+    found = await repo.get_thumbs_for_trace(existing.trace_id, existing.user_id)
+    assert found is existing
