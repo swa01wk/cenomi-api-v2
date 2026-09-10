@@ -14,10 +14,31 @@ FIELD_LABELS: dict[str, str] = {
     "lease_brand_mall": "lease, brand, or mall",
     "description": "description",
     "startDate": "inspection start date",
+    "inspectionTime": "inspection start time",
     "endDate": "inspection end date",
+    "inspectionEndTime": "inspection end time",
     "inspection_done_by": "who will perform the inspection (FM Manager or Operations)",
     "comments": "comments",
     "unit_readiness_date": "unit readiness date",
+    # The three fitout confirmation milestones. Without these, _mentions_field
+    # fell back to the raw key and demanded the word "done" — which none of the
+    # real questions contain ("Has the fitout been completed?") — so a correct
+    # reply was judged a repeat of the previous question and replaced by a
+    # sentence built from the key: "Please provide the fitout complete done."
+    #
+    # _mentions_field requires every token of the label (>3 chars) to appear in
+    # the reply, so these are worded to match the questions in _RADIO_PHRASING
+    # rather than to read prettily: "started" matches "Has the fitout started?",
+    # "completed" matches "Has the fitout been completed?".
+    "fitout_start_done": "fitout started (yes or no)",
+    "fitout_complete_done": "fitout completed (yes or no)",
+    "trading_done": "trading started (yes or no)",
+    "delay_reason": "reason for the delay",
+    "planned_fitout_start_date": "revised planned fitout start date",
+    "planned_fitout_end_date": "revised planned fitout end date",
+    "planned_fitout_complete_date": "revised planned fitout completion date",
+    "planned_trading_date": "revised planned trading date",
+    "actual_fitout_complete_date": "actual fitout completion date",
     "expected_handover_date": "expected handover date",
     "guideLineLink": "guideline link",
     "actual_handover_date": "actual handover date",
@@ -223,6 +244,28 @@ def build_response_generation_context(
             content = turn.get("content", "")
             if content:
                 lines.append(f"{role}: {content}")
+        lines.append("")
+        lines.append(
+            "NOTE: Every question in CONVERSATION SO FAR has already been "
+            "answered. Never repeat or rephrase an earlier question, and never "
+            "quote a field value from history — the values above in DATA "
+            "COLLECTED SO FAR are the current ones."
+        )
+        lines.append("")
+
+    # ── 8. Final binding constraint ──────────────────────────────────────────
+    # Deliberately LAST: the conversation history above is the most salient
+    # text for the model, and it was observed re-asking the previous turn's
+    # question (quoting a now-stale value) despite the same constraint being
+    # stated near the top. Restating it here, after the history, is what keeps
+    # the generated question aligned with the field the backend is collecting.
+    if asking_field:
+        field_label = FIELD_LABELS.get(asking_field, asking_field)
+        lines.append(
+            f"## REQUIRED: your reply MUST ask the user for {field_label}. "
+            f"Asking for anything else — especially re-asking a question that "
+            f"appears in CONVERSATION SO FAR — is incorrect."
+        )
         lines.append("")
 
     lines.append(

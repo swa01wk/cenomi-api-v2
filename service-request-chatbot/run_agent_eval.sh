@@ -370,6 +370,9 @@ for tier in "${TIER_LIST[@]}"; do
       _run_scenarios_tier 9 "Work Permit create — intent, packed create, RBAC (S240–S244)" "tier_9_wp_create"
       _run_lifecycle_tier 9 "Work Permit review hops — Hot/Cold/Maint/Ops + reject + RBAC (L240–L245)" "tier_9_wp_review"
       ;;
+    notif)
+      _run_scenarios_tier notif "Notification agent — inbox listing, filters, routing (S250–S255)" "tier_9_notifications"
+      ;;
     *)
       _warn "Unknown tier '${tier}' — skipped"
       ;;

@@ -32,6 +32,106 @@ from app.observability.decorators import trace_node
 log = structlog.get_logger(__name__)
 
 # ---------------------------------------------------------------------------
+# Who may raise each fitout confirmation SR
+# ---------------------------------------------------------------------------
+
+# Creation only. Approving an existing confirmation SR is a different action,
+# governed by the platform's own operation assignment rather than this map.
+_CREATE_ROLES_BY_AGENT: dict[str, frozenset[str]] = {
+    # Trading Confirmation is raised by the mall side.
+    "rdd_trading_confirmation_agent": frozenset(
+        {"MALL_MANAGER", "OPERATIONS", "ADMIN"}
+    ),
+    # Fitout Start / End confirmations are raised by RDD.
+    "rdd_fitout_start_agent": frozenset({"DD_ENGINEER", "ADMIN"}),
+    "rdd_fitout_end_agent": frozenset({"DD_ENGINEER", "ADMIN"}),
+}
+
+_AGENT_SR_LABELS: dict[str, str] = {
+    "rdd_trading_confirmation_agent": "Trading Confirmation",
+    "rdd_fitout_start_agent": "Fitout Start Confirmation",
+    "rdd_fitout_end_agent": "Fitout End Confirmation",
+}
+
+_ROLE_LABELS: dict[str, str] = {
+    "MALL_MANAGER": "Mall Manager",
+    "OPERATIONS": "Operations",
+    "DD_ENGINEER": "RDD Project Manager",
+    "FM_MANAGER": "FM Manager",
+    "ADMIN": "Admin",
+}
+
+_FITOUT_APPROVE_INTENTS: frozenset[str] = frozenset(
+    {
+        "APPROVE_FITOUT_CONFIRM_FOS",
+        "APPROVE_FITOUT_CONFIRM_END",
+        "APPROVE_FITOUT_CONFIRM_TRADING",
+    }
+)
+
+
+def _role_names(state: ServiceRequestState) -> set[str]:
+    auth = state.get("auth_context")
+    return {str(r).upper() for r in (getattr(auth, "roles", None) or ())}
+
+
+def _allowed_roles_sentence(allowed: frozenset[str]) -> str:
+    """"Mall Manager and Operations" — Admin is left out; it is a superuser."""
+    names = [_ROLE_LABELS.get(r, r.title()) for r in sorted(allowed) if r != "ADMIN"]
+    if len(names) > 1:
+        return ", ".join(names[:-1]) + " and " + names[-1]
+    return names[0] if names else "another role"
+
+
+def _refuse_unauthorised_create(state: ServiceRequestState) -> dict[str, Any] | None:
+    """Refuse a confirmation SR the caller's role may not raise, or None to allow.
+
+    Checked at the workflow boundary, before the lease lookup ever runs.
+    Without it an RDD Project Manager asking for a Trading Confirmation was
+    told their role did not allow it and then walked through the entire form
+    anyway — lease suggestions, guided-mode choice, guideline link — building
+    a request the platform would refuse at submit.
+    """
+    agent = str(state.get("active_agent") or "")
+    allowed = _CREATE_ROLES_BY_AGENT.get(agent)
+    if not allowed:
+        return None
+
+    # Only creation is gated here. An SR already on the platform means the
+    # caller opened someone else's request to approve it.
+    backend_refs = state.get("backend_refs") or {}
+    if backend_refs.get("sr_id") or state.get("workflow_stage") == "APPROVE_SR":
+        return None
+    # Anything not an approve is on its way to creating one — including a turn
+    # the supervisor could not classify. Listing the create intents instead
+    # left that turn ungated, and the node stage-pins it to CREATE_SR anyway.
+    if str(state.get("intent") or "") in _FITOUT_APPROVE_INTENTS:
+        return None
+
+    roles = _role_names(state)
+    # An unresolved role stays permissive, matching every other entry guard —
+    # they deny only when a role is actually present.
+    if not roles or roles & allowed:
+        return None
+
+    label = _AGENT_SR_LABELS.get(agent, "confirmation")
+    log.info(
+        "fitout_confirm_entry.create_denied_for_role",
+        agent=agent,
+        roles=sorted(roles),
+    )
+    patch = _clear_all_state()
+    patch["response_message"] = (
+        f"Creating a {label} service request isn't available for your role — "
+        f"{_allowed_roles_sentence(allowed)} raise these. "
+        "I can still help you with handover service requests, or answer "
+        "questions about the platform."
+    )
+    patch["response_ui"] = {"type": "message", "verbatim": True}
+    patch["response_decorations"] = {}
+    return patch
+
+# ---------------------------------------------------------------------------
 # Phrase sets
 # ---------------------------------------------------------------------------
 
@@ -90,9 +190,95 @@ def _clear_all_state() -> dict:
         "lease_matches": [],
         "backend_refs": {},
         "documents": [],
+        # Cancelling wipes the draft, so any per-turn pointer into it is stale.
+        # Leaving active_field set sent the very next turn to field_extraction
+        # (see _waiting_short_circuit_target), which discarded the "request has
+        # been cleared" reply and re-asked for the lease code — the draft really
+        # was cleared, but the user only saw the question come back.
+        "active_field": None,
+        "correction_pending_field": None,
         "response_ui": {"cancelled": True},
         "status": "WAITING_FOR_USER",
     }
+
+
+_MILESTONE_ACK_KEY = "_milestone_confirmed_ack"
+
+_CONTINUE_MILESTONE_PHRASES: frozenset[str] = frozenset(
+    {
+        "continue",
+        "proceed",
+        "go ahead",
+        "revise",
+        "keep going",
+        "yes",
+        "yep",
+        "yeah",
+        "ok",
+        "okay",
+    }
+)
+
+_CLEARED_REQUEST_MESSAGE = (
+    "The request has been cleared. Would you like to continue?"
+)
+
+
+def _ack_milestone(state: ServiceRequestState) -> dict[str, Any]:
+    collected = dict(state.get("collected_data") or {})
+    collected[_MILESTONE_ACK_KEY] = True
+    log.info("fitout_confirm_entry.continue_milestone")
+    return {
+        "collected_data": collected,
+        "confirmation_status": None,
+        "status": "IN_PROGRESS",
+    }
+
+
+def _clear_draft_for_milestone_cancel() -> dict[str, Any]:
+    patch = _clear_all_state()
+    patch["response_ui"] = {
+        "type": "message",
+        "verbatim": True,
+        "reset_conversation": True,
+    }
+    patch["response_message"] = _CLEARED_REQUEST_MESSAGE
+    return patch
+
+
+def _cancelled_patch(sr_id: Any) -> dict[str, Any]:
+    """State patch for a confirmed cancel — clears the chat draft *and* the form.
+
+    ``reset_conversation`` is what makes the left-hand Service Request form
+    empty out: the client answers it by calling ``resetFormFromChat()`` and
+    dropping every draft field. Without it the form kept the cancelled
+    request's lease, company and dates on screen while the assistant said the
+    SR had been cancelled — the two panes disagreeing about whether the
+    request still existed. The handover flow has always sent it; all three
+    fitout confirmations were sending only ``cancelled``, which shows the
+    banner and touches nothing else.
+    """
+    patch = _clear_all_state()
+    patch["workflow_stage"] = "CANCELLED"
+    patch["response_ui"] = {
+        "type": "message",
+        "verbatim": True,
+        "reset_conversation": True,
+        "cancelled": True,
+        "workflow_stage": "CANCELLED",
+    }
+    # A request being created has no number yet — the SR is only raised on
+    # submit. Naming one anyway printed "Service Request **N/A** has been
+    # cancelled", which reads as a failure to look the number up rather than as
+    # a draft that never became an SR.
+    patch["response_message"] = (
+        f"Service Request **{sr_id}** has been cancelled. "
+        "What would you like to do next?"
+        if sr_id
+        else "The request has been cancelled and the form cleared. "
+        "What would you like to do next?"
+    )
+    return patch
 
 
 def _contains_phrase(message: str, phrases: frozenset[str]) -> bool:
@@ -114,6 +300,43 @@ async def fitout_confirm_entry_node(state: ServiceRequestState) -> dict[str, Any
     user_message: str = state.get("user_message") or ""
     confirmation_status: str | None = state.get("confirmation_status")
     action_override: str | None = state.get("action_override")  # type: ignore[assignment]
+
+    # ── Role guard — before anything that could start collecting ───────────
+    refusal = _refuse_unauthorised_create(state)
+    if refusal is not None:
+        return refusal
+
+    if action_override == "continue_milestone":
+        return _ack_milestone(state)
+
+    if action_override == "cancel_milestone":
+        log.info("fitout_confirm_entry.action_override_cancel_milestone")
+        return _clear_draft_for_milestone_cancel()
+
+    if state.get("confirmation_status") == "MILESTONE_PENDING":
+        if _contains_phrase(user_message, _CONTINUE_MILESTONE_PHRASES):
+            return _ack_milestone(state)
+        if _contains_phrase(user_message, _CANCEL_SR_PHRASES):
+            log.info("fitout_confirm_entry.milestone_cancel_by_text")
+            return _clear_draft_for_milestone_cancel()
+        return {
+            "status": "WAITING_FOR_USER",
+            "confirmation_status": "MILESTONE_PENDING",
+            "response_message": (
+                "Please tap **Continue** to revise the existing date, "
+                "or **Cancel** to pick a different lease."
+            ),
+            "response_ui": {"type": "message", "verbatim": True},
+            "response_decorations": {
+                "suggestions": {
+                    "kind": "labeled_options",
+                    "options": [
+                        {"label": "Cancel", "value": "cancel", "action": "cancel_milestone"},
+                        {"label": "Continue", "value": "continue", "action": "continue_milestone"},
+                    ],
+                }
+            },
+        }
 
     # ── 0. Explicit UI action — takes priority over text parsing ───────────
     if action_override in (
@@ -140,29 +363,26 @@ async def fitout_confirm_entry_node(state: ServiceRequestState) -> dict[str, Any
             "confirmation_status": "CONFIRMED",
         }
 
-    if action_override == "cancel" and confirmation_status == "PENDING":
-        log.info("fitout_confirm_entry.cancel_rejects_pending_confirmation")
-        return {"confirmation_status": "REJECTED", "status": "IN_PROGRESS"}
-
     if action_override in ("cancel_sr", "cancel", "cancel_create_sr"):
         log.info("fitout_confirm_entry.action_override_cancel_sr")
         backend_refs: dict[str, Any] = state.get("backend_refs") or {}
         sr_id = backend_refs.get("sr_id")
-        if not sr_id:
-            patch = _clear_all_state()
-            patch["response_message"] = (
-                "Your fitout confirmation request has been cancelled. "
-                "What would you like to do next?"
-            )
-            return patch
-        return {
-            "confirmation_status": "CANCEL_PENDING",
-            "status": "WAITING_FOR_USER",
-            "response_message": (
+        if sr_id:
+            message = (
                 f"Are you sure you want to cancel Service Request **{sr_id}**? "
                 "This will mark it as cancelled on the platform. "
                 "Reply **yes** to confirm, or **no** to go back."
-            ),
+            )
+        else:
+            message = (
+                "Are you sure you want to cancel this request? "
+                "This will clear the current details. "
+                "Reply **yes** to confirm, or **no** to go back to the review."
+            )
+        return {
+            "confirmation_status": "CANCEL_PENDING",
+            "status": "WAITING_FOR_USER",
+            "response_message": message,
         }
 
     if action_override == "confirm_cancel_sr":
@@ -180,14 +400,7 @@ async def fitout_confirm_entry_node(state: ServiceRequestState) -> dict[str, Any
                     sr_id=sr_id,
                     exc_info=True,
                 )
-        patch = _clear_all_state()
-        patch["workflow_stage"] = "CANCELLED"
-        patch["response_ui"] = {"cancelled": True, "workflow_stage": "CANCELLED"}
-        patch["response_message"] = (
-            f"Service Request **{sr_id or 'N/A'}** has been cancelled. "
-            "What would you like to do next?"
-        )
-        return patch
+        return _cancelled_patch(sr_id)
 
     if action_override == "decline_cancel_sr":
         log.info("fitout_confirm_entry.action_override_decline_cancel_sr")
@@ -224,14 +437,7 @@ async def fitout_confirm_entry_node(state: ServiceRequestState) -> dict[str, Any
                         sr_id=sr_id,
                         exc_info=True,
                     )
-            patch = _clear_all_state()
-            patch["workflow_stage"] = "CANCELLED"
-            patch["response_ui"] = {"cancelled": True, "workflow_stage": "CANCELLED"}
-            patch["response_message"] = (
-                f"Service Request **{sr_id or 'N/A'}** has been cancelled. "
-                "What would you like to do next?"
-            )
-            return patch
+            return _cancelled_patch(sr_id)
 
         if _contains_phrase(user_message, _REJECT_PHRASES):
             log.info("fitout_confirm_entry.cancel_declined_by_text")
@@ -256,20 +462,20 @@ async def fitout_confirm_entry_node(state: ServiceRequestState) -> dict[str, Any
         log.info("fitout_confirm_entry.text_cancel_sr", user_message=user_message[:120])
         backend_refs = state.get("backend_refs") or {}
         sr_id = backend_refs.get("sr_id")
-        if not sr_id:
-            patch = _clear_all_state()
-            patch["response_message"] = (
-                "Your fitout confirmation request has been cancelled. "
-                "What would you like to do next?"
+        if sr_id:
+            message = (
+                f"Are you sure you want to cancel Service Request **{sr_id}**? "
+                "Reply **yes** to confirm, or **no** to go back."
             )
-            return patch
+        else:
+            message = (
+                "Are you sure you want to cancel this request? "
+                "Reply **yes** to confirm, or **no** to go back to the review."
+            )
         return {
             "confirmation_status": "CANCEL_PENDING",
             "status": "WAITING_FOR_USER",
-            "response_message": (
-                f"Are you sure you want to cancel Service Request **{sr_id}**? "
-                "Reply **yes** to confirm, or **no** to go back."
-            ),
+            "response_message": message,
         }
 
     if _contains_phrase(user_message, _CANCEL_WORKFLOW_PHRASES):
@@ -278,7 +484,14 @@ async def fitout_confirm_entry_node(state: ServiceRequestState) -> dict[str, Any
         patch["response_message"] = (
             "Sure — I've cleared everything. What would you like to do next?"
         )
-        patch["response_ui"] = {}
+        # "I've cleared everything" has to include the form. Without
+        # reset_conversation the client keeps every draft field, so the lease,
+        # company and dates of the abandoned request stayed on screen.
+        patch["response_ui"] = {
+            "type": "message",
+            "verbatim": True,
+            "reset_conversation": True,
+        }
         return patch
 
     # ── 3. Confirmation response parsing ──────────────────────────────────

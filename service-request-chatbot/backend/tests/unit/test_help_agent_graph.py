@@ -225,6 +225,7 @@ class TestRouteAfterValidation:
             "title": "handover-LC-001-test", "description": "Test",
             "startDate": "2026-07-01", "endDate": "2026-07-03",
             "inspectionTime": "",   # optional — explicitly declined
+            "inspectionEndTime": "",  # optional — explicitly declined
             "inspection_done_by": "FM_MANAGER", "notes": "", "comments": "",
         }
 

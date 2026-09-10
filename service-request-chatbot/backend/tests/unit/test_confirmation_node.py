@@ -22,6 +22,10 @@ from app.agents.graph.nodes.handover.confirmation_node import (
     confirmation_node,
 )
 from app.agents.services.display_formatters import format_field_display_value
+from app.agents.services.review_decorations_service import (
+    MM_OPTIONAL_DONE,
+    MM_OPTIONAL_UPLOAD_STATUS_KEY,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -45,12 +49,15 @@ def _minimal_create_sr() -> dict[str, Any]:
         "contracted_area": 150,
         "title": "Handover SR",
         "description": "Tenant handover request",
+        "already_handovered": "initiate_handover",
         "startDate": "2025-03-01",
         "endDate": "2025-09-01",
         "inspectionTime": "",       # optional — empty string marks it as answered
         "inspection_done_by": "FM_MANAGER",
         "notes": "",
         "comments": "Ready for handover",
+        # MM optional upload gate must be bypassed for confirmation card tests.
+        MM_OPTIONAL_UPLOAD_STATUS_KEY: MM_OPTIONAL_DONE,
     }
 
 
@@ -141,6 +148,31 @@ class TestBuildConfirmationCard:
         data2["title"] = "Different Title"
         assert _build_confirmation_card(data1, "CREATE_SR") != _build_confirmation_card(data2, "CREATE_SR")
 
+    def test_inspection_time_shown_on_start_and_end_not_nine_am(self) -> None:
+        data = _minimal_create_sr()
+        data["startDate"] = "2026-08-13"
+        data["endDate"] = "2026-08-13"
+        data["inspectionTime"] = "10:56"
+        card = _build_confirmation_card(data, "CREATE_SR")
+        start = next(f for f in card["fields"] if f["key"] == "startDate")
+        end = next(f for f in card["fields"] if f["key"] == "endDate")
+        assert start["value"] == "13/08/2026 10:56 AM"
+        assert end["value"] == "13/08/2026 10:56 AM"
+        assert "9:00 AM" not in str(start["value"])
+
+    def test_end_time_independent_of_start_on_confirmation_card(self) -> None:
+        data = _minimal_create_sr()
+        data["startDate"] = "2026-08-20"
+        data["endDate"] = "2026-08-21"
+        data["inspectionTime"] = "14:00"
+        data["startDateLT"] = "20/08/2026 2:00 PM"
+        data["endDateLT"] = "21/08/2026 6:00 PM"
+        card = _build_confirmation_card(data, "CREATE_SR")
+        start = next(f for f in card["fields"] if f["key"] == "startDate")
+        end = next(f for f in card["fields"] if f["key"] == "endDate")
+        assert start["value"] == "20/08/2026 2:00 PM"
+        assert end["value"] == "21/08/2026 6:00 PM"
+
 
 # ===========================================================================
 # TestConfirmationNodeSkip
@@ -157,8 +189,9 @@ class TestConfirmationNodeSkip:
     @pytest.mark.asyncio
     async def test_returns_empty_when_partial_fields(self) -> None:
         data = _minimal_create_sr()
-        del data["title"]
-        del data["description"]
+        # Remove non-optional required fields to trigger the "incomplete" path.
+        del data["startDate"]
+        del data["endDate"]
         state: dict[str, Any] = {"collected_data": data, "workflow_stage": "CREATE_SR"}
         result = await confirmation_node(state)
         assert result == {}
@@ -180,8 +213,9 @@ class TestConfirmationNodeSkip:
 
     @pytest.mark.asyncio
     async def test_returns_empty_when_field_value_is_empty_string(self) -> None:
+        # title is optional (empty string = user declined), so use a non-optional field.
         data = _minimal_create_sr()
-        data["title"] = ""
+        data["mall"] = ""
         state: dict[str, Any] = {"collected_data": data, "workflow_stage": "CREATE_SR"}
         result = await confirmation_node(state)
         assert result == {}
@@ -587,7 +621,8 @@ class TestStageSpecificConfirmationCards:
         assert "startDate" not in card_keys
 
     @pytest.mark.asyncio
-    async def test_node_asks_upload_when_fm_approve_without_docs(self) -> None:
+    async def test_node_cards_fm_approve_without_docs(self) -> None:
+        """FM documents are optional — a staged approve reaches the card."""
         data = _minimal_fm_review()
         state: dict[str, Any] = {
             "collected_data": data,
@@ -596,9 +631,7 @@ class TestStageSpecificConfirmationCards:
             "backend_refs": {"fm_action": "approve", "sr_id": "sr-1"},
         }
         result = await confirmation_node(state)
-        assert result.get("status") == "WAITING_FOR_USER"
-        assert result.get("response_ui", {}).get("type") != "confirmation_card"
-        assert "document_requirement" in (result.get("response_decorations") or {})
+        assert result.get("response_ui", {}).get("type") == "confirmation_card"
 
     @pytest.mark.asyncio
     async def test_node_generates_rdd_card_for_rdd_review_stage(self) -> None:
@@ -620,3 +653,4 @@ class TestStageSpecificConfirmationCards:
         state: dict[str, Any] = {"collected_data": data, "workflow_stage": "RDD_REVIEW"}
         result = await confirmation_node(state)
         assert result == {}
+

@@ -53,6 +53,7 @@ _UA_RECORD = LeaseRecord(
     unit_codes=["FF050"],
     contracted_area=420.0,
     city="Jeddah",
+    company_name="Under Armour Trading Co",
     lease_brand_mall="t0105712 - Brand Under Armour - Jawharat Jeddah",
 )
 
@@ -147,14 +148,22 @@ def _make_trace_manager() -> MagicMock:
 class TestNoIdentifiers:
     @pytest.mark.asyncio
     async def test_create_sr_browse_returns_in_progress(self) -> None:
-        state = _state(collected_data={}, workflow_stage="CREATE_SR")
+        state = _state(
+            collected_data={},
+            workflow_stage="CREATE_SR",
+            active_agent="rdd_handover_agent",
+        )
         svc = _MockService(_make_result([]))
         result = await lease_lookup_node(state, service=svc)
         assert result["status"] == "IN_PROGRESS"
 
     @pytest.mark.asyncio
     async def test_create_sr_browse_emits_leases_picker(self) -> None:
-        state = _state(collected_data={}, workflow_stage="CREATE_SR")
+        state = _state(
+            collected_data={},
+            workflow_stage="CREATE_SR",
+            active_agent="rdd_handover_agent",
+        )
         svc = _MockService(_make_result([]))
         result = await lease_lookup_node(state, service=svc)
         spec = result["response_decorations"]["suggestions"]
@@ -163,7 +172,11 @@ class TestNoIdentifiers:
 
     @pytest.mark.asyncio
     async def test_create_sr_browse_defers_text_question(self) -> None:
-        state = _state(collected_data={}, workflow_stage="CREATE_SR")
+        state = _state(
+            collected_data={},
+            workflow_stage="CREATE_SR",
+            active_agent="rdd_handover_agent",
+        )
         svc = _MockService(_make_result([]))
         result = await lease_lookup_node(state, service=svc)
         assert "response_ui" not in result
@@ -202,7 +215,7 @@ class TestNoIdentifiers:
 
     @pytest.mark.asyncio
     async def test_no_collected_data_key_browse_on_default_create_sr(self) -> None:
-        state = _state()
+        state = _state(active_agent="rdd_handover_agent")
         svc = _MockService(_make_result([]))
         result = await lease_lookup_node(state, service=svc)
         assert result["status"] == "IN_PROGRESS"
@@ -232,6 +245,7 @@ class TestSelectedLeaseMerge:
         assert cd["city"] == "Jeddah"
         assert cd["tenant_profile_id"] == 116
         assert cd["property_id"] == 3041
+        assert cd["company"] == "Under Armour Trading Co"
 
     @pytest.mark.asyncio
     async def test_selected_lease_preserves_existing_user_fields(self) -> None:
@@ -872,3 +886,136 @@ class TestServiceError:
         result = await lease_lookup_node(state, service=svc)
         cd = result.get("collected_data")
         assert cd is None or cd.get("lease_id") is None
+
+
+# ---------------------------------------------------------------------------
+# TestMilestoneAlreadyConfirmed
+# ---------------------------------------------------------------------------
+
+
+def _record_with_actual(**dates: str) -> LeaseRecord:
+    payload = _UA_RECORD.model_dump()
+    payload.update(dates)
+    return LeaseRecord.model_validate(payload)
+
+
+class TestMilestoneAlreadyConfirmed:
+    @pytest.mark.asyncio
+    async def test_handover_sr_exists_without_actual_hard_blocks(self) -> None:
+        state = _state(
+            collected_data={"lease_code": "t0105712"},
+            active_agent="rdd_handover_agent",
+        )
+        svc = _MockService(
+            _make_result([_UA_RECORD], reason="handover_exists")
+        )
+        result = await lease_lookup_node(state, service=svc)
+        assert result["status"] == "WAITING_FOR_USER"
+        assert "active Handover" in result["response_message"]
+        assert result.get("confirmation_status") != "MILESTONE_PENDING"
+        assert "continue_milestone" not in str(result.get("response_decorations") or {})
+
+    @pytest.mark.asyncio
+    async def test_handover_sr_exists_zero_matches_hard_blocks(self) -> None:
+        state = _state(
+            collected_data={"lease_code": "t0105712"},
+            active_agent="rdd_handover_agent",
+        )
+        svc = _MockService(_make_result([], reason="handover_exists"))
+        result = await lease_lookup_node(state, service=svc)
+        assert "active Handover" in result["response_message"]
+
+    @pytest.mark.asyncio
+    async def test_handover_actual_date_emits_cancel_continue_chips(self) -> None:
+        record = _record_with_actual(actual_shop_handover_date="2026-03-15")
+        state = _state(
+            collected_data={"lease_code": "t0105712"},
+            active_agent="rdd_handover_agent",
+        )
+        svc = _MockService(_make_result([record], reason="handover_exists"))
+        result = await lease_lookup_node(state, service=svc)
+        assert result["confirmation_status"] == "MILESTONE_PENDING"
+        assert result["status"] == "WAITING_FOR_USER"
+        assert "already confirmed" in result["response_message"].lower()
+        assert "15/03/2026" in result["response_message"]
+        options = (result["response_decorations"]["suggestions"]["options"])
+        actions = {o["action"] for o in options}
+        assert actions == {"cancel_milestone", "continue_milestone"}
+        assert result["collected_data"]["lease_id"] == 95404
+
+    @pytest.mark.asyncio
+    async def test_ack_skips_milestone_pause(self) -> None:
+        record = _record_with_actual(actual_shop_handover_date="2026-03-15")
+        state = _state(
+            collected_data={
+                "lease_code": "t0105712",
+                "_milestone_confirmed_ack": True,
+            },
+            active_agent="rdd_handover_agent",
+        )
+        svc = _MockService(_make_result([record], reason="handover_exists"))
+        result = await lease_lookup_node(state, service=svc)
+        assert result["status"] == "IN_PROGRESS"
+        assert result.get("confirmation_status") != "MILESTONE_PENDING"
+        assert result["collected_data"]["lease_id"] == 95404
+
+    @pytest.mark.asyncio
+    async def test_fos_actual_start_emits_chips(self) -> None:
+        record = _record_with_actual(actual_fitout_start_date="2026-04-01")
+        state = _state(
+            collected_data={"lease_code": "t0105712"},
+            active_agent="rdd_fitout_start_agent",
+        )
+        svc = _MockService(_make_result([record]))
+        result = await lease_lookup_node(state, service=svc)
+        assert result["confirmation_status"] == "MILESTONE_PENDING"
+        assert "Fitout Start" in result["response_message"]
+        assert "01/04/2026" in result["response_message"]
+
+    @pytest.mark.asyncio
+    async def test_fos_without_actual_does_not_pause(self) -> None:
+        state = _state(
+            collected_data={"lease_code": "t0105712"},
+            active_agent="rdd_fitout_start_agent",
+        )
+        svc = _MockService(_make_result([_UA_RECORD]))
+        result = await lease_lookup_node(state, service=svc)
+        assert result["status"] == "IN_PROGRESS"
+        assert result.get("confirmation_status") != "MILESTONE_PENDING"
+
+    @pytest.mark.asyncio
+    async def test_end_actual_emits_chips(self) -> None:
+        record = _record_with_actual(actual_fitout_end_date="2026-05-10")
+        state = _state(
+            collected_data={"lease_code": "t0105712"},
+            active_agent="rdd_fitout_end_agent",
+        )
+        svc = _MockService(_make_result([record]))
+        result = await lease_lookup_node(state, service=svc)
+        assert "Fitout End" in result["response_message"]
+        assert result["confirmation_status"] == "MILESTONE_PENDING"
+
+    @pytest.mark.asyncio
+    async def test_trading_actual_emits_chips(self) -> None:
+        record = _record_with_actual(actual_trading_date="2026-06-01")
+        state = _state(
+            collected_data={"lease_code": "t0105712"},
+            active_agent="rdd_trading_confirmation_agent",
+        )
+        svc = _MockService(_make_result([record]))
+        result = await lease_lookup_node(state, service=svc)
+        assert "Trading" in result["response_message"]
+        assert result["confirmation_status"] == "MILESTONE_PENDING"
+
+    @pytest.mark.asyncio
+    async def test_fos_does_not_warn_on_handover_actual_only(self) -> None:
+        record = _record_with_actual(actual_shop_handover_date="2026-03-15")
+        state = _state(
+            collected_data={"lease_code": "t0105712"},
+            active_agent="rdd_fitout_start_agent",
+        )
+        svc = _MockService(_make_result([record]))
+        result = await lease_lookup_node(state, service=svc)
+        assert result["status"] == "IN_PROGRESS"
+        assert result.get("confirmation_status") != "MILESTONE_PENDING"
+

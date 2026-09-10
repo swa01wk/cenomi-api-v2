@@ -31,3 +31,10 @@ build/
 
 # Alembic — do not commit generated migration auto-backups
 alembic/versions/__pycache__/
+
+# Indexer record dumps (python -m app.indexer.cli --dump-dir ...).
+# These contain real rows copied out of the Cenomi platform database —
+# staff names, email addresses and phone numbers. Never commit them.
+indexer-dump/
+*.rows.jsonl
+*.docs.jsonl

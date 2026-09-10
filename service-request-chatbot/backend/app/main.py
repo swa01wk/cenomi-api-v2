@@ -6,14 +6,18 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.routes import health, upload
+from app.api.routes import health, indexer, upload
 from app.api.routes.auth import router as auth_router
 from app.api.routes.chat import router as chat_router
 from app.api.routes.chat import service_request_router
+from app.api.routes.chat_feedback import router as chat_feedback_router
+from app.api.routes.dashboard import router as dashboard_router
 from app.api.routes.msp_chat import msp_chat_router
+from app.api.routes import notifications as notifications_routes
 from app.core.config import settings
 from app.core.logging import configure_logging
 from app.integrations.factory import close_integrations
+from app.observability.api import analytics as obs_analytics
 from app.observability.api import feedback as obs_feedback
 from app.observability.api import metrics as obs_metrics
 from app.observability.api import sessions as obs_sessions
@@ -56,12 +60,26 @@ def create_app() -> FastAPI:
     application.include_router(chat_router, prefix=settings.api_v1_prefix, tags=["chat-v1"])
     # MSP Platform-compatible help endpoints — contractually pinned to /api/v1 by cenomi-ai-backend
     application.include_router(msp_chat_router, prefix=settings.api_v1_prefix, tags=["msp-chat"])
+    # End-user star ratings — chat-adjacent, never starts a chat turn
+    application.include_router(chat_feedback_router, prefix="/api", tags=["feedback"])
+    application.include_router(chat_feedback_router, prefix=settings.api_v1_prefix, tags=["feedback-v1"])
+    application.include_router(
+        notifications_routes.router,
+        prefix=settings.api_v1_prefix,
+        tags=["notifications-v1"],
+    )
     application.include_router(upload.router, prefix=settings.api_v1_prefix, tags=["upload-v1"])
+    # RAG indexer status / re-index request (admin-only)
+    application.include_router(indexer.router, prefix=settings.api_v1_prefix, tags=["indexer-v1"])
     # Observability (unversioned legacy paths)
     application.include_router(obs_traces.router, prefix="/api", tags=["observability"])
     application.include_router(obs_feedback.router, prefix="/api", tags=["observability"])
     application.include_router(obs_sessions.router, prefix="/api", tags=["observability"])
     application.include_router(obs_metrics.router, prefix=settings.api_v1_prefix, tags=["observability-v1"])
+    # Agent analytics — dashboard aggregates over the observability tables
+    application.include_router(obs_analytics.router, prefix=settings.api_v1_prefix, tags=["analytics-v1"])
+    # Assistant-admin dashboard — contract consumed by the tenant frontend
+    application.include_router(dashboard_router, prefix=settings.api_v1_prefix)
 
     # ── v2 routes (current — new callers should use these) ────────────────────
 
@@ -69,11 +87,14 @@ def create_app() -> FastAPI:
     application.include_router(auth_router, prefix=settings.api_v2_prefix, tags=["auth-v2"])
     application.include_router(service_request_router, prefix=settings.api_v2_prefix, tags=["chat-v2"])
     application.include_router(chat_router, prefix=settings.api_v2_prefix, tags=["chat-v2"])
+    application.include_router(chat_feedback_router, prefix=settings.api_v2_prefix, tags=["feedback-v2"])
     application.include_router(upload.router, prefix=settings.api_v2_prefix, tags=["upload-v2"])
+    application.include_router(indexer.router, prefix=settings.api_v2_prefix, tags=["indexer-v2"])
     application.include_router(obs_traces.router, prefix=settings.api_v2_prefix, tags=["observability-v2"])
     application.include_router(obs_feedback.router, prefix=settings.api_v2_prefix, tags=["observability-v2"])
     application.include_router(obs_sessions.router, prefix=settings.api_v2_prefix, tags=["observability-v2"])
     application.include_router(obs_metrics.router, prefix=settings.api_v2_prefix, tags=["observability-v2"])
+    application.include_router(obs_analytics.router, prefix=settings.api_v2_prefix, tags=["analytics-v2"])
     # Note: msp_chat_router is intentionally NOT duplicated at v2 — MSP Platform
     # contract is fixed to /api/v1/chat and /api/v1/chat/stream.
 

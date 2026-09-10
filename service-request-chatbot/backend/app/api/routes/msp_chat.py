@@ -34,7 +34,6 @@ LLM gateway changes and is deferred.
 from __future__ import annotations
 
 import json
-import logging
 import re
 from collections.abc import AsyncIterator
 from typing import Any
@@ -120,6 +119,49 @@ class _MSPChatContext(BaseModel):
         description="Help subcategory, e.g. 'How to Submit'.",
         examples=["How to Submit"],
     )
+    property_id: int | None = Field(
+        default=None,
+        description=(
+            "unique_property_id of the mall the user is currently viewing "
+            "(e.g. from /propertydetails?propertyId=3691). Lets 'who is the "
+            "mall manager' resolve without the user naming the mall."
+        ),
+        examples=[3691],
+    )
+    mall_name: str | None = Field(
+        default=None,
+        description=(
+            "marketing_name of the mall being viewed. Sent alongside "
+            "property_id so the agent needs no extra lookup to ground the answer."
+        ),
+        examples=["Yasmeen Mall"],
+    )
+    viewing_notification_id: str | None = Field(
+        default=None,
+        description="Notification currently open in the UI (deictic 'this notification').",
+        examples=["NTF-000012"],
+    )
+    viewing_service_request_id: str | None = Field(
+        default=None,
+        description="Service request currently open in the UI (deictic 'this SR').",
+        examples=["11711"],
+    )
+    viewing_notification: dict[str, Any] | None = Field(
+        default=None,
+        description="Optional notification snapshot {id, title, body, related_sr_id, status}.",
+    )
+    active_notification_id: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Open-notification reference {id: <SR id>, sub_category}. Seeds the "
+            "SR workflow handoff (OPEN_NOTIFICATION) — id is the SR id from the "
+            "notification's text_content.id, not the notification row id."
+        ),
+    )
+    notification_list_more: dict[str, Any] | None = Field(
+        default=None,
+        description="View-more paging {sub_category, page, unread?} for one group.",
+    )
 
 
 class MSPChatRequest(BaseModel):
@@ -170,7 +212,12 @@ class MSPChatResponse(BaseModel):
     conversation_id: str = Field(
         description="Session / conversation ID.  Reuse on the next turn."
     )
-    message_id: str = Field(description="Per-message UUID for observability.")
+    message_id: str = Field(
+        description=(
+            "Persisted assistant message UUID (chat_messages.id). Stable — "
+            "use it together with trace_id when submitting feedback."
+        )
+    )
     message: str = Field(description="Assistant reply text.")
     sources: list[Source] = Field(
         default_factory=list,
@@ -179,6 +226,13 @@ class MSPChatResponse(BaseModel):
     language: str = Field(
         description="Detected or requested language code.",
         examples=["en", "ar"],
+    )
+    trace_id: str | None = Field(
+        default=None,
+        description=(
+            "Observability trace id for this turn.  Additive field: pass it to "
+            "POST /chat/feedback to attach a star rating to this answer."
+        ),
     )
 
 
@@ -268,7 +322,12 @@ async def post_msp_chat(
 
     lang = body.language or _detect_language(result.message)
     sources = [Source(**s) for s in result.faq_sources]
-    message_id = str(uuid4())
+    # Durable per-message identity: the persisted chat_messages.id of the
+    # assistant reply.  The uuid4() fallback only covers the injection-refusal
+    # path, which returns before the reply is persisted.
+    message_id = (
+        str(result.assistant_message_id) if result.assistant_message_id else str(uuid4())
+    )
 
     bound_log.info(
         "msp_chat.sync.completed",
@@ -283,6 +342,7 @@ async def post_msp_chat(
         message=result.message,
         sources=sources,
         language=lang,
+        trace_id=str(result.trace_id) if result.trace_id else None,
     )
 
 
@@ -335,7 +395,11 @@ async def post_msp_chat_stream(
             return
 
         lang = body.language or _detect_language(result.message)
-        message_id = str(uuid4())
+        message_id = (
+            str(result.assistant_message_id)
+            if result.assistant_message_id
+            else str(uuid4())
+        )
         conversation_id = str(result.session_id)
 
         # ── token event — full message as one chunk (Phase 1 pseudo-streaming) ─
@@ -352,6 +416,7 @@ async def post_msp_chat_stream(
                 "conversation_id": conversation_id,
                 "message_id": message_id,
                 "language": lang,
+                "trace_id": str(result.trace_id) if result.trace_id else None,
             },
         )
 

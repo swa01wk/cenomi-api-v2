@@ -1,8 +1,9 @@
 """Application configuration via environment variables."""
 
 from functools import lru_cache
+from typing import Any
 
-from pydantic import Field, computed_field
+from pydantic import Field, computed_field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -61,6 +62,14 @@ class Settings(BaseSettings):
         description=(
             "Force in-memory mock SR state even when SERVICE_REQUEST_API_BASE_URL is set. "
             "Use for local eval runs where the UAT API rejects the chatbot's local JWT."
+        ),
+    )
+    notifications_use_mock: bool = Field(
+        default=False,
+        validation_alias="NOTIFICATIONS_USE_MOCK",
+        description=(
+            "Force in-memory mock notification inbox data even when the platform "
+            "base URL and internal API token are configured. Use for local dev/eval."
         ),
     )
     # FILE_UPLOAD_API_BASE_URL is accepted in .env for forward compatibility but
@@ -145,6 +154,121 @@ class Settings(BaseSettings):
         default=None,
         validation_alias="LLM_BASE_URL",
         description="Optional custom base URL for the OpenAI-compatible endpoint.",
+    )
+    @model_validator(mode="before")
+    @classmethod
+    def _blank_optional_to_none(cls, data: Any) -> Any:
+        """Treat a whitespace-only value as unset, for every optional setting.
+
+        Azure Key Vault cannot store an empty secret value, so "this one has no
+        value" gets saved as a single space. A space is truthy in Python, so it
+        sails straight past the ``value or default`` guards these settings rely
+        on and is handed to clients as though it were real configuration.
+
+        That took production down on 2026-08-23: LLM_BASE_URL=' ' became
+        URL('%20/') inside the OpenAI client, every LLM call failed with
+        UnsupportedProtocol, and EMBEDDING_BASE_URL=' ' did the same to RAG —
+        while the app booted, /ready passed and requests returned 200 OK.
+
+        Dropping the key here lets the field's own default apply, which is what
+        "unset" already means when the variable is simply absent. That also
+        rescues the non-URL settings: LLM_PROVIDER=' ' would otherwise reach the
+        registry as an unknown provider and raise instead of defaulting to
+        "openai". Required settings are left alone so a genuinely missing value
+        still fails loudly.
+        """
+        if not isinstance(data, dict):
+            return data
+
+        optional: set[str] = set()
+        for name, field in cls.model_fields.items():
+            # Anything with a default: blank is indistinguishable from absent,
+            # so give it the same meaning. Fields with no default stay put, so a
+            # genuinely required setting still fails validation rather than
+            # silently acquiring a value nobody chose.
+            if field.is_required():
+                continue
+            optional.add(name)
+            alias = field.validation_alias
+            if isinstance(alias, str):
+                optional.add(alias)
+
+        return {
+            key: value
+            for key, value in data.items()
+            if not (isinstance(value, str) and not value.strip() and key in optional)
+        }
+
+    @field_validator("llm_base_url", "embedding_base_url")
+    @classmethod
+    def _require_url_scheme(cls, value: str | None, info: Any) -> str | None:
+        """Reject a base URL with no scheme; normalise blank to None.
+
+        These are optional — empty means "use the provider's own default
+        endpoint" — so a non-empty value without http:// or https:// can only be
+        an operator error. Left unchecked it reaches httpx as-is and raises
+        UnsupportedProtocol on every call, which surfaces as a bare
+        "Connection error." after the OpenAI SDK's retries.
+
+        That failure is invisible where it matters: the app boots, /ready passes,
+        requests return 200 OK, and every LLM call fails, so users get fallback
+        text indefinitely while the service looks healthy. Refusing to start
+        makes the mistake immediate and names the fix.
+        """
+        if value is None:
+            return None
+        stripped = value.strip()
+        if not stripped:
+            return None
+        if not stripped.startswith(("http://", "https://")):
+            env_var = info.field_name.upper()
+            raise ValueError(
+                f"{env_var} must start with http:// or https:// (got {stripped!r}). "
+                f"Leave {env_var} empty to use the provider's default endpoint."
+            )
+        return stripped
+
+    handover_lease_picker_enabled: bool = Field(
+        default=True,
+        validation_alias="HANDOVER_LEASE_PICKER_ENABLED",
+        description=(
+            "Offer browsable eligible-lease chips when the Handover CREATE flow "
+            "has no lease identifiers yet. The picker shows the 5 most recently "
+            "activated leases with a search box and a read-more pager, so it "
+            "answers 'which lease?' instead of listing leases at random. Set "
+            "false to fall back to the plain lease-code question."
+        ),
+    )
+    guided_tour_choice_enabled: bool = Field(
+        default=False,
+        validation_alias="GUIDED_TOUR_CHOICE_ENABLED",
+        description=(
+            "Ask the user once per draft whether they want the assistant to "
+            "guide them through the form. Answering no leaves the form "
+            "editable — the assistant asks the same questions either way, and "
+            "anything typed into the form syncs back to the draft silently. "
+            "Applies to every service-request workflow that collects fields."
+        ),
+    )
+    handover_short_flow_enabled: bool = Field(
+        default=False,
+        validation_alias="HANDOVER_SHORT_FLOW_ENABLED",
+        description=(
+            "Collapse the Path A CREATE_SR ask loop from nine questions to "
+            "four turns: handover type, one combined inspection question "
+            "(start date + end date + inspector), documents, then preview. "
+            "Set false to keep the field-per-turn flow."
+        ),
+    )
+    handover_ai_autofill_enabled: bool = Field(
+        default=False,
+        validation_alias="HANDOVER_AI_AUTOFILL_ENABLED",
+        description=(
+            "Let an LLM draft the handover description and notes instead of "
+            "using the deterministic templates. Requires "
+            "HANDOVER_SHORT_FLOW_ENABLED; falls back to the templates on any "
+            "error or timeout. The title is always template-generated."
+        ),
     )
     llm_confidence_threshold: float = Field(
         default=0.6,
@@ -238,6 +362,86 @@ class Settings(BaseSettings):
         default=None,
         validation_alias="AZURE_SEARCH_INDEX_NAME",
         description="Azure AI Search index name (e.g. cenomi-help-index).",
+    )
+
+    # ── RAG Knowledge Indexer job (ticket 3547) ──────────────────────────────
+    # All optional/defaulted — the API process must start without any of them.
+    # The indexer reads the Cenomi platform DB (read-only, raw SQL) and writes
+    # to the same Azure AI Search index the read path queries.  Note the job
+    # needs an ADMIN search key, unlike the query key the API uses.
+    cenomi_database_url: str | None = Field(
+        default=None,
+        validation_alias="CENOMI_DATABASE_URL",
+        description=(
+            "Read-only Cenomi platform Postgres DSN, e.g. "
+            "postgresql+asyncpg://ro_user:...@host:5432/cenomi?ssl=require. "
+            "NOT the chatbot DATABASE_URL."
+        ),
+    )
+    indexer_chunk_max_tokens: int = Field(
+        default=500,
+        validation_alias="INDEXER_CHUNK_MAX_TOKENS",
+        description="Maximum tokens per indexed chunk (tiktoken cl100k_base).",
+    )
+    indexer_chunk_overlap: int = Field(
+        default=50,
+        validation_alias="INDEXER_CHUNK_OVERLAP",
+        description="Token overlap between consecutive chunks; must be < max tokens.",
+    )
+    indexer_embed_batch_size: int = Field(
+        default=50,
+        validation_alias="INDEXER_EMBED_BATCH_SIZE",
+        description="Texts per embed_batch call.",
+    )
+    indexer_upload_batch_size: int = Field(
+        default=1000,
+        validation_alias="INDEXER_UPLOAD_BATCH_SIZE",
+        description="Documents per Azure Search upload batch.",
+    )
+    indexer_max_concurrency: int = Field(
+        default=4,
+        validation_alias="INDEXER_MAX_CONCURRENCY",
+        description="Concurrent embed batch calls (semaphore).",
+    )
+    indexer_dry_run: bool = Field(
+        default=False,
+        validation_alias="INDEXER_DRY_RUN",
+        description="Build + log documents; no Search writes; no watermark advance.",
+    )
+    indexer_enable_user_guides: bool = Field(
+        default=False,
+        validation_alias="INDEXER_ENABLE_USER_GUIDES",
+        description="Enable the user_guide PDF source.",
+    )
+    indexer_enable_download_center: bool = Field(
+        default=False,
+        validation_alias="INDEXER_ENABLE_DOWNLOAD_CENTER",
+        description="Enable the download_center PDF source.",
+    )
+    indexer_watermark_lag: int = Field(
+        default=300,
+        validation_alias="INDEXER_WATERMARK_LAG",
+        description="Seconds subtracted from run start when advancing a watermark.",
+    )
+    indexer_max_docs_per_run: int = Field(
+        default=5000,
+        validation_alias="INDEXER_MAX_DOCS_PER_RUN",
+        description="Incremental row cap per source per run.",
+    )
+    indexer_mall_info_full_on_incremental: bool = Field(
+        default=False,
+        validation_alias="INDEXER_MALL_INFO_FULL_ON_INCREMENTAL",
+        description="Force mall_info full rebuild on incremental runs (updated_at unmaintained).",
+    )
+    indexer_blob_connection_string: str | None = Field(
+        default=None,
+        validation_alias="INDEXER_BLOB_CONNECTION_STRING",
+        description="Azure Blob connection string for PDF sources.",
+    )
+    indexer_blob_container: str | None = Field(
+        default=None,
+        validation_alias="INDEXER_BLOB_CONTAINER",
+        description="Blob container for PDF sources; blob name = str(document_id).",
     )
 
     @computed_field  # type: ignore[prop-decorator]

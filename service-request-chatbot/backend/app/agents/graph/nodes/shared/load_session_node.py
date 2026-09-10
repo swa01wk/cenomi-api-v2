@@ -13,6 +13,7 @@ from uuid import UUID
 import structlog
 
 from app.agents.graph.state import ServiceRequestState
+from app.agents.services.conversation_state_service import StateLoadError
 from app.observability.decorators import trace_node
 
 log = structlog.get_logger(__name__)
@@ -67,6 +68,11 @@ async def load_session_node(state: ServiceRequestState) -> dict[str, Any]:
             )
 
         return loaded
+    except StateLoadError:
+        # Propagate: continuing with {} makes the turn look like a brand new
+        # conversation, and save_state_node would then persist that emptiness
+        # over the user's real draft. Aborting the turn is recoverable.
+        raise
     except Exception:
         log.exception("load_session_node.failed", session_id=session_id)
         return {}

@@ -18,6 +18,18 @@ from app.db.repositories.service_request_draft_repo import ServiceRequestDraftRe
 log = structlog.get_logger(__name__)
 
 
+class StateLoadError(RuntimeError):
+    """Raised when an existing draft could not be read.
+
+    Deliberately distinct from "no draft exists" so callers never mistake a
+    read failure for a fresh conversation and persist over live data.
+    """
+
+    def __init__(self, session_id: str) -> None:
+        super().__init__(f"Could not load draft state for session {session_id}")
+        self.session_id = session_id
+
+
 class ConversationStateService:
     """Load and persist draft state for a service-request conversation session."""
 
@@ -70,8 +82,16 @@ class ConversationStateService:
 
             return result
         except Exception:
+            # Do NOT degrade to {}. An empty result is indistinguishable from
+            # "this session has no draft yet", so the turn would run as a brand
+            # new conversation and ``save_checkpoint`` would then overwrite the
+            # real draft with near-empty collected_data — destroying the lease
+            # resolution and every answer the user has given. Observed live:
+            # four concurrent requests reduced a full draft to a single field.
+            # Failing the turn is recoverable (the user retries); silently
+            # wiping their request is not.
             log.exception("conversation_state_service.load.failed", session_id=str(session_id))
-            return {}
+            raise StateLoadError(str(session_id)) from None
 
     async def save_checkpoint(self, session_id: UUID, state: dict[str, Any]) -> None:
         """Upsert draft state after a completed graph turn.

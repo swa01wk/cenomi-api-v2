@@ -25,10 +25,9 @@ Agent observability models (custom internal tracing layer)
 from __future__ import annotations
 
 from datetime import datetime
+from decimal import Decimal
 from typing import Any
 from uuid import UUID, uuid4
-
-from decimal import Decimal
 
 from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, Numeric, String, Text, func
 from sqlalchemy.dialects.postgresql import JSONB
@@ -391,6 +390,9 @@ class AgentTrace(Base):
     input_message: Mapped[str | None] = mapped_column(Text(), nullable=True)
     output_message: Mapped[str | None] = mapped_column(Text(), nullable=True)
     status: Mapped[str] = mapped_column(Text(), nullable=False, index=True)
+    # Turn outcome classification for analytics:
+    # ANSWERED / PARTIAL (ungrounded or redirect) / UNANSWERED / FAILED.
+    answer_status: Mapped[str | None] = mapped_column(Text(), nullable=True, index=True)
     error_message: Mapped[str | None] = mapped_column(Text(), nullable=True)
     total_latency_ms: Mapped[int | None] = mapped_column(Integer(), nullable=True)
     total_token_count: Mapped[int | None] = mapped_column(Integer(), nullable=True)
@@ -407,33 +409,33 @@ class AgentTrace(Base):
         DateTime(timezone=True), nullable=True
     )
 
-    runs: Mapped[list["AgentRun"]] = relationship(
+    runs: Mapped[list[AgentRun]] = relationship(
         back_populates="trace",
         cascade="all, delete-orphan",
         lazy="raise",
         order_by="AgentRun.started_at",
     )
-    state_snapshots: Mapped[list["AgentStateSnapshot"]] = relationship(
+    state_snapshots: Mapped[list[AgentStateSnapshot]] = relationship(
         back_populates="trace",
         cascade="all, delete-orphan",
         lazy="raise",
     )
-    state_diffs: Mapped[list["AgentStateDiff"]] = relationship(
+    state_diffs: Mapped[list[AgentStateDiff]] = relationship(
         back_populates="trace",
         cascade="all, delete-orphan",
         lazy="raise",
     )
-    tool_calls: Mapped[list["AgentToolCall"]] = relationship(
+    tool_calls: Mapped[list[AgentToolCall]] = relationship(
         back_populates="trace",
         cascade="all, delete-orphan",
         lazy="raise",
     )
-    llm_calls: Mapped[list["AgentLLMCall"]] = relationship(
+    llm_calls: Mapped[list[AgentLLMCall]] = relationship(
         back_populates="trace",
         cascade="all, delete-orphan",
         lazy="raise",
     )
-    feedback: Mapped[list["AgentFeedback"]] = relationship(
+    feedback: Mapped[list[AgentFeedback]] = relationship(
         back_populates="trace",
         cascade="all, delete-orphan",
         lazy="raise",
@@ -483,40 +485,40 @@ class AgentRun(Base):
         DateTime(timezone=True), nullable=True
     )
 
-    trace: Mapped["AgentTrace"] = relationship(back_populates="runs", lazy="raise")
-    children: Mapped[list["AgentRun"]] = relationship(
+    trace: Mapped[AgentTrace] = relationship(back_populates="runs", lazy="raise")
+    children: Mapped[list[AgentRun]] = relationship(
         "AgentRun",
         back_populates="parent",
         lazy="raise",
         cascade="all, delete-orphan",
     )
-    parent: Mapped["AgentRun | None"] = relationship(
+    parent: Mapped[AgentRun | None] = relationship(
         "AgentRun",
         back_populates="children",
         remote_side="AgentRun.id",
         lazy="raise",
     )
-    state_snapshots: Mapped[list["AgentStateSnapshot"]] = relationship(
+    state_snapshots: Mapped[list[AgentStateSnapshot]] = relationship(
         back_populates="run",
         cascade="all, delete-orphan",
         lazy="raise",
     )
-    state_diffs: Mapped[list["AgentStateDiff"]] = relationship(
+    state_diffs: Mapped[list[AgentStateDiff]] = relationship(
         back_populates="run",
         cascade="all, delete-orphan",
         lazy="raise",
     )
-    tool_calls: Mapped[list["AgentToolCall"]] = relationship(
+    tool_calls: Mapped[list[AgentToolCall]] = relationship(
         back_populates="run",
         cascade="all, delete-orphan",
         lazy="raise",
     )
-    llm_calls: Mapped[list["AgentLLMCall"]] = relationship(
+    llm_calls: Mapped[list[AgentLLMCall]] = relationship(
         back_populates="run",
         cascade="all, delete-orphan",
         lazy="raise",
     )
-    feedback: Mapped[list["AgentFeedback"]] = relationship(
+    feedback: Mapped[list[AgentFeedback]] = relationship(
         back_populates="run",
         lazy="raise",
     )
@@ -552,10 +554,10 @@ class AgentStateSnapshot(Base):
         DateTime(timezone=True), server_default=func.now()
     )
 
-    trace: Mapped["AgentTrace"] = relationship(
+    trace: Mapped[AgentTrace] = relationship(
         back_populates="state_snapshots", lazy="raise"
     )
-    run: Mapped["AgentRun"] = relationship(
+    run: Mapped[AgentRun] = relationship(
         back_populates="state_snapshots", lazy="raise"
     )
 
@@ -585,10 +587,10 @@ class AgentStateDiff(Base):
         DateTime(timezone=True), server_default=func.now()
     )
 
-    trace: Mapped["AgentTrace"] = relationship(
+    trace: Mapped[AgentTrace] = relationship(
         back_populates="state_diffs", lazy="raise"
     )
-    run: Mapped["AgentRun"] = relationship(
+    run: Mapped[AgentRun] = relationship(
         back_populates="state_diffs", lazy="raise"
     )
 
@@ -634,10 +636,10 @@ class AgentToolCall(Base):
         DateTime(timezone=True), server_default=func.now()
     )
 
-    trace: Mapped["AgentTrace"] = relationship(
+    trace: Mapped[AgentTrace] = relationship(
         back_populates="tool_calls", lazy="raise"
     )
-    run: Mapped["AgentRun"] = relationship(
+    run: Mapped[AgentRun] = relationship(
         back_populates="tool_calls", lazy="raise"
     )
 
@@ -689,10 +691,10 @@ class AgentLLMCall(Base):
         DateTime(timezone=True), server_default=func.now()
     )
 
-    trace: Mapped["AgentTrace"] = relationship(
+    trace: Mapped[AgentTrace] = relationship(
         back_populates="llm_calls", lazy="raise"
     )
-    run: Mapped["AgentRun"] = relationship(
+    run: Mapped[AgentRun] = relationship(
         back_populates="llm_calls", lazy="raise"
     )
 
@@ -721,7 +723,21 @@ class AgentFeedback(Base):
         nullable=True,
     )
     user_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), nullable=True, index=True
+    )
+    # Rating context (007): lets analytics query feedback by session / SR
+    # without joining through agent_traces.
+    session_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), nullable=True, index=True
+    )
+    message_id: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True), nullable=True
+    )
+    # Where the rating was collected: "help_answer" | "sr_created".
+    source: Mapped[str | None] = mapped_column(Text(), nullable=True)
+    sr_id: Mapped[str | None] = mapped_column(Text(), nullable=True)
+    metadata_: Mapped[dict[str, Any]] = mapped_column(
+        "metadata", JSONB, default=dict, server_default="{}"
     )
     feedback_type: Mapped[str] = mapped_column(Text(), nullable=False)
     score: Mapped[int | None] = mapped_column(Integer(), nullable=True)
@@ -731,9 +747,41 @@ class AgentFeedback(Base):
         DateTime(timezone=True), server_default=func.now()
     )
 
-    trace: Mapped["AgentTrace"] = relationship(
+    trace: Mapped[AgentTrace] = relationship(
         back_populates="feedback", lazy="raise"
     )
-    run: Mapped["AgentRun | None"] = relationship(
+    run: Mapped[AgentRun | None] = relationship(
         back_populates="feedback", lazy="raise"
+    )
+
+
+class IndexerWatermark(Base):
+    """Per-source incremental indexing state for the RAG knowledge indexer.
+
+    One row per index ``source_type`` (help_content, mall_info, key_contact,
+    event, ...).  ``watermark_at`` is the change-detection cursor against the
+    Cenomi platform database's ``updated_at`` columns; it advances only after
+    a source's upserts all succeed.  This is the only indexer state stored in
+    the chatbot database — no Cenomi content is ever copied here.
+    """
+
+    __tablename__ = "indexer_watermarks"
+
+    source: Mapped[str] = mapped_column(Text(), primary_key=True)
+    last_run_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    watermark_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    last_status: Mapped[str] = mapped_column(Text(), nullable=False)
+    docs_upserted: Mapped[int] = mapped_column(
+        Integer(), nullable=False, server_default="0"
+    )
+    docs_deleted: Mapped[int] = mapped_column(
+        Integer(), nullable=False, server_default="0"
+    )
+    error: Mapped[str | None] = mapped_column(Text(), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
     )

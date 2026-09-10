@@ -70,18 +70,37 @@ class VertexAIEmbeddingProvider:
 
     async def embed(self, text: str) -> list[float] | None:
         """Return the embedding vector for *text*, or ``None`` on error."""
+        batch = await self.embed_batch([text])
+        return batch[0] if batch else None
+
+    async def embed_batch(self, texts: list[str]) -> list[list[float]] | None:
+        """Return one vector per text, preserving order; ``None`` on any error.
+
+        Uses the provider's native list input — ``embed_content`` accepts a
+        list of contents and returns one embedding per item in order.
+        """
+        if not texts:
+            return []
         try:
             response = await self._client.aio.models.embed_content(
                 model=self._model,
-                contents=text,
+                contents=texts,
             )
-            # google-genai returns EmbedContentResponse; extract the first embedding.
-            embedding = response.embeddings[0].values
-            return list(embedding)
+            embeddings = [list(e.values) for e in response.embeddings]
+            if len(embeddings) != len(texts):
+                log.warning(
+                    "vertex_ai_embed.length_mismatch",
+                    model=self._model,
+                    expected=len(texts),
+                    got=len(embeddings),
+                )
+                return None
+            return embeddings
         except Exception as exc:
             log.warning(
                 "vertex_ai_embed.error",
                 model=self._model,
+                batch_size=len(texts),
                 error=str(exc),
             )
             return None

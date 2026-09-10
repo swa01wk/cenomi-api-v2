@@ -14,6 +14,326 @@ on the chatbot or frontend side.
 
 ---
 
+## 2026-08-17 · Correction loops, RDD document status, Path B comments, card/message wording
+
+**Repos:** `cenomi-api-v2` (chatbot backend) + `cenomi-frontend-2` (tenant web)
+
+**Why:** A day of live testing on staging surfaced nine defects. Seven were
+reproduced locally (e2e or observability trace) before being fixed; two were
+diagnosed from a captured network payload. Grouped below by the behaviour the
+user saw, because several share a root cause.
+
+### Mechanisms introduced on this branch
+
+Two of these landed as staged work before the fixes below and had no changelog
+entry of their own; the numbered sections that follow only ever described
+repairs to them. Documenting them here so the design is on record.
+
+#### A. Deterministic mid-flow field correction ("I want to change the title")
+
+**The problem it solves.** While the bot is collecting field X, the user often
+asks to revisit field Y instead. The LLM extractor cannot be trusted with this:
+it is primed toward `active_field` and the previous assistant question, so it
+binds the correction phrase to the field being collected rather than the one the
+user named. Left to the LLM, "I want to change the title" while answering
+`description` becomes a description of "I want to change the title".
+
+**How it works.** A cheap regex detector runs *before* the extraction LLM call:
+
+| Piece | Role |
+|---|---|
+| `services/field_correction_service.py` | `FIELD_SYNONYMS` (phrase → field), `_CORRECTION_CUE_RE` (request phrasings only), `detect_correction_intent()`, `is_unspecified_correction()` |
+| `graph/state.py` | `correction_pending_field` — a **one-turn** signal, set by extraction and consumed+cleared by the very next `missing_field_node` run |
+| `graph/nodes/shared/field_extraction_node.py` | Three arms: bare redirect → skip the LLM entirely; redirect **with** an inline value ("change the title to Foo") → point the extraction hint at the target field first; unspecified ("can you fix it") → block, so the phrase is never stored as a value |
+| `graph/nodes/shared/missing_field_node.py` | Priority −1 branch builds `"Current {label}: {value}. What would you like to change it to?"` **verbatim**, with the field's own chips for enums, and refuses fields the merge layer would discard (backend-derived, or lease identifiers once `lease_id` is resolved) |
+| `graph/help_agent_graph.py` | `_route_after_validation` sends a pending correction to `missing_field` even when the draft is otherwise complete |
+
+**Why the re-ask is `verbatim`.** The prompt is built from `collected_data`,
+which at that moment still holds the *old* value. An LLM rewrite reads that as
+the field already being answered and re-confirms it instead of asking for a new
+one.
+
+**Deliberate non-goals.** The cue regex matches *request* phrasings only, never
+the bare presence of a correction verb — otherwise a legitimate answer like
+"Updated renovation title" would be read as a request to change the title and
+re-ask forever. Sections 1 and 4 below are both cases where that line was drawn
+in the wrong place.
+
+#### B. Per-session turn serialisation
+
+`services/chat_orchestration_service.py`
+
+A turn is a read-modify-write over the whole draft: `load_session` reads
+`collected_data`, the graph mutates it, `save_state` writes the entire blob
+back. Two turns for one session running concurrently therefore lose one side's
+work — last writer wins. Verified live: four parallel requests reduced a fully
+populated draft (lease, dates, title, notes, comments) to a single field. Users
+reach this by double-clicking send, a client retry, or two open tabs.
+
+An `asyncio.Lock` per `session_id` serialises them, and the DB commit happens
+**inside** the lock — the repositories only `flush()`, so a commit at request
+teardown would land after the lock released and the next queued turn would read
+pre-commit state. Holding the lock across the commit is what actually makes the
+turns sequential rather than merely non-overlapping.
+
+Scope: per-process, which fully covers a single uvicorn worker (how this service
+runs today). Across workers or replicas this needs a Postgres advisory lock on
+`session_id`; the `StateLoadError` guard in `ConversationStateService` is the
+cross-process backstop that stops a failed read from destroying data.
+
+#### C. Smaller conventions worth reusing
+
+- **`verbatim` on `response_ui`** — a node that has authored exact user-facing
+  text (concrete dates, the correction re-ask, the document-status question)
+  sets this and `response_generation_node` returns it untouched. Reach for it
+  whenever the wording carries a live value the LLM could restate wrongly.
+- **A confirmation card owns its wording** — the confirmation nodes set
+  `response_message = None` and put the text in the card. That text is now used
+  as-is rather than fed to the LLM as a hint (section 8).
+- **Direct-set chip actions bypass extraction** — chips whose handler writes
+  `collected_data` directly (`_DIRECT_SET_CHIP_ACTIONS`,
+  `_RDD_DIRECT_SET_CHIP_ACTIONS`) route straight to `merge_state`. Re-running
+  extraction over a chip label finds nothing, and the correction re-arm then
+  reads "field has a value + nothing extracted" as a failed correction and
+  re-asks what the user just clicked.
+- **Display flags must not double as contract flags** — `has_comments` drove
+  both the card and the API payload, so hiding a row would have silently changed
+  the request shape. Split into `payload_has_comments` (section 7).
+
+### 1. Notes and comments re-asked forever
+
+**Symptom:** the bot asked for notes, the user answered, and the same question
+came straight back — for both notes and comments. Title, dates and inspector
+were unaffected.
+
+**Cause:** `is_unspecified_correction` classifies any message carrying a
+correction verb but naming no field as an "I want to change something" request.
+That path returns an empty extraction *by design*, so the answer was discarded
+and the field re-asked. Notes and comments are the only fields users answer
+with sentences, and handover prose routinely carries those verbs — "please
+update the flooring before handover", "we need to change the shutters".
+Retyping failed identically, so the flow could never move on.
+
+- `graph/nodes/shared/field_extraction_node.py` — skip the unspecified-correction
+  path while a free-text field (`title`, `description`, `notes`, `comments`) is
+  being collected. No field is named in those messages, so there is nothing to
+  redirect to; while one of these is active the message **is** the value.
+- `services/field_correction_service.py::_find_matched_field` — match synonyms on
+  whole words. The substring search read `end` out of "weekend", `start` out of
+  "restart", `note` out of "denote" and `comment` out of "commentary", turning
+  ordinary sentences into redirects to fields the user never mentioned.
+
+### 2. Corrections silently swallowed in FM and RDD review
+
+**Symptom:** "i want to edit the fitout start date" in RDD review answered with
+"I see you want to change the fitout start date to *\<the current value\>*",
+then every date typed afterwards was discarded and the question repeated.
+
+**Cause:** every question saves `status = WAITING_FOR_USER`, so that value is
+present on the *next* turn — the one carrying the reply. `_route_after_rdd_entry`
+short-circuited on it as its **first** check, sending both correction requests
+and answers to `response_generation`, which cannot write `collected_data`. The
+LLM improvised from the values already there. Confirmed from the trace: the
+turn never reached `field_extraction`.
+
+- `graph/help_agent_graph.py` — extracted `_waiting_short_circuit_target` and
+  applied it to the handover, FM and RDD entry routes. A stale WAITING status
+  now still reaches `field_extraction` when the message is a correction request
+  or an answer to the `active_field`; a genuine idle wait (the MM upload offer,
+  which leaves `active_field` None) short-circuits as before. Only the CREATE_SR
+  route had this guard; FM and RDD never did.
+- `graph/help_agent_graph.py` — reordered `_route_after_rdd_entry` so
+  `confirmation_status` / chip actions / `rdd_action` are checked **before** the
+  stale status, matching the comment FM and handover already carried. This also
+  fixed a second latent bug: a `CONFIRMED` set this turn was being shadowed by
+  the previous turn's persisted status.
+
+### 3. Path B corrections targeted fields Path B does not collect
+
+**Symptom:** in Already Trading, "i want to edit the actual handover date"
+answered "What would you like to **set** as the Actual Handover Date?" — *set*,
+not *change*, because the field had no value: it is not part of Path B.
+
+**Cause:** the synonym table is written for the standard handover path. Path B
+records the same milestones under `actual_shop_handover_date`,
+`actual_fitout_start_date` and `actual_fitout_end_date`, so three of its four
+dates resolved to the wrong key and the edit went nowhere.
+
+- `services/field_correction_service.py` — `_STAGE_SYNONYM_OVERRIDES`, layered
+  over the base table for `CREATE_HANDED_OVER_SR` only. Every other stage
+  resolves exactly as before.
+- `graph/nodes/shared/field_extraction_node.py`, `graph/help_agent_graph.py` —
+  thread `workflow_stage` into `detect_correction_intent` /
+  `is_unspecified_correction`.
+
+### 4. "guidline link" matched nothing
+
+**Symptom:** "i want to edit guidline link" was answered with a request for the
+actual handover date.
+
+**Cause:** the misspelling (dropped `e`) and the bare plural `guidelines` were
+both absent from the table, so the request fell through to the
+unspecified-correction path and re-armed whichever field was active.
+
+- `services/field_correction_service.py::_phrase_pattern` — plurals are now
+  general rather than hand-listed: each synonym word matches its plural, so
+  `guideline link` covers `guidelines link`, `guideline links` and
+  `guidelines links`. Hand-listing both forms is how the `guidelines` plural
+  went missing in the first place; this also fixes `notes`/`note`,
+  `comments`/`comment` and `end dates` for free.
+- Spelling variants added for `guideLineLink` only (`guidline`, `guide line`).
+
+### 5. RDD PM was never asked the Meeting Report outcome
+
+**Cause:** `get_missing_fields` gated `document_status` on `rdd_upload_doc_type`
+— a field retired when uploads moved to the `document_requirement` card — so the
+condition was dead. The chips, the entry-node handler, the card display and the
+payload consumer all already existed and were simply unreachable.
+
+- `schemas/handover_schema.py` — `document_status` is now a plain `RDD_REVIEW`
+  required field, positioned between `guideLineLink` and the three dates. It
+  needs no condition: before any upload `missing_field_node` returns the
+  document card first, and after a *Rejected* upload `merge_state_node` has
+  already written `DISAPPROVED`. What remains — a Meeting Report with no status
+  picked — is exactly what the chips are for. Removed the dead conditional and
+  the now-redundant `ALLOWED_EXTRACTED_FIELDS` entry.
+- `graph/help_agent_graph.py` — `_RDD_DIRECT_SET_CHIP_ACTIONS` routes the two
+  status chips straight to `merge_state`, so extraction's correction re-arm
+  cannot re-ask the question the user just clicked.
+- `graph/nodes/shared/missing_field_node.py` — the question text is built
+  deterministically and marked `verbatim`. `field_questions` holds an
+  instruction *about* asking ("Ask the RDD Project Manager for…"), which only
+  becomes a real question if the LLM rewrite lands; when it did not, the chips
+  rendered with nothing above them.
+- `graph/nodes/shared/missing_field_node.py` — correction chips for
+  `document_status`, `inspection_done_by` and `already_handovered` now carry the
+  same `action` as their first-ask twins. Without it a correction click sent a
+  bare label through LLM re-extraction, where the re-arm re-asks the question
+  just answered.
+
+### 6. Already Trading never asked for comments
+
+**Cause:** `merge_state_node` filled the generated "No additional comments
+provided for lease X." sentence while `comments` was still `None` — the exact
+state `_route_after_validation`'s proactive-ask branch keys on — so the question
+was consumed before it could be asked and every Path B SR shipped with the
+placeholder.
+
+- `graph/nodes/shared/merge_state_node.py` — dropped `CREATE_HANDED_OVER_SR`
+  from the FM/RDD auto-satisfy block and moved its default to the CONFIRMED
+  path, scoped per stage so Path B does not get invented `description`/`notes`
+  it has no payload fields for.
+
+### 7. Fitout confirmation cards showed a Comments row nobody fills
+
+**Cause:** `_route_after_validation` excludes fitout agents from proactive
+optional asking, so the row could only ever render blank.
+
+- `schemas/fitout_confirm_schema.py` — `has_comments: False` for FOS and END
+  (TRADING already was). Split out `payload_has_comments` so the display
+  decision cannot silently alter the API contract — FOS/FOE still send
+  `comments` unchanged.
+- `graph/nodes/fitout_confirm/fitout_confirm_payload_builder_node.py` — reads the
+  new key.
+- `graph/nodes/handover/preview_node.py` — `_hidden_preview_keys` drops
+  `comments` from the SR preview card for the three fitout sub-categories, on
+  both the synced-state and live-GET branches.
+
+### 8. Wording corrections
+
+- `graph/nodes/shared/missing_field_node.py` — `_RADIO_PHRASING`. The three
+  milestone fields read as nouns, so one shared label in "Has {label} started?"
+  produced "Has fitout start started?" and "Has fitout complete started?" —
+  the second doubly wrong, since completion is reached, not started. Each
+  milestone now owns its question, subject, affirmed/negated verb and the two
+  mid-sentence clauses.
+- `graph/nodes/fitout_confirm/fitout_confirm_api_submission_node.py` — the create
+  message no longer promises "It will be routed to the approver for review" on
+  every submit. All three fitout confirmations are single-level workflows whose
+  only approver is the role that raises them, so the platform approves them in
+  the same transaction (Path B1 in the frontend spec). The message follows the
+  **status the platform returned**; the caller's role is only a fallback when
+  the response carries no status.
+- `graph/nodes/shared/response_generation_node.py` — a confirmation card keeps
+  its own wording. The confirmation nodes author their card text and set
+  `response_message = None`; with no hint to rewrite, the LLM improvised from
+  conversation history. Observed on an RDD card as "The fitout end date is
+  currently set to 24/08/2026. Please confirm the new fitout end date you'd like
+  to set." — the trace showed `merge_state` had already written 25/08 and the
+  card below it showed the new value. Only the sentence was wrong, but it read
+  as a loop.
+
+### 9. Reopened Already Trading SR lost two dates
+
+**Cause:** `payload_to_collected_data` never mapped the Path B keys the create
+payload sends, so the preview card skipped them as empty.
+
+- `services/review_decorations_service.py` — added `actual_shop_handover_date`,
+  `actual_fitout_end_date`, `already_handovered` (the discriminator
+  `HandoverAgenticBridge` reads to pick the HANDED_OVER form skeleton) and
+  `notes`.
+
+### Frontend (`cenomi-frontend-2`)
+
+**Handover Meeting Report section missing until a manual reload.** Settled with
+a captured network payload: the first fetch and the post-refresh fetch were
+**byte-identical**, both containing the report attachment. The data was never
+late — the frontend refused to look at it.
+
+- `libs/ui-web/src/lib/components/serviceRequestForms/ServiceReqForms.tsx` — the
+  `meetingReports` memo depended on `[!!sr_attachments, serviceCategory]`. The
+  boolean only changes when the list flips between null and non-null, so
+  replacing one array with another — exactly what a soft refresh does — left
+  `meetingReports` frozen. On RDD review the page already held the MM/FM
+  attachments, so the boolean never flipped when the Meeting Report arrived.
+  Now depends on `sr_attachments` itself, plus `subServiceCategory`, which
+  selects the document type and was missing from the list too.
+
+  > `[!!something]` as a dependency will do this anywhere it appears — worth a
+  > sweep of that file.
+
+**Chips rendered with no question above them.**
+
+- `libs/ui-web/src/lib/components/serviceRequestChatbot/useServiceRequestChat.ts`
+  + new `silentTurnMessage.ts` — a *silent* turn (the debounced form-bridge
+  patch) published its chips but returned before appending the assistant bubble.
+  When the backend answered a background patch by asking the next question, the
+  options rendered bare. The bubble is now shown when the turn actually asked
+  something (a `text_question` naming a field) and that wording is not already
+  the last thing on screen; genuine no-op patches stay silent.
+
+### Tests
+
+Backend — 7 new files, 4 updated:
+`tests/e2e/test_notes_comments_prose_e2e.py`,
+`tests/e2e/test_comments_and_rdd_status_e2e.py`,
+`tests/e2e/test_handed_over_correction_e2e.py`,
+`tests/unit/test_fitout_and_handed_over_cards.py`,
+`tests/unit/test_review_stage_correction_routing.py`,
+`tests/unit/test_response_generation_confirmation_card.py`,
+`tests/unit/test_fitout_confirm_submission_message.py`;
+plus additions to `test_field_extraction.py` and
+`test_field_correction_service.py`, and updated expectations in
+`test_handover_schema.py`, `test_rdd_doc_type_status.py`,
+`test_rdd_workflow_order.py` and `test_missing_field_node.py` where they pinned
+the retired `rdd_upload_doc_type` mechanism or the old chip shape.
+
+Frontend — `silentTurnMessage.spec.ts` (8 tests).
+
+Eval — S236–S244 (one per defect) plus S245–S246 for the correction
+mechanism itself: the bare redirect arm and the unspecified-request guard.
+S17 already covered a correction carrying an inline value, which resolves
+through normal extraction. Grouped as `EVAL_2026_08_17`, runnable via
+`run_eval.py --tier aug17`. See `tests/eval/scenarios.py`.
+
+**Suite status:** backend 2035 passed / 58 failed — the same 58 that were
+failing before this work began (RDD workflow ordering, validation service,
+workflow config, several e2e lifecycles), and 2 of the original 60 were fixed
+along the way. Frontend `ui-web` 219 passed / 8 failed, unchanged from baseline.
+The pre-existing failures are unrelated to this session and remain open.
+
+---
+
 ## 2026-08-07 · RDD final approve: remove user_action, fix success message to reflect tenant-acceptance step
 
 **Repo:** `cenomi-api-v2` (chatbot backend)

@@ -8,7 +8,7 @@ Foundry in compatibility mode).  Mirrors the ``LLMGateway`` pattern.
 from __future__ import annotations
 
 import structlog
-from openai import AsyncOpenAI, APIError
+from openai import APIError, AsyncOpenAI
 
 log = structlog.get_logger(__name__)
 
@@ -45,20 +45,35 @@ class OpenAIEmbeddingProvider:
 
     async def embed(self, text: str) -> list[float] | None:
         """Return the embedding vector for *text*, or ``None`` on error."""
+        batch = await self.embed_batch([text])
+        return batch[0] if batch else None
+
+    async def embed_batch(self, texts: list[str]) -> list[list[float]] | None:
+        """Return one vector per text, preserving order; ``None`` on any error."""
+        if not texts:
+            return []
         try:
             response = await self._client.embeddings.create(
-                input=text,
+                input=texts,
                 model=self._model,
             )
-            return response.data[0].embedding
+            # The API may return items out of order; sort by index to be safe.
+            ordered = sorted(response.data, key=lambda d: d.index)
+            return [d.embedding for d in ordered]
         except APIError as exc:
             log.warning(
                 "openai_embed.api_error",
                 model=self._model,
+                batch_size=len(texts),
                 status_code=getattr(exc, "status_code", None),
                 error=str(exc),
             )
             return None
         except Exception as exc:
-            log.warning("openai_embed.unexpected_error", model=self._model, error=str(exc))
+            log.warning(
+                "openai_embed.unexpected_error",
+                model=self._model,
+                batch_size=len(texts),
+                error=str(exc),
+            )
             return None

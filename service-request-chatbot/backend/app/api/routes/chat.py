@@ -19,13 +19,12 @@ claim in production.
 
 from __future__ import annotations
 
-import logging
 from typing import Any
 from uuid import UUID, uuid4
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from app.core.security import get_auth_context
 from app.db.session import DbSession
@@ -35,7 +34,6 @@ from app.services.chat_orchestration_service import (
     user_id_to_uuid,
 )
 from app.types.chat import AuthContext
-from fastapi import Depends
 
 log = structlog.get_logger(__name__)
 
@@ -53,6 +51,38 @@ service_request_router = APIRouter()
 # ---------------------------------------------------------------------------
 # Request / Response models — POST /api/chat/service-request
 # ---------------------------------------------------------------------------
+
+
+class ActiveNotificationRef(BaseModel):
+    """Notification the user tapped "Open" on — carries the SR reference.
+
+    ``id`` is the platform SR id (``text_content.id`` on the notification
+    payload), NOT the notification row id.  ``sub_category`` lets the backend
+    seed the correct agent up front; when absent or unmapped, sr_status_sync
+    re-derives it from the SR payload.
+    """
+
+    id: str = Field(description="Service request id from the notification payload.")
+    sub_category: str | None = Field(
+        default=None,
+        description="SR sub-category, e.g. HANDOVER / FIT_OUT_CONFIRM_FOS.",
+        examples=["HANDOVER"],
+    )
+
+    @field_validator("id", mode="before")
+    @classmethod
+    def _coerce_id(cls, value: Any) -> str:
+        return str(value).strip()
+
+
+class NotificationListMoreRef(BaseModel):
+    """View-more paging for one notification group (TC-3662)."""
+
+    sub_category: str = Field(description="Group to page, e.g. HANDOVER.")
+    page: int = Field(ge=1, description="1-based page to fetch.")
+    unread: bool | None = Field(
+        default=None, description="Carry the list's unread filter forward."
+    )
 
 
 class ServiceRequestChatRequest(BaseModel):
@@ -98,6 +128,19 @@ class ServiceRequestChatRequest(BaseModel):
         default=None,
         description="Inline field edits submitted from the confirmation card.",
     )
+    language: str | None = Field(
+        default=None,
+        description="Response language hint: 'en' or 'ar'.",
+    )
+    context: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Page context from the widget: current_url_pattern, help_category, "
+            "help_subcategory, property_id, mall_name. The frontend has always "
+            "sent this; it was previously dropped because the field was not "
+            "declared here."
+        ),
+    )
     sr_id: str | None = Field(
         default=None,
         description=(
@@ -106,6 +149,55 @@ class ServiceRequestChatRequest(BaseModel):
         ),
         examples=["SR-2026-00741"],
     )
+    viewing_notification_id: str | None = Field(
+        default=None,
+        description=(
+            "Notification ID for the page the user is currently viewing. "
+            "Enables deictic chat ('explain this', 'mark this as read') without repeating the ID. "
+            "UI will send this from the notifications detail page."
+        ),
+        examples=["NTF-000012"],
+    )
+    viewing_service_request_id: str | None = Field(
+        default=None,
+        description=(
+            "Service request ID for the page the user is currently viewing. "
+            "Often sent together with viewing_notification_id when a notification wraps an SR."
+        ),
+        examples=["11711"],
+    )
+    viewing_notification: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Optional notification snapshot (id, title, body, related_sr_id, status). "
+            "Used until a platform notifications API is wired; the UI may send this with the turn."
+        ),
+    )
+    active_notification_id: ActiveNotificationRef | None = Field(
+        default=None,
+        description=(
+            "Sent when the user taps Open on a notification. Seeds the SR id "
+            "(and agent, when sub_category maps) and routes straight into "
+            "sr_status_sync — the OPEN_NOTIFICATION flow. A bare string is "
+            "accepted as the SR id (reconciled-spec fallback)."
+        ),
+    )
+
+    notification_list_more: NotificationListMoreRef | None = Field(
+        default=None,
+        description=(
+            "Sent when the user taps View more on a notification group — "
+            "fetches the next page of that group as a fresh list card."
+        ),
+    )
+
+    @field_validator("active_notification_id", mode="before")
+    @classmethod
+    def _coerce_notification_ref(cls, value: Any) -> Any:
+        """Reconciled-spec fallback: a bare string is the SR id."""
+        if isinstance(value, str) and value.strip():
+            return {"id": value.strip()}
+        return value
 
 
 class ChatStatePayload(BaseModel):
@@ -123,6 +215,22 @@ class ChatStatePayload(BaseModel):
         description=(
             "Outcome of a platform-mutating turn: 'success' after SUBMITTED/COMPLETED, "
             "'failed' after FAILED, null for field-collection / waiting turns."
+        ),
+    )
+    confirmation_status: str | None = Field(
+        default=None,
+        description=(
+            "HITL confirmation marker. CANCEL_PENDING means the agent asked "
+            "are-you-sure before cancelling; the UI should show Yes/No."
+        ),
+    )
+    guided_tour: str | None = Field(
+        default=None,
+        description=(
+            "'guided' when the user asked the assistant to walk them through "
+            "the form, 'open' when they asked to keep it editable, null before "
+            "they have chosen. The assistant asks the same questions either "
+            "way; this only governs whether the form is locked and spotlighted."
         ),
     )
 
@@ -162,6 +270,13 @@ class ServiceRequestChatResponse(BaseModel):
         default=None,
         description="Observability trace ID for this turn.",
     )
+    message_id: str | None = Field(
+        default=None,
+        description=(
+            "Persisted assistant message UUID (chat_messages.id).  Additive "
+            "field: pass it together with trace_id to POST /chat/feedback."
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -195,10 +310,21 @@ async def post_service_request_chat(
     # OR a session_id is present (silent refresh — e.g. after a document upload
     # the FE calls refreshAfterUpload with an empty message so the graph re-emits
     # the current stage's UI with the new document row).
-    if not body.message and not body.sr_id and not body.action and not body.session_id:
+    if (
+        not body.message
+        and not body.sr_id
+        and not body.action
+        and not body.session_id
+        and not body.viewing_notification_id
+        and not body.active_notification_id
+        and not body.notification_list_more
+    ):
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="Either 'message', 'sr_id', 'action', or 'session_id' must be provided.",
+            detail=(
+                "Either 'message', 'sr_id', 'action', 'session_id', "
+                "'viewing_notification_id', or 'active_notification_id' must be provided."
+            ),
         )
 
     # Resolve user_id: JWT subject_id takes precedence over request body user_id
@@ -231,6 +357,21 @@ async def post_service_request_chat(
             corrected_fields=body.corrected_fields,
             auth_context=auth,
             sr_id=body.sr_id,
+            language=body.language,
+            msp_context=body.context,
+            viewing_notification_id=body.viewing_notification_id,
+            viewing_service_request_id=body.viewing_service_request_id,
+            viewing_notification=body.viewing_notification,
+            active_notification_id=(
+                body.active_notification_id.model_dump()
+                if body.active_notification_id
+                else None
+            ),
+            notification_list_more=(
+                body.notification_list_more.model_dump()
+                if body.notification_list_more
+                else None
+            ),
         )
     except Exception as exc:
         bound_log.exception("api.chat.service_request.unhandled_error", error=str(exc))
@@ -255,8 +396,13 @@ async def post_service_request_chat(
             fm_status=result.state.fm_status,
             sr_id=result.state.sr_id,
             action_result=result.state.action_result,
+            confirmation_status=result.state.confirmation_status,
+            guided_tour=result.state.guided_tour,
         ),
         trace_id=str(result.trace_id) if result.trace_id else None,
+        message_id=(
+            str(result.assistant_message_id) if result.assistant_message_id else None
+        ),
     )
 
 

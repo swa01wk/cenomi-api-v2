@@ -336,6 +336,8 @@ def ddmmyyyy_to_iso(value: Any) -> str:
 
 def get_required_fields(stage_name: str) -> tuple[str, ...]:
     """Return required fields for *stage_name*."""
+    if stage_name == "CREATE_SR":
+        stage_name = "CREATE_WORK_PERMIT"
     stage = STAGE_REGISTRY.get(stage_name)
     if not stage:
         raise KeyError(f"Unknown work permit stage '{stage_name}'")

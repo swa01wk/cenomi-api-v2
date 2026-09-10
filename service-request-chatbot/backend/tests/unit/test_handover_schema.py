@@ -96,8 +96,9 @@ class TestCreateSRStage:
         "title",
         "description",
         "startDate",
-        "endDate",
         "inspectionTime",    # Fix 2: optional HH:MM time field
+        "endDate",
+        "inspectionEndTime",  # optional HH:MM — end of the inspection window
         "inspection_done_by",
         "notes",
         "comments",          # Fix 4: comments re-added as required (optional value allowed)
@@ -160,7 +161,10 @@ class TestFMReviewStage:
 class TestRDDReviewStage:
     _EXPECTED_FIELDS = (
         "guideLineLink",
-        # document_status is conditional (Meeting Report only) — not in required_fields
+        # Meeting Report outcome — asked with Approve / Approve-with-changes chips
+        # once that report is uploaded. rdd_upload_doc_type is gone: uploads moved
+        # to the document_requirement card, which shows all types at once.
+        "document_status",
         # trading_date intentionally excluded — auto-computed as fitout_end_date + 8 days
         "actual_handover_date",
         "fitout_start_date",
@@ -179,8 +183,13 @@ class TestRDDReviewStage:
     def test_required_fields_complete(self) -> None:
         assert set(RDD_REVIEW_STAGE.required_fields) == set(self._EXPECTED_FIELDS)
 
-    def test_document_status_not_unconditionally_required(self) -> None:
-        assert "document_status" not in RDD_REVIEW_STAGE.required_fields
+    def test_document_status_asked_after_guideline_and_before_dates(self) -> None:
+        """The Meeting Report outcome is collected between the guideline link
+        and the three handover dates — see get_missing_fields' docstring for why
+        it needs no condition here."""
+        fields = RDD_REVIEW_STAGE.required_fields
+        assert fields.index("document_status") == fields.index("guideLineLink") + 1
+        assert fields.index("document_status") < fields.index("actual_handover_date")
 
     def test_required_documents_complete(self) -> None:
         assert set(RDD_REVIEW_STAGE.required_documents) == set(self._EXPECTED_DOCS)
@@ -441,6 +450,7 @@ class TestServiceRequestGraphState:
         "conversation_history",
         # Data collection
         "collected_data", "extracted_fields", "missing_fields", "active_field",
+        "correction_pending_field",
         # Lease
         "lease_matches", "selected_lease",
         # Documents
@@ -453,12 +463,17 @@ class TestServiceRequestGraphState:
         "response_message", "response_ui", "response_decorations",
         # FAQ RAG citations
         "faq_sources",
+        # Turn outcome classification (analytics)
+        "answer_status",
         # UI-layer overrides (not persisted)
         "action_override", "corrected_fields",
         # Runtime-only services (not serialised)
         "trace_manager", "conversation_state_service", "auth_context",
         # MSP Platform integration (injected by MSP adapter; absent on SR turns)
         "language", "msp_context",
+        # Page viewing context (per-turn, never persisted)
+        "viewing_notification_id", "viewing_service_request_id", "viewing_notification",
+        "notification_list_more", "active_notification_id",
     }
 
     def test_all_keys_declared(self) -> None:

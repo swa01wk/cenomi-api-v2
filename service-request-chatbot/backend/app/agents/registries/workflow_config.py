@@ -76,6 +76,11 @@ class WorkflowConfig:
         Supervisor intents that activate this agent.  Used to derive
         ``_SR_ACTION_INTENTS`` in ``help_agent_graph.py`` and ``ALL_INTENTS``
         in ``help_agent_schema.py``.
+    guided_tour_gate:
+        Whether this workflow offers the guided-tour choice before its first
+        field question (see ``guided_tour_service``).  Defaults to True so a
+        newly registered workflow inherits it; set False for a flow with
+        nothing to collect, where the question would be noise.
     """
 
     agent_name: str
@@ -89,6 +94,7 @@ class WorkflowConfig:
     auto_generated_fields: frozenset[str]
     lease_trigger_fields: tuple[str, ...]
     action_intents: frozenset[str]
+    guided_tour_gate: bool = True
 
 
 # ---------------------------------------------------------------------------

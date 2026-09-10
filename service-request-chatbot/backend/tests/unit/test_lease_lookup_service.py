@@ -108,6 +108,21 @@ class TestLeaseRecord:
         assert dumped["lease_code"] == _UA_RECORD["lease_code"]
         assert dumped["lease_id"] == _UA_RECORD["lease_id"]
 
+    def test_maps_actual_shop_handover_to_both_handover_fields(self) -> None:
+        payload = dict(_UA_RECORD)
+        payload["actual_shop_handover_date"] = "2026-03-15"
+        record = LeaseRecord.model_validate(payload)
+        assert record.actual_shop_handover_date == "2026-03-15"
+        assert record.actual_handover_date == "2026-03-15"
+
+    def test_maps_actual_handover_alias(self) -> None:
+        payload = dict(_UA_RECORD)
+        payload["actual_handover_date"] = "2026-03-15"
+        record = LeaseRecord.model_validate(payload)
+        assert record.actual_handover_date == "2026-03-15"
+        assert record.actual_shop_handover_date == "2026-03-15"
+
+
 
 # ---------------------------------------------------------------------------
 # TestLeaseLookupQuery
@@ -756,14 +771,21 @@ class TestHttpLeaseLookupParamBuilding:
         params = svc._build_params(LeaseLookupQuery(brand="Nike", mall="Riyadh Park"))
         assert params == {"brand": "Nike", "mall": "Riyadh Park"}
 
-    def test_all_params(self) -> None:
+    def test_a_lease_code_travels_without_the_other_identifiers(self) -> None:
+        # The platform ANDs every identifier onto the code, and the code is
+        # already unique, so brand/mall/company can only narrow it wrongly.
+        # Live case: "Brand Taxi Mall Rental" was split into brand='Brand Taxi'
+        # and mall='Mall Rental', and the bogus mall filtered the lease away.
         svc = HttpLeaseLookupService.__new__(HttpLeaseLookupService)
         params = svc._build_params(
             LeaseLookupQuery(lease_code="t0001", brand="Nike", mall="Riyadh Park")
         )
-        assert "lease_code" in params
-        assert "brand" in params
-        assert "mall" in params
+        assert params == {"lease_code": "t0001"}
+
+    def test_brand_and_mall_still_narrow_a_codeless_search(self) -> None:
+        svc = HttpLeaseLookupService.__new__(HttpLeaseLookupService)
+        params = svc._build_params(LeaseLookupQuery(brand="Nike", mall="Riyadh Park"))
+        assert params == {"brand": "Nike", "mall": "Riyadh Park"}
 
     def test_none_fields_excluded(self) -> None:
         svc = HttpLeaseLookupService.__new__(HttpLeaseLookupService)

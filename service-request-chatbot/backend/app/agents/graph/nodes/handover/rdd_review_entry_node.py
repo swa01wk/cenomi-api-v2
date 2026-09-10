@@ -126,9 +126,17 @@ async def rdd_review_entry_node(state: ServiceRequestState) -> dict[str, Any]:
         return {"backend_refs": backend_refs}
 
     if action_override == "approve_rdd_final":
+        # Confirms in the same turn. The reviewer reached this chip by reading
+        # the submitted report's own card and tapping Final Approve on it —
+        # there is nothing further to review, and routing through another
+        # confirmation card re-rendered the *submit* card instead of approving.
+        #
+        # It only ever appeared to approve directly because the CONFIRMED flag
+        # from the preceding submit was still in state; once that was retired
+        # (rdd_api_submission_node), this chip had to carry its own.
         log.info("rdd_review_entry.action_final_approve")
         backend_refs["rdd_action"] = "final_approve"
-        return {"backend_refs": backend_refs}
+        return {"backend_refs": backend_refs, "confirmation_status": "CONFIRMED"}
 
     # Type-first RDD upload selection chips.
     _DOC_TYPE_ACTIONS: dict[str, tuple[str, str | None]] = {

@@ -22,9 +22,15 @@ from typing import Any
 
 import structlog
 
+from app.agents.graph.nodes.shared.sr_status_sync_node import (
+    _FITOUT_CONFIRM_SUB_CATEGORIES,
+)
 from app.agents.graph.state import ServiceRequestState
 from app.agents.prompts.response_generation_prompt import FIELD_LABELS
-from app.agents.services.display_formatters import format_field_display_value
+from app.agents.services.display_formatters import (
+    format_enum_label,
+    format_field_display_value,
+)
 from app.agents.services.service_request_api_service import get_service_request_api_service
 from app.observability.decorators import trace_node
 
@@ -112,35 +118,107 @@ _PLATFORM_FIELD_ORDER: list[tuple[str, str]] = [
 
 
 def _field(key: str, label: str, value: Any) -> dict[str, Any]:
-    """Build a single preview field dict with user-friendly display values."""
+    """Build a single preview field dict with user-friendly display values.
+
+    ``value`` stays machine-readable — the FE bridge writes it straight into
+    Formik, and the HANDOVER ↔ HANDED_OVER swap observer matches literal codes
+    like ``initiate_handover``. When a code has a human label, it is published
+    alongside as ``display`` and the card renders that instead; consumers that
+    only know ``value`` are unaffected.
+    """
     if value is None or value == "" or value == []:
-        display = None
-    else:
-        formatted = format_field_display_value(key, value)
-        display = str(formatted) if formatted is not None else None
-    return {"key": key, "label": label, "value": display}
+        return {"key": key, "label": label, "value": None}
+    formatted = format_field_display_value(key, value)
+    raw = str(formatted) if formatted is not None else None
+    row: dict[str, Any] = {"key": key, "label": label, "value": raw}
+    if raw is not None:
+        humanized = str(format_enum_label(raw))
+        if humanized != raw:
+            row["display"] = humanized
+    return row
 
 
-def _fields_from_collected(collected_data: dict[str, Any]) -> list[dict[str, Any]]:
+def _hidden_preview_keys(state: ServiceRequestState) -> frozenset[str]:
+    """Keys to omit from the preview card for the current SR type.
+
+    The fitout confirmation SRs (FOS / FOE / Trading) never collect ``comments``
+    — ``_route_after_validation`` excludes fitout agents from proactive optional
+    asking — so a Comments row on their card can only ever show a value the user
+    was never given a chance to set.
+    """
+    sub_category = str(state.get("sub_category") or "")
+    if sub_category in _FITOUT_CONFIRM_SUB_CATEGORIES:
+        return frozenset({"comments"})
+    return frozenset()
+
+
+def _fields_from_collected(
+    collected_data: dict[str, Any],
+    hidden_keys: frozenset[str] = frozenset(),
+) -> list[dict[str, Any]]:
     """Build ordered field rows from draft collected_data.
 
-    Only fields explicitly listed in ``_PREVIEW_FIELD_ORDER`` are included.
+    Only fields explicitly listed in ``_PREVIEW_FIELD_ORDER`` are included, minus
+    anything in *hidden_keys* (see ``_hidden_preview_keys``).
     Internal/system fields such as ``brand_id``, ``lease_id``, ``contract_id``,
     ``property_id``, ``tenant_profile_id``, etc. that live in ``collected_data``
     but are not meaningful to the user are intentionally excluded.
+
+    ``startDate`` / ``endDate`` are emitted as UTC ISO
+    (``YYYY-MM-DDTHH:MM:SS.mmmZ``) plus companion ``*LT`` display strings so
+    the FE DateTimePicker hydrates the user's inspection time instead of
+    defaulting date-only values to 9:00 AM.
     """
     rows: list[dict[str, Any]] = []
+    from app.agents.services.payload_builder_service import resolve_start_end_hhmm
+
+    start_hhmm, end_hhmm = resolve_start_end_hhmm(collected_data)
+    times = {"startDate": start_hhmm, "endDate": end_hhmm}
     for key, label in _PREVIEW_FIELD_ORDER:
+        if key in hidden_keys:
+            continue
         val = collected_data.get(key)
-        if val is not None and val != "" and val != []:
+        if val is None or val == "" or val == []:
+            continue
+        if key in ("startDate", "endDate"):
+            utc_iso, lt_display = _inspection_preview_pair(
+                val, collected_data.get(f"{key}LT"), times.get(key)
+            )
+            rows.append({"key": key, "label": label, "value": utc_iso})
+            if lt_display:
+                rows.append(
+                    {"key": f"{key}LT", "label": f"{label} LT", "value": lt_display}
+                )
+        else:
             rows.append(_field(key, label, val))
     return rows
 
 
-def _fields_from_platform(payload: dict[str, Any]) -> list[dict[str, Any]]:
+def _inspection_preview_pair(
+    iso_or_date: Any,
+    existing_lt: Any,
+    inspection_time: str | None,
+) -> tuple[str, str]:
+    """Return ``(utc_iso, lt_display)`` for draft_preview start/end dates."""
+    from app.agents.services.payload_builder_service import format_inspection_datetime_pair
+
+    utc_iso, lt_display = format_inspection_datetime_pair(
+        iso_or_date, existing_lt, inspection_time=inspection_time
+    )
+    if utc_iso:
+        return utc_iso, lt_display
+    return str(iso_or_date), lt_display or ("" if existing_lt is None else str(existing_lt))
+
+
+def _fields_from_platform(
+    payload: dict[str, Any],
+    hidden_keys: frozenset[str] = frozenset(),
+) -> list[dict[str, Any]]:
     """Build ordered field rows from a platform SR payload blob."""
     rows: list[dict[str, Any]] = []
     for key, label in _PLATFORM_FIELD_ORDER:
+        if key in hidden_keys:
+            continue
         val = payload.get(key)
         if val is not None and val != "":
             rows.append(_field(key, label, val))
@@ -190,13 +268,14 @@ async def preview_node(state: ServiceRequestState) -> dict[str, Any]:
     backend_refs: dict[str, Any] = state.get("backend_refs") or {}
     sr_id: str | None = backend_refs.get("sr_id")
     collected_data: dict[str, Any] = state.get("collected_data") or {}
+    hidden: frozenset[str] = _hidden_preview_keys(state)
 
     if sr_id:
         # ── Submitted SR — use synced state when available, else platform GET ──
         platform_status = backend_refs.get("platform_sr_status")
         if platform_status is not None:
             log.info("preview_node.using_synced_state", sr_id=sr_id)
-            fields = _fields_from_collected(collected_data)
+            fields = _fields_from_collected(collected_data, hidden)
             ops_row = _ops_field(backend_refs.get("sr_operations") or [])
             if ops_row:
                 fields.append(ops_row)
@@ -209,10 +288,15 @@ async def preview_node(state: ServiceRequestState) -> dict[str, Any]:
                 "isSubmitted": True,
                 "fields": fields,
             }
+            # Humanize before the LLM sees it: the model quotes this instruction
+            # almost verbatim, so a raw code here reaches the user as
+            # "with the status 'REPORT_SUBMITTED'". response_ui.status stays raw
+            # because the FE badge maps the code, not the label.
             response_message = (
                 f"Show the user the service request (ID: {sr_id}) "
-                f"with status '{platform_status}'. "
-                "The structured card is being shown; give a very short 1-sentence intro."
+                f"with status '{format_enum_label(platform_status)}'. "
+                "The structured card is being shown; give a very short 1-sentence intro. "
+                "Use the status wording exactly as written above."
             )
             return {
                 "response_ui": response_ui,
@@ -226,7 +310,7 @@ async def preview_node(state: ServiceRequestState) -> dict[str, Any]:
             result = await api_service.get_service_request(sr_id)
             if result.success:
                 payload: dict[str, Any] = result.payload or {}
-                fields = _fields_from_platform(payload)
+                fields = _fields_from_platform(payload, hidden)
                 ops_row = _ops_field(result.service_request_operations or [])
                 if ops_row:
                     fields.append(ops_row)
@@ -242,13 +326,14 @@ async def preview_node(state: ServiceRequestState) -> dict[str, Any]:
                 }
                 response_message = (
                     f"Show the user the service request (ID: {sr_id}) "
-                    f"with status '{result.status}'. "
-                    "The structured card is being shown; give a very short 1-sentence intro."
+                    f"with status '{format_enum_label(result.status)}'. "
+                    "The structured card is being shown; give a very short 1-sentence intro. "
+                    "Use the status wording exactly as written above."
                 )
                 log.info("preview_node.sr_fetched", sr_id=sr_id, status=result.status)
             else:
                 log.warning("preview_node.sr_fetch_failed", sr_id=sr_id, error=result.error)
-                fields = _fields_from_collected(collected_data)
+                fields = _fields_from_collected(collected_data, hidden)
                 response_ui = {
                     "type": "sr_preview_card",
                     "message": f"Could not fetch live SR {sr_id} — showing draft data.",
@@ -264,7 +349,7 @@ async def preview_node(state: ServiceRequestState) -> dict[str, Any]:
                 )
         except Exception as exc:
             log.exception("preview_node.sr_fetch_error", sr_id=sr_id, error=str(exc))
-            fields = _fields_from_collected(collected_data)
+            fields = _fields_from_collected(collected_data, hidden)
             response_ui = {
                 "type": "sr_preview_card",
                 "message": f"Could not reach the platform for SR {sr_id} — showing draft data.",
@@ -280,7 +365,7 @@ async def preview_node(state: ServiceRequestState) -> dict[str, Any]:
     else:
         # ── Not yet submitted — show collected draft data ─────────────────
         log.info("preview_node.showing_draft")
-        fields = _fields_from_collected(collected_data)
+        fields = _fields_from_collected(collected_data, hidden)
         if not fields:
             response_ui = {
                 "type": "sr_preview_card",
