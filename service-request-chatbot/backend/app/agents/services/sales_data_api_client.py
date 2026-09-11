@@ -89,11 +89,24 @@ class SalesDataApiClient:
         lease_code: str | None = None,
         page: int = 1,
         limit: int = 100,
+        all_my_companies: bool = True,
     ) -> list[dict[str, Any]]:
         """Return sales-data rows visible to the authenticated user.
 
         With ``disable_pagination=True`` (Layer 2 validation), all rows are
         returned at once so the agent can check existence and access in one call.
+
+        ``all_my_companies`` (default True) scopes the lookup to every
+        tenant profile the authenticated user belongs to, not just whichever
+        one is "active" in the portal's company switcher at the moment —
+        without it, clicking a notification for a lease under a different
+        one of the user's own companies than the currently active one
+        incorrectly reports "no access", and a CSV upload for that lease
+        fails Layer 2 validation the same way. The AI service is a distinct
+        caller from the main portal UI (which still defaults to
+        active-company-only scoping), so widening this here is safe and
+        matches what a chat assistant helping "this person with their own
+        data" should already do.
         """
         params: dict[str, Any] = {"page": page, "limit": limit}
         if disable_pagination:
@@ -102,8 +115,16 @@ class SalesDataApiClient:
             params["status"] = status
         if lease_code:
             params["lease_code"] = lease_code
+        if all_my_companies:
+            params["all_my_companies"] = "true"
 
-        async with httpx.AsyncClient(timeout=15.0) as client:
+        # This call regressed from ~200ms to 15s+ once all_my_companies=true
+        # started being sent on every request — right at (and sometimes past)
+        # the default 15s client timeout, causing intermittent failures.
+        # Bumped as a safety net while the underlying cenomi-api query is
+        # optimized; this masks the symptom, not the cause (see comment on
+        # all_my_companies above).
+        async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.get(
                 f"{self._base}/api/v1/sales-data",
                 headers=self._headers(),
@@ -132,6 +153,14 @@ class SalesDataApiClient:
             body = resp.json()
             errors = body.get("errors") or body.get("detail", {}).get("errors", [])
             return {"success": False, "errors": errors}
+
+        if resp.status_code >= 500:
+            log.error(
+                "submit_sales_data.backend_5xx",
+                status_code=resp.status_code,
+                response_body=resp.text[:2000],
+                request_payload=rows,
+            )
 
         resp.raise_for_status()
         return {"success": True}
@@ -241,11 +270,54 @@ def _norm_lease_name(value: str | None) -> str:
     return " ".join(str(value or "").casefold().split())
 
 
+def _normalize_period_date(value: str | None) -> str:
+    """Reduce any date-ish string to bare YYYY-MM-DD.
+
+    Handles a live cenomi-api row's raw date string, which may carry a time
+    component / offset (e.g. "2026-08-01T04:00:00+04:00") unlike the CSV
+    side, which sales_data_csv.parse_sales_period_date already normalizes to
+    YYYY-MM-DD.
+    """
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    for sep in ("T", " "):
+        if sep in raw:
+            raw = raw.split(sep, 1)[0]
+            break
+    return raw.replace("/", "-")
+
+
+def _period_year_month(value: str | None) -> str:
+    """First 7 chars (YYYY-MM) of a normalized period date.
+
+    A live PENDING row is not reliably a full calendar-month range — it can
+    carry a single-day placeholder as both start and end (observed: a lease
+    "December 2024" PENDING row with sales_period_start ==
+    sales_period_end == 2024-12-31, not 2024-12-01..2024-12-31). Matching on
+    the exact (start, end) tuple therefore fails for real rows even when the
+    tenant's CSV is for the right lease and month. pending_months.py's own
+    "December 2024" label is built the same way — from just the year-month
+    of sales_period_start — so Layer 2 matching mirrors that granularity
+    instead of demanding an exact date range.
+    """
+    return _normalize_period_date(value)[:7]
+
+
 def canonical_brand_name(backend_row: dict[str, Any]) -> str:
     """Brand on a sales-data row from mock or live Cenomi."""
     return str(
         backend_row.get("brand_name")
         or backend_row.get("brand")
+        or ""
+    ).strip()
+
+
+def canonical_company_name(backend_row: dict[str, Any]) -> str:
+    """Company on a sales-data row from mock or live Cenomi."""
+    return str(
+        backend_row.get("company_name")
+        or backend_row.get("company")
         or ""
     ).strip()
 
@@ -314,10 +386,10 @@ def partition_rows_by_lease_access(
       valid, no_access, no_pending_row, identity_mismatch, accessible_lease_codes
     """
     accessible: set[str] = {r["lease_code"] for r in backend_rows}
-    pending_index: dict[tuple[str, str, str], dict] = {}
+    pending_index: dict[tuple[str, str], dict] = {}
     for r in backend_rows:
         if r["status"] in ("PENDING", "NEED_REUPLOAD"):
-            key = (r["lease_code"], r["sales_period_start"], r["sales_period_end"])
+            key = (r["lease_code"], _period_year_month(r["sales_period_start"]))
             pending_index[key] = r
 
     valid: list[dict] = []
@@ -329,11 +401,12 @@ def partition_rows_by_lease_access(
         lc = row.get("lease_code", "")
         start = row.get("sales_period_start", "")
         end = row.get("sales_period_end", "")
+        norm_key = (lc, _period_year_month(start))
 
         if lc not in accessible:
             no_access.append({**row, "_error": f"You don't have access to lease {lc}."})
             continue
-        if (lc, start, end) not in pending_index:
+        if norm_key not in pending_index:
             no_pending_row.append(
                 {
                     **row,
@@ -345,7 +418,7 @@ def partition_rows_by_lease_access(
             )
             continue
 
-        backend_row = pending_index[(lc, start, end)]
+        backend_row = pending_index[norm_key]
         expected_brand = canonical_brand_name(backend_row)
         expected_property = canonical_property_name(backend_row)
         brand_ok = _csv_name_matches_lease(row.get("brand"), expected_brand)
@@ -366,11 +439,18 @@ def partition_rows_by_lease_access(
         valid.append({
             **row,
             "lease_id": backend_row["lease_id"],
-            "sales_period_start": backend_row["sales_period_start"],
-            "sales_period_end": backend_row["sales_period_end"],
+            # Bare YYYY-MM-DD, not the raw "2024-12-31T04:00:00+04:00" the
+            # live API returns — that datetime-with-offset string was being
+            # forwarded verbatim into the review table and the actual
+            # POST /sales-data submission payload, which cenomi-api rejected
+            # with a 400 ("sales period start date doesn't match the
+            # pending record") since it expects a plain date.
+            "sales_period_start": _normalize_period_date(backend_row["sales_period_start"]),
+            "sales_period_end": _normalize_period_date(backend_row["sales_period_end"]),
             "current_status": backend_row["status"],
             "brand": expected_brand or (row.get("brand") or ""),
             "property": expected_property or (row.get("property") or ""),
+            "company": canonical_company_name(backend_row),
         })
 
     return {

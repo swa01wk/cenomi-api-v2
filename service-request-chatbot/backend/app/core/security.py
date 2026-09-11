@@ -58,6 +58,11 @@ def get_auth_context(
     tenant_raw = payload.get("tenant_id")
     if tenant_raw in (None, ""):
         tenant_raw = payload.get("tenant_profile_id")
+    log.info(
+        "security.auth_context_resolved",
+        tenant_id=str(tenant_raw) if tenant_raw not in (None, "") else None,
+        roles=payload.get("roles", []),
+    )
     return AuthContext(
         subject_id=str(payload.get("user_id", payload.get("sub", "unknown"))),
         tenant_id=str(tenant_raw) if tenant_raw not in (None, "") else None,

@@ -107,7 +107,7 @@ def _upload_prompt(state: ServiceRequestState, *, lease: str, asked: dict[str, s
         "backend_refs": refs,
         "collected_data": collected,
         "user_message": (
-            f"{lease} {asked.get('label', '')}".strip()
+            f"{lease} {(asked or {}).get('label', '')}".strip()
             if asked or lease
             else (state.get("user_message") or "")
         ),
@@ -200,7 +200,13 @@ def _decide(
         return _upload_prompt(state, lease=lease, asked=asked)
 
     if not asked:
-        return _pending_list_payload(items, collected, refs)
+        # A lease is already known (e.g. Open'd from a notification) but the
+        # period didn't parse — scope the list to that lease's own pending
+        # months. Without this, every other lease the tenant has shows up
+        # too, which is confusing when the user opened one specific
+        # notification for one specific lease.
+        scoped = [i for i in items if i.get("lease_code") == lease] if lease else items
+        return _pending_list_payload(scoped or items, collected, refs)
 
     if not lease:
         matches = leases_with_month(items, asked["year_month"])

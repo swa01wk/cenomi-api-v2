@@ -61,6 +61,7 @@ async def sales_data_confirmation_node(state: ServiceRequestState) -> dict[str, 
             "lease_id": row.get("lease_id"),
             "brand": row.get("brand") or "",
             "property": row.get("property") or "",
+            "company": row.get("company") or "",
             "period": _format_period(
                 row["sales_period_start"], row["sales_period_end"]
             ),

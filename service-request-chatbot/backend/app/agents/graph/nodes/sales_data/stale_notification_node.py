@@ -73,5 +73,11 @@ async def stale_notification_node(state: ServiceRequestState) -> dict[str, Any]:
             "type": "stale_notification",
             "message": message,
             "show_listing_link": True,
+            # Without this, response_generation's LLM rewrite pulls in stale
+            # state (e.g. the original notification's period/lease) and
+            # produces a specific-sounding sentence that doesn't match what
+            # the tenant actually just uploaded — this message is already
+            # accurate and generic on purpose; show it as-is.
+            "verbatim": True,
         },
     }

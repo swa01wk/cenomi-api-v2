@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+import httpx
 import structlog
 
 from app.agents.graph.state import ServiceRequestState
@@ -51,6 +52,24 @@ async def sales_data_api_submission_node(state: ServiceRequestState) -> dict[str
 
     try:
         result = await client.submit_sales_data(payload)
+    except httpx.HTTPStatusError as exc:
+        # A genuine 5xx response from cenomi-api — not a network/connectivity
+        # failure. Reporting this as "network" is misleading: the request
+        # reached the server and the server itself errored out.
+        log.error(
+            "sales_data_api_submission.backend_5xx",
+            status_code=exc.response.status_code,
+            exc_info=True,
+        )
+        backend_refs["submission_error_type"] = "server_error"
+        backend_refs["submission_errors"] = [
+            {"message": f"Backend returned {exc.response.status_code}"}
+        ]
+        return {
+            "backend_refs": backend_refs,
+            "workflow_stage": "SUBMISSION_ERROR",
+            "status": "WAITING_FOR_USER",
+        }
     except Exception as exc:
         log.error("sales_data_api_submission.network_error", exc_info=True)
         backend_refs["submission_error_type"] = "network"

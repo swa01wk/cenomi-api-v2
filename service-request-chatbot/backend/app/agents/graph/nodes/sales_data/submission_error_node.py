@@ -48,6 +48,16 @@ async def submission_error_node(state: ServiceRequestState) -> dict[str, Any]:
             "from being saved. Please try again in a moment.\n\n"
             "Your CSV has been retained — click Submit again when you're ready."
         )
+    elif error_type == "server_error":
+        # A clean 5xx from cenomi-api itself (request reached the server,
+        # server errored) — distinct from "network" (request never got a
+        # response) so the wording doesn't misleadingly blame connectivity.
+        message = (
+            "⚠️ **Submission failed** — The sales data service ran into an error "
+            "while saving your data. Please try again in a moment, or contact "
+            "support if this keeps happening.\n\n"
+            "Your CSV has been retained — click Submit again when you're ready."
+        )
     elif error_type == "stale_state" or _is_stale_state_error(errors):
         message = (
             "⚠️ **Submission rejected** — One or more leases in your file were updated "
@@ -61,8 +71,15 @@ async def submission_error_node(state: ServiceRequestState) -> dict[str, Any]:
             idx = e.get("index", "?")
             msg = e.get("message", "Unknown error")
             field = e.get("field", "")
+            # idx defaults to "?" when cenomi-api's error entry has no
+            # "index" field — int(idx) + 1 then crashes the whole turn with
+            # a 500 instead of just showing the row label as "?".
+            try:
+                row_label = str(int(idx) + 1)
+            except (TypeError, ValueError):
+                row_label = str(idx)
             error_lines.append(
-                f"• Row {int(idx) + 1} ({field}): {msg}"
+                f"• Row {row_label} ({field}): {msg}"
             )
 
         error_text = "\n".join(error_lines) if error_lines else "No details provided."

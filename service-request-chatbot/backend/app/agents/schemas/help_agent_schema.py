@@ -142,6 +142,10 @@ SALES_DATA_TENANT_PLATFORM_ROLES: frozenset[str] = frozenset(
         "BILLING_CONTACT",
         "PRIMARY_TENANT_CONTACT",
         "COMPANY_ADMIN_CENTRAL",
+        # Live AI-session JWTs stamp the role name "COMPANY_ADMIN" (see the
+        # "Shop Manager / Company Admin" tenant user) — not "COMPANY_ADMIN_CENTRAL".
+        # Keep both so real tokens route the same as the assumed platform name.
+        "COMPANY_ADMIN",
         "SHOP_MANAGER",
         "FINANCIAL_CONTROLLER",
         "LEASING_MANAGER",
