@@ -330,7 +330,14 @@ async def _load_reviewable(
         return _reviewable(cached)
     token = get_current_bearer_token()
     client = SalesDataApiClient(bearer_token=token)
-    rows = await client.get_sales_data(disable_pagination=True)
+    # SALES_DATA_TEAM/admin JWTs carry tenant_profile_id=0 (unscoped) —
+    # cenomi-api already returns every row platform-wide for that case with
+    # no extra filter. all_my_companies=true is meant for a TENANT spanning
+    # several of their OWN companies; it's meaningless here and appears to
+    # be the actual trigger for the multi-second/timeout slowdown observed
+    # on this admin path specifically (a plain unscoped fetch was ~200ms
+    # before all_my_companies existed).
+    rows = await client.get_sales_data(disable_pagination=True, all_my_companies=False)
     submitted = _reviewable(rows)
     backend_refs["admin_review_rows"] = submitted
     return submitted
@@ -376,7 +383,7 @@ async def admin_review_entry_node(state: ServiceRequestState) -> dict[str, Any]:
         token = get_current_bearer_token()
         client = SalesDataApiClient(bearer_token=token)
         try:
-            rows = await client.get_sales_data(disable_pagination=True)
+            rows = await client.get_sales_data(disable_pagination=True, all_my_companies=False)
         except Exception:
             # Was silently swallowed with no log line — the only signal that
             # anything went wrong was the generic user-facing message, with
