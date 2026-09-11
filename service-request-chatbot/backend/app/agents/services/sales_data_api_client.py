@@ -118,13 +118,14 @@ class SalesDataApiClient:
         if all_my_companies:
             params["all_my_companies"] = "true"
 
-        # This call regressed from ~200ms to 15s+ once all_my_companies=true
-        # started being sent on every request — right at (and sometimes past)
-        # the default 15s client timeout, causing intermittent failures.
-        # Bumped as a safety net while the underlying cenomi-api query is
-        # optimized; this masks the symptom, not the cause (see comment on
-        # all_my_companies above).
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        # This call regressed from ~200ms to 15-30s+ once all_my_companies=true
+        # started being sent on every request — the first bump to 30s still
+        # wasn't enough margin (observed admin_review_entry taking 30.3s and
+        # hitting it). Bumped again as a stopgap; this masks the symptom, not
+        # the cause — the underlying cenomi-api query still needs to be
+        # optimized (see comment on all_my_companies above). A 45s+ wait is
+        # not acceptable for an interactive chat turn either way.
+        async with httpx.AsyncClient(timeout=45.0) as client:
             resp = await client.get(
                 f"{self._base}/api/v1/sales-data",
                 headers=self._headers(),
@@ -385,11 +386,16 @@ def partition_rows_by_lease_access(
     Returns:
       valid, no_access, no_pending_row, identity_mismatch, accessible_lease_codes
     """
-    accessible: set[str] = {r["lease_code"] for r in backend_rows}
+    # Lease codes are compared case/whitespace-insensitively, same as
+    # brand/property below — a manually-typed or LLM-extracted lease code
+    # ("T0106013", stray spaces, ...) must match the platform's canonical
+    # casing ("t0106013") or every legitimately accessible lease falsely
+    # reports "no access".
+    accessible: set[str] = {_norm_lease_name(r["lease_code"]) for r in backend_rows}
     pending_index: dict[tuple[str, str], dict] = {}
     for r in backend_rows:
         if r["status"] in ("PENDING", "NEED_REUPLOAD"):
-            key = (r["lease_code"], _period_year_month(r["sales_period_start"]))
+            key = (_norm_lease_name(r["lease_code"]), _period_year_month(r["sales_period_start"]))
             pending_index[key] = r
 
     valid: list[dict] = []
@@ -401,9 +407,9 @@ def partition_rows_by_lease_access(
         lc = row.get("lease_code", "")
         start = row.get("sales_period_start", "")
         end = row.get("sales_period_end", "")
-        norm_key = (lc, _period_year_month(start))
+        norm_key = (_norm_lease_name(lc), _period_year_month(start))
 
-        if lc not in accessible:
+        if _norm_lease_name(lc) not in accessible:
             no_access.append({**row, "_error": f"You don't have access to lease {lc}."})
             continue
         if norm_key not in pending_index:
@@ -438,6 +444,11 @@ def partition_rows_by_lease_access(
 
         valid.append({
             **row,
+            # Canonical casing, not whatever the user typed/LLM extracted
+            # ("T0106013" vs "t0106013") — matching accessible/pending_index
+            # keys are normalized, but the submission payload should carry
+            # the platform's own spelling.
+            "lease_code": backend_row["lease_code"],
             "lease_id": backend_row["lease_id"],
             # Bare YYYY-MM-DD, not the raw "2024-12-31T04:00:00+04:00" the
             # live API returns — that datetime-with-offset string was being

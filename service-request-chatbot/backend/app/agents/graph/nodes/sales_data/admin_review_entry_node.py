@@ -378,6 +378,10 @@ async def admin_review_entry_node(state: ServiceRequestState) -> dict[str, Any]:
         try:
             rows = await client.get_sales_data(disable_pagination=True)
         except Exception:
+            # Was silently swallowed with no log line — the only signal that
+            # anything went wrong was the generic user-facing message, with
+            # no way to tell a timeout apart from any other failure.
+            log.error("admin_review_entry.get_sales_data_failed", exc_info=True)
             return {
                 "status": "WAITING_FOR_USER",
                 "response_message": "⚠️ Could not fetch sales data. Please try again.",
@@ -495,6 +499,7 @@ async def admin_review_entry_node(state: ServiceRequestState) -> dict[str, Any]:
         try:
             reviewable = await _load_reviewable(backend_refs)
         except Exception:
+            log.error("admin_review_entry.load_reviewable_failed", exc_info=True)
             return {
                 "status": "WAITING_FOR_USER",
                 "response_message": "⚠️ Could not fetch sales data. Please try again.",
