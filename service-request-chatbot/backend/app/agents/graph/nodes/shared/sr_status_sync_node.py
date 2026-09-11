@@ -31,6 +31,10 @@ from typing import Any
 import structlog
 
 from app.agents.graph.state import ServiceRequestState
+from app.agents.services.deleted_documents import (
+    deleted_document_ids,
+    without_deleted,
+)
 from app.agents.services.review_decorations_service import (
     build_review_decorations,
     derive_user_role,
@@ -403,6 +407,8 @@ async def sr_status_sync_node(state: ServiceRequestState) -> dict[str, Any]:
     hydrated_docs = _attachments_to_documents(attachments) if attachments else []
     if existing_docs or hydrated_docs:
         merged_docs = _merge_documents(existing_docs, hydrated_docs)
+        # A platform GET that lags the delete must not bring the file back.
+        merged_docs = without_deleted(merged_docs, deleted_document_ids(backend_refs))
         updates["documents"] = merged_docs
         _apply_document_refs(backend_refs, merged_docs)
 

@@ -318,6 +318,32 @@ def _uploaded_type_ids(
     return ids
 
 
+# The Handover Meeting Report and the Rejected Fitout and Handover Report are
+# alternatives: the handover is either reported or rejected, never both.
+_RDD_REPORT_ALTERNATIVES: dict[str, str] = {
+    RDD_DOC_TYPE_MEETING: RDD_DOC_TYPE_REJECTED,
+    RDD_DOC_TYPE_REJECTED: RDD_DOC_TYPE_MEETING,
+}
+
+
+def _rdd_upload_types(uploaded: set[str]) -> list[str]:
+    """The RDD document types the upload card offers, given what is uploaded.
+
+    Once one report of the either-or pair is on the SR, the other leaves the
+    card — its row and its entry in the type dropdown alike, since the chat's
+    dropdown is built from the rows still missing. It used to stay offered, so
+    a reviewer who had filed the Meeting Report could still attach a Rejected
+    report beside it. Deleting the uploaded report brings both back, because
+    this is recomputed from the documents every turn. A pair that somehow holds
+    both keeps both: a row with a file on it is never hidden.
+    """
+    types = [RDD_DOC_TYPE_MEETING, RDD_DOC_TYPE_REJECTED, RDD_DOC_TYPE_OTHER]
+    for report, alternative in _RDD_REPORT_ALTERNATIVES.items():
+        if report in uploaded and alternative not in uploaded:
+            types.remove(alternative)
+    return types
+
+
 def _document_requirement_block(
     *,
     stage: str,
@@ -354,11 +380,7 @@ def _document_requirement_block(
     # so the user can see the ✓ status and click the Continue chip to advance
     # to date collection (dates come AFTER the upload per the payload shape).
     if stage == "RDD_REVIEW":
-        relevant = [
-            RDD_DOC_TYPE_MEETING,
-            RDD_DOC_TYPE_REJECTED,
-            RDD_DOC_TYPE_OTHER,
-        ]
+        relevant = _rdd_upload_types(uploaded)
 
     doc_rows = [
         {
@@ -384,11 +406,7 @@ def _document_requirement_block(
     # For RDD, list every allowed type so the FE dropdown lets the user pick
     # which of the three they're attaching (matches FM's multi-type upload).
     if stage == "RDD_REVIEW":
-        upload_context["allowedDocumentTypes"] = [
-            RDD_DOC_TYPE_MEETING,
-            RDD_DOC_TYPE_REJECTED,
-            RDD_DOC_TYPE_OTHER,
-        ]
+        upload_context["allowedDocumentTypes"] = list(relevant)
 
     return {
         "documents": doc_rows,

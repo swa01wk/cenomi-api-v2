@@ -18,6 +18,12 @@ import re
 from typing import Any
 
 from app.agents.graph.state import ServiceRequestState
+from app.agents.services.deleted_documents import (
+    deleted_ids_from_corrected,
+    record_deleted_documents,
+    without_deleted,
+    without_deleted_ids,
+)
 from app.observability.decorators import trace_node
 
 # Provenance of every field the short flow generated, kept alongside the values
@@ -975,6 +981,26 @@ async def merge_state_node(state: ServiceRequestState) -> dict[str, Any]:
     # workflow_stage + sub_category so the remaining fields align with Path B
     # (four actual dates instead of description/dates/inspector).
     patch: dict[str, Any] = {"collected_data": collected}
+
+    # A document the user deleted on the form (or in the chat). The cleared row
+    # names the id that went; without this the id lived on in state["documents"]
+    # and the document refs, and the payload builders sent it back to the
+    # platform, which refused the submit with "Document ID not found".
+    deleted_now = deleted_ids_from_corrected(corrected)
+    if deleted_now:
+        refs: dict[str, Any] = dict(state.get("backend_refs") or {})
+        record_deleted_documents(refs, deleted_now)
+        patch["documents"] = without_deleted(
+            list(state.get("documents") or []), deleted_now
+        )
+        refs["uploaded_documents"] = without_deleted_ids(
+            list(refs.get("uploaded_documents") or []), deleted_now
+        )
+        if str(refs.get("rdd_document_id") or "").strip() in deleted_now:
+            refs.pop("rdd_document_id", None)
+        patch["backend_refs"] = refs
+        if str(collected.get("document_id") or "").strip() in deleted_now:
+            collected["document_id"] = ""
     active_agent = state.get("active_agent") or ""
     current_stage = state.get("workflow_stage") or ""
     already_handovered = str(collected.get("already_handovered") or "").strip().lower()

@@ -59,6 +59,10 @@ from app.agents.graph.nodes.supervisor_node import (
     supervisor_node,
 )
 from app.agents.graph.nodes.shared.registry_node import registry_node
+from app.agents.graph.nodes.shared.new_request_node import (
+    asks_for_a_new_service_request,
+    new_request_node,
+)
 from app.agents.graph.nodes.shared.sr_status_sync_node import sr_status_sync_node
 from app.agents.graph.nodes.shared.response_generation_node import response_generation_node
 from app.agents.registries.workflow_config import WORKFLOW_CONFIG_REGISTRY, get_workflow_config
@@ -227,6 +231,13 @@ def _route_after_load(state: dict[str, Any]) -> str:
         return _AGENT_ENTRY_NODES.get(agent, "handover_entry")
 
     if sr_id:
+        # An explicit request for a new SR outranks the SR that happens to be
+        # open. Sync would hand it to that SR — its preview, or its stage entry
+        # (a Mall Manager on the details page of an SR pending FM typed "create
+        # hanover" and was refused by the FM review's role guard). new_request
+        # drops the open SR and lets the supervisor classify on a clean slate.
+        if not _awaiting_free_text and asks_for_a_new_service_request(user_message):
+            return "new_request"
         # When the current stage is already terminal the tenant's SR lifecycle is
         # complete.  Running sr_status_sync would advance the stage (e.g. mock
         # backend auto-approves SR_CREATED → APPROVE_SR) before the supervisor has
@@ -801,6 +812,7 @@ def build_help_agent_graph():
     graph.add_node("load_session", load_session_node)
     graph.add_node("document_upload", document_upload_node)
     graph.add_node("sr_status_sync", sr_status_sync_node)
+    graph.add_node("new_request", new_request_node)
     graph.add_node("supervisor", supervisor_node)
     graph.add_node("faq_node", faq_node)
     graph.add_node("notification", notification_entry_node)
@@ -851,6 +863,7 @@ def build_help_agent_graph():
         _route_after_load,
         {
             "sr_status_sync": "sr_status_sync",
+            "new_request": "new_request",
             "supervisor": "supervisor",
             "handover_entry": "handover_entry",
             "work_permit_entry": "work_permit_entry",
@@ -863,6 +876,9 @@ def build_help_agent_graph():
             "open_notification": "open_notification",
         },
     )
+    # A new request raised from an open SR: its context is dropped, then the
+    # supervisor classifies the message as it would on a fresh session.
+    graph.add_edge("new_request", "supervisor")
     graph.add_conditional_edges(
         "sr_status_sync",
         _route_after_sync,
