@@ -183,6 +183,46 @@ def _reminder_payload(
     }
 
 
+def _lease_already_submitted_payload(
+    lease: str,
+    others: list[dict[str, Any]],
+    collected: dict,
+    refs: dict,
+) -> dict[str, Any]:
+    """The lease this turn is about (e.g. from a notification the user just
+    re-opened) has nothing PENDING left — most likely already submitted.
+
+    Say so plainly instead of silently dumping every OTHER lease's pending
+    data (or offering a generic upload prompt) as if it belonged to this
+    notification. This is the fix for: re-opening the same notification
+    after submitting shows every other lease's pending months instead of
+    telling the tenant this one is already done.
+    """
+    note = (
+        f"✅ **{lease}** has no pending sales data right now — "
+        "it looks like it's already been submitted.\n\n"
+    )
+    if others:
+        payload = _pending_list_payload(others, collected, refs)
+        payload["response_message"] = note + payload["response_message"]
+        payload["response_ui"]["message"] = payload["response_message"]
+        return payload
+    message = note + "You have no other pending sales data submissions."
+    return {
+        "workflow_stage": "UPLOAD_INTENT",
+        "status": "WAITING_FOR_USER",
+        "intent": "UPLOAD_SALES_DATA",
+        "backend_refs": refs,
+        "collected_data": collected,
+        "response_message": message,
+        "response_ui": {
+            "type": "message",
+            "message": message,
+            "verbatim": True,
+        },
+    }
+
+
 def _decide(
     state: ServiceRequestState,
     items: list[dict[str, Any]],
@@ -197,6 +237,12 @@ def _decide(
     refs["pending_items"] = items
 
     if not items:
+        if lease and asked is None:
+            # Nothing PENDING anywhere, but we know exactly which lease this
+            # turn is about (e.g. from notification_context) — tell the
+            # tenant plainly rather than a generic "please upload" prompt
+            # that implies this lease still needs data.
+            return _lease_already_submitted_payload(lease, [], collected, refs)
         return _upload_prompt(state, lease=lease, asked=asked)
 
     if not asked:
@@ -205,8 +251,42 @@ def _decide(
         # months. Without this, every other lease the tenant has shows up
         # too, which is confusing when the user opened one specific
         # notification for one specific lease.
-        scoped = [i for i in items if i.get("lease_code") == lease] if lease else items
-        return _pending_list_payload(scoped or items, collected, refs)
+        if not lease:
+            return _pending_list_payload(items, collected, refs)
+
+        scoped = [i for i in items if i.get("lease_code") == lease]
+
+        if not scoped:
+            # `scoped or items` used to silently fall back to dumping every
+            # OTHER lease's pending data here, which is exactly the
+            # confusing "shows everything" bug this branch exists to
+            # prevent. `items` is already everyone else's data since this
+            # lease has zero rows in it.
+            return _lease_already_submitted_payload(lease, items, collected, refs)
+
+        if len(scoped) == 1:
+            # Exactly one pending month on the lease we already know about —
+            # no need to make the user pick it from a list, go straight to
+            # the upload prompt for it.
+            only = scoped[0]
+            asked_for_lease = {
+                "year_month": only["year_month"],
+                "label": only["label"],
+                "start": only.get("sales_period_start", ""),
+                "end": only.get("sales_period_end", ""),
+            }
+            collected = dict(collected)
+            collected["_asked_period"] = asked_for_lease
+            collected["_upload_lease"] = lease
+            refs = dict(refs)
+            refs["asked_period"] = asked_for_lease
+            return _upload_prompt(
+                {**state, "backend_refs": refs, "collected_data": collected},
+                lease=lease,
+                asked=asked_for_lease,
+            )
+
+        return _pending_list_payload(scoped, collected, refs)
 
     if not lease:
         matches = leases_with_month(items, asked["year_month"])
