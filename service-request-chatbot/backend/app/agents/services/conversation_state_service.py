@@ -13,6 +13,10 @@ from uuid import UUID
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agents.services.deleted_documents import (
+    deleted_document_ids,
+    without_deleted,
+)
 from app.db.repositories.service_request_draft_repo import ServiceRequestDraftRepository
 
 log = structlog.get_logger(__name__)
@@ -174,6 +178,11 @@ class ConversationStateService:
                         list(draft.documents or []),
                         list(state_docs or []),
                     )
+                # The union above can only add; a document deleted this
+                # session must not come back from the older draft copy.
+                merged_docs = without_deleted(
+                    merged_docs, deleted_document_ids(state.get("backend_refs"))
+                )
                 updates: dict[str, Any] = {
                     "workflow_stage": workflow_stage,
                     # Use raw_collected unconditionally — an empty dict after a
