@@ -193,6 +193,14 @@ class ConversationStateService:
                 sr_id = _extract_sr_id(state)
                 if sr_id:
                     updates["sr_id"] = sr_id
+                elif (state.get("backend_refs") or {}).get("released_sr_id"):
+                    # The turn deliberately let go of the SR to start a new
+                    # request (new_request_node). An sr_id is otherwise only
+                    # ever written, never cleared, so the draft would restore
+                    # the released SR on the next turn and pull the new request
+                    # back onto it. Clear it only on that explicit signal.
+                    updates["sr_id"] = None
+                    updates["service_request_status"] = None
                 await self._draft_repo.update(draft.id, updates)
 
             log.debug(

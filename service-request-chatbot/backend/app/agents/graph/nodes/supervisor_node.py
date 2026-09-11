@@ -107,6 +107,22 @@ _PREVIEW_PHRASES: frozenset[str] = frozenset(
 # ---------------------------------------------------------------------------
 
 
+def _rbac_denial_example(permitted: frozenset[str]) -> str:
+    """The "for example" line of a role refusal, limited to what the role can do.
+
+    It used to offer every refused user help to "create or check the status of
+    a handover service request". Only a Mall Manager can create one: an RDD
+    Project Manager refused a Trading Confirmation was invited to create a
+    handover they are not allowed to raise either. Everyone can check status.
+    """
+    if "CREATE_RDD_SERVICE_REQUEST" in permitted:
+        return (
+            "For example, I can help you create or check the status of a "
+            "handover service request."
+        )
+    return "For example, I can help you check the status of a service request."
+
+
 def _user_wants_to_switch(message: str) -> bool:
     """Return ``True`` if *message* contains an explicit cancel/switch phrase."""
     lowered = message.lower()
@@ -452,7 +468,7 @@ async def supervisor_node(state: ServiceRequestState) -> dict[str, Any]:  # noqa
                     f"Your role ({role_display}) does not permit this action "
                     f"({intent_display}). "
                     "I can answer platform questions or help with actions your role allows. "
-                    "For example, I can help you create or check the status of a handover service request."
+                    + _rbac_denial_example(permitted)
                 ),
             }
 
