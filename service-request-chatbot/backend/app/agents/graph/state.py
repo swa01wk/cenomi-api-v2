@@ -68,6 +68,12 @@ class ServiceRequestGraphState(TypedDict, total=False):
     # Generic UI chrome set by graph nodes; orchestration blind-merges into response_ui.
     response_decorations: dict[str, Any]
 
+    # ── Turn outcome classification (analytics) ───────────────────────────────
+    # Set by answer-producing nodes (faq_node) when they can judge grounding:
+    # "ANSWERED" | "PARTIAL" | "UNANSWERED". Orchestration falls back to a
+    # heuristic for paths that do not set it, and stamps it on agent_traces.
+    answer_status: Optional[str]
+
     # ── FAQ RAG citations ─────────────────────────────────────────────────────
     # Set by faq_node when RAG search succeeds; always a list (never None).
     # Reset to [] at the start of each turn by load_session_node.

@@ -64,11 +64,11 @@ class TestHandedOverSchema:
 
     def test_handed_over_allowed_documents(self) -> None:
         from app.agents.schemas.handover_schema import HANDED_OVER_ALLOWED_DOCUMENTS
-        assert "SR_HANDED_OVER_OTHER" in HANDED_OVER_ALLOWED_DOCUMENTS
+        assert "SR_HANDOVER_OTHER" in HANDED_OVER_ALLOWED_DOCUMENTS
 
-    def test_all_document_types_includes_sr_handed_over_other(self) -> None:
+    def test_all_document_types_includes_handed_over_other(self) -> None:
         from app.agents.schemas.handover_schema import ALL_DOCUMENT_TYPES
-        assert "SR_HANDED_OVER_OTHER" in ALL_DOCUMENT_TYPES
+        assert "SR_HANDOVER_OTHER" in ALL_DOCUMENT_TYPES
 
     def test_permission_map_mall_manager_has_create_handed_over_sr(self) -> None:
         from app.agents.schemas.handover_schema import PERMISSION_MAP

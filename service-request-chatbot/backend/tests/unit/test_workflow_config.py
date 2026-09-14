@@ -84,10 +84,11 @@ class TestHandoverConfigRegistered:
         assert "tenant_profile_id" in cfg.backend_fields
         assert "lease_id" in cfg.backend_fields
 
-    def test_auto_generated_fields_contains_title(self) -> None:
+    def test_auto_generated_fields_contains_computed_dates(self) -> None:
         cfg = get_workflow_config("rdd_handover_agent")
         assert cfg is not None
-        assert "title" in cfg.auto_generated_fields
+        assert "expected_handover_date" in cfg.auto_generated_fields
+        assert "trading_date" in cfg.auto_generated_fields
 
     def test_lease_trigger_fields_non_empty(self) -> None:
         cfg = get_workflow_config("rdd_handover_agent")

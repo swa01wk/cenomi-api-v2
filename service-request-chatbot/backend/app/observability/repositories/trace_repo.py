@@ -131,6 +131,7 @@ class TraceRepository:
         total_token_count: int | None = None,
         estimated_cost: Decimal | None = None,
         error_message: str | None = None,
+        answer_status: str | None = None,
     ) -> AgentTrace:
         """Mark a trace as completed and record outcome fields."""
         row = await self.get(trace_id)
@@ -161,6 +162,8 @@ class TraceRepository:
             row.estimated_cost = estimated_cost
         if error_message is not None:
             row.error_message = error_message
+        if answer_status is not None:
+            row.answer_status = answer_status
 
         await self._session.flush()
         log.debug(

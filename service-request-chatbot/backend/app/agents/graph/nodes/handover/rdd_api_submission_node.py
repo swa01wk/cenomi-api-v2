@@ -104,6 +104,7 @@ async def rdd_api_submission_node(state: ServiceRequestState) -> dict[str, Any]:
     if _has_blocking_errors(validation_errors):
         blocking_count = sum(1 for e in validation_errors if e.get("blocking", True))
         return {
+            "confirmation_status": None,
             "status": "FAILED",
             "response_message": (
                 f"RDD submission blocked: {blocking_count} validation error(s) must be "
@@ -119,11 +120,13 @@ async def rdd_api_submission_node(state: ServiceRequestState) -> dict[str, Any]:
 
     if not sr_id:
         return {
+            "confirmation_status": None,
             "status": "FAILED",
             "response_message": "RDD submission blocked: service request ID is missing.",
         }
     if not payload:
         return {
+            "confirmation_status": None,
             "status": "FAILED",
             "response_message": (
                 "RDD submission blocked: the report payload could not be found. "
@@ -140,6 +143,7 @@ async def rdd_api_submission_node(state: ServiceRequestState) -> dict[str, Any]:
         except PermissionDeniedError as exc:
             logger.warning("rdd_api_submission_node: permission denied — %s", exc)
             return {
+                "confirmation_status": None,
                 "status": "FAILED",
                 "response_message": f"Permission denied: {exc}",
             }
@@ -216,6 +220,7 @@ async def rdd_api_submission_node(state: ServiceRequestState) -> dict[str, Any]:
         result = await svc.patch_service_request(sr_id, payload)
     else:
         return {
+            "confirmation_status": None,
             "status": "FAILED",
             "response_message": (
                 f"RDD submission blocked: unrecognised rdd_action '{rdd_action}'. "
@@ -263,6 +268,7 @@ async def rdd_api_submission_node(state: ServiceRequestState) -> dict[str, Any]:
     if not api_success:
         error_detail = f" (Detail: {result.error})" if result.error else ""
         return {
+            "confirmation_status": None,
             "backend_refs": backend_refs,
             "status": "FAILED",
             "response_message": (
@@ -282,6 +288,10 @@ async def rdd_api_submission_node(state: ServiceRequestState) -> dict[str, Any]:
     # Phase 3a (submit_report) — SR is not yet complete; awaits final approval
     if rdd_action != "final_approve":
         backend_refs["rdd_status"] = "REPORT_SUBMITTED"
+        # The report is on the platform; this action and its payload are spent.
+        # Final Approve is a separate action that sets its own.
+        backend_refs.pop("rdd_action", None)
+        backend_refs.pop("rdd_payload", None)
         written_inner = payload.get("payload") if isinstance(payload, dict) else None
         if isinstance(written_inner, dict) and written_inner:
             snapshot_create_payload_from_platform(
@@ -317,6 +327,14 @@ async def rdd_api_submission_node(state: ServiceRequestState) -> dict[str, Any]:
         out: dict[str, Any] = {
             "backend_refs": backend_refs,
             "status": "SUBMITTED",
+            # Retire the CONFIRMED flag with the action it authorised. Left set,
+            # _route_after_rdd_confirmation sent the very next turn — the form
+            # bridge fires a silent patch as soon as this card lands — back into
+            # rdd_payload_builder → here, where ``rdd_action`` had not survived
+            # the turn. A successful submit was answered by "the RDD submission
+            # is blocked because the action wasn't recognised", dangling under
+            # its own success message.
+            "confirmation_status": None,
             # workflow_stage stays RDD_REVIEW — SR is not completed until final approval
             "response_ui": {
                 "stage_complete": False,
@@ -347,6 +365,7 @@ async def rdd_api_submission_node(state: ServiceRequestState) -> dict[str, Any]:
             exc_info=True,
         )
         return {
+            "confirmation_status": None,
             "backend_refs": backend_refs,
             "status": "FAILED",
             "response_message": (
@@ -361,6 +380,7 @@ async def rdd_api_submission_node(state: ServiceRequestState) -> dict[str, Any]:
     )
     if getattr(get_result, "error", None) or not getattr(get_result, "success", True):
         return {
+            "confirmation_status": None,
             "backend_refs": backend_refs,
             "status": "FAILED",
             "response_message": (
@@ -413,6 +433,7 @@ async def rdd_api_submission_node(state: ServiceRequestState) -> dict[str, Any]:
                 "rdd_api_submission_node: audit log write failed (non-fatal)", exc_info=True
             )
     return {
+        "confirmation_status": None,
         "backend_refs": backend_refs,
         "status": "COMPLETED",
         "workflow_stage": "SR_COMPLETED",

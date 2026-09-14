@@ -38,6 +38,10 @@ from app.observability.decorators import trace_node
 
 logger = logging.getLogger(__name__)
 
+# Validation failures that mean the value is malformed rather than merely
+# wrong, so the field is cleared and re-asked instead of left on the form.
+_MALFORMED_VALUE_TYPES: frozenset[str] = frozenset({"date_format", "url"})
+
 _validation_service = ValidationService()
 
 # Fitout confirmation agents have their own required-field schema; skip the
@@ -117,12 +121,18 @@ async def validation_node(state: ServiceRequestState) -> dict[str, Any]:
     # draft_preview / Formik after the bot re-asks. Without this, a bogus
     # entry (e.g. lease code typed into startDate) stays visible in the
     # form even though the AI rejected it, and the next valid answer looks
-    # to the bridge like "no change" for the field it re-asked. Only clear
-    # date_format failures — required / ordering / enum errors are handled
-    # by the normal collection flow.
+    # to the bridge like "no change" for the field it re-asked.
+    #
+    # Only failures that mean "this value is not a value of this kind" clear
+    # the field. ``url`` joined ``date_format`` after "abcd@gmail.com" was
+    # refused as a guideline link and still appeared in the form — the AI said
+    # it needed http:// or https:// while the form showed the address it had
+    # just rejected. Required / ordering / enum errors are left alone: those
+    # are about what the value means, not what it is, and the normal
+    # collection flow handles them.
     cleared_fields: list[str] = []
     for err in blocking_errors:
-        if err.get("validation_type") == "date_format":
+        if err.get("validation_type") in _MALFORMED_VALUE_TYPES:
             field_name = err.get("field")
             if field_name and field_name in collected_data:
                 collected_data.pop(field_name, None)
@@ -141,4 +151,43 @@ async def validation_node(state: ServiceRequestState) -> dict[str, Any]:
     }
     if cleared_fields:
         result["collected_data"] = collected_data
+
+    # A confirmation the flow refuses is void, and must not fire later.
+    #
+    # Reported live on SR 320998. The user set an end date before the start,
+    # clicked Confirm & Submit, and was correctly refused — but
+    # ``confirmation_status`` stayed CONFIRMED. Seven seconds later a silent
+    # form-sync turn carried a valid date, validation passed, and every entry
+    # route sends a standing CONFIRMED straight to merge_state and on to
+    # submission. The SR was created by a background sync, from a confirmation
+    # that had already been turned down.
+    #
+    # The exemption in _route_after_validation is mirrored exactly: an optional
+    # field reported missing does not refuse a confirmed draft, so it must not
+    # void the confirmation either.
+    if has_blocking and state.get("confirmation_status") == "CONFIRMED":
+        if active_agent in _FITOUT_CONFIRM_AGENTS:
+            from app.agents.schemas.fitout_confirm_schema import (
+                OPTIONAL_FIELDS as _OPTIONAL,
+            )
+        else:
+            from app.agents.schemas.handover_schema import (
+                OPTIONAL_FIELDS as _OPTIONAL,
+            )
+        refusing = [
+            e
+            for e in blocking_errors
+            if not (
+                e.get("validation_type") == "required"
+                and e.get("field") in _OPTIONAL
+            )
+        ]
+        if refusing:
+            logger.info(
+                "validation_node: voiding a confirmation refused by %d error(s)"
+                " — the user must confirm again",
+                len(refusing),
+            )
+            result["confirmation_status"] = None
+
     return result

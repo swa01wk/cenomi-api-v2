@@ -41,6 +41,7 @@ from app.agents.services.context_builder import build_agent_context, format_cont
 from app.integrations.factory import get_search_repository
 from app.integrations.search.base import SearchResult
 from app.observability.decorators import trace_node
+from app.observability.llm_capture import capture_complete_json
 
 log = structlog.get_logger(__name__)
 
@@ -304,17 +305,19 @@ async def faq_node(state: ServiceRequestState) -> dict[str, Any]:
     user_content = _build_faq_user_content(state, rag_block)
     answer: str = _FALLBACK_MESSAGE
 
+    parsed: Any = None
+    in_tokens = out_tokens = llm_ms = 0
     try:
-        parsed, _in, _out, _ms = await gateway.complete_json(
+        parsed, in_tokens, out_tokens, llm_ms = await gateway.complete_json(
             system_prompt=FAQ_SYSTEM_PROMPT,
             user_message=user_content,
         )
+        parse_ok = isinstance(parsed, dict) and bool(parsed.get("message"))
         if isinstance(parsed, dict) and parsed.get("message"):
             raw_message = parsed["message"]
             if isinstance(raw_message, str):
                 answer = raw_message.strip()
             else:
-                # Model ignored the string contract and nested structured data.
                 log.warning(
                     "faq_node.structured_message_coerced",
                     message_type=type(raw_message).__name__,
@@ -322,10 +325,43 @@ async def faq_node(state: ServiceRequestState) -> dict[str, Any]:
                 answer = _render_structured(raw_message).strip() or _FALLBACK_MESSAGE
         else:
             log.warning("faq_node.unexpected_llm_shape", parsed=parsed)
+        await capture_complete_json(
+            state,
+            run_name="faq_llm_call",
+            prompt_name="faq_prompt",
+            gateway=gateway,
+            input_tokens=in_tokens,
+            output_tokens=out_tokens,
+            latency_ms=llm_ms,
+            structured_output={"message": answer[:500]},
+            parse_success=parse_ok,
+        )
     except json.JSONDecodeError as exc:
         log.warning("faq_node.json_parse_error", error=str(exc))
+        await capture_complete_json(
+            state,
+            run_name="faq_llm_call",
+            prompt_name="faq_prompt",
+            gateway=gateway,
+            input_tokens=0,
+            output_tokens=0,
+            latency_ms=0,
+            parse_success=False,
+            parse_error=str(exc),
+        )
     except Exception as exc:
         log.exception("faq_node.llm_failed", error=str(exc))
+        await capture_complete_json(
+            state,
+            run_name="faq_llm_call",
+            prompt_name="faq_prompt",
+            gateway=gateway,
+            input_tokens=in_tokens,
+            output_tokens=out_tokens,
+            latency_ms=llm_ms,
+            parse_success=False,
+            parse_error=str(exc),
+        )
 
     log.info(
         "faq_node.answered",
@@ -344,6 +380,16 @@ async def faq_node(state: ServiceRequestState) -> dict[str, Any]:
     # wondering whether their service request survived. It did — this node writes
     # only response_message/status, so collected_data and active_field are intact
     # and the next turn continues where it left off.
+    # Turn outcome for analytics: the fallback means the question was not
+    # answered; a grounded (RAG-backed) reply is ANSWERED; an answer produced
+    # from the static prompt alone is PARTIAL (plausible but ungrounded).
+    if answer == _FALLBACK_MESSAGE:
+        answer_status = "UNANSWERED"
+    elif rag_block:
+        answer_status = "ANSWERED"
+    else:
+        answer_status = "PARTIAL"
+
     active_field = state.get("active_field")
     if active_field:
         from app.agents.graph.nodes.handover.confirmation_node import _FIELD_LABELS
@@ -355,4 +401,5 @@ async def faq_node(state: ServiceRequestState) -> dict[str, Any]:
         "response_message": answer,
         "status": "WAITING_FOR_USER",
         "faq_sources": [],
+        "answer_status": answer_status,
     }

@@ -14,8 +14,9 @@ import { LifecycleStepper } from "./LifecycleStepper";
 import { StageActions } from "./StageActions";
 import { StageContextPanel } from "./StageContextPanel";
 import { DocumentUploadPanel } from "./DocumentUploadPanel";
-import { postServiceRequestChat } from "@/lib/api/chat-client";
+import { postServiceRequestChat, postSessionHeartbeat, postSessionEnd } from "@/lib/api/chat-client";
 import { getStoredUser } from "@/lib/api/auth-client";
+import { FlowUsefulnessCard } from "./FlowUsefulnessCard";
 import type {
   ChatAction,
   ChatMessage,
@@ -79,6 +80,7 @@ export function ServiceRequestChat() {
   const [srId, setSrId] = useState<string | null>(null);
   const [uploadedDocuments, setUploadedDocuments] = useState<UploadedDoc[]>([]);
   const [rddStatus, setRddStatus] = useState<string | null>(null);
+  const [showUsefulness, setShowUsefulness] = useState(false);
 
   // "Open existing SR" input — FM/DD can type an SR ID to continue a lifecycle
   const [openSrInput, setOpenSrInput] = useState("");
@@ -97,6 +99,33 @@ export function ServiceRequestChat() {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
   }, [messages, isPending]);
+
+  useEffect(() => {
+    if (!sessionId) return;
+    let last = Date.now();
+    const tick = () => {
+      if (document.visibilityState !== "visible") return;
+      const now = Date.now();
+      const delta = now - last;
+      last = now;
+      void postSessionHeartbeat(sessionId, delta);
+    };
+    const interval = setInterval(tick, 30_000);
+    const onVis = () => {
+      // Pause heartbeats while hidden; do not count background time as active.
+      if (document.visibilityState === "visible") last = Date.now();
+    };
+    document.addEventListener("visibilitychange", onVis);
+    const onPageHide = () => {
+      void postSessionEnd(sessionId);
+    };
+    window.addEventListener("pagehide", onPageHide);
+    return () => {
+      clearInterval(interval);
+      document.removeEventListener("visibilitychange", onVis);
+      window.removeEventListener("pagehide", onPageHide);
+    };
+  }, [sessionId]);
 
   // ── Core turn function ─────────────────────────────────────────────────────
 
@@ -189,6 +218,16 @@ export function ServiceRequestChat() {
           timestamp: new Date(),
         };
         setMessages((prev) => [...prev, assistantMsg]);
+
+        const skipKey = `sr-usefulness:${res.sessionId}`;
+        const alreadyAsked =
+          typeof window !== "undefined" && sessionStorage.getItem(skipKey) === "1";
+        if (
+          !alreadyAsked &&
+          (res.workflowComplete === true || res.actionResult === "success")
+        ) {
+          setShowUsefulness(true);
+        }
       } catch (err) {
         const errorMsg: ChatMessage = {
           id: crypto.randomUUID(),
@@ -398,6 +437,18 @@ export function ServiceRequestChat() {
                   </div>
                 );
               })}
+              {showUsefulness && sessionId && (
+                <div className="mt-2">
+                  <FlowUsefulnessCard
+                    sessionId={sessionId}
+                    srId={srId}
+                    onDone={() => {
+                      sessionStorage.setItem(`sr-usefulness:${sessionId}`, "1");
+                      setShowUsefulness(false);
+                    }}
+                  />
+                </div>
+              )}
               {isPending && <MessageBubble role="assistant" text="" isLoading />}
             </>
           )}

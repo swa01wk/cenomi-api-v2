@@ -229,13 +229,45 @@ class Settings(BaseSettings):
         return stripped
 
     handover_lease_picker_enabled: bool = Field(
-        default=False,
+        default=True,
         validation_alias="HANDOVER_LEASE_PICKER_ENABLED",
         description=(
             "Offer browsable eligible-lease chips when the Handover CREATE flow "
-            "has no lease identifiers yet. Disabled by default: the picker lists "
-            "leases the user has not asked for, and the plain 'what is the lease "
-            "code?' question is the expected prompt. Set true to restore it."
+            "has no lease identifiers yet. The picker shows the 5 most recently "
+            "activated leases with a search box and a read-more pager, so it "
+            "answers 'which lease?' instead of listing leases at random. Set "
+            "false to fall back to the plain lease-code question."
+        ),
+    )
+    guided_tour_choice_enabled: bool = Field(
+        default=False,
+        validation_alias="GUIDED_TOUR_CHOICE_ENABLED",
+        description=(
+            "Ask the user once per draft whether they want the assistant to "
+            "guide them through the form. Answering no leaves the form "
+            "editable — the assistant asks the same questions either way, and "
+            "anything typed into the form syncs back to the draft silently. "
+            "Applies to every service-request workflow that collects fields."
+        ),
+    )
+    handover_short_flow_enabled: bool = Field(
+        default=False,
+        validation_alias="HANDOVER_SHORT_FLOW_ENABLED",
+        description=(
+            "Collapse the Path A CREATE_SR ask loop from nine questions to "
+            "four turns: handover type, one combined inspection question "
+            "(start date + end date + inspector), documents, then preview. "
+            "Set false to keep the field-per-turn flow."
+        ),
+    )
+    handover_ai_autofill_enabled: bool = Field(
+        default=False,
+        validation_alias="HANDOVER_AI_AUTOFILL_ENABLED",
+        description=(
+            "Let an LLM draft the handover description and notes instead of "
+            "using the deterministic templates. Requires "
+            "HANDOVER_SHORT_FLOW_ENABLED; falls back to the templates on any "
+            "error or timeout. The title is always template-generated."
         ),
     )
     llm_confidence_threshold: float = Field(
@@ -410,6 +442,22 @@ class Settings(BaseSettings):
         default=None,
         validation_alias="INDEXER_BLOB_CONTAINER",
         description="Blob container for PDF sources; blob name = str(document_id).",
+    )
+
+    analytics_idle_timeout_seconds: int = Field(
+        default=600,
+        validation_alias="ANALYTICS_IDLE_TIMEOUT_SECONDS",
+        description="Mark IN_PROGRESS sessions idle after this many seconds without activity.",
+    )
+    analytics_heartbeat_min_interval_seconds: int = Field(
+        default=15,
+        validation_alias="ANALYTICS_HEARTBEAT_MIN_INTERVAL_SECONDS",
+        description="Ignore heartbeat active-ms increments faster than this interval.",
+    )
+    analytics_max_active_delta_ms: int = Field(
+        default=120_000,
+        validation_alias="ANALYTICS_MAX_ACTIVE_DELTA_MS",
+        description="Clamp a single heartbeat client_active_delta_ms to this maximum.",
     )
 
     @computed_field  # type: ignore[prop-decorator]
