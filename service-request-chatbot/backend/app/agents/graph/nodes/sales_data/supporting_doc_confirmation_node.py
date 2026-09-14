@@ -64,7 +64,7 @@ async def supporting_doc_confirmation_node(state: ServiceRequestState) -> dict[s
                 collected["sales_amt"] = amt
 
     def _missing_comment_response() -> dict[str, Any]:
-        prompt = _confirm_ui(collected)
+        prompt = _confirm_ui(collected, comment_missing=True)
         prompt["collected_data"] = collected
         return prompt
 
@@ -159,7 +159,7 @@ def _resume_upload_after_cancel(
     return prompt
 
 
-def _confirm_ui(collected: dict[str, Any]) -> dict[str, Any]:
+def _confirm_ui(collected: dict[str, Any], *, comment_missing: bool = False) -> dict[str, Any]:
     lease_code = collected.get("lease_code", "")
     start = collected.get("sales_period_start", "")
     end = collected.get("sales_period_end", "")
@@ -171,16 +171,19 @@ def _confirm_ui(collected: dict[str, Any]) -> dict[str, Any]:
     ask_label = ASK_UPLOAD_LABELS.get(current_status, "Document")
     amt = collected.get("sales_amt")
 
-    # As short as the original implementation — the card
-    # (SalesDataSupportingDocConfirmCard.tsx) already renders lease/period/
-    # file/amount/status as an actual table from response_ui's fields below,
-    # and the Confirm/Cancel buttons make "reply yes/no" instructions
-    # redundant. Every call to this shows the same single line regardless
-    # of whether it's the first prompt or a retry after a missing comment.
-    message = (
-        "A comment is required before I can submit. Add a short note "
-        "(for example: *POS report attached*) and confirm again."
-    )
+    # The card (SalesDataSupportingDocConfirmCard.tsx) already renders
+    # lease/period/file/amount/status as an actual table from response_ui's
+    # fields below, and the Confirm/Cancel buttons make "reply yes/no"
+    # instructions redundant — so both messages stay short. But they must
+    # differ: this used to show "A comment is required" even on the very
+    # first view of the card, before the tenant had done anything wrong.
+    if comment_missing:
+        message = (
+            "A comment is required before I can submit. Add a short note "
+            "(for example: *POS report attached*) and confirm again."
+        )
+    else:
+        message = "Add a short comment (for example: *POS report attached*), then confirm."
 
     return {
         "confirmation_status": "PENDING",
