@@ -35,78 +35,6 @@ log = structlog.get_logger(__name__)
 
 _MAX_RESPONSE_BYTES = 32_768  # cap raw body stored in trace payload
 
-# Work Permit V1 subtypes (workflow 5–8). Kept here so the mock does not import
-# work_permit_schema (graph nodes already depend on this module).
-_WP_HOT_ROOF: frozenset[str] = frozenset(
-    {"CONSTRUCTION_HOT", "CONSTRUCTION_ROOF_ACCESS", "MAINTENANCE_ROOF_ACCESS"}
-)
-_WP_COLD: frozenset[str] = frozenset({"CONSTRUCTION_COLD"})
-_WP_MAINT: frozenset[str] = frozenset({"MAINTENANCE_HOT", "MAINTENANCE_COLD"})
-_WP_OPS: frozenset[str] = frozenset({"OPERATIONS"})
-_WP_SUBTYPES: frozenset[str] = _WP_HOT_ROOF | _WP_COLD | _WP_MAINT | _WP_OPS
-
-
-def _wp_operations_for_subtype(sub_category: str) -> list[dict[str, Any]]:
-    """Seed V1 operations matching platform workflows 5–8."""
-    if sub_category in _WP_HOT_ROOF:
-        return [
-            {"assigned_role": "DD_ENGINEER", "workflow_level": 1, "status": "IN_PROGRESS"},
-            {"assigned_role": "FM_MANAGER", "workflow_level": 2, "status": "YET_TO_START"},
-            {"assigned_role": "MALL_MANAGER", "workflow_level": 3, "status": "YET_TO_START"},
-        ]
-    if sub_category in _WP_COLD:
-        return [
-            {"assigned_role": "DD_ENGINEER", "workflow_level": 1, "status": "IN_PROGRESS"},
-            {"assigned_role": "MALL_MANAGER", "workflow_level": 2, "status": "YET_TO_START"},
-            {"assigned_role": "OPERATION_EXECUTIVES", "workflow_level": 2, "status": "YET_TO_START"},
-            {"assigned_role": "OPERATIONS", "workflow_level": 2, "status": "YET_TO_START"},
-        ]
-    if sub_category in _WP_MAINT:
-        return [
-            {"assigned_role": "FM_MANAGER", "workflow_level": 1, "status": "IN_PROGRESS"},
-            {"assigned_role": "MALL_MANAGER", "workflow_level": 2, "status": "YET_TO_START"},
-        ]
-    if sub_category in _WP_OPS:
-        return [
-            {"assigned_role": "MALL_MANAGER", "workflow_level": 1, "status": "IN_PROGRESS"},
-        ]
-    return []
-
-
-def _advance_wp_operations(
-    ops: list[dict[str, Any]],
-    status: str,
-) -> str:
-    """Advance WP V1 hops. Returns the new SR status."""
-    submitted = (status or "").upper()
-    if submitted == "REJECTED":
-        for op in ops:
-            if (op.get("status") or "").upper() == "IN_PROGRESS":
-                op["status"] = "FINISHED"
-        return "REJECTED"
-    if submitted != "APPROVED":
-        return submitted or "IN_PROCESS"
-
-    current_levels = [
-        int(op.get("workflow_level") or 0)
-        for op in ops
-        if (op.get("status") or "").upper() == "IN_PROGRESS"
-    ]
-    if not current_levels:
-        return "APPROVED"
-    level = min(current_levels)
-    for op in ops:
-        if int(op.get("workflow_level") or 0) == level and (
-            (op.get("status") or "").upper() == "IN_PROGRESS"
-        ):
-            op["status"] = "FINISHED"
-    next_ops = [op for op in ops if int(op.get("workflow_level") or 0) == level + 1]
-    if not next_ops:
-        return "APPROVED"
-    for op in next_ops:
-        op["status"] = "IN_PROGRESS"
-    return "IN_PROCESS"
-
 
 # ---------------------------------------------------------------------------
 # Result models
@@ -442,24 +370,15 @@ class MockServiceRequestAPIService(AbstractServiceRequestAPIService):
         correlation_id = str(uuid.uuid4())
         self._created.append({"sr_id": sr_id, "payload": payload})
 
-        # Seed GET state — WP V1, fitout confirm, or handover FM → DD.
-        sub_category: str = str(payload.get("sub_category") or "").upper()
-        service_category: str = str(payload.get("service_category") or "").upper()
+        # Seed GET state — fitout confirm SRs use a single-approver workflow;
+        # standard handover SRs use the multi-step FM → DD_ENGINEER workflow.
+        sub_category: str = payload.get("sub_category") or ""
         _FITOUT_FOS_END = frozenset({"FIT_OUT_CONFIRM_FOS", "FIT_OUT_CONFIRM_END"})
         _FITOUT_TRADING = frozenset({"FIT_OUT_CONFIRM_TRADING"})
-        is_wp = service_category == "WORK_PERMIT" or sub_category in _WP_SUBTYPES
-        if is_wp:
-            ops = _wp_operations_for_subtype(sub_category)
-            sr_status = "IN_PROCESS"
-            sr_category = "WORK_PERMIT"
-        elif sub_category in _FITOUT_FOS_END:
+        if sub_category in _FITOUT_FOS_END:
             ops = [{"assigned_role": "DD_ENGINEER", "workflow_level": 1, "status": "IN_PROGRESS"}]
-            sr_status = "SUBMITTED"
-            sr_category = "FIT_OUT_AND_HANDOVER"
         elif sub_category in _FITOUT_TRADING:
             ops = [{"assigned_role": "MALL_MANAGER", "workflow_level": 1, "status": "IN_PROGRESS"}]
-            sr_status = "SUBMITTED"
-            sr_category = "FIT_OUT_AND_HANDOVER"
         else:
             ops = [
                 {"assigned_role": "MALL_MANAGER", "workflow_level": 1, "status": "FINISHED"},
@@ -467,22 +386,16 @@ class MockServiceRequestAPIService(AbstractServiceRequestAPIService):
                 {"assigned_role": "FM_MANAGER", "workflow_level": 2, "status": "IN_PROGRESS"},
                 {"assigned_role": "DD_ENGINEER", "workflow_level": 3, "status": "YET_TO_START"},
             ]
-            sr_status = "SUBMITTED"
-            sr_category = "FIT_OUT_AND_HANDOVER"
 
         # Persist the inner payload and sub_category so that GET /service-requests/{sr_id}
         # can return them for status-sync and sub_category inference.
         inner_payload: dict[str, Any] = dict(payload.get("payload") or {})
         if sub_category:
             inner_payload["sub_category"] = sub_category
-        inner_payload.setdefault("category", sr_category)
-        inner_payload.setdefault("service_category", sr_category)
 
         self._sr_states[sr_id] = {
             "service_request_id": sr_id,
-            "status": sr_status,
-            "category": sr_category,
-            "sub_category": sub_category,
+            "status": "SUBMITTED",
             "service_request_operations": ops,
             "workflow_version": 1,
             "payload": inner_payload,
@@ -514,12 +427,6 @@ class MockServiceRequestAPIService(AbstractServiceRequestAPIService):
         payload = dict(state.get("payload") or {})
         if state.get("workflow_version") is not None:
             payload["workflow_version"] = state["workflow_version"]
-        if state.get("category") and not payload.get("category"):
-            payload["category"] = state["category"]
-        if state.get("sub_category") and not payload.get("sub_category"):
-            payload["sub_category"] = state["sub_category"]
-        if state.get("category") == "WORK_PERMIT":
-            payload.setdefault("service_category", "WORK_PERMIT")
         return _GR(
             success=True,
             sr_id=sr_id,
@@ -552,19 +459,12 @@ class MockServiceRequestAPIService(AbstractServiceRequestAPIService):
         status = payload.get("status", "IN_PROCESS")
         # Advance mock state
         if sr_id in self._sr_states:
-            is_wp = (
-                self._sr_states[sr_id].get("category") == "WORK_PERMIT"
-                or str(self._sr_states[sr_id].get("sub_category") or "").upper() in _WP_SUBTYPES
-            )
             # V2 UPDATE (RE_EXAMINE) keeps FM IN_PROGRESS — same as platform TransitionTypeStay.
             if status == "RE_EXAMINE":
                 self._sr_states[sr_id]["status"] = "IN_PROCESS"
-            elif is_wp:
-                ops = self._sr_states[sr_id].get("service_request_operations", [])
-                self._sr_states[sr_id]["status"] = _advance_wp_operations(ops, status)
             else:
                 self._sr_states[sr_id]["status"] = status
-            if (not is_wp) and status == "APPROVED":
+            if status == "APPROVED":
                 ops = self._sr_states[sr_id].get("service_request_operations", [])
                 # Determine who was active before this PATCH so we can correctly
                 # advance the workflow:

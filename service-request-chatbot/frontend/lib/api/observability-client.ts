@@ -5,7 +5,6 @@ import type {
   TraceDetail,
   TraceFiltersState,
 } from "@/lib/types/observability";
-import { getStoredToken } from "@/lib/api/auth-client";
 
 // Observability trace/session endpoints live under /api (no v1 prefix).
 // Only the metrics summary endpoint uses /api/v1.
@@ -15,8 +14,7 @@ function apiBase(): string {
 }
 
 function v1Base(): string {
-  const raw = process.env.NEXT_PUBLIC_API_V1_PREFIX;
-  const prefix = raw && raw.length > 0 ? raw : "/api/v1";
+  const prefix = process.env.NEXT_PUBLIC_API_V1_PREFIX ?? "/api/v1";
   return `${apiBase()}${prefix}`;
 }
 
@@ -65,37 +63,9 @@ export async function getTraceDetail(traceId: string): Promise<TraceDetail | nul
 
 // ─── Metrics ──────────────────────────────────────────────────────────────────
 
-export async function submitFeedback(
-  traceId: string,
-  body: FeedbackPayload,
-): Promise<void> {
-  const token = getStoredToken();
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
-  if (token) headers.Authorization = `Bearer ${token}`;
-  const res = await fetch(`${observabilityBase()}/traces/${traceId}/feedback`, {
-    method: "POST",
-    headers,
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) {
-    throw new Error(`submitFeedback failed: ${res.status} ${res.statusText}`);
-  }
-}
-
-export type MetricsWindow = { from?: string; to?: string; agent?: string };
-
-function metricsQuery(window?: MetricsWindow): string {
-  const params = new URLSearchParams();
-  if (window?.from) params.set("from", window.from);
-  if (window?.to) params.set("to", window.to);
-  if (window?.agent) params.set("agent", window.agent);
-  const qs = params.toString();
-  return qs ? `?${qs}` : "";
-}
-
-export async function getMetricsSummary(window?: MetricsWindow): Promise<MetricsSummary> {
-  const res = await fetch(`${v1Base()}/observability/metrics/summary${metricsQuery(window)}`, {
-    cache: "no-store",
+export async function getMetricsSummary(): Promise<MetricsSummary> {
+  const res = await fetch(`${v1Base()}/observability/metrics/summary`, {
+    next: { revalidate: 30 },
   });
   if (!res.ok) {
     throw new Error(`getMetricsSummary failed: ${res.status} ${res.statusText}`);
@@ -103,44 +73,18 @@ export async function getMetricsSummary(window?: MetricsWindow): Promise<Metrics
   return (await res.json()) as MetricsSummary;
 }
 
-export async function getMetricsUsers(window?: MetricsWindow): Promise<{
-  items: Array<Record<string, number | string>>;
-  total: number;
-  page: number;
-  page_size: number;
-}> {
-  const res = await fetch(`${v1Base()}/observability/metrics/users${metricsQuery(window)}`, {
-    cache: "no-store",
-  });
-  if (!res.ok) throw new Error(`getMetricsUsers failed: ${res.status}`);
-  return res.json();
-}
+// ─── Feedback ─────────────────────────────────────────────────────────────────
 
-export async function getMetricsFunnel(window?: MetricsWindow): Promise<{
-  steps: Array<{ key: string; count: number }>;
-  drop_off_by_stage: Array<{ workflow_stage: string; last_sessions: number }>;
-}> {
-  const res = await fetch(`${v1Base()}/observability/metrics/funnel${metricsQuery(window)}`, {
-    cache: "no-store",
+export async function submitFeedback(
+  traceId: string,
+  body: FeedbackPayload,
+): Promise<void> {
+  const res = await fetch(`${observabilityBase()}/traces/${traceId}/feedback`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
   });
-  if (!res.ok) throw new Error(`getMetricsFunnel failed: ${res.status}`);
-  return res.json();
-}
-
-export async function getMetricsFeedback(window?: MetricsWindow): Promise<{
-  thumbs_up: number;
-  thumbs_down: number;
-  thumbs_up_rate: number;
-  useful: number;
-  not_useful: number;
-  usefulness_rate: number;
-  csat_avg: number | null;
-  csat_n: number;
-  not_useful_reasons: Array<{ reason: string; count: number }>;
-}> {
-  const res = await fetch(`${v1Base()}/observability/metrics/feedback${metricsQuery(window)}`, {
-    cache: "no-store",
-  });
-  if (!res.ok) throw new Error(`getMetricsFeedback failed: ${res.status}`);
-  return res.json();
+  if (!res.ok) {
+    throw new Error(`submitFeedback failed: ${res.status} ${res.statusText}`);
+  }
 }

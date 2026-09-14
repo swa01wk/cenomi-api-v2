@@ -164,7 +164,6 @@ export type FeedbackPayload = {
   comment?: string;
   feedback_type?: FeedbackType;
   label?: string;
-  user_id?: string;
 };
 
 // ─── Trace detail (full response) ─────────────────────────────────────────────
@@ -182,29 +181,15 @@ export type TraceDetail = {
 
 // ─── Metrics ──────────────────────────────────────────────────────────────────
 
-export type MetricsWindowRange = { from: string; to: string };
-
 export type MetricsSummary = {
   total_traces: number;
-  completed_traces?: number;
+  completed_traces: number;
   failed_traces: number;
   success_rate: number;
   avg_latency_ms: number;
   total_tokens: number;
   total_cost: number;
-  sessions?: number;
-  ended_sessions?: number;
-  sr_submitted?: number;
-  sr_completion_rate?: number;
-  usefulness_rate?: number;
-  feedback_coverage?: number;
-  cost_per_successful_sr?: number;
-  p95_latency_ms?: number;
-  idle_abandoned?: number;
-  avg_wall_session_ms?: number;
-  avg_client_active_ms?: number;
-  avg_agent_time_ms?: number;
-  window?: MetricsWindowRange;
+  [key: string]: number;
 };
 
 // ─── Filter state ─────────────────────────────────────────────────────────────

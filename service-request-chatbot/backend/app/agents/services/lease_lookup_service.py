@@ -339,25 +339,13 @@ class HttpLeaseLookupService(AbstractLeaseLookupService):
     def _build_params(query: LeaseLookupQuery) -> dict[str, Any]:
         params: dict[str, Any] = {}
         if query.lease_code:
-            # A lease code identifies one lease on its own — the platform
-            # matches it exactly against pms_tenant_code — and every other
-            # identifier is ANDed onto it, so they can only narrow it wrongly.
-            #
-            # Reported live on t0108880 "Brand Taxi Mall Rental". The extractor
-            # split that name in two, because it contains the word "Mall", and
-            # the lookup went out as
-            #     lease_code=t0108880, brand='Brand Taxi', mall='Mall Rental'
-            # The mall matched nothing, the AND removed the row, and the user
-            # was told no such lease existed — for a lease the picker had just
-            # listed and they had selected from it.
             params["lease_code"] = query.lease_code
-        else:
-            if query.brand:
-                params["brand"] = query.brand
-            if query.mall:
-                params["mall"] = query.mall
-            if query.company:
-                params["company"] = query.company
+        if query.brand:
+            params["brand"] = query.brand
+        if query.mall:
+            params["mall"] = query.mall
+        if query.company:
+            params["company"] = query.company
         # Forward the user's property scope to the platform so the response is
         # pre-filtered to leases the user is authorised to manage.
         if query.property_ids:

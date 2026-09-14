@@ -621,8 +621,7 @@ class TestStageSpecificConfirmationCards:
         assert "startDate" not in card_keys
 
     @pytest.mark.asyncio
-    async def test_node_cards_fm_approve_without_docs(self) -> None:
-        """FM documents are optional — a staged approve reaches the card."""
+    async def test_node_asks_upload_when_fm_approve_without_docs(self) -> None:
         data = _minimal_fm_review()
         state: dict[str, Any] = {
             "collected_data": data,
@@ -631,7 +630,9 @@ class TestStageSpecificConfirmationCards:
             "backend_refs": {"fm_action": "approve", "sr_id": "sr-1"},
         }
         result = await confirmation_node(state)
-        assert result.get("response_ui", {}).get("type") == "confirmation_card"
+        assert result.get("status") == "WAITING_FOR_USER"
+        assert result.get("response_ui", {}).get("type") != "confirmation_card"
+        assert "document_requirement" in (result.get("response_decorations") or {})
 
     @pytest.mark.asyncio
     async def test_node_generates_rdd_card_for_rdd_review_stage(self) -> None:

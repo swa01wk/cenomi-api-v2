@@ -94,7 +94,6 @@ def _make_result(
     status_code: int | None = 200,
     latency_ms: int = 15,
     reason: str | None = None,
-    existing_handover_sr_id: str | None = None,
 ) -> LeaseLookupResult:
     payload: dict[str, Any] = {
         "leases": [m.model_dump() for m in matches],
@@ -148,22 +147,14 @@ def _make_trace_manager() -> MagicMock:
 class TestNoIdentifiers:
     @pytest.mark.asyncio
     async def test_create_sr_browse_returns_in_progress(self) -> None:
-        state = _state(
-            collected_data={},
-            workflow_stage="CREATE_SR",
-            active_agent="rdd_handover_agent",
-        )
+        state = _state(collected_data={}, workflow_stage="CREATE_SR")
         svc = _MockService(_make_result([]))
         result = await lease_lookup_node(state, service=svc)
         assert result["status"] == "IN_PROGRESS"
 
     @pytest.mark.asyncio
     async def test_create_sr_browse_emits_leases_picker(self) -> None:
-        state = _state(
-            collected_data={},
-            workflow_stage="CREATE_SR",
-            active_agent="rdd_handover_agent",
-        )
+        state = _state(collected_data={}, workflow_stage="CREATE_SR")
         svc = _MockService(_make_result([]))
         result = await lease_lookup_node(state, service=svc)
         spec = result["response_decorations"]["suggestions"]
@@ -172,37 +163,31 @@ class TestNoIdentifiers:
 
     @pytest.mark.asyncio
     async def test_create_sr_browse_defers_text_question(self) -> None:
-        state = _state(
-            collected_data={},
-            workflow_stage="CREATE_SR",
-            active_agent="rdd_handover_agent",
-        )
+        state = _state(collected_data={}, workflow_stage="CREATE_SR")
         svc = _MockService(_make_result([]))
         result = await lease_lookup_node(state, service=svc)
         assert "response_ui" not in result
 
     @pytest.mark.asyncio
-    async def test_work_permit_browse_returns_in_progress(self) -> None:
+    async def test_work_permit_no_identifiers_returns_waiting(self) -> None:
         state = _state(collected_data={}, workflow_stage="CREATE_WORK_PERMIT")
         svc = _MockService(_make_result([]))
         result = await lease_lookup_node(state, service=svc)
-        assert result["status"] == "IN_PROGRESS"
+        assert result["status"] == "WAITING_FOR_USER"
 
     @pytest.mark.asyncio
-    async def test_work_permit_browse_emits_leases_picker(self) -> None:
+    async def test_work_permit_no_identifiers_asks_for_lease_code(self) -> None:
         state = _state(collected_data={}, workflow_stage="CREATE_WORK_PERMIT")
         svc = _MockService(_make_result([]))
         result = await lease_lookup_node(state, service=svc)
-        spec = result["response_decorations"]["suggestions"]
-        assert spec["kind"] == "resource_picker"
-        assert spec["resource"] == "leases"
+        assert result["response_ui"]["field"] == "lease_code"
 
     @pytest.mark.asyncio
-    async def test_work_permit_browse_defers_text_question(self) -> None:
+    async def test_work_permit_no_identifiers_response_ui_type_is_text_question(self) -> None:
         state = _state(collected_data={}, workflow_stage="CREATE_WORK_PERMIT")
         svc = _MockService(_make_result([]))
         result = await lease_lookup_node(state, service=svc)
-        assert "response_ui" not in result
+        assert result["response_ui"]["type"] == "text_question"
 
     @pytest.mark.asyncio
     async def test_no_identifiers_service_not_called(self) -> None:
@@ -215,7 +200,7 @@ class TestNoIdentifiers:
 
     @pytest.mark.asyncio
     async def test_no_collected_data_key_browse_on_default_create_sr(self) -> None:
-        state = _state(active_agent="rdd_handover_agent")
+        state = _state()
         svc = _MockService(_make_result([]))
         result = await lease_lookup_node(state, service=svc)
         assert result["status"] == "IN_PROGRESS"

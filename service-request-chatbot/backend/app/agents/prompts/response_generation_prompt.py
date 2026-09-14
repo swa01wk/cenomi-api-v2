@@ -20,25 +20,6 @@ FIELD_LABELS: dict[str, str] = {
     "inspection_done_by": "who will perform the inspection (FM Manager or Operations)",
     "comments": "comments",
     "unit_readiness_date": "unit readiness date",
-    # The three fitout confirmation milestones. Without these, _mentions_field
-    # fell back to the raw key and demanded the word "done" — which none of the
-    # real questions contain ("Has the fitout been completed?") — so a correct
-    # reply was judged a repeat of the previous question and replaced by a
-    # sentence built from the key: "Please provide the fitout complete done."
-    #
-    # _mentions_field requires every token of the label (>3 chars) to appear in
-    # the reply, so these are worded to match the questions in _RADIO_PHRASING
-    # rather than to read prettily: "started" matches "Has the fitout started?",
-    # "completed" matches "Has the fitout been completed?".
-    "fitout_start_done": "fitout started (yes or no)",
-    "fitout_complete_done": "fitout completed (yes or no)",
-    "trading_done": "trading started (yes or no)",
-    "delay_reason": "reason for the delay",
-    "planned_fitout_start_date": "revised planned fitout start date",
-    "planned_fitout_end_date": "revised planned fitout end date",
-    "planned_fitout_complete_date": "revised planned fitout completion date",
-    "planned_trading_date": "revised planned trading date",
-    "actual_fitout_complete_date": "actual fitout completion date",
     "expected_handover_date": "expected handover date",
     "guideLineLink": "guideline link",
     "actual_handover_date": "actual handover date",

@@ -114,13 +114,8 @@ for Path B users.
    - "June 1st" (no year) → assume the current year (2026) → "2026-06-01"
    - "June 1, 2026" → "2026-06-01"
    - "1st of June" → "2026-06-01" (assume current year if not given)
-   - **Relative dates**: the input always carries a `Today's date: YYYY-MM-DD (Weekday)`
-     line. Resolve relative expressions against it and emit the resulting ISO date:
-     "today" → that date; "tomorrow" → +1 day; "day after tomorrow" → +2 days;
-     "in 3 days" / "3 days from now" → +3 days; "next Monday" → the next
-     occurrence of that weekday strictly after today; "next week" → +7 days.
-     Give a resolved relative date confidence 0.9 (an explicit calendar date stays 1.0).
-   - "end of next month", "sometime next quarter" → omit the field (too vague to resolve precisely)
+   - "next Monday" or other relative dates → omit the field (confidence too low to resolve without a calendar)
+   - "end of next month" → omit the field (too vague to resolve precisely)
    - Placeholders like "ASAP", "TBD", "soon", "later", "don't know yet", "to be determined",
      "as soon as possible", "when ready", "sometime" → ALWAYS omit — these are NOT valid dates.
      Do NOT store these strings as date values; they must be rejected so the bot re-asks.
@@ -279,86 +274,6 @@ Examples:
 - Question: "When should the inspection start?"
   User: "June 1 to June 3, FM Manager"
   → Extract `startDate: "2026-06-01"`, `endDate: "2026-06-03"`, `inspection_done_by: "FM_MANAGER"`
-
-**The combined inspection question**
-
-One question may ask for the window and the inspector together ("Inspection
-details — give me the window and who is inspecting"). Extract every value the
-user supplies and simply omit the rest — the bot asks again for what is left.
-
-- Question: "**Inspection details** — give me the window and who is inspecting."
-  User: "6 Sep to 7 Sep, FM Manager"
-  → Extract `startDate: "2026-09-06"`, `endDate: "2026-09-07"`, `inspection_done_by: "FM_MANAGER"`
-
-- Same question, User: "Start 10/09/2026, End 11/09/2026, FM Manager"  ← a quick-pick chip
-  → Extract `startDate: "2026-09-10"`, `endDate: "2026-09-11"`,
-    `inspection_done_by: "FM_MANAGER"` — the whole question answered in one tap
-
-- Same question, User: "Start 07/09/2026, End 08/09/2026"   ← a window-only chip
-  → Extract `startDate: "2026-09-07"` AND `endDate: "2026-09-08"`; omit `inspection_done_by`
-
-- Same question, User: "End 08/09/2026"                      ← end-only chip
-  → Extract `endDate: "2026-09-08"` only
-
-- Same question, User: "operations, today and tomorrow" (Today's date: 2026-09-04)
-  → Extract `inspection_done_by: "OPERATIONS"`, `startDate: "2026-09-04"`,
-    `endDate: "2026-09-05"`
-
-- Same question, User: "FM team"
-  → Extract `inspection_done_by: "FM_MANAGER"` only — do NOT guess dates
-
-**The combined Already Trading question (Path B)**
-
-Path B records a unit that is already open, so all four dates come from the
-user in one line, in this order unless they name them: shop handover, fit-out
-start, fit-out end, trading.
-
-- Question: "**The dates so far** — this unit is already trading, so I need
-  what actually happened."
-  User: "20/08/2026, 27/08/2026, 30/09/2026, 10/10/2026"
-  → Extract `actual_shop_handover_date: "2026-08-20"`,
-    `actual_fitout_start_date: "2026-08-27"`,
-    `actual_fitout_end_date: "2026-09-30"`,
-    `actual_trading_date: "2026-10-10"`
-
-- Same question, User: "handed over 20 Aug, fitout 27 Aug to 30 Sep, trading 10 Oct"
-  → the same four values
-
-- Same question, User: "20 Aug and 27 Aug"
-  → Extract `actual_shop_handover_date` and `actual_fitout_start_date` only;
-    the bot asks for the rest
-
-**The combined RDD review question**
-
-RDD review asks for the Handover Meeting Report outcome and the milestone dates
-in one question. Read every value the user gives and omit the rest; the bot
-asks again for what is left. `trading_date` is never extracted — the system
-derives it from `fitout_end_date` — so ignore a fourth date rather than
-inventing a field for it.
-
-The dates are given in this order unless the user names them: actual handover,
-fit-out start, fit-out end.
-
-- Question: "**Report outcome and milestone dates** — the outcome, the actual
-  handover date, and the fit-out window."
-  User: "approved, 10 Sep, 30 Sep to 10 Nov"
-  → Extract `document_status: "APPROVED"`, `actual_handover_date: "2026-09-10"`,
-    `fitout_start_date: "2026-09-30"`, `fitout_end_date: "2026-11-10"`
-
-- Same question, User: "Approved. handover 10/09/2026, fitout start 30/09/2026,
-  fitout end 10/11/2026"   ← a quick-pick chip
-  → the same four values
-
-- Same question, User: "approved 20 sept 27 sept 30 sept 10 oct"
-  → Extract `document_status: "APPROVED"`, `actual_handover_date: "2026-09-20"`,
-    `fitout_start_date: "2026-09-27"`, `fitout_end_date: "2026-09-30"` —
-    the fourth date is the trading date, which the system computes: omit it
-
-- Same question, User: "approve with changes"
-  → Extract `document_status: "APPROVED_WITH_CHANGES"` only
-
-- Same question, User: "handover was the 20th, fitout 27 Sep to 30 Sep"
-  → Extract the three dates; omit `document_status`
 
 Always prefer extracting MORE fields over fewer when values are explicitly stated.
 Never skip a clearly-stated field just because it was not the one being asked about.

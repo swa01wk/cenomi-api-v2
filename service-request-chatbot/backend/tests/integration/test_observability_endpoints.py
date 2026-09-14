@@ -117,9 +117,6 @@ def _mock_feedback(*, trace_id: UUID) -> MagicMock:
     row.score = 4
     row.label = "GOOD_EXTRACTION"
     row.comment = "Agent correctly extracted the lease."
-    row.session_id = None
-    row.sr_id = None
-    row.metadata_ = {}
     row.created_at = _NOW
     return row
 
@@ -648,44 +645,3 @@ class TestSubmitFeedback:
         assert captured["score"] == 3
         assert captured["label"] == "PARTIAL_EXTRACTION"
         assert captured["comment"] == "Missed one field."
-
-    @pytest.mark.asyncio
-    async def test_turn_thumbs_updates_existing_row(self):
-        tid = uuid4()
-        trace = _mock_trace(trace_id=tid)
-        existing = _mock_feedback(trace_id=tid)
-        existing.feedback_type = "TURN_THUMBS"
-        existing.label = "THUMBS_UP"
-        client = _make_app_client()
-        try:
-            with (
-                patch(
-                    "app.observability.api.feedback.TraceRepository.get",
-                    new_callable=AsyncMock,
-                    return_value=trace,
-                ),
-                patch(
-                    "app.observability.api.feedback.FeedbackRepository.get_thumbs_for_trace",
-                    new_callable=AsyncMock,
-                    return_value=existing,
-                ),
-                patch(
-                    "app.observability.api.feedback.FeedbackRepository.create",
-                    new_callable=AsyncMock,
-                ) as create,
-            ):
-                async with client as c:
-                    resp = await c.post(
-                        f"{_TRACES_URL}/{tid}/feedback",
-                        json={
-                            "feedback_type": "TURN_THUMBS",
-                            "label": "THUMBS_DOWN",
-                            "user_id": "demo_user",
-                        },
-                    )
-        finally:
-            _restore()
-
-        assert resp.status_code == 201
-        assert resp.json()["label"] == "THUMBS_DOWN"
-        create.assert_not_called()

@@ -95,34 +95,6 @@ def _build_display_fields(
     return display
 
 
-# Rows the card lets the user fix in place, per sub-category. The lease rows are
-# deliberately absent: the lease is resolved by lookup and every identifier on
-# the request hangs off it, so it is read-only here exactly as it is in chat.
-def _editable_keys(sub_category: str) -> set[str]:
-    cfg = SUBCAT_CONFIG.get(sub_category, {})
-    keys: set[str] = {"delay_reason"}
-    radio_field = cfg.get("radio_field", "")
-    if radio_field:
-        keys.add(radio_field)
-    actual = cfg.get("actual_date_field")
-    if actual:
-        keys.add(actual)
-    keys.update(cfg.get("planned_date_fields", []))
-    if cfg.get("has_comments"):
-        keys.add("comments")
-    return keys
-
-
-# The radio is a two-way answer, not free text — the card offers the same two
-# values the chat question does, so flipping it here cannot produce a value the
-# validator will reject.
-_RADIO_OPTIONS: tuple[str, ...] = ("yes", "no")
-
-
-def _is_date_key(field_key: str) -> bool:
-    return field_key.endswith("_date") and not field_key.endswith("_readonly")
-
-
 def _build_confirmation_card(
     collected: dict[str, Any],
     sub_category: str,
@@ -134,29 +106,16 @@ def _build_confirmation_card(
 
     display_keys = _build_display_fields(sub_category, collected, radio_value)
 
-    editable_keys = _editable_keys(sub_category)
-
     fields: list[dict[str, Any]] = []
     for field_key in display_keys:
         raw_value = collected.get(field_key)
-        is_editable = field_key in editable_keys
-        # An editable row round-trips through an input, so it carries the raw
-        # machine value (YYYY-MM-DD, "yes"/"no"). A read-only row carries the
-        # formatted string the user reads.
-        value = (
-            "" if raw_value is None else str(raw_value)
-        ) if is_editable else format_field_display_value(field_key, raw_value)
-        row: dict[str, Any] = {
+        display_value = format_field_display_value(field_key, raw_value)
+        fields.append({
             "key": field_key,
             "label": _FIELD_LABELS.get(field_key, field_key),
-            "value": value,
-            "editable": is_editable,
-        }
-        if is_editable and field_key == radio_field:
-            row["options"] = list(_RADIO_OPTIONS)
-        elif is_editable and _is_date_key(field_key):
-            row["inputType"] = "date"
-        fields.append(row)
+            "value": display_value,
+            "editable": False,
+        })
 
     request_type = _REQUEST_TYPE_LABELS.get(sub_category, "Fitout Confirmation SR")
     stage_label = "Approve" if workflow_stage == "APPROVE_SR" else "Create"

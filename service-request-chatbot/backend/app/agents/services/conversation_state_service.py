@@ -13,10 +13,6 @@ from uuid import UUID
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.agents.services.deleted_documents import (
-    deleted_document_ids,
-    without_deleted,
-)
 from app.db.repositories.service_request_draft_repo import ServiceRequestDraftRepository
 
 log = structlog.get_logger(__name__)
@@ -178,11 +174,6 @@ class ConversationStateService:
                         list(draft.documents or []),
                         list(state_docs or []),
                     )
-                # The union above can only add; a document deleted this
-                # session must not come back from the older draft copy.
-                merged_docs = without_deleted(
-                    merged_docs, deleted_document_ids(state.get("backend_refs"))
-                )
                 updates: dict[str, Any] = {
                     "workflow_stage": workflow_stage,
                     # Use raw_collected unconditionally — an empty dict after a
@@ -202,14 +193,6 @@ class ConversationStateService:
                 sr_id = _extract_sr_id(state)
                 if sr_id:
                     updates["sr_id"] = sr_id
-                elif (state.get("backend_refs") or {}).get("released_sr_id"):
-                    # The turn deliberately let go of the SR to start a new
-                    # request (new_request_node). An sr_id is otherwise only
-                    # ever written, never cleared, so the draft would restore
-                    # the released SR on the next turn and pull the new request
-                    # back onto it. Clear it only on that explicit signal.
-                    updates["sr_id"] = None
-                    updates["service_request_status"] = None
                 await self._draft_repo.update(draft.id, updates)
 
             log.debug(

@@ -52,20 +52,24 @@ def _passed(results: list[dict]) -> list[dict]:
 
 
 class TestValidateDocumentCountFMReview:
-    """FM_REVIEW has no document requirement — all three types are optional.
+    """FM_REVIEW requires at least one document to be uploaded."""
 
-    It used to demand at least one, raised as a blocking ``document_count``
-    error. That held the reviewer on the upload card with no way past it when
-    they had nothing to attach, even though the card itself marks every FM row
-    ``required: False``.
-    """
-
-    def test_no_documents_is_not_an_error(self) -> None:
+    def test_no_documents_returns_failure(self) -> None:
         results = validate_document_count([], "FM_REVIEW")
-        assert _failed(results) == []
+        assert len(_failed(results)) == 1
 
-    def test_no_documents_raises_nothing_at_all(self) -> None:
-        assert validate_document_count([], "FM_REVIEW") == []
+    def test_empty_list_failure_is_blocking(self) -> None:
+        results = validate_document_count([], "FM_REVIEW")
+        failed = _failed(results)
+        assert failed[0]["blocking"] is True
+
+    def test_empty_list_failure_field_is_documents(self) -> None:
+        results = validate_document_count([], "FM_REVIEW")
+        assert _failed(results)[0]["field"] == "_documents"
+
+    def test_empty_list_failure_type_is_document_count(self) -> None:
+        results = validate_document_count([], "FM_REVIEW")
+        assert _failed(results)[0]["validation_type"] == "document_count"
 
     def test_one_checklist_document_passes(self) -> None:
         results = validate_document_count([_doc("SR_HANDOVER_CHECKLIST")], "FM_REVIEW")
@@ -95,7 +99,12 @@ class TestValidateDocumentCountFMReview:
 
     def test_none_documents_treated_as_empty(self) -> None:
         results = validate_document_count(None, "FM_REVIEW")  # type: ignore[arg-type]
-        assert _failed(results) == []
+        assert len(_failed(results)) == 1
+
+    def test_failure_message_mentions_upload(self) -> None:
+        results = validate_document_count([], "FM_REVIEW")
+        msg = _failed(results)[0]["message"].lower()
+        assert "upload" in msg or "document" in msg
 
 
 # ===========================================================================
@@ -248,12 +257,13 @@ class TestValidationServiceDocumentCount:
 
     # ── FM_REVIEW — no documents → blocked ─────────────────────────────────
 
-    def test_fm_review_no_docs_produces_no_count_error(self) -> None:
+    def test_fm_review_no_docs_produces_blocking_error(self) -> None:
         svc = ValidationService()
         data = {"unit_readiness_date": "2026-07-10", "expected_handover_date": "2026-07-17"}
         errors = svc.validate_draft(data, workflow_stage="FM_REVIEW", documents=[])
         count_errors = [e for e in errors if e["validation_type"] == "document_count"]
-        assert count_errors == []
+        assert len(count_errors) == 1
+        assert count_errors[0]["blocking"] is True
 
     def test_fm_review_one_doc_no_count_error(self) -> None:
         svc = ValidationService()
@@ -328,9 +338,9 @@ class TestValidationServiceDocumentCount:
 
     # ── None documents default behaviour ───────────────────────────────────
 
-    def test_fm_review_none_documents_raises_no_count_error(self) -> None:
+    def test_fm_review_none_documents_triggers_count_error(self) -> None:
         svc = ValidationService()
         data = {"unit_readiness_date": "2026-07-10", "expected_handover_date": "2026-07-17"}
         errors = svc.validate_draft(data, workflow_stage="FM_REVIEW", documents=None)
         count_errors = [e for e in errors if e["validation_type"] == "document_count"]
-        assert count_errors == []
+        assert len(count_errors) == 1

@@ -1,12 +1,10 @@
-"""Unit tests — the eligible-lease browse picker and its kill switch.
+"""Unit tests — the eligible-lease browse picker is off by default.
 
-The first version of this picker was disabled: asked for a lease code, the
-Handover CREATE flow answered with leases the user had not asked about
-("Careem (t002134)", "Load more leases"), which is noise in front of a question
-they can simply answer. It is back on by default in a form that narrows rather
-than pads — the 5 most recently activated eligible leases, a search box, and a
-read-more pager. HANDOVER_LEASE_PICKER_ENABLED=false still turns it off without
-a code change, falling back to the plain lease-code question.
+Asked for a lease code, the Handover CREATE flow used to answer with a list of
+leases the user had not asked about ("Careem (t002134)", "Load more leases"),
+which is noise in front of a question they can simply answer. The picker is now
+gated behind HANDOVER_LEASE_PICKER_ENABLED, default off, so the flow asks for
+the lease code as plain text.
 """
 
 from __future__ import annotations
@@ -35,44 +33,43 @@ def _state(**overrides: Any) -> dict[str, Any]:
 
 
 class TestLeasePickerToggle:
-    def test_enabled_by_default(self) -> None:
-        assert settings.handover_lease_picker_enabled is True
-        assert should_browse_leases(_state()) is True
-
-    def test_can_be_disabled(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(settings, "handover_lease_picker_enabled", False)
+    def test_disabled_by_default(self) -> None:
+        assert settings.handover_lease_picker_enabled is False
         assert should_browse_leases(_state()) is False
 
+    def test_can_be_re_enabled(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(settings, "handover_lease_picker_enabled", True)
+        assert should_browse_leases(_state()) is True
+
     @pytest.mark.parametrize("blank", ["", " ", "   "])
-    def test_blank_env_value_keeps_the_default(self, blank: str) -> None:
-        """Key Vault stores "empty" as a space — that must not read as false."""
+    def test_blank_env_value_stays_disabled(self, blank: str) -> None:
+        """Key Vault stores "empty" as a space — that must not enable it."""
         built = Settings(  # type: ignore[call-arg]
             _env_file=None,
             DATABASE_URL="postgresql+asyncpg://u:p@h:5432/d",
             HANDOVER_LEASE_PICKER_ENABLED=blank,
         )
-        assert built.handover_lease_picker_enabled is True
+        assert built.handover_lease_picker_enabled is False
 
-    def test_explicit_false_env_value_disables(self) -> None:
+    def test_explicit_true_env_value_enables(self) -> None:
         built = Settings(  # type: ignore[call-arg]
             _env_file=None,
             DATABASE_URL="postgresql+asyncpg://u:p@h:5432/d",
-            HANDOVER_LEASE_PICKER_ENABLED="false",
+            HANDOVER_LEASE_PICKER_ENABLED="true",
         )
-        assert built.handover_lease_picker_enabled is False
+        assert built.handover_lease_picker_enabled is True
 
-    def test_a_workflow_without_a_lease_list_is_still_excluded(self) -> None:
-        """Re-enabling must not widen the picker to workflows with no list.
+    def test_other_agents_still_excluded_when_enabled(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The flag must not widen the picker to fitout / work-permit agents."""
+        monkeypatch.setattr(settings, "handover_lease_picker_enabled", True)
+        assert should_browse_leases(_state(active_agent="rdd_fitout_start_agent")) is False
 
-        The three fitout confirmations now have their own — each scoped by
-        ``purpose`` to the leases holding its prerequisite milestone. Work Permit
-        create shares Handover's eligible-lease list. An unknown session still
-        must not be offered handover leases.
-        """
-        assert should_browse_leases(_state(active_agent="notification_agent")) is False
-        assert should_browse_leases(_state(active_agent="")) is False
-
-    def test_resolved_lease_still_excluded(self) -> None:
+    def test_resolved_lease_still_excluded_when_enabled(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(settings, "handover_lease_picker_enabled", True)
         assert should_browse_leases(_state(collected_data={"lease_id": 9001})) is False
 
     def test_reviewer_inbox_picker_is_unaffected(self) -> None:
@@ -82,28 +79,9 @@ class TestLeasePickerToggle:
         assert inbox["suggestions"]["resource"] == "service_requests"
 
 
-class TestFlowOffersThePicker:
+class TestFlowAsksForLeaseCodeInstead:
     @pytest.mark.asyncio
-    async def test_no_identifiers_offers_picker(self) -> None:
-        service = MagicMock()
-        service.lookup = AsyncMock()
-        result = await lease_lookup_node(_state(), service=service)  # type: ignore[arg-type]
-
-        spec = result["response_decorations"]["suggestions"]
-        assert result["status"] == "IN_PROGRESS"
-        assert spec["resource"] == "leases"
-        assert spec["filters"]["limit"] == 5
-        assert spec["filters"]["sort_by"] == "activation_date"
-        assert spec["searchable"] is True
-        # No identifiers to look up — the chips come from the platform list
-        # endpoint the frontend calls, not from a lease lookup here.
-        assert service.lookup.called is False
-
-    @pytest.mark.asyncio
-    async def test_asks_as_plain_text_when_disabled(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setattr(settings, "handover_lease_picker_enabled", False)
+    async def test_no_identifiers_asks_as_plain_text(self) -> None:
         service = MagicMock()
         service.lookup = AsyncMock()
         result = await lease_lookup_node(_state(), service=service)  # type: ignore[arg-type]
@@ -112,3 +90,15 @@ class TestFlowOffersThePicker:
         assert result["response_ui"]["field"] == "lease_code"
         assert result.get("response_decorations") is None
         assert service.lookup.called is False
+
+    @pytest.mark.asyncio
+    async def test_picker_returned_when_explicitly_enabled(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(settings, "handover_lease_picker_enabled", True)
+        service = MagicMock()
+        service.lookup = AsyncMock()
+        result = await lease_lookup_node(_state(), service=service)  # type: ignore[arg-type]
+
+        assert result["status"] == "IN_PROGRESS"
+        assert result["response_decorations"]["suggestions"]["resource"] == "leases"

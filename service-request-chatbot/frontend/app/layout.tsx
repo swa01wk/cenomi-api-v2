@@ -17,7 +17,6 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
               Service Request Chat
             </Link>
             <nav className="flex gap-4 text-sm text-zinc-600 dark:text-zinc-400">
-              <Link href="/admin/agent-success">AI Success</Link>
               <Link href="/admin/agent-observability">Observability</Link>
             </nav>
           </div>

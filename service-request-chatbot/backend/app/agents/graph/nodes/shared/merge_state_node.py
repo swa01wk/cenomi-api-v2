@@ -18,18 +18,7 @@ import re
 from typing import Any
 
 from app.agents.graph.state import ServiceRequestState
-from app.agents.services.deleted_documents import (
-    deleted_ids_from_corrected,
-    record_deleted_documents,
-    without_deleted,
-    without_deleted_ids,
-)
 from app.observability.decorators import trace_node
-
-# Provenance of every field the short flow generated, kept alongside the values
-# in collected_data (persisted with the draft) so the review card can label
-# them and detect a later user edit.
-_AI_FIELD_META_KEY = "_ai_field_meta"
 
 # RDD upload type codes (mirrored from handover_schema to avoid circular import).
 _RDD_DOC_TYPE_MEETING = "DR_SR_HANDOVER_REPORT"
@@ -126,19 +115,9 @@ _USER_TIME_FIELDS: frozenset[str] = frozenset(
 
 _EXPLICIT_YEAR_RE = re.compile(r"\b(?:19|20)\d{2}\b")
 
-_ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
-
 # Any digit in the user's message means they may have typed a date. Used to gate
 # year coercion so a bare "yes"/"confirm" never rewrites a backend-supplied date.
 _DATE_TOKEN_RE = re.compile(r"\d")
-
-# Phrases the extractor resolves against today's date rather than reading a
-# year off the message.
-_RELATIVE_DATE_RE = re.compile(
-    r"\b(today|tomorrow|day after tomorrow|next\s+(week|month|mon|tue|wed|thu|fri|sat|sun)\w*"
-    r"|in\s+\d+\s+days?|\d+\s+days?\s+from\s+now)\b",
-    re.IGNORECASE,
-)
 
 
 def _coerce_year_if_absent(value: str, message_has_year: bool) -> str:
@@ -176,26 +155,6 @@ def _to_date_only(value: Any) -> Any:
         except ValueError:
             return value
     return value
-
-
-def _to_iso_date(value: Any) -> Any:
-    """Normalise any supplied date to ``YYYY-MM-DD``.
-
-    The portal form sends DD/MM/YYYY, and storing that verbatim left the review
-    card's date pickers empty — a native date input accepts ISO and nothing
-    else, so it silently renders a blank for anything it cannot parse. The
-    draft therefore keeps one canonical shape; display formatting is the
-    client's job.
-    """
-    text = _to_date_only(value)
-    if not isinstance(text, str) or not text.strip():
-        return text
-    if _ISO_DATE_RE.match(text):
-        return text
-    from app.agents.services.validation_service import _parse_date
-
-    parsed = _parse_date(text, "date")
-    return parsed.isoformat() if parsed is not None else text
 
 
 def _salvage_inspection_time(
@@ -454,13 +413,7 @@ async def merge_state_node(state: ServiceRequestState) -> dict[str, Any]:
     user_message: str = state.get("user_message") or ""
     message_has_date_token: bool = bool(_DATE_TOKEN_RE.search(user_message))
     can_coerce_year: bool = bool(user_message.strip()) and message_has_date_token
-    # A relative phrase ("in 3 days", "next Monday") is resolved by the
-    # extractor against today's date, so its year is already deliberate —
-    # coercing it to the current year would move a New Year window back into
-    # the year that is ending.
-    message_has_year: bool = bool(_EXPLICIT_YEAR_RE.search(user_message)) or bool(
-        _RELATIVE_DATE_RE.search(user_message)
-    )
+    message_has_year: bool = bool(_EXPLICIT_YEAR_RE.search(user_message))
 
     # ── Apply inline edits from the confirmation card first ────────────────
     # corrected_fields come directly from the user's UI interaction, so they
@@ -503,36 +456,8 @@ async def merge_state_node(state: ServiceRequestState) -> dict[str, Any]:
             if field_name in _USER_DATE_FIELDS and field_name not in _USER_TIME_FIELDS:
                 if field_name in ("startDate", "endDate") and isinstance(value, str):
                     _salvage_inspection_time(collected, {}, value, field_name)
-                value = _to_iso_date(value)
+                value = _to_date_only(value)
             collected[field_name] = value
-
-    # The guided-tour choice. Recorded here rather than in each agent's entry
-    # node so every workflow — handover, work permit, fitout confirmation and
-    # whatever registers next — inherits it from one place.
-    from app.agents.services import guided_tour_service
-
-    guided_tour_service.apply_answer(collected, dict(state))
-
-    # The form's date-and-time picker is one control, and changing only its
-    # clock arrives as the LT display string alone ("15/09/2026 2:00 PM").
-    # That is the user's newest word on the field, so it has to set the stored
-    # clock too — otherwise _sync_inspection_lt_fields rebuilds the LT from the
-    # older inspectionTime further down and the edit reverts to 9:00 AM while
-    # the date half of the same edit sticks.
-    if corrected:
-        from app.agents.services.payload_builder_service import (
-            extract_hhmm_from_datetime,
-        )
-
-        for _lt_key, _time_key in (
-            ("startDateLT", "inspectionTime"),
-            ("endDateLT", "inspectionEndTime"),
-        ):
-            if _lt_key not in corrected:
-                continue
-            _hhmm = extract_hhmm_from_datetime(str(corrected[_lt_key] or ""))
-            if _hhmm:
-                collected[_time_key] = _hhmm
 
     corrections: list[dict[str, Any]] = list(collected.get("_corrections") or [])
 
@@ -649,12 +574,12 @@ async def merge_state_node(state: ServiceRequestState) -> dict[str, Any]:
         ):
             if field_name in ("startDate", "endDate"):
                 _salvage_inspection_time(collected, extracted, new_value, field_name)
-            new_value = _to_iso_date(new_value)
+            new_value = _to_date_only(new_value)
             new_value = _coerce_year_if_absent(new_value, message_has_year)
         elif field_name in _USER_DATE_FIELDS:
             if field_name in ("startDate", "endDate") and isinstance(new_value, str):
                 _salvage_inspection_time(collected, extracted, new_value, field_name)
-            new_value = _to_iso_date(new_value)
+            new_value = _to_date_only(new_value)
 
         current_value = collected.get(field_name)
 
@@ -776,32 +701,6 @@ async def merge_state_node(state: ServiceRequestState) -> dict[str, Any]:
     # Silence unused-var warning when the CREATE_HANDED_OVER_SR branch runs.
     _ = title_needs_default
 
-    # ── Short flow: fill the fields the bot no longer asks for ────────────────
-    # Runs only once everything the user *is* asked for has landed, so the
-    # generated description / notes can name the real inspection window. Never
-    # overwrites a value the user typed or edited on the review card — see
-    # ``autofill_text_fields``.
-    from app.agents.schemas.handover_schema import short_flow_enabled
-
-    if short_flow_enabled() and _short_flow_autofill_ready(collected, workflow_stage):
-        from app.agents.services.sr_autofill_service import autofill_text_fields
-
-        from app.agents.services.sr_autofill_service import default_inspection_times
-
-        # The clocks are never asked for, so store the default the payload
-        # would use. Left unset they read as a missing required field and
-        # block submission — the user edits the window on the card, hits
-        # Confirm, and is asked for a time instead.
-        collected.update(default_inspection_times(collected))
-
-        filled, provenance = await autofill_text_fields(collected, workflow_stage)
-        if filled:
-            collected.update(filled)
-            meta: dict[str, Any] = dict(collected.get(_AI_FIELD_META_KEY) or {})
-            for field_name, entry in provenance.items():
-                meta[field_name] = {**entry, "value": filled[field_name]}
-            collected[_AI_FIELD_META_KEY] = meta
-
     # ── Auto-compute expected_handover_date from unit_readiness_date ──────────
     # FM_REVIEW: expected_handover_date = unit_readiness_date + 7 days.
     # Skipped for CREATE_HANDED_OVER_SR — expected_handover_date is not used
@@ -908,41 +807,22 @@ async def merge_state_node(state: ServiceRequestState) -> dict[str, Any]:
         _sync_inspection_lt_fields(collected)
 
     # CREATE_SR / APPROVE_SR: when the user answers the yes/no radio in this
-    # session, mark confirmed and clear the opposite branch so the planned or
-    # actual dates are re-collected.
+    # session (via extracted_fields — not silent form corrected_fields), mark
+    # confirmed and clear the opposite branch so planned/actual dates are
+    # re-collected.  Form pre-fill alone must not skip the chat yes/no step.
     #
-    # Two ways to answer, and both are the user:
-    #
-    # * typed or chipped in chat — extracted_fields, and only while the bot was
-    #   actually asking for the radio (active_field). Lease turns re-extract a
-    #   form-synced value and must not flip the flag.
-    # * chosen on the form or the review card — corrected_fields. The bridge
-    #   sends those only for genuine edits; it returns early while applying the
-    #   assistant's own values, so an AI apply cannot reach here. active_field
-    #   is deliberately not required: the card is edited while some other field
-    #   is being asked for.
-    #
-    # Pre-fill still must not count, and does not: hydrating an open SR
-    # populates through lease lookup, which resets the flag, not through
-    # corrected_fields. Before this, a user who picked No on the form set the
-    # value but never the flag, so get_missing_fields kept reporting the radio
-    # missing and the assistant asked the same yes/no question forever.
+    # Only confirm when the bot was asking for the radio (active_field).  Lease
+    # turns often re-extract a form-synced trading_done/fitout_*_done value and
+    # must NOT flip ``_approve_radio_confirmed`` or we skip straight to planned
+    # dates.
     if (
         workflow_stage in ("CREATE_SR", "APPROVE_SR")
         and active_agent in _FITOUT_AGENTS
     ):
         active_field_now = str(state.get("active_field") or "").strip()
         extracted_keys = set((state.get("extracted_fields") or {}).keys())
-        radio_typed = (
-            extracted_keys & _FITOUT_RADIO_FIELDS
-            if active_field_now in _FITOUT_RADIO_FIELDS
-            else set()
-        )
-        radio_picked = set(
-            (state.get("corrected_fields") or {}).keys()
-        ) & _FITOUT_RADIO_FIELDS
-        radio_answered = radio_typed | radio_picked
-        if radio_answered:
+        radio_answered = extracted_keys & _FITOUT_RADIO_FIELDS
+        if radio_answered and active_field_now in _FITOUT_RADIO_FIELDS:
             collected["_approve_radio_confirmed"] = True
             for radio_key in radio_answered:
                 new_radio = str(collected.get(radio_key) or "").strip().lower()
@@ -981,26 +861,6 @@ async def merge_state_node(state: ServiceRequestState) -> dict[str, Any]:
     # workflow_stage + sub_category so the remaining fields align with Path B
     # (four actual dates instead of description/dates/inspector).
     patch: dict[str, Any] = {"collected_data": collected}
-
-    # A document the user deleted on the form (or in the chat). The cleared row
-    # names the id that went; without this the id lived on in state["documents"]
-    # and the document refs, and the payload builders sent it back to the
-    # platform, which refused the submit with "Document ID not found".
-    deleted_now = deleted_ids_from_corrected(corrected)
-    if deleted_now:
-        refs: dict[str, Any] = dict(state.get("backend_refs") or {})
-        record_deleted_documents(refs, deleted_now)
-        patch["documents"] = without_deleted(
-            list(state.get("documents") or []), deleted_now
-        )
-        refs["uploaded_documents"] = without_deleted_ids(
-            list(refs.get("uploaded_documents") or []), deleted_now
-        )
-        if str(refs.get("rdd_document_id") or "").strip() in deleted_now:
-            refs.pop("rdd_document_id", None)
-        patch["backend_refs"] = refs
-        if str(collected.get("document_id") or "").strip() in deleted_now:
-            collected["document_id"] = ""
     active_agent = state.get("active_agent") or ""
     current_stage = state.get("workflow_stage") or ""
     already_handovered = str(collected.get("already_handovered") or "").strip().lower()
@@ -1012,33 +872,6 @@ async def merge_state_node(state: ServiceRequestState) -> dict[str, Any]:
         patch["workflow_stage"] = "CREATE_HANDED_OVER_SR"
         patch["sub_category"] = "HANDED_OVER"
     return patch
-
-
-def _short_flow_autofill_ready(collected: dict[str, Any], workflow_stage: str) -> bool:
-    """True once the user has supplied everything the short flow asks for.
-
-    Generating earlier would describe an inspection whose window is not known
-    yet, and the text would then have to be regenerated (or, worse, kept) once
-    the dates arrive.
-    """
-    # Local import: handover_schema imports BACKEND_COMPUTED_FIELDS from this
-    # module, so a module-level import here would close the cycle.
-    from app.agents.schemas.handover_schema import AI_FILLED_STAGES, INSPECTION_FIELD_GROUP
-
-    if workflow_stage not in AI_FILLED_STAGES:
-        return False
-    if not str(collected.get("lease_code") or "").strip():
-        return False
-    if workflow_stage == "CREATE_SR":
-        required_now: tuple[str, ...] = INSPECTION_FIELD_GROUP
-    else:
-        required_now = (
-            "actual_shop_handover_date",
-            "actual_fitout_start_date",
-            "actual_fitout_end_date",
-            "actual_trading_date",
-        )
-    return all(collected.get(f) not in (None, "", []) for f in required_now)
 
 
 def _was_skipped(value: object) -> bool:

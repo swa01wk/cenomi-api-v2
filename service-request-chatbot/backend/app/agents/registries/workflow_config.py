@@ -76,11 +76,6 @@ class WorkflowConfig:
         Supervisor intents that activate this agent.  Used to derive
         ``_SR_ACTION_INTENTS`` in ``help_agent_graph.py`` and ``ALL_INTENTS``
         in ``help_agent_schema.py``.
-    guided_tour_gate:
-        Whether this workflow offers the guided-tour choice before its first
-        field question (see ``guided_tour_service``).  Defaults to True so a
-        newly registered workflow inherits it; set False for a flow with
-        nothing to collect, where the question would be noise.
     """
 
     agent_name: str
@@ -94,7 +89,6 @@ class WorkflowConfig:
     auto_generated_fields: frozenset[str]
     lease_trigger_fields: tuple[str, ...]
     action_intents: frozenset[str]
-    guided_tour_gate: bool = True
 
 
 # ---------------------------------------------------------------------------
@@ -179,9 +173,8 @@ WORKFLOW_CONFIG_REGISTRY: dict[str, WorkflowConfig] = {}
 def _build_work_permit_config() -> WorkflowConfig:
     """Build the ``WorkflowConfig`` for the Work Permit Agent.
 
-    Create is ``CREATE_WORK_PERMIT``. Review hops are subtype-specific
-    (DD → FM → MM, or Cold MM/Ops, or Operations MM-only) and are opened
-    via ``sr_status_sync`` mapping of V1 ``service_request_operations``.
+    Single-stage workflow: the Mall Manager creates a work permit SR.
+    There is no FM_REVIEW or RDD_REVIEW phase for work permits.
     """
     from app.agents.prompts.work_permit_extraction_prompt import (
         WORK_PERMIT_EXTRACTION_SYSTEM_PROMPT,
@@ -207,29 +200,10 @@ def _build_work_permit_config() -> WorkflowConfig:
         agent_name="work_permit_agent",
         extraction_prompt=WORK_PERMIT_EXTRACTION_SYSTEM_PROMPT,
         field_questions=field_questions,
-        stage_sync_nodes={
-            "WP_DD_REVIEW": "work_permit_entry",
-            "WP_FM_REVIEW": "work_permit_entry",
-            "WP_MM_REVIEW": "work_permit_entry",
-            "WP_MM_OPS_REVIEW": "work_permit_entry",
-        },
-        collection_stages=frozenset(
-            {
-                "CREATE_WORK_PERMIT",
-                "WP_DD_REVIEW",
-                "WP_FM_REVIEW",
-                "WP_MM_REVIEW",
-                "WP_MM_OPS_REVIEW",
-            }
-        ),
-        confirmation_nodes={
-            "CREATE_WORK_PERMIT": "work_permit_confirmation",
-            "WP_DD_REVIEW": "work_permit_confirmation",
-            "WP_FM_REVIEW": "work_permit_confirmation",
-            "WP_MM_REVIEW": "work_permit_confirmation",
-            "WP_MM_OPS_REVIEW": "work_permit_confirmation",
-        },
-        terminal_stages=frozenset({"WP_CREATED", "WP_APPROVED", "WP_REJECTED"}),
+        stage_sync_nodes={},
+        collection_stages=frozenset({"CREATE_WORK_PERMIT"}),
+        confirmation_nodes={"CREATE_WORK_PERMIT": "work_permit_confirmation"},
+        terminal_stages=frozenset({"WP_CREATED"}),
         backend_fields=frozenset(
             {
                 "lease_id",
@@ -245,7 +219,7 @@ def _build_work_permit_config() -> WorkflowConfig:
         ),
         auto_generated_fields=frozenset(),
         lease_trigger_fields=("lease_code", "company", "lease_brand_mall"),
-        action_intents=frozenset({"CREATE_WORK_PERMIT_SR", "APPROVE_WORK_PERMIT_SR"}),
+        action_intents=frozenset({"CREATE_WORK_PERMIT_SR"}),
     )
 
 

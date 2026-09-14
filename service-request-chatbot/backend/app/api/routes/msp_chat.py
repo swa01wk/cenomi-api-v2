@@ -212,12 +212,7 @@ class MSPChatResponse(BaseModel):
     conversation_id: str = Field(
         description="Session / conversation ID.  Reuse on the next turn."
     )
-    message_id: str = Field(
-        description=(
-            "Persisted assistant message UUID (chat_messages.id). Stable — "
-            "use it together with trace_id when submitting feedback."
-        )
-    )
+    message_id: str = Field(description="Per-message UUID for observability.")
     message: str = Field(description="Assistant reply text.")
     sources: list[Source] = Field(
         default_factory=list,
@@ -226,13 +221,6 @@ class MSPChatResponse(BaseModel):
     language: str = Field(
         description="Detected or requested language code.",
         examples=["en", "ar"],
-    )
-    trace_id: str | None = Field(
-        default=None,
-        description=(
-            "Observability trace id for this turn.  Additive field: pass it to "
-            "POST /chat/feedback to attach a star rating to this answer."
-        ),
     )
 
 
@@ -322,12 +310,7 @@ async def post_msp_chat(
 
     lang = body.language or _detect_language(result.message)
     sources = [Source(**s) for s in result.faq_sources]
-    # Durable per-message identity: the persisted chat_messages.id of the
-    # assistant reply.  The uuid4() fallback only covers the injection-refusal
-    # path, which returns before the reply is persisted.
-    message_id = (
-        str(result.assistant_message_id) if result.assistant_message_id else str(uuid4())
-    )
+    message_id = str(uuid4())
 
     bound_log.info(
         "msp_chat.sync.completed",
@@ -342,7 +325,6 @@ async def post_msp_chat(
         message=result.message,
         sources=sources,
         language=lang,
-        trace_id=str(result.trace_id) if result.trace_id else None,
     )
 
 
@@ -395,11 +377,7 @@ async def post_msp_chat_stream(
             return
 
         lang = body.language or _detect_language(result.message)
-        message_id = (
-            str(result.assistant_message_id)
-            if result.assistant_message_id
-            else str(uuid4())
-        )
+        message_id = str(uuid4())
         conversation_id = str(result.session_id)
 
         # ── token event — full message as one chunk (Phase 1 pseudo-streaming) ─
@@ -416,7 +394,6 @@ async def post_msp_chat_stream(
                 "conversation_id": conversation_id,
                 "message_id": message_id,
                 "language": lang,
-                "trace_id": str(result.trace_id) if result.trace_id else None,
             },
         )
 

@@ -31,7 +31,7 @@ Agent taxonomy
 - notification_agent   : list / explain / mark-read; OPEN hands off to
                          handover/fitout (sr_status_sync) or sales_data_agent
 - rdd_handover_agent           : handles the full RDD lifecycle (CREATE_SR → FM_REVIEW → RDD_REVIEW)
-- work_permit_agent            : work permit create (CREATE_WORK_PERMIT) + review hops
+- work_permit_agent            : single-stage work permit SR creation (CREATE_WORK_PERMIT)
 - rdd_fitout_start_agent       : fitout start confirmation (FIT_OUT_CONFIRM_FOS)
 - rdd_fitout_end_agent         : fitout end confirmation (FIT_OUT_CONFIRM_END)
 - rdd_trading_confirmation_agent : trading confirmation (FIT_OUT_CONFIRM_TRADING)
@@ -60,10 +60,6 @@ from app.agents.graph.nodes.supervisor_node import (
     supervisor_node,
 )
 from app.agents.graph.nodes.shared.registry_node import registry_node
-from app.agents.graph.nodes.shared.new_request_node import (
-    asks_for_a_new_service_request,
-    new_request_node,
-)
 from app.agents.graph.nodes.shared.sr_status_sync_node import sr_status_sync_node
 from app.agents.graph.nodes.shared.response_generation_node import response_generation_node
 from app.agents.registries.workflow_config import WORKFLOW_CONFIG_REGISTRY, get_workflow_config
@@ -132,7 +128,6 @@ from app.agents.graph.nodes.sales_data.supporting_doc_submission_node import (
 from app.agents.graph.nodes.handover.handover_entry_node import handover_entry_node
 from app.agents.graph.nodes.handover.fm_review_entry_node import fm_review_entry_node
 from app.agents.graph.nodes.handover.rdd_review_entry_node import rdd_review_entry_node
-from app.agents.services import guided_tour_service as _guided_tour_service
 from app.agents.graph.nodes.shared.field_extraction_node import field_extraction_node
 from app.agents.graph.nodes.shared.merge_state_node import merge_state_node
 from app.agents.graph.nodes.shared.lease_lookup_node import lease_lookup_node
@@ -268,13 +263,6 @@ def _route_after_load(state: dict[str, Any]) -> str:
         return _AGENT_ENTRY_NODES.get(agent, "handover_entry")
 
     if sr_id:
-        # An explicit request for a new SR outranks the SR that happens to be
-        # open. Sync would hand it to that SR — its preview, or its stage entry
-        # (a Mall Manager on the details page of an SR pending FM typed "create
-        # hanover" and was refused by the FM review's role guard). new_request
-        # drops the open SR and lets the supervisor classify on a clean slate.
-        if not _awaiting_free_text and asks_for_a_new_service_request(user_message):
-            return "new_request"
         # When the current stage is already terminal the tenant's SR lifecycle is
         # complete.  Running sr_status_sync would advance the stage (e.g. mock
         # backend auto-approves SR_CREATED → APPROVE_SR) before the supervisor has
@@ -445,17 +433,10 @@ def _route_after_registry(state: dict[str, Any]) -> str:
 def _route_after_merge(state: dict[str, Any]) -> str:
     if state.get("selected_lease"):
         return "lease_lookup"
-    # Review / approve stages: lease was resolved at create time.
+    # FM_REVIEW, RDD_REVIEW, and APPROVE_SR: lease was resolved during CREATE_SR.
+    # Skip re-lookup; an sr_id in backend_refs confirms the SR exists.
     workflow_stage = state.get("workflow_stage") or ""
-    if workflow_stage in (
-        "FM_REVIEW",
-        "RDD_REVIEW",
-        "APPROVE_SR",
-        "WP_DD_REVIEW",
-        "WP_FM_REVIEW",
-        "WP_MM_REVIEW",
-        "WP_MM_OPS_REVIEW",
-    ):
+    if workflow_stage in ("FM_REVIEW", "RDD_REVIEW", "APPROVE_SR"):
         return "validation"
     collected = state.get("collected_data") or {}
     if not collected.get("lease_id"):
@@ -481,8 +462,6 @@ def _route_after_validation(state: dict[str, Any]) -> str:
     )
     if active_agent_for_optional in _FITOUT_AGENTS:
         from app.agents.schemas.fitout_confirm_schema import OPTIONAL_FIELDS
-    elif active_agent_for_optional == "work_permit_agent":
-        from app.agents.schemas.work_permit_schema import OPTIONAL_FIELDS
     else:
         from app.agents.schemas.handover_schema import OPTIONAL_FIELDS
 
@@ -610,35 +589,6 @@ _RDD_DIRECT_SET_CHIP_ACTIONS: frozenset[str] = frozenset(
 )
 
 
-def _form_patch_target(state: dict[str, Any]) -> str | None:
-    """Where a turn carrying inline form edits belongs, or ``None``.
-
-    ``corrected_fields`` is the form bridge's silent patch: the user typed into
-    the SR form and the edit is riding back to the draft. Only ``merge_state``
-    writes it into ``collected_data``, so such a turn must never be
-    short-circuited to ``response_generation`` — that node cannot write the
-    draft, so the edit is dropped without a trace and the next apply pushes the
-    assistant's older value back over what the user typed.
-
-    Live symptom: with the form left open, edits made while the document card
-    or the review card was up (both idle waits with no ``active_field``)
-    vanished, and the review card showed the values the assistant had collected
-    rather than the ones on screen.
-
-    A patch that carries no message has nothing for the extractor to read, so
-    it goes straight to ``merge_state``; one that arrives alongside a typed
-    message still goes through extraction, which flows into ``merge_state``
-    anyway.
-    """
-    if not (state.get("corrected_fields") or {}):
-        return None
-    return (
-        "field_extraction"
-        if str(state.get("user_message") or "").strip()
-        else "merge_state"
-    )
-
-
 def _waiting_short_circuit_target(state: dict[str, Any]) -> str:
     """Where a turn goes when the persisted ``status`` is WAITING_FOR_USER.
 
@@ -661,10 +611,6 @@ def _waiting_short_circuit_target(state: dict[str, Any]) -> str:
     """
     from app.agents.services.field_correction_service import detect_correction_intent
 
-    patch_target = _form_patch_target(state)
-    if patch_target:
-        return patch_target
-
     if detect_correction_intent(
         state.get("user_message") or "",
         state.get("collected_data") or {},
@@ -681,12 +627,6 @@ def _route_after_handover_entry(state: dict[str, Any]) -> str:
     # Check confirmation_status BEFORE stale WAITING_FOR_USER so that a confirm
     # action set this turn is never shadowed by a persisted WAITING_FOR_USER value
     # from the previous save_state.  Mirrors the same guard in _route_after_fm_entry.
-
-    # The guided-tour choice is not a collectable field, so extraction has
-    # nothing to bind it to. Chip or typed, it goes straight to merge_state,
-    # which records it for every workflow.
-    if _guided_tour_service.has_pending_answer(state):
-        return "merge_state"
     if state.get("confirmation_status") == "CONFIRMED":
         return "merge_state"
     if state.get("action_override") == "continue_milestone":
@@ -703,19 +643,13 @@ def _route_after_handover_entry(state: dict[str, Any]) -> str:
         return _waiting_short_circuit_target(state)
     if state.get("action_override") == "cancel":
         return "merge_state"
-    return _form_patch_target(state) or "field_extraction"
+    return "field_extraction"
 
 
 def _route_after_fm_entry(state: dict[str, Any]) -> str:
     # Check fm_action / confirmation_status BEFORE stale status so that an
     # approve or confirm action set this turn is never shadowed by a persisted
     # WAITING_FOR_USER value from the previous save_state.
-
-    # The guided-tour choice is not a collectable field, so extraction has
-    # nothing to bind it to. Chip or typed, it goes straight to merge_state,
-    # which records it for every workflow.
-    if _guided_tour_service.has_pending_answer(state):
-        return "merge_state"
     if state.get("confirmation_status") == "CONFIRMED":
         return "merge_state"
     backend_refs = state.get("backend_refs") or {}
@@ -723,7 +657,7 @@ def _route_after_fm_entry(state: dict[str, Any]) -> str:
         return "merge_state"
     if state.get("status") == "WAITING_FOR_USER":
         return _waiting_short_circuit_target(state)
-    return _form_patch_target(state) or "field_extraction"
+    return "field_extraction"
 
 
 def _route_after_rdd_entry(state: dict[str, Any]) -> str:
@@ -734,12 +668,6 @@ def _route_after_rdd_entry(state: dict[str, Any]) -> str:
     #
     # Single-turn confirm already set CONFIRMED — skip extraction and go
     # straight through merge → validation → rdd_confirmation → payload builder.
-
-    # The guided-tour choice is not a collectable field, so extraction has
-    # nothing to bind it to. Chip or typed, it goes straight to merge_state,
-    # which records it for every workflow.
-    if _guided_tour_service.has_pending_answer(state):
-        return "merge_state"
     if state.get("confirmation_status") == "CONFIRMED":
         return "merge_state"
     # Status chips write document_status into collected_data directly (see
@@ -760,7 +688,7 @@ def _route_after_rdd_entry(state: dict[str, Any]) -> str:
         return "response_generation"
     if state.get("status") == "WAITING_FOR_USER":
         return _waiting_short_circuit_target(state)
-    return _form_patch_target(state) or "field_extraction"
+    return "field_extraction"
 
 
 def _route_after_confirmation(state: dict[str, Any]) -> str:
@@ -782,30 +710,11 @@ def _route_after_rdd_confirmation(state: dict[str, Any]) -> str:
 
 
 def _route_after_work_permit_entry(state: dict[str, Any]) -> str:
-    # The guided-tour choice is not a collectable field, so extraction has
-    # nothing to bind it to. Chip or typed, it goes straight to merge_state,
-    # which records it for every workflow.
-    if _guided_tour_service.has_pending_answer(state):
-        return "merge_state"
-    # Mirror fitout/handover: CONFIRMED must win over a stale WAITING_FOR_USER
-    # left from the confirmation-card turn.
-    if state.get("confirmation_status") == "CONFIRMED":
-        return "merge_state"
-    if state.get("confirmation_status") == "REJECTED":
-        return "field_extraction"
     if state.get("status") == "WAITING_FOR_USER":
-        return _form_patch_target(state) or "response_generation"
+        return "response_generation"
     if state.get("action_override") == "cancel":
         return "merge_state"
-    workflow_stage = state.get("workflow_stage") or ""
-    if workflow_stage in (
-        "WP_DD_REVIEW",
-        "WP_FM_REVIEW",
-        "WP_MM_REVIEW",
-        "WP_MM_OPS_REVIEW",
-    ):
-        return "merge_state"
-    return _form_patch_target(state) or "field_extraction"
+    return "field_extraction"
 
 
 def _route_after_work_permit_confirmation(state: dict[str, Any]) -> str:
@@ -824,12 +733,6 @@ def _route_after_fitout_confirm_entry(state: dict[str, Any]) -> str:
     # short-circuited to response_generation, which re-emitted the previous
     # question instead of submitting — the flow looped on the date prompt and
     # never produced a success message or View Service Request button.
-
-    # The guided-tour choice is not a collectable field, so extraction has
-    # nothing to bind it to. Chip or typed, it goes straight to merge_state,
-    # which records it for every workflow.
-    if _guided_tour_service.has_pending_answer(state):
-        return "merge_state"
     if state.get("confirmation_status") == "CONFIRMED":
         return "merge_state"
     if state.get("action_override") == "continue_milestone":
@@ -837,10 +740,10 @@ def _route_after_fitout_confirm_entry(state: dict[str, Any]) -> str:
     if state.get("confirmation_status") == "REJECTED":
         return "field_extraction"
     if state.get("status") == "WAITING_FOR_USER":
-        return _form_patch_target(state) or "response_generation"
+        return "response_generation"
     if state.get("action_override") == "cancel":
         return "merge_state"
-    return _form_patch_target(state) or "field_extraction"
+    return "field_extraction"
 
 
 def _route_after_fitout_confirm_confirmation(state: dict[str, Any]) -> str:
@@ -1019,7 +922,6 @@ def build_help_agent_graph():
     graph.add_node("load_session", load_session_node)
     graph.add_node("document_upload", document_upload_node)
     graph.add_node("sr_status_sync", sr_status_sync_node)
-    graph.add_node("new_request", new_request_node)
     graph.add_node("supervisor", supervisor_node)
     graph.add_node("faq_node", faq_node)
     graph.add_node("notification", notification_entry_node)
@@ -1093,7 +995,6 @@ def build_help_agent_graph():
         _route_after_load,
         {
             "sr_status_sync": "sr_status_sync",
-            "new_request": "new_request",
             "supervisor": "supervisor",
             "handover_entry": "handover_entry",
             "work_permit_entry": "work_permit_entry",
@@ -1107,9 +1008,6 @@ def build_help_agent_graph():
             "open_notification": "open_notification",
         },
     )
-    # A new request raised from an open SR: its context is dropped, then the
-    # supervisor classifies the message as it would on a fresh session.
-    graph.add_edge("new_request", "supervisor")
     graph.add_conditional_edges(
         "sr_status_sync",
         _route_after_sync,
@@ -1118,7 +1016,6 @@ def build_help_agent_graph():
             "fm_review_entry": "fm_review_entry",
             "rdd_review_entry": "rdd_review_entry",
             "fitout_confirm_entry": "fitout_confirm_entry",
-            "work_permit_entry": "work_permit_entry",
             "preview": "preview",
             "supervisor": "supervisor",
             # Sync GET failure sets sync_error and returns response_generation

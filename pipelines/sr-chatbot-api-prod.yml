@@ -8,11 +8,6 @@
 #   app_url          — public base URL used for the post-deploy health check
 #   AZURE_CLIENT_ID / AZURE_CLIENT_SECRET / AZURE_TENANT_ID / AZURE_SUBSCRIPTION_ID / AZURE_RG
 # and a service connection named "CenomiRegistry" plus an environment named "CenomiProd".
-#
-# Git feature (from azure-pipelines-build.yml):
-#   - Manual: SourceBranch + CommitSHA (none = latest on branch)
-#   - Tag trigger: release-prod-ai-v2-api-*
-#   - Validates commit is ancestor of selected branch before deploy
 
 trigger:
   branches:

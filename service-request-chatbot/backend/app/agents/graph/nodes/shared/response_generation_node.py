@@ -35,7 +35,6 @@ from app.agents.prompts.response_generation_prompt import (
     build_response_generation_context,
 )
 from app.observability.decorators import trace_node
-from app.observability.llm_capture import capture_complete_json
 
 logger = logging.getLogger(__name__)
 
@@ -177,55 +176,21 @@ async def response_generation_node(state: ServiceRequestState) -> dict[str, Any]
 
     # ── Call the LLM ────────────────────────────────────────────────────────
     llm_message: str | None = None
-    in_tokens = out_tokens = llm_ms = 0
-    gateway = get_default_gateway()
     try:
-        parsed, in_tokens, out_tokens, llm_ms = await gateway.complete_json(
+        gateway = get_default_gateway()
+        parsed, _, _, _ = await gateway.complete_json(
             system_prompt=RESPONSE_GENERATION_SYSTEM_PROMPT,
             user_message=user_content,
         )
         llm_message = parsed.get("message") or None
-        await capture_complete_json(
-            state,
-            run_name="response_generation_llm_call",
-            prompt_name="response_generation_prompt",
-            gateway=gateway,
-            input_tokens=in_tokens,
-            output_tokens=out_tokens,
-            latency_ms=llm_ms,
-            structured_output={"message": (llm_message or "")[:500]},
-            parse_success=bool(llm_message),
-        )
         if llm_message:
             logger.debug("response_generation_node.llm_success: %s", llm_message[:80])
         else:
             logger.warning("response_generation_node.llm_empty_message: %s", parsed)
     except json.JSONDecodeError as exc:
         logger.warning("response_generation_node.llm_json_parse_failed: %s", exc)
-        await capture_complete_json(
-            state,
-            run_name="response_generation_llm_call",
-            prompt_name="response_generation_prompt",
-            gateway=gateway,
-            input_tokens=0,
-            output_tokens=0,
-            latency_ms=0,
-            parse_success=False,
-            parse_error=str(exc),
-        )
     except Exception as exc:
         logger.warning("response_generation_node.llm_call_failed: %s", exc)
-        await capture_complete_json(
-            state,
-            run_name="response_generation_llm_call",
-            prompt_name="response_generation_prompt",
-            gateway=gateway,
-            input_tokens=in_tokens,
-            output_tokens=out_tokens,
-            latency_ms=llm_ms,
-            parse_success=False,
-            parse_error=str(exc),
-        )
 
     # ── Guard: reject a reply that re-asks the previous question ────────────
     # The prompt states the target field twice (top and, most importantly,
@@ -254,18 +219,8 @@ async def response_generation_node(state: ServiceRequestState) -> dict[str, Any]
             llm_message[:120],
         )
         if asking_field:
-            # The collecting node already wrote a proper question for this
-            # field — chips and all — and it is sitting in the UI payload.
-            # Prefer it over a sentence assembled from the field name, which
-            # reached users as "Please provide the fitout complete done."
-            node_question = (current_ui or {}).get("message")
-            if node_question:
-                llm_message = str(node_question)
-            else:
-                label = FIELD_LABELS.get(asking_field, asking_field.replace("_", " "))
-                llm_message = (
-                    f"Thanks — that's been updated. Please provide the {label}."
-                )
+            label = FIELD_LABELS.get(asking_field, asking_field.replace("_", " "))
+            llm_message = f"Thanks — that's been updated. Please provide the {label}."
         else:
             # No field is being collected (e.g. the pre-submission upload gate,
             # which leaves response_message None). The turn has nothing left to

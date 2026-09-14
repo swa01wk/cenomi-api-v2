@@ -23,14 +23,7 @@ from app.agents.services.resource_picker_decorations import build_handover_inbox
 from app.types.chat import AuthContext
 
 # Primary graph roles checked for stage entry guards and decoration targeting.
-_GRAPH_ROLES: tuple[str, ...] = (
-    "FM_MANAGER",
-    "OPERATIONS",
-    "OPERATION_EXECUTIVES",
-    "DD_ENGINEER",
-    "MALL_MANAGER",
-    "ADMIN",
-)
+_GRAPH_ROLES: tuple[str, ...] = ("FM_MANAGER", "OPERATIONS", "DD_ENGINEER", "MALL_MANAGER", "ADMIN")
 
 _DOC_LABELS: dict[str, str] = {
     "SR_HANDOVER_CHECKLIST": "Handover Checklist",
@@ -118,18 +111,6 @@ def payload_to_collected_data(payload: dict[str, Any]) -> dict[str, Any]:
     mapped: dict[str, Any] = {}
     for key in (
         "title", "description", "startDate", "endDate", "inspection_done_by",
-        # The inspection clocks. The platform stores the times only in the LT
-        # display strings — ``inspectionTime``/``inspectionEndTime`` come back
-        # null — so without these an SR reopened for review arrives with no
-        # clocks at all. On a same-day window that was a dead end: the form
-        # showed "09/09/2026 7:27 PM" while the assistant insisted both times
-        # were "not set" and refused to move on.
-        #
-        # The LT strings are the source, never the UTC ``startDate``: the same
-        # 9:00 AM is stored as 03:30Z on one SR and 06:00Z on another, so
-        # re-deriving the clock from UTC would show one time and submit a
-        # different one. merge_state_node reads the clock straight off these.
-        "startDateLT", "endDateLT", "inspectionTime", "inspectionEndTime",
         "unit_readiness_date", "expected_handover_date", "actual_handover_date",
         "fitout_start_date", "fitout_end_date", "trading_date", "comments",
         "notes",
@@ -170,75 +151,7 @@ def payload_to_collected_data(payload: dict[str, Any]) -> dict[str, Any]:
         0,
     ):
         mapped["lease_id"] = mapped["contract_id"]
-    # Recover the inspection clocks from the LT strings. merge_state_node only
-    # syncs them on CREATE_SR, so a reopened SR would otherwise carry the LT
-    # display but no ``inspectionTime``/``inspectionEndTime`` — which is what
-    # left the reviewer stuck on "the end time (not set) has to be later than
-    # the start time (not set)" while the form showed both.
-    from app.agents.services.payload_builder_service import (
-        extract_hhmm_from_datetime,
-    )
-
-    for lt_key, time_key in (
-        ("startDateLT", "inspectionTime"),
-        ("endDateLT", "inspectionEndTime"),
-    ):
-        if mapped.get(time_key):
-            continue
-        hhmm = extract_hhmm_from_datetime(str(mapped.get(lt_key) or ""))
-        if hhmm:
-            mapped[time_key] = hhmm
-
-    # An SR that reaches us without a handover type still has one — its
-    # sub-category says which. 509 of the 578 handover SRs on the platform
-    # carry no ``already_handovered`` (all raised through the form, the newest
-    # in July), and opening one of those left the type blank on the review card
-    # and the discriminator missing for the bridge, which reads it to choose
-    # between the HANDOVER and HANDED_OVER form skeletons — so an Already
-    # Trading SR could open against the wrong skeleton entirely.
-    #
-    # Derived only when the payload is silent: a value the platform sent is
-    # always kept, even one that disagrees with the sub-category, because that
-    # is the SR's own record of what it is.
-    if not str(mapped.get("already_handovered") or "").strip():
-        derived = _handover_type_for_sub_category(payload.get("sub_category"))
-        if derived:
-            mapped["already_handovered"] = derived
-
-    # Work Permit inner payload (planneddate, contractor, subtype).
-    from app.agents.schemas.work_permit_schema import (
-        VALID_WORK_PERMIT_TYPES,
-        ddmmyyyy_to_iso,
-    )
-
-    for wp_key in ("contractor_name", "phone", "work_type", "work_location", "comments"):
-        if wp_key in payload and payload[wp_key] not in (None, "") and not mapped.get(wp_key):
-            mapped[wp_key] = payload[wp_key]
-    planned = payload.get("planneddate")
-    if isinstance(planned, dict):
-        if planned.get("worktimedate") and not mapped.get("start_date"):
-            mapped["start_date"] = ddmmyyyy_to_iso(planned.get("worktimedate"))
-        if planned.get("completionworkdate") and not mapped.get("end_date"):
-            mapped["end_date"] = ddmmyyyy_to_iso(planned.get("completionworkdate"))
-    sub = payload.get("sub_category") or payload.get("work_permit_type")
-    if sub in VALID_WORK_PERMIT_TYPES:
-        mapped["work_permit_type"] = sub
-        mapped["sub_category"] = sub
     return mapped
-
-
-# The sub-category is the SR's own statement of which handover path it is.
-_SUB_CATEGORY_HANDOVER_TYPE: dict[str, str] = {
-    "HANDOVER": "initiate_handover",
-    "HANDED_OVER": "already_trading",
-}
-
-
-def _handover_type_for_sub_category(sub_category: Any) -> str | None:
-    """``already_handovered`` implied by *sub_category*, or None if it implies none."""
-    return _SUB_CATEGORY_HANDOVER_TYPE.get(
-        str(sub_category or "").strip().upper()
-    )
 
 
 def build_inbox_decorations(auth: AuthContext | None) -> dict[str, Any]:
@@ -246,40 +159,6 @@ def build_inbox_decorations(auth: AuthContext | None) -> dict[str, Any]:
     if not is_handover_reviewer(auth):
         return {}
     return build_handover_inbox_picker()
-
-
-def _uploaded_doc_row(
-    documents: list[dict[str, Any]], doc_type: str
-) -> dict[str, Any]:
-    """The identifying half of a document row: its id and file name, if uploaded.
-
-    A row without ``document_id`` cannot be deleted. The card reads
-    ``documentId ?? document_id``, finds neither, and falls to its local-only
-    branch: the row clears on screen, no DELETE is ever sent, and the next turn
-    re-renders the document from state — it "comes back after a second". Zero
-    DELETE requests reached the backend across a whole session of trying.
-    """
-    for doc in documents:
-        dt = str(doc.get("document_type_id") or doc.get("document_type") or "")
-        if dt != doc_type:
-            continue
-        document_id = str(doc.get("document_id") or "").strip()
-        if not document_id:
-            continue
-        row: dict[str, Any] = {"document_id": document_id}
-        # Three spellings reach us: the platform upload response says
-        # ``filename``, the draft stores ``file_name``, and rows patched from
-        # the client carry ``fileName``. Reading only two of them sent the card
-        # out with an id and no name — and the client, seeing a named row go
-        # nameless, overwrote the name it already had, so the tick and the file
-        # name vanished from the chat card and the form at once.
-        file_name = (
-            doc.get("file_name") or doc.get("fileName") or doc.get("filename")
-        )
-        if file_name:
-            row["file_name"] = file_name
-        return row
-    return {}
 
 
 def _uploaded_type_ids(
@@ -318,32 +197,6 @@ def _uploaded_type_ids(
     return ids
 
 
-# The Handover Meeting Report and the Rejected Fitout and Handover Report are
-# alternatives: the handover is either reported or rejected, never both.
-_RDD_REPORT_ALTERNATIVES: dict[str, str] = {
-    RDD_DOC_TYPE_MEETING: RDD_DOC_TYPE_REJECTED,
-    RDD_DOC_TYPE_REJECTED: RDD_DOC_TYPE_MEETING,
-}
-
-
-def _rdd_upload_types(uploaded: set[str]) -> list[str]:
-    """The RDD document types the upload card offers, given what is uploaded.
-
-    Once one report of the either-or pair is on the SR, the other leaves the
-    card — its row and its entry in the type dropdown alike, since the chat's
-    dropdown is built from the rows still missing. It used to stay offered, so
-    a reviewer who had filed the Meeting Report could still attach a Rejected
-    report beside it. Deleting the uploaded report brings both back, because
-    this is recomputed from the documents every turn. A pair that somehow holds
-    both keeps both: a row with a file on it is never hidden.
-    """
-    types = [RDD_DOC_TYPE_MEETING, RDD_DOC_TYPE_REJECTED, RDD_DOC_TYPE_OTHER]
-    for report, alternative in _RDD_REPORT_ALTERNATIVES.items():
-        if report in uploaded and alternative not in uploaded:
-            types.remove(alternative)
-    return types
-
-
 def _document_requirement_block(
     *,
     stage: str,
@@ -380,7 +233,11 @@ def _document_requirement_block(
     # so the user can see the ✓ status and click the Continue chip to advance
     # to date collection (dates come AFTER the upload per the payload shape).
     if stage == "RDD_REVIEW":
-        relevant = _rdd_upload_types(uploaded)
+        relevant = [
+            RDD_DOC_TYPE_MEETING,
+            RDD_DOC_TYPE_REJECTED,
+            RDD_DOC_TYPE_OTHER,
+        ]
 
     doc_rows = [
         {
@@ -394,7 +251,6 @@ def _document_requirement_block(
                 else False  # FM needs any one of the three — none individually mandatory
             ),
             "status": "uploaded" if doc_type in uploaded else "missing",
-            **_uploaded_doc_row(documents, doc_type),
         }
         for doc_type in relevant
     ]
@@ -406,7 +262,11 @@ def _document_requirement_block(
     # For RDD, list every allowed type so the FE dropdown lets the user pick
     # which of the three they're attaching (matches FM's multi-type upload).
     if stage == "RDD_REVIEW":
-        upload_context["allowedDocumentTypes"] = list(relevant)
+        upload_context["allowedDocumentTypes"] = [
+            RDD_DOC_TYPE_MEETING,
+            RDD_DOC_TYPE_REJECTED,
+            RDD_DOC_TYPE_OTHER,
+        ]
 
     return {
         "documents": doc_rows,
@@ -452,81 +312,31 @@ _RDD_TERMINAL_STATUSES: frozenset[str] = frozenset(
 
 def _fm_review_ready(
     collected: dict[str, Any],
-    documents: list[dict[str, Any]],  # unused: kept so every call site reads the same
+    documents: list[dict[str, Any]],
 ) -> bool:
-    """True when FM can approve: the unit readiness date is set.
-
-    None of the three FM documents is mandatory — the upload card already
-    marks every row ``required: False`` — so approval must not wait on one.
-    It used to, which stranded a reviewer with nothing to attach: the Approve
-    Review chip never appeared and the turn kept repeating "Please upload at
-    least one FM document" with no way past it.
-    """
-    return collected.get("unit_readiness_date") not in (None, "")
+    """True when FM can approve: readiness date set and at least one FM doc uploaded."""
+    date_ok = collected.get("unit_readiness_date") not in (None, "")
+    if not date_ok:
+        return False
+    uploaded = _uploaded_type_ids(documents)
+    return bool(uploaded & _FM_DOC_TYPES)
 
 
 def is_fm_review_ready(
     collected: dict[str, Any],
     documents: list[dict[str, Any]],
 ) -> bool:
-    """Public alias for FM approve readiness (unit readiness date present)."""
+    """Public alias for FM approve readiness (date + ≥1 FM document)."""
     return _fm_review_ready(collected, documents)
 
 
-# The FM fields Save Progress actually PATCHes. Documents are deliberately not
-# here: an upload has already reached the platform by the time it shows up in
-# ``documents``, so it is never something still waiting to be saved.
-_FM_SAVEABLE_FIELDS: tuple[str, ...] = ("unit_readiness_date", "comments", "notes")
-
-
-def _saved_value(value: Any) -> str:
-    """A session value and its platform twin, comparable without format noise.
-
-    The same day arrives as ``2026-08-10`` from the session and
-    ``2026-08-10T00:00:00Z`` from the platform GET.
-    """
-    if value is None:
-        return ""
-    text = str(value).strip()
-    if len(text) >= 10 and "T" in text and text[:10].count("-") == 2:
-        return text[:10]
-    return text
-
-
-def fm_has_unsaved_changes(state: dict[str, Any]) -> bool:
-    """True when FM is holding an edit the platform has not stored yet.
-
-    Save Progress used to sit on every FM turn, including ones where the
-    reviewer had changed nothing, so tapping it PATCHed the SR back to the
-    values it already held. ``sr_status_sync_node`` refreshes
-    ``backend_refs["create_payload"]`` from the platform GET on every turn with
-    an ``sr_id``, which makes that snapshot the saved baseline to compare the
-    session's answers against.
-
-    Fails open: with no snapshot to compare against, keep the chip rather than
-    hide a save the reviewer might genuinely need.
-    """
-    refs = state.get("backend_refs") or {}
-    snapshot = (refs.get("create_payload") or {}).get("payload")
-    if not isinstance(snapshot, dict) or not snapshot:
-        return True
-    saved = payload_to_collected_data(snapshot)
-    collected = state.get("collected_data") or {}
-    return any(
-        _saved_value(collected.get(name)) != _saved_value(saved.get(name))
-        for name in _FM_SAVEABLE_FIELDS
-    )
-
-
 _FM_UPLOAD_ASK_MESSAGE = (
-    "Please share the unit readiness date to continue with the review. "
-    "All FM documents are optional — attach the Handover Checklist, Site "
-    "Survey, or Other below if you have them."
+    "Please upload at least one FM document (Handover Checklist, Site Survey, "
+    "or Other) to continue with the review."
 )
 _FM_UPLOAD_REVIEW_MESSAGE = (
-    "All FM documents are optional — upload the Handover Checklist, Site "
-    "Survey, or Other if you have them, then tap Continue to review and "
-    "choose an action."
+    "Review the details below. You can upload FM documents (Handover Checklist, "
+    "Site Survey, or Other), then choose an action."
 )
 _RDD_UPLOAD_ASK_MESSAGE = (
     "Please upload either the Handover Meeting Report or the Rejected Fitout and "
@@ -579,15 +389,6 @@ def build_document_upload_ask_response(state: dict[str, Any]) -> dict[str, Any]:
 
     deco_state = {**dict(state), "confirmation_status": None}
     decorations = build_review_decorations(deco_state)
-    # Once FM has what it needs, the card stays open with a Continue chip so
-    # the reviewer can add the Site Survey or an Other document before moving
-    # on. The stage action chips (Save Progress / Approve Review) would
-    # otherwise be the only way off this turn, and neither says "I am done
-    # uploading".
-    if stage == "FM_REVIEW":
-        decorations = merge_decorations(
-            decorations, {"suggestions": build_fm_upload_continue_suggestions()}
-        )
     return {
         "status": "WAITING_FOR_USER",
         "response_message": message,
@@ -644,15 +445,12 @@ def _action_suggestions(
     rdd_status: str | None,
     collected: dict[str, Any] | None = None,
     documents: list[dict[str, Any]] | None = None,
-    fm_dirty: bool = True,
 ) -> dict[str, Any] | None:
     """Return stage-specific action chips. Never mix FM and RDD actions.
 
     FM shows exactly one chip:
+    - Save Progress while incomplete (persists data, does not approve)
     - Approve Review when ready (advances toward RDD)
-    - Save Progress while incomplete AND holding an unsaved edit
-    - Continue otherwise — Save Progress on a turn with nothing to save was a
-      button that re-sent the values the SR already held
 
     RDD Submit Report is shown only when ``_rdd_ready_to_submit`` — never while
     required data or the Meeting Report is still outstanding.
@@ -673,10 +471,14 @@ def _action_suggestions(
                     "action": "approve_fm_review",
                 },
             ]
-        elif fm_dirty:
-            options = [dict(_SAVE_FM_PROGRESS_OPTION)]
         else:
-            options = [dict(_CONTINUE_FM_UPLOAD_OPTION)]
+            options = [
+                {
+                    "label": "Save Progress",
+                    "value": "save_fm_progress",
+                    "action": "save_fm_progress",
+                },
+            ]
     elif stage == "RDD_REVIEW" and role in _STAGE_ACTOR_ROLES["RDD_REVIEW"]:
         status = (rdd_status or "").upper()
         if status in _RDD_TERMINAL_STATUSES:
@@ -765,7 +567,6 @@ def build_review_decorations(state: dict[str, Any]) -> dict[str, Any]:
         rdd_status=rdd_status,
         collected=collected,
         documents=documents,
-        fm_dirty=fm_has_unsaved_changes(state) if stage == "FM_REVIEW" else True,
     )
     if suggestions:
         decorations["suggestions"] = suggestions
@@ -817,13 +618,6 @@ def build_review_decorations(state: dict[str, Any]) -> dict[str, Any]:
 
 
 # CREATE_SR optional MM upload offer (Yes → show card; No/Continue → hide).
-# FM review keeps its upload card open until the reviewer says they are done,
-# the way the MM pre-submission gate does. Without it the first document made
-# the review "ready" and the flow jumped to the confirmation card while the
-# reviewer was still picking the second — with no way back to the card.
-FM_UPLOAD_GATE_KEY = "fm_upload_gate"
-FM_UPLOAD_GATE_DONE = "done"
-
 MM_OPTIONAL_UPLOAD_STATUS_KEY = "mm_optional_upload_status"
 MM_OPTIONAL_AWAITING_CHOICE = "awaiting_choice"
 MM_OPTIONAL_AWAITING_UPLOAD = "awaiting_upload"
@@ -856,30 +650,6 @@ def build_mm_optional_upload_offer_suggestions() -> dict[str, Any]:
             },
         ],
     }
-
-
-_SAVE_FM_PROGRESS_OPTION: dict[str, str] = {
-    "label": "Save Progress",
-    "value": "save_fm_progress",
-    "action": "save_fm_progress",
-}
-
-_CONTINUE_FM_UPLOAD_OPTION: dict[str, str] = {
-    "label": "Continue",
-    "value": "continue",
-    "action": "continue_fm_upload",
-}
-
-
-def build_fm_upload_continue_suggestions() -> dict[str, Any]:
-    """The single chip while the FM upload card is open: Continue.
-
-    Save Progress does not belong here. The card's own Save button already
-    commits each document, and Continue carries the readiness date forward to
-    the review — so a second Save chip beside them saved nothing the reviewer
-    had not already saved, and read as a third, competing way off the card.
-    """
-    return {"kind": "labeled_options", "options": [dict(_CONTINUE_FM_UPLOAD_OPTION)]}
 
 
 def build_mm_optional_upload_continue_suggestions() -> dict[str, Any]:
@@ -947,7 +717,6 @@ def build_create_sr_attachment_decorations(state: dict[str, Any]) -> dict[str, A
             "label": _DOC_LABELS.get("SR_HANDOVER_OTHER", "Other"),
             "required": False,
             "status": "uploaded" if "SR_HANDOVER_OTHER" in uploaded else "missing",
-            **_uploaded_doc_row(documents, "SR_HANDOVER_OTHER"),
         }
     ]
 

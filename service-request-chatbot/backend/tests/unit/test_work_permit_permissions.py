@@ -95,18 +95,6 @@ class TestWorkPermitRoleMap:
     def test_admin_can_raise_wp(self) -> None:
         assert "CAN_RAISE_WORK_PERMIT_SR" in ROLE_PERMISSION_MAP.get("ADMIN", frozenset())
 
-    def test_operation_executives_can_view_wp(self) -> None:
-        assert "VIEW_WORK_PERMIT" in ROLE_PERMISSION_MAP.get("OPERATION_EXECUTIVES", frozenset())
-
-    def test_operation_executives_cannot_raise_wp(self) -> None:
-        assert "CAN_RAISE_WORK_PERMIT_SR" not in ROLE_PERMISSION_MAP.get(
-            "OPERATION_EXECUTIVES", frozenset()
-        )
-
-    def test_approve_work_permit_not_in_action_map(self) -> None:
-        """Platform has no APPROVE_SR_WORK_PERMIT — hop gate is assigned_role."""
-        assert "APPROVE_WORK_PERMIT_SR" not in ACTION_PERMISSION_MAP
-
 
 # ===========================================================================
 # TestPermissionServiceWP
@@ -161,21 +149,6 @@ class TestPermissionServiceWP:
         with pytest.raises(PermissionDeniedError) as exc_info:
             svc.check("CREATE_WORK_PERMIT_SR", _auth("FM_MANAGER"))
         assert exc_info.value.action == "CREATE_WORK_PERMIT_SR"
-
-    def test_dd_can_approve_dd_hop(self) -> None:
-        PermissionService().ensure_can_approve_work_permit(
-            AuthContext(subject_id="dd", tenant_id=None, roles=frozenset({"DD_ENGINEER"})),
-            workflow_stage="WP_DD_REVIEW",
-            in_progress_roles={"DD_ENGINEER"},
-        )
-
-    def test_fm_cannot_approve_dd_hop(self) -> None:
-        with pytest.raises(PermissionDeniedError):
-            PermissionService().ensure_can_approve_work_permit(
-                AuthContext(subject_id="fm", tenant_id=None, roles=frozenset({"FM_MANAGER"})),
-                workflow_stage="WP_DD_REVIEW",
-                in_progress_roles={"DD_ENGINEER"},
-            )
 
 
 # ===========================================================================
@@ -273,42 +246,6 @@ class TestWorkPermitValidation:
         errors = svc.validate_draft(data, workflow_stage="CREATE_WORK_PERMIT", documents=[])
         count_errors = [e for e in errors if e["validation_type"] == "document_count"]
         assert len(count_errors) == 0
-
-    def test_invalid_start_date_format_is_date_format_error(self) -> None:
-        svc = ValidationService()
-        data = self._complete_wp_data()
-        data["start_date"] = "t0105712"
-        errors = svc.validate_draft(data, workflow_stage="CREATE_WORK_PERMIT")
-        fmt_errors = [
-            e
-            for e in errors
-            if e["validation_type"] == "date_format" and e["field"] == "start_date"
-        ]
-        assert len(fmt_errors) == 1
-
-    def test_end_date_before_start_date_is_date_range_error(self) -> None:
-        svc = ValidationService()
-        data = self._complete_wp_data()
-        data["start_date"] = "2026-08-20"
-        data["end_date"] = "2026-08-10"
-        errors = svc.validate_draft(data, workflow_stage="CREATE_WORK_PERMIT")
-        range_errors = [
-            e
-            for e in errors
-            if e["validation_type"] == "date_range" and e["field"] == "end_date"
-        ]
-        assert len(range_errors) == 1
-
-    def test_same_day_start_and_end_is_valid(self) -> None:
-        svc = ValidationService()
-        data = self._complete_wp_data()
-        data["start_date"] = "2026-08-20"
-        data["end_date"] = "2026-08-20"
-        errors = svc.validate_draft(data, workflow_stage="CREATE_WORK_PERMIT")
-        date_errors = [
-            e for e in errors if e["validation_type"] in {"date_format", "date_range"}
-        ]
-        assert len(date_errors) == 0
 
 
 # ===========================================================================

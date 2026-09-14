@@ -37,11 +37,6 @@ from datetime import datetime, time, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from app.agents.services.deleted_documents import (
-    deleted_document_ids,
-    without_deleted_ids,
-)
-
 logger = logging.getLogger(__name__)
 
 # Portal DateTimePicker + manual CREATE use Asia/Riyadh wall time for LT.
@@ -838,9 +833,6 @@ def build_fm_review_payload(
     for existing_id in inner.get("documents_ids") or []:
         if existing_id and existing_id not in uploaded_docs:
             uploaded_docs.append(existing_id)
-    # The platform keeps a deleted id in its payload snapshot after the
-    # attachment row is gone, and refuses a submit that lists it.
-    uploaded_docs = without_deleted_ids(uploaded_docs, deleted_document_ids(backend_refs))
 
     sr_operations: list[dict[str, Any]] = backend_refs.get("sr_operations") or []
     ref_no: str = backend_refs.get("ref_no", "")
@@ -953,9 +945,6 @@ def build_rdd_report_payload(
         if existing_id and existing_id not in fm_doc_ids:
             # Keep FM docs from platform; RDD report id added separately below.
             fm_doc_ids.append(existing_id)
-    # The platform keeps a deleted id in its payload snapshot after the
-    # attachment row is gone, and refuses a submit that lists it.
-    fm_doc_ids = without_deleted_ids(fm_doc_ids, deleted_document_ids(backend_refs))
 
     rdd_doc_id: str | None = backend_refs.get("rdd_document_id")
     rejected_ids: list[str] = [

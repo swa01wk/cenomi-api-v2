@@ -31,10 +31,6 @@ from typing import Any
 import structlog
 
 from app.agents.graph.state import ServiceRequestState
-from app.agents.services.deleted_documents import (
-    deleted_document_ids,
-    without_deleted,
-)
 from app.agents.services.review_decorations_service import (
     build_review_decorations,
     derive_user_role,
@@ -43,13 +39,6 @@ from app.agents.services.review_decorations_service import (
 )
 from app.agents.services.display_formatters import format_enum_label
 from app.agents.services.service_request_api_service import get_service_request_api_service
-from app.agents.schemas.work_permit_schema import (
-    STAGE_LABELS,
-    WP_REVIEW_STAGES,
-    is_work_permit_category,
-    map_wp_operations_to_stage,
-    resolve_wp_sub_category,
-)
 from app.observability.decorators import trace_node
 
 log = structlog.get_logger(__name__)
@@ -91,24 +80,19 @@ def _map_operations_to_stage(
     *,
     sub_category: str | None = None,
     platform_status: str | None = None,
-    category: str | None = None,
 ) -> str | None:
     """Derive workflow_stage from ``service_request_operations`` list.
 
-    Priority: WORK_PERMIT > HANDED_OVER early-exit > fitout-confirm early-exit >
+    Priority: HANDED_OVER early-exit > fitout-confirm early-exit >
               RDD_REVIEW > FM_REVIEW > SR_COMPLETED > unchanged.
 
-    Work Permit must run before the Handover DD/FM mapping: a WP
-    ``DD_ENGINEER IN_PROGRESS`` is ``WP_DD_REVIEW``, not ``RDD_REVIEW``.
-    """
-    if is_work_permit_category(category, sub_category):
-        return map_wp_operations_to_stage(
-            operations,
-            sub_category=sub_category,
-            platform_status=platform_status,
-            current_stage=current_stage,
-        )
+    For Path B (sub_category=HANDED_OVER) SRs that are already APPROVED on the
+    platform, return SR_COMPLETED immediately without consulting operations — there
+    is no FM or RDD stage for the HANDED_OVER sub_category.
 
+    For fitout confirmation SRs (FIT_OUT_CONFIRM_*), any in-progress operation
+    maps to APPROVE_SR (single-stage approval, no FM/RDD phases).
+    """
     # Path B early exit: HANDED_OVER + APPROVED → terminal
     if sub_category == "HANDED_OVER" and (platform_status or "").upper() == "APPROVED":
         return "SR_COMPLETED"
@@ -328,30 +312,23 @@ async def sr_status_sync_node(state: ServiceRequestState) -> dict[str, Any]:
                 or []
             )
 
-    # Resolve category / sub_category from GET (detail uses ``category``).
-    payload_tmp: dict[str, Any] = getattr(result, "payload", None) or {}
-    sr_category: str | None = (
-        state.get("service_category")
-        or payload_tmp.get("category")
-        or payload_tmp.get("service_category")
-    )
-    payload_sub = payload_tmp.get("sub_category")
+    # Resolve sub_category: prefer state value (set by supervisor) over payload.
     sr_sub_category: str | None = state.get("sub_category")
-    if payload_sub and str(payload_sub).upper() not in {"", "WORK_PERMIT", "HANDOVER"}:
-        sr_sub_category = payload_sub
-    elif not sr_sub_category:
-        sr_sub_category = payload_sub or payload_tmp.get("already_handovered")
+    if not sr_sub_category:
+        payload_tmp: dict[str, Any] = getattr(result, "payload", None) or {}
+        sr_sub_category = payload_tmp.get("sub_category") or payload_tmp.get("already_handovered")
 
     # When the backend doesn't return sub_category explicitly, infer it from the
     # fitout-specific fields stored in the inner payload.  These fields are unique
     # to their respective fitout confirm sub-categories and cannot appear in
     # standard handover SRs.
     if not sr_sub_category:
-        if "fitout_start_done" in payload_tmp:
+        payload_tmp2: dict[str, Any] = getattr(result, "payload", None) or {}
+        if "fitout_start_done" in payload_tmp2:
             sr_sub_category = "FIT_OUT_CONFIRM_FOS"
-        elif "fitout_complete_done" in payload_tmp:
+        elif "fitout_complete_done" in payload_tmp2:
             sr_sub_category = "FIT_OUT_CONFIRM_END"
-        elif "trading_done" in payload_tmp:
+        elif "trading_done" in payload_tmp2:
             sr_sub_category = "FIT_OUT_CONFIRM_TRADING"
 
     new_stage = _map_operations_to_stage(
@@ -359,7 +336,6 @@ async def sr_status_sync_node(state: ServiceRequestState) -> dict[str, Any]:
         current_stage,
         sub_category=sr_sub_category,
         platform_status=platform_status,
-        category=sr_category,
     )
 
     # Never regress from RDD_REVIEW back to FM_REVIEW: platform lag can keep
@@ -407,28 +383,20 @@ async def sr_status_sync_node(state: ServiceRequestState) -> dict[str, Any]:
     hydrated_docs = _attachments_to_documents(attachments) if attachments else []
     if existing_docs or hydrated_docs:
         merged_docs = _merge_documents(existing_docs, hydrated_docs)
-        # A platform GET that lags the delete must not bring the file back.
-        merged_docs = without_deleted(merged_docs, deleted_document_ids(backend_refs))
         updates["documents"] = merged_docs
         _apply_document_refs(backend_refs, merged_docs)
 
     payload: dict[str, Any] = getattr(result, "payload", None) or {}
-    wp_sr = is_work_permit_category(sr_category, sr_sub_category)
     if payload:
-        # Snapshot for builders (open-existing path never ran create payload builder).
+        # Snapshot for FM/RDD builders (open-existing path never ran create payload builder).
         inner = dict(payload)
-        wp_sub = resolve_wp_sub_category(sr_sub_category, inner) if wp_sr else None
         backend_refs["create_payload"] = {
             "payload": inner,
             "title": inner.get("title") or "",
             "tenant_profile_id": inner.get("tenant_profile_id"),
             "property_id": inner.get("property_id"),
-            "service_category": "WORK_PERMIT" if wp_sr else "FIT_OUT_AND_HANDOVER",
-            "sub_category": (
-                wp_sub
-                if wp_sr
-                else (sr_sub_category or inner.get("sub_category") or "HANDOVER")
-            ),
+            "service_category": "FIT_OUT_AND_HANDOVER",
+            "sub_category": sr_sub_category or inner.get("sub_category") or "HANDOVER",
             "lease_code": inner.get("lease_code") or inner.get("lease") or "",
             "lease_id": inner.get("lease_id") or inner.get("contract_id"),
             "service_request_id": sr_id,
@@ -449,12 +417,7 @@ async def sr_status_sync_node(state: ServiceRequestState) -> dict[str, Any]:
                 updates["collected_data"] = {**existing_collected, **hydrated}
 
     # Ensure active_agent for review routing when opening existing SR.
-    if wp_sr:
-        updates["active_agent"] = "work_permit_agent"
-        updates["service_category"] = "WORK_PERMIT"
-        if sr_sub_category:
-            updates["sub_category"] = sr_sub_category
-    elif not state.get("active_agent"):
+    if not state.get("active_agent"):
         if effective_stage in ("FM_REVIEW", "RDD_REVIEW"):
             updates["active_agent"] = "rdd_handover_agent"
             updates["service_category"] = "FIT_OUT_AND_HANDOVER"
@@ -480,15 +443,8 @@ async def sr_status_sync_node(state: ServiceRequestState) -> dict[str, Any]:
         "FM_REVIEW",
         "RDD_REVIEW",
         "APPROVE_SR",
-        *WP_REVIEW_STAGES,
     ):
-        if effective_stage in WP_REVIEW_STAGES:
-            label = STAGE_LABELS.get(effective_stage or "", "Work Permit Review")
-            updates["response_message"] = (
-                f"Opening Work Permit SR **{sr_id}** ({label}). "
-                "Review the details below, then approve or reject this hop."
-            )
-        elif effective_stage == "APPROVE_SR" and sr_sub_category in _FITOUT_CONFIRM_SUB_CATEGORIES:
+        if effective_stage == "APPROVE_SR" and sr_sub_category in _FITOUT_CONFIRM_SUB_CATEGORIES:
             _FITOUT_OPEN_LABELS = {
                 "FIT_OUT_CONFIRM_FOS": "Fitout Start Confirmation",
                 "FIT_OUT_CONFIRM_END": "Fitout End Confirmation",

@@ -115,8 +115,6 @@ async def test_list_emits_grouped_notification_list() -> None:
         "FIT_OUT_CONFIRM_END",
     ]
     handover = ui["groups"][0]
-    # Both HANDOVER fixtures list, read or not — reading a notification does
-    # not discharge its action, so the agent keeps it until ACTION_DONE.
     assert handover["total_count"] == 2
     assert handover["notifications"][0]["sr_id"] == "11711"
     assert "action-required" in result["response_message"]

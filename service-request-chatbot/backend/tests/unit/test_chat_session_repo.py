@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from unittest.mock import AsyncMock
 from uuid import uuid4
 
@@ -176,13 +175,10 @@ async def test_update_all_allowed_fields(
             "intent": "maintenance",
             "workflow_stage": "validate",
             "status": "IN_PROGRESS",
-            "last_activity_at": datetime(2026, 1, 1, tzinfo=timezone.utc),
-            "client_active_ms": 0,
         },
     )
 
     assert updated.active_agent == "validation_agent"
     assert updated.intent == "maintenance"
     assert updated.workflow_stage == "validate"
-    assert updated.client_active_ms == 0
     mock_session.flush.assert_awaited_once()

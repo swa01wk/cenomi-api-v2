@@ -19,7 +19,6 @@ Non-responsibilities
 from __future__ import annotations
 
 import logging
-import re
 from typing import Any
 
 from app.agents.graph.state import ServiceRequestState
@@ -29,7 +28,6 @@ from app.agents.services.display_formatters import (
     format_field_display_value,
 )
 from app.agents.services.review_decorations_service import (
-    _uploaded_doc_row,
     build_document_upload_ask_response,
     build_mm_optional_upload_continue_suggestions,
     is_fm_review_ready,
@@ -54,9 +52,7 @@ _FIELD_LABELS: dict[str, str] = {
     "title": "Title",
     "description": "Description",
     "startDate": "Inspection Start Date",
-    "inspectionTime": "Inspection Start Time",
     "endDate": "Inspection End Date",
-    "inspectionEndTime": "Inspection End Time",
     "inspection_done_by": "Inspection Done By",
     "notes": "Notes",
     "comments": "Comments",
@@ -87,9 +83,7 @@ _CREATE_SR_EDITABLE: frozenset[str] = frozenset(
         "title",
         "description",
         "startDate",
-        "inspectionTime",
         "endDate",
-        "inspectionEndTime",
         "inspection_done_by",
         "notes",
         "comments",
@@ -133,19 +127,7 @@ _FM_REVIEW_DISPLAY_FIELDS: tuple[str, ...] = (
     "comments",
 )
 
-# Path B records what already happened, and the review card is where a
-# mistyped date gets fixed — so every date the user supplied is editable here,
-# as they are on the Path A card.
-_HANDED_OVER_EDITABLE: frozenset[str] = frozenset(
-    {
-        "title",
-        "actual_shop_handover_date",
-        "actual_fitout_start_date",
-        "actual_fitout_end_date",
-        "actual_trading_date",
-        "comments",
-    }
-)
+_HANDED_OVER_EDITABLE: frozenset[str] = frozenset({"title", "comments"})
 
 _HANDED_OVER_DISPLAY_FIELDS: tuple[str, ...] = (
     "lease_code",
@@ -231,224 +213,6 @@ _CONFIRM_ACTION_MAP: dict[tuple[str, str], str] = {
 }
 
 
-# Rows the frontend should render with a native picker rather than a text box.
-# The value on these rows is the raw machine format: YYYY-MM-DD and HH:MM.
-_TYPED_INPUTS: dict[str, str] = {
-    "startDate": "date",
-    "endDate": "date",
-    "inspectionTime": "time",
-    "inspectionEndTime": "time",
-    "actual_shop_handover_date": "date",
-    "actual_fitout_start_date": "date",
-    "actual_fitout_end_date": "date",
-    "actual_trading_date": "date",
-}
-
-# The review cards' own date rows. Each holds a plain calendar date with no
-# clock folded into it, so each can take a real picker — without one the row
-# was a free-text box seeded with "27/09/2026", leaving the reviewer to retype
-# a display string by hand to change a date.
-#
-# ``startDate`` / ``endDate`` are deliberately absent here: at review stages
-# their value is the merged "06/09/2026 9:00 AM" display string, which a native
-# date input cannot hold and would silently render blank.
-_REVIEW_TYPED_INPUTS: dict[str, str] = {
-    "unit_readiness_date": "date",
-    "expected_handover_date": "date",
-    "actual_handover_date": "date",
-    "fitout_start_date": "date",
-    "fitout_end_date": "date",
-}
-
-# Stages whose card is a review of an existing SR rather than a draft.
-_REVIEW_CARD_STAGES: frozenset[str] = frozenset({"FM_REVIEW", "RDD_REVIEW"})
-
-# What a native date input will accept, and nothing else.
-_ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
-
-# What the payload builder books when no clock was ever given. Shown on the
-# card so the preview states the time the SR will actually carry.
-_DEFAULT_INSPECTION_HHMM = "09:00"
-
-# Clock rows sit directly under the date they belong to.
-_INSPECTION_TIME_ROWS: tuple[tuple[str, str], ...] = (
-    ("startDate", "inspectionTime"),
-    ("endDate", "inspectionEndTime"),
-)
-
-
-def _lease_locked_on_card(workflow_stage: str, collected_data: dict[str, Any]) -> bool:
-    """True once the lease is settled and must not be edited on the card.
-
-    Asked in chat, the assistant already refuses: "Lease Code comes from the
-    lease record and can't be edited here" (see missing_field_node). An
-    editable box on the review card offered exactly what chat refuses, on the
-    field every identifier on the request hangs off. Read-only once the lookup
-    has resolved a lease_id; to use a different lease, start a new request.
-    """
-    from app.agents.schemas.handover_schema import AI_FILLED_STAGES, short_flow_enabled
-
-    if not short_flow_enabled() or workflow_stage not in AI_FILLED_STAGES:
-        return False
-    return bool(collected_data.get("lease_id"))
-
-
-def _typed_date_inputs(workflow_stage: str) -> bool:
-    """True when the card's date rows should carry native pickers.
-
-    Both create stages: Path A's inspection window and Path B's four actual
-    dates are all fixed on this card, and a picker round-trips the raw value
-    instead of asking the user to retype a display string.
-    """
-    from app.agents.schemas.handover_schema import AI_FILLED_STAGES, short_flow_enabled
-
-    return short_flow_enabled() and workflow_stage in AI_FILLED_STAGES
-
-
-def _picker_value(input_type: str, value: Any) -> Any | None:
-    """*value* in the shape the native input speaks, or None to skip the picker.
-
-    A date input accepts YYYY-MM-DD and nothing else — hand it anything else
-    and it renders an empty ``dd/mm/yyyy`` with no complaint. The platform
-    stores these dates as display strings ("28/09/2026"), so a reopened SR's
-    card showed three blank pickers where its dates should have been.
-
-    Returning None leaves the row as text, which is the safe failure: a value
-    the picker cannot hold is still a value the reviewer must be able to see.
-    """
-    if value in (None, ""):
-        # Nothing to bind; an empty picker is the correct empty state.
-        return value
-    if input_type != "date":
-        return value
-    from app.agents.graph.nodes.shared.merge_state_node import _to_iso_date
-
-    iso = _to_iso_date(value)
-    return iso if _ISO_DATE_RE.match(str(iso)) else None
-
-
-def _typed_input_map(workflow_stage: str) -> dict[str, str]:
-    """Which rows this stage's card renders with a native picker."""
-    if workflow_stage in _REVIEW_CARD_STAGES:
-        return _REVIEW_TYPED_INPUTS
-    if _typed_date_inputs(workflow_stage):
-        return _TYPED_INPUTS
-    return {}
-
-
-def _typed_inspection_inputs(workflow_stage: str) -> bool:
-    """True when the card splits the inspection window into date and time rows.
-
-    Path A only — Path B's dates carry no clock.
-    """
-    return _typed_date_inputs(workflow_stage) and workflow_stage == "CREATE_SR"
-
-
-def _with_inspection_time_rows(display_keys: list[str]) -> list[str]:
-    """Insert each clock row immediately after its date row."""
-    keys = list(display_keys)
-    for date_key, time_key in _INSPECTION_TIME_ROWS:
-        if date_key in keys and time_key not in keys:
-            keys.insert(keys.index(date_key) + 1, time_key)
-    return keys
-
-
-# Provenance of short-flow generated values, written by merge_state_node.
-_AI_FIELD_META_KEY = "_ai_field_meta"
-
-# What each generated source means to the person reading the card.
-_PROVENANCE_HINTS: dict[str, str] = {
-    "template": "Filled in for you — edit if you want different wording.",
-    "ai": "Drafted by the assistant from your answers — please check it.",
-}
-
-# Stages that show who raised the request and who reviews it next.
-_ACCOUNTABILITY_STAGES: frozenset[str] = frozenset(
-    {"CREATE_SR", "CREATE_HANDED_OVER_SR"}
-)
-
-_ROLE_LABELS: dict[str, str] = {
-    "MALL_MANAGER": "Mall Manager",
-    "FM_MANAGER": "FM Manager",
-    "OPERATIONS": "Operations",
-    "DD_ENGINEER": "RDD Engineer",
-    "ADMIN": "Admin",
-}
-
-
-def _provenance_for(
-    field_key: str,
-    raw_value: Any,
-    ai_meta: dict[str, Any],
-) -> dict[str, Any]:
-    """Label a row as generated — unless the user has since changed it.
-
-    The meta records the exact text that was generated, so an edit (typed in
-    chat or on this card) is detected by comparison rather than by trusting a
-    flag that nothing clears.
-    """
-    entry = ai_meta.get(field_key)
-    if not isinstance(entry, dict):
-        return {}
-    if str(entry.get("value") or "") != str(raw_value or ""):
-        # The user replaced it — their words, their row.
-        return {"source": "user"}
-    source = str(entry.get("source") or "template")
-    row: dict[str, Any] = {"generated": True, "source": source}
-    hint = _PROVENANCE_HINTS.get(source)
-    if hint:
-        row["hint"] = hint
-    # Only a genuinely uncertain value earns a number; a deterministic template
-    # is correct by construction and a percentage next to it means nothing.
-    confidence = entry.get("confidence")
-    if source != "template" and isinstance(confidence, (int, float)):
-        row["confidence"] = float(confidence)
-    return row
-
-
-def _accountability_rows(
-    workflow_stage: str,
-    collected_data: dict[str, Any],
-    backend_refs: dict[str, Any] | None,
-) -> list[dict[str, Any]]:
-    """Read-only 'raised by' / 'reviewed next by' rows for the CREATE stages.
-
-    Roles, not names: the chat backend authenticates a subject id and its roles,
-    and inventing a display name it has never been told would be worse than
-    naming the role accurately.
-    """
-    from app.agents.schemas.handover_schema import short_flow_enabled
-
-    # Part of the short flow's review step. With the flag off the card keeps
-    # exactly the rows it has always had.
-    if not short_flow_enabled() or workflow_stage not in _ACCOUNTABILITY_STAGES:
-        return []
-
-    rows: list[dict[str, Any]] = []
-    creator_role = str((backend_refs or {}).get("user_role") or "").strip().upper()
-    if creator_role:
-        rows.append(
-            {
-                "key": "created_by_role",
-                "label": "Raised By",
-                "value": _ROLE_LABELS.get(creator_role, format_enum_label(creator_role)),
-                "editable": False,
-            }
-        )
-
-    checker = str(collected_data.get("inspection_done_by") or "").strip().upper()
-    if checker:
-        rows.append(
-            {
-                "key": "checker_role",
-                "label": "Reviewed Next By",
-                "value": _ROLE_LABELS.get(checker, format_enum_label(checker)),
-                "editable": False,
-            }
-        )
-    return rows
-
-
 def _build_confirmation_card(
     collected_data: dict[str, Any],
     workflow_stage: str,
@@ -490,9 +254,6 @@ def _build_confirmation_card(
     }:
         editable.discard("guideLineLink")
 
-    if _lease_locked_on_card(workflow_stage, collected_data):
-        editable.discard("lease_code")
-
     # Enum fields that must render as a <select> dropdown on the frontend.
     _ENUM_OPTIONS: dict[str, list[str]] = {
         "document_status": [
@@ -505,9 +266,6 @@ def _build_confirmation_card(
             "OPERATIONS",
         ],
     }
-
-    # Provenance for the fields the short flow generated (see sr_autofill_service).
-    ai_meta: dict[str, Any] = dict(collected_data.get(_AI_FIELD_META_KEY) or {})
 
     display_keys = list(display_fields)
     # Hide document_status on the card unless Meeting Report was uploaded (or
@@ -531,23 +289,6 @@ def _build_confirmation_card(
         ):
             display_keys = [k for k in display_keys if k != "document_status"]
 
-        # A disapproved handover records no dates — the RDD form has no fields
-        # for them and the flow no longer asks — so the card must not list four
-        # empty rows the reviewer cannot fill. Mirrors
-        # RDD_REJECTED_UNASKED_FIELDS, with trading_date alongside them since
-        # it is only ever derived from the fit-out end.
-        from app.agents.schemas.handover_schema import (
-            RDD_REJECTED_STATUS,
-            RDD_REJECTED_UNASKED_FIELDS,
-        )
-
-        if (
-            str(collected_data.get("document_status") or "").strip().upper()
-            == RDD_REJECTED_STATUS
-        ):
-            hidden = RDD_REJECTED_UNASKED_FIELDS | {"trading_date"}
-            display_keys = [k for k in display_keys if k not in hidden]
-
     # Start and end times are independent. inspectionTime is the start clock;
     # endDateLT keeps an end-specific time when the user gave one.
     from app.agents.services.payload_builder_service import (  # local import avoids circular deps
@@ -555,33 +296,18 @@ def _build_confirmation_card(
         resolve_start_end_hhmm,
     )
     start_hhmm, end_hhmm = resolve_start_end_hhmm(collected_data)
-
-    # Short flow: the window is never typed out question-by-question, so the
-    # review card is where a wrong date or clock gets fixed. Give each one its
-    # own row with a real date / time picker instead of folding the clock into
-    # the date's display string, which can only be edited as free text.
-    typed_inputs = _typed_input_map(workflow_stage)
-    if _typed_inspection_inputs(workflow_stage):
-        display_keys = _with_inspection_time_rows(display_keys)
-        collected_data = {
-            **collected_data,
-            "inspectionTime": start_hhmm or _DEFAULT_INSPECTION_HHMM,
-            "inspectionEndTime": end_hhmm or start_hhmm or _DEFAULT_INSPECTION_HHMM,
-        }
-        _date_lt_overrides: dict[str, Any] = {}
-    else:
-        _date_lt_overrides = {}
-        for _date_key, _lt_key, _hhmm in (
-            ("startDate", "startDateLT", start_hhmm),
-            ("endDate", "endDateLT", end_hhmm),
-        ):
-            _raw = collected_data.get(_date_key)
-            if _raw and _hhmm:
-                _, _lt = _normalize_inspection_datetime(
-                    _raw, collected_data.get(_lt_key), inspection_time=_hhmm
-                )
-                if _lt:
-                    _date_lt_overrides[_date_key] = _lt
+    _date_lt_overrides: dict[str, Any] = {}
+    for _date_key, _lt_key, _hhmm in (
+        ("startDate", "startDateLT", start_hhmm),
+        ("endDate", "endDateLT", end_hhmm),
+    ):
+        _raw = collected_data.get(_date_key)
+        if _raw and _hhmm:
+            _, _lt = _normalize_inspection_datetime(
+                _raw, collected_data.get(_lt_key), inspection_time=_hhmm
+            )
+            if _lt:
+                _date_lt_overrides[_date_key] = _lt
 
     fields: list[dict[str, Any]] = []
     for field_key in display_keys:
@@ -608,18 +334,7 @@ def _build_confirmation_card(
         }
         if field_key in _ENUM_OPTIONS:
             row["options"] = _ENUM_OPTIONS[field_key]
-        if is_editable and field_key in typed_inputs:
-            # Tells the frontend to render a native date / time picker and to
-            # round-trip the raw value instead of its display text.
-            _typed = typed_inputs[field_key]
-            _bound = _picker_value(_typed, display_value)
-            if _bound is not None:
-                row["inputType"] = _typed
-                row["value"] = _bound
-        row.update(_provenance_for(field_key, raw_value, ai_meta))
         fields.append(row)
-
-    fields.extend(_accountability_rows(workflow_stage, collected_data, backend_refs))
 
     card: dict[str, Any] = {
         "type": "confirmation_card",
@@ -720,22 +435,6 @@ async def confirmation_node(state: ServiceRequestState) -> dict[str, Any]:
                     "(no fm_action yet, docs not ready)"
                 )
                 return build_document_upload_ask_response(state)
-            # Ready, but the reviewer may have more to attach. Hold on the
-            # upload card — which now carries a Continue chip — until they say
-            # they are done. The first document used to make the review
-            # "ready" and drop them straight onto the confirmation card while
-            # they were still choosing the second, with no way back.
-            from app.agents.services.review_decorations_service import (
-                FM_UPLOAD_GATE_DONE,
-                FM_UPLOAD_GATE_KEY,
-            )
-
-            if collected_data.get(FM_UPLOAD_GATE_KEY) != FM_UPLOAD_GATE_DONE:
-                logger.info(
-                    "confirmation_node: FM docs ready — holding on the upload "
-                    "card until the reviewer continues"
-                )
-                return build_document_upload_ask_response(state)
             # All conditions met; proceed to show the confirmation card.
             # _build_confirmation_card defaults confirmAction to confirm_fm_approve
             # so the next turn sets fm_action=approve via the single-turn confirm path.
@@ -787,11 +486,6 @@ async def confirmation_node(state: ServiceRequestState) -> dict[str, Any]:
                     "label": gate_label,
                     "required": False,
                     "status": "uploaded" if already_uploaded else "missing",
-                    # Without the id the card cannot delete what it shows, and
-                    # without the name it renders "Uploaded  Other" — the tick
-                    # and file name vanish the moment this card is rebuilt over
-                    # the one the client filled in locally after the upload.
-                    **_uploaded_doc_row(documents, "SR_HANDOVER_OTHER"),
                 }
             ],
             "uploadContext": {

@@ -498,11 +498,6 @@ class MockNotificationInboxService(AbstractNotificationInboxService):
         for sub in selected:
             entries = _MOCK_FIXTURES.get(sub, [])
             items = [_parse_item(e, sub) for e in entries]
-            # Platform parity: read rows STAY listed — every agent row is
-            # action-required and reading one does not discharge the action
-            # (an earlier read-hiding cut made "Needs your action" drop rows
-            # whose work was still owed). unread only acts as an explicit
-            # filter, mirroring the platform's IsUnRead param.
             if filters and filters.unread is True:
                 items = [i for i in items if not i.read_at]
             elif filters and filters.unread is False:

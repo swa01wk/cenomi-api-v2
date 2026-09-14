@@ -745,19 +745,7 @@ async def handover_entry_node(state: ServiceRequestState) -> dict[str, Any]:
     _CREATE_SR_INTENTS: frozenset[str] = frozenset(
         {"CREATE_RDD_SERVICE_REQUEST", "CREATE_HANDED_OVER_SR"}
     )
-    # A silent form patch is not a request for another SR. ``intent`` survives
-    # from the turn that created the SR, so after submission the form bridge's
-    # next patch — an empty message carrying corrected_fields — matched this
-    # branch and wiped the finished draft: the stage fell back to CREATE_SR,
-    # the assistant asked for the lease code again, and the client's isComplete
-    # went false, taking the success block and its "View Service Request"
-    # button off screen a second after they appeared. Observed on SR 320996,
-    # where the reset landed 11 seconds after "reference number is 320996".
-    is_silent_form_patch = bool(state.get("corrected_fields")) and not str(
-        state.get("user_message") or ""
-    ).strip()
-
-    if state.get("intent") in _CREATE_SR_INTENTS and not is_silent_form_patch:
+    if state.get("intent") in _CREATE_SR_INTENTS:
         terminal_stages = {"SR_CREATED", "SR_COMPLETED", "CANCELLED", "HANDED_OVER_COMPLETED"}
         if state.get("workflow_stage") in terminal_stages:
             log.info(

@@ -1,7 +1,6 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import Link from "next/link";
 import { MetricsCards } from "@/components/observability/MetricsCards";
 import { TraceFilters } from "@/components/observability/TraceFilters";
 import { TraceListTable } from "@/components/observability/TraceListTable";
@@ -50,22 +49,14 @@ export default function AgentObservabilityPage() {
             agent asked, extracted, or submitted something.
           </p>
         </div>
-        <div className="flex items-center gap-2">
-          <Link
-            href="/admin/agent-success"
-            className="rounded-md border border-zinc-200 bg-white px-3 py-1.5 text-sm text-zinc-700 hover:bg-zinc-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300 dark:hover:bg-zinc-800"
-          >
-            AI Success
-          </Link>
-          <button
-            type="button"
-            onClick={() => fetchTraces(filters)}
-            disabled={loading}
-            className="rounded-md border border-zinc-200 bg-white px-3 py-1.5 text-sm text-zinc-700 hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300 dark:hover:bg-zinc-800"
-          >
-            {loading ? "Loading…" : "Refresh"}
-          </button>
-        </div>
+        <button
+          type="button"
+          onClick={() => fetchTraces(filters)}
+          disabled={loading}
+          className="rounded-md border border-zinc-200 bg-white px-3 py-1.5 text-sm text-zinc-700 hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300 dark:hover:bg-zinc-800"
+        >
+          {loading ? "Loading…" : "Refresh"}
+        </button>
       </div>
 
       {/* Metrics are server-rendered via an async Server Component */}
