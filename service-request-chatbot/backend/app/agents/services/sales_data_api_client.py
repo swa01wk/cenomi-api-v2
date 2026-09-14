@@ -246,7 +246,15 @@ class SalesDataApiClient:
             )
 
         resp.raise_for_status()
-        return resp.json()
+        body = resp.json()
+        # Live cenomi-api wraps the payload as {"success": true, "data": {...
+        # "document_id": ...}} — the caller (supporting_doc_upload_node) reads
+        # document_id off the top level per this method's own docstring, so
+        # returning the envelope unwrapped made every successful upload look
+        # like it failed with "file server did not return a document ID".
+        if isinstance(body, dict) and isinstance(body.get("data"), dict):
+            return body["data"]
+        return body
 
     # ── GET /api/v1/sales-data/template ────────────────────────────────────
 
