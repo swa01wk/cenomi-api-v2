@@ -46,18 +46,42 @@ async def supporting_doc_confirmation_node(state: ServiceRequestState) -> dict[s
     if comment:
         collected["comment_text"] = comment
 
+    invalid_amount = False
     if "sales_amt" in corrected_fields and corrected_fields.get("sales_amt") is not None:
         try:
-            collected["sales_amt"] = float(corrected_fields["sales_amt"])
+            amt = float(corrected_fields["sales_amt"])
         except (TypeError, ValueError):
-            pass
+            invalid_amount = True
+        else:
+            # A corrected amount is genuine fresh tenant input (they're
+            # editing the figure as part of this reupload), so it gets the
+            # same sanity check the CSV/manual-entry paths already apply —
+            # a silently-accepted zero or negative amount would otherwise
+            # reach cenomi-api's PATCH unchecked.
+            if amt <= 0:
+                invalid_amount = True
+            else:
+                collected["sales_amt"] = amt
 
     def _missing_comment_response() -> dict[str, Any]:
         prompt = _confirm_ui(collected)
         prompt["collected_data"] = collected
         return prompt
 
+    def _invalid_amount_response() -> dict[str, Any]:
+        return {
+            "collected_data": collected,
+            "workflow_stage": "AWAITING_DOC_CONFIRM",
+            "status": "WAITING_FOR_USER",
+            "response_message": (
+                "That amount doesn't look right — enter a positive sales figure."
+            ),
+            "response_ui": {"type": "message", "verbatim": True},
+        }
+
     if action_override in ("confirm", "confirm_supporting_doc"):
+        if invalid_amount:
+            return _invalid_amount_response()
         if not (collected.get("comment_text") or "").strip():
             log.info("supporting_doc_confirmation.comment_required")
             return _missing_comment_response()
@@ -78,6 +102,8 @@ async def supporting_doc_confirmation_node(state: ServiceRequestState) -> dict[s
 
     if workflow_stage == "AWAITING_DOC_CONFIRM" and user_message:
         if _contains_phrase(user_message, _CONFIRM_PHRASES):
+            if invalid_amount:
+                return _invalid_amount_response()
             if not (collected.get("comment_text") or "").strip():
                 return _missing_comment_response()
             log.info("supporting_doc_confirmation.confirmed_by_text")

@@ -173,7 +173,12 @@ GO_SALES_DATA_KEYS = [
     # Admin -> Tenant, ActionRequired=true unconditionally for this branch
     # (sales_data_usecase.go:415), so all four of these are live/openable.
     ("SALES_DATA_PENDING", "admin_to_tenant", True, "UPLOAD_SALES_DATA"),
-    ("SALES_DATA_NEED_REUPLOAD", "admin_to_tenant", True, "UPLOAD_SALES_DATA"),
+    (
+        "SALES_DATA_NEED_REUPLOAD",
+        "admin_to_tenant",
+        True,
+        "UPLOAD_SUPPORTING_DOCUMENT",
+    ),
     (
         "SALES_DATA_NEED_UPLOAD_SUPPORTING_DOCUMENT",
         "admin_to_tenant",
@@ -264,9 +269,19 @@ def test_unreachable_tenant_to_admin_keys_map_correctly_for_defense_in_depth(
 def test_need_reupload_and_need_upload_audited_sales_are_correctly_mapped_today() -> (
     None
 ):
-    """Sanity check: the two keys that DO have explicit branches behave."""
+    """Sanity check: the two keys that DO have explicit branches behave.
+
+    SALES_DATA_NEED_REUPLOAD maps to UPLOAD_SUPPORTING_DOCUMENT, not
+    UPLOAD_SALES_DATA — it's a correction on an existing SUBMITTED row (the
+    portal's own editSalesAmt upload modal), not a fresh PENDING-month
+    submission. Routing it to UPLOAD_SALES_DATA sent it through the
+    pending-months gate, which only ever looks at PENDING rows — a
+    NEED_REUPLOAD row has none, so the tenant's own "needs reupload"
+    notification silently landed on "nothing pending" instead of prompting
+    for the reupload.
+    """
     assert sales_data_intent_for_ref({"key": "SALES_DATA_NEED_REUPLOAD"}) == (
-        "UPLOAD_SALES_DATA"
+        "UPLOAD_SUPPORTING_DOCUMENT"
     )
     assert (
         sales_data_intent_for_ref({"key": "SALES_DATA_NEED_UPLOAD_AUDITED_SALES"})

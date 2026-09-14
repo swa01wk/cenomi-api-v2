@@ -478,7 +478,10 @@ async def admin_review_entry_node(state: ServiceRequestState) -> dict[str, Any]:
         # can have many months awaiting review, and without this the whole
         # backlog for that lease came back instead of the one submission
         # the notification was actually about. This is a year-month prefix
-        # ("2026-05"), not a full date — see extract_period_date().
+        # ("2026-05") OR, for the yearly-frequency case, a bare 4-digit
+        # year ("2026") — see extract_period_date(). Match with startswith,
+        # never exact/length-equal comparison, or the yearly case (4 chars)
+        # can never match a row's 7-char normalized prefix.
         notification_period_date = str(notification_ctx.get("period_date") or "").strip()
         typed_codes = _extract_lease_codes(user_message)
         scoped_lease = notification_lease or (typed_codes[0] if typed_codes else "")
@@ -492,6 +495,7 @@ async def admin_review_entry_node(state: ServiceRequestState) -> dict[str, Any]:
         token = get_current_bearer_token()
         client = SalesDataApiClient(bearer_token=token)
         try:
+            notification_period_stale = False
             if scoped_lease:
                 rows = await client.get_sales_data(
                     disable_pagination=True,
@@ -499,16 +503,27 @@ async def admin_review_entry_node(state: ServiceRequestState) -> dict[str, Any]:
                     lease_code=scoped_lease,
                 )
                 if notification_period_date:
-                    # extract_period_date() returns a year-month prefix, not
-                    # a full date — the notification's monthly-frequency
-                    # case only ever names a month, never a day.
-                    rows = [
+                    # startswith, not exact/length-equal comparison: the
+                    # yearly-frequency case gives a bare 4-digit year, the
+                    # common monthly case gives a 7-char "YYYY-MM" prefix —
+                    # a row's normalized date is always the longer string.
+                    period_rows = [
                         r for r in rows
-                        if normalize_period_date(r.get("sales_period_end"))[:7]
-                        == notification_period_date
-                        or normalize_period_date(r.get("sales_period_start"))[:7]
-                        == notification_period_date
-                    ] or rows
+                        if normalize_period_date(r.get("sales_period_end")).startswith(
+                            notification_period_date
+                        )
+                        or normalize_period_date(r.get("sales_period_start")).startswith(
+                            notification_period_date
+                        )
+                    ]
+                    # No silent fallback to the whole lease history here —
+                    # that defeated the entire point of period-scoping in
+                    # exactly the case it matters most (a stale notification
+                    # for a submission that's since been approved/reuploaded
+                    # past this period). Tell the admin plainly instead.
+                    if not period_rows and rows:
+                        notification_period_stale = True
+                    rows = period_rows
                 total_count = len(rows)
             else:
                 # Bounded page, not disable_pagination=True: "SUBMITTED"
@@ -548,6 +563,17 @@ async def admin_review_entry_node(state: ServiceRequestState) -> dict[str, Any]:
                     "status": "WAITING_FOR_USER",
                     "workflow_stage": "ADMIN_REVIEW",
                     "response_message": "That was the first page.",
+                }
+            if notification_period_stale:
+                return {
+                    "status": "WAITING_FOR_USER",
+                    "workflow_stage": "ADMIN_REVIEW",
+                    "response_message": (
+                        f"That submission for **{scoped_lease}** is no longer awaiting "
+                        "review for the period this notification named — it may have "
+                        "already been reviewed. Say \"review sales data\" to see what's "
+                        "currently pending."
+                    ),
                 }
             return {
                 "status": "WAITING_FOR_USER",

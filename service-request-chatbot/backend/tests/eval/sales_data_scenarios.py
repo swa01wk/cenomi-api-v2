@@ -82,6 +82,11 @@ class SalesDataTurn:
     """If True, the runner POSTs a tiny PDF to /api/v2/sales-data/supporting-doc
     and injects corrected_fields.doc_session_id."""
 
+    active_notification_id: Optional[dict] = None
+    """Simulates the turn arriving from a bell/inbox notification Open —
+    e.g. {"id": "LC-2001", "key": "SALES_DATA_SUBMITTED", "message": "..."}.
+    Sent verbatim as active_notification_id on the chat payload."""
+
 
 @dataclass
 class SalesDataScenario:
@@ -625,7 +630,67 @@ SD235 = SalesDataScenario(
     ],
 )
 
-TIER_SD3 = [SD230, SD231, SD232, SD233, SD234, SD235]
+SD236 = SalesDataScenario(
+    id=236,
+    name="Sales Data — Admin Notification Open Scopes to One Lease",
+    goal=(
+        "Admin opens a SALES_DATA_SUBMITTED notification for LC-2001 — the "
+        "review list must scope to that lease, not show the whole backlog "
+        "(the recurring 'clicked one notification, saw everything' bug)."
+    ),
+    tier="sd3",
+    tags=["admin", "notification", "scoping"],
+    user_email="sales.approver@cenomi.com",
+    turns=[
+        SalesDataTurn(
+            message="",
+            note="Open SALES_DATA_SUBMITTED notification for LC-2001 → scoped admin_sales_data_list",
+            active_notification_id={
+                "id": "LC-2001",
+                "key": "SALES_DATA_SUBMITTED",
+                "sub_category": "SALES_DATA",
+                "message": (
+                    "Please review the sales data for Centrepoint-Riyadh Park "
+                    "corresponding to month July"
+                ),
+            },
+            expect_ui_type="admin_sales_data_list",
+            expect_keywords=["LC-2001"],
+            expect_no_keywords=["LC-2002"],
+        ),
+    ],
+)
+
+SD237 = SalesDataScenario(
+    id=237,
+    name="Sales Data — NEED_REUPLOAD Notification Opens Reupload Prompt",
+    goal=(
+        "Tenant opens their own SALES_DATA_NEED_REUPLOAD notification for "
+        "LC-1003 — must land on the reupload/document prompt, not "
+        "'nothing pending' (NEED_REUPLOAD has no PENDING row, so routing "
+        "this through the pending-months gate silently found nothing)."
+    ),
+    tier="sd3",
+    tags=["tenant", "notification", "reupload", "routing"],
+    turns=[
+        SalesDataTurn(
+            message="",
+            note="Open SALES_DATA_NEED_REUPLOAD notification for LC-1003 → doc/reupload prompt, not 'nothing pending'",
+            active_notification_id={
+                "id": "LC-1003",
+                "key": "SALES_DATA_NEED_REUPLOAD",
+                "sub_category": "SALES_DATA",
+                "message": "Please re-submit sales data for LC-1003 as of month August.",
+            },
+            expect_ui_type="supporting_doc_prompt",
+            expect_workflow_stage="AWAITING_DOC_UPLOAD",
+            expect_keywords=["LC-1003"],
+            expect_no_keywords=["no pending", "nothing pending", "already been submitted"],
+        ),
+    ],
+)
+
+TIER_SD3 = [SD230, SD231, SD232, SD233, SD234, SD235, SD236, SD237]
 
 # ---------------------------------------------------------------------------
 # Full flat registry for reference

@@ -99,10 +99,11 @@ _MONTH_NAME_TO_NUM = {
 
 
 def extract_period_date(text: str | None) -> str | None:
-    """Year-month prefix ("2024-12") from an admin "corresponding to ..."
-    notification — day-level precision isn't always available (the monthly-
-    frequency case only ever names a month, no year), so callers should
-    match rows by year-month, not by exact date.
+    """Period prefix from an admin "corresponding to ..." notification —
+    either a year-month ("2024-12") or, for the yearly-frequency case, a
+    bare 4-digit year ("2024"). Callers must match a row's own period by
+    startswith(this value), never by exact/length-equal comparison — day-
+    and even month-level precision isn't always available.
     """
     raw = (text or "").strip()
     if not raw:
@@ -183,7 +184,16 @@ def sales_data_intent_for_ref(ref: dict[str, Any]) -> str:
     if token in _ADMIN_KEYS:
         return "REVIEW_SALES_DATA"
     if token in {"SALES_DATA_NEED_REUPLOAD", "NEED_REUPLOAD"}:
-        return "UPLOAD_SALES_DATA"
+        # The admin asked for a correction on an existing SUBMITTED row —
+        # this is the document/amount-correction flow (portal's own
+        # editSalesAmt upload modal), the same destination as the
+        # NEED_UPLOAD_SUPPORTING_DOCUMENT/AUDITED_SALES cases above, NOT a
+        # fresh PENDING-month submission. Routing this to UPLOAD_SALES_DATA
+        # sent it through the pending-months gate instead, which only ever
+        # looks at PENDING rows — a NEED_REUPLOAD row has none, so clicking
+        # the tenant's own "needs reupload" notification silently landed on
+        # "nothing pending" instead of the reupload prompt.
+        return "UPLOAD_SUPPORTING_DOCUMENT"
     return "UPLOAD_SALES_DATA"
 
 

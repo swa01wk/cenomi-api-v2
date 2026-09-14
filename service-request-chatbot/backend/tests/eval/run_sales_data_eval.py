@@ -262,6 +262,8 @@ async def _chat_turn(
     }
     if turn.action:
         payload["action"] = turn.action
+    if turn.active_notification_id:
+        payload["active_notification_id"] = turn.active_notification_id
 
     # Merge corrected_fields from turn + injected csv/doc session ids
     cf: dict[str, Any] = dict(turn.corrected_fields or {})
