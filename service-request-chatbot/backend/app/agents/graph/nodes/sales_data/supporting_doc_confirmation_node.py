@@ -149,27 +149,19 @@ def _confirm_ui(collected: dict[str, Any], extra: str = "") -> dict[str, Any]:
     current_label = STATUS_LABELS.get(current_status, current_status)
     target_label = STATUS_LABELS.get(target_status, target_status)
     ask_label = ASK_UPLOAD_LABELS.get(current_status, "Document")
-    comment_display = collected.get("comment_text") or "—"
     amt = collected.get("sales_amt")
-    amt_display = (
-        f"SAR {float(amt):,.2f}" if amt is not None and amt != "" else "—"
-    )
 
+    # Short by design — the card (SalesDataSupportingDocConfirmCard.tsx)
+    # renders the lease/period/file/amount/status detail as an actual HTML
+    # table from response_ui's fields below; this plain-text bubble used to
+    # duplicate all of that as a markdown pipe-table, which the chat surface
+    # doesn't render as a real table — just literal "| Field | Value |" text.
     extra_block = f"\n\n{extra}" if extra else ""
     message = (
-        f"Please confirm this **{ask_label}** upload:\n\n"
-        f"| Field | Value |\n"
-        f"|---|---|\n"
-        f"| Lease | **{lease_code}** |\n"
-        f"| Period | **{start} – {end}** |\n"
-        f"| File | **{filename}** |\n"
-        f"| Ask type | {ask_label} |\n"
-        f"| Amount | {amt_display} |\n"
-        f"| Current status | {current_label} |\n"
-        f"| New status | {target_label} |\n"
-        f"| Comment | {comment_display} |\n\n"
-        "A **comment is required**. You may also update the sales amount. "
-        "Reply **yes** to submit, or **no** to attach a different file."
+        f"Please confirm this **{ask_label}** upload for lease **{lease_code}** "
+        f"({start} – {end}).\n\n"
+        "A comment is required. Reply **yes** to submit, or **no** to attach "
+        "a different file."
         f"{extra_block}"
     )
 
@@ -193,7 +185,9 @@ def _confirm_ui(collected: dict[str, Any], extra: str = "") -> dict[str, Any]:
             "sales_period_end": end,
             "filename": filename,
             "current_status": current_status,
+            "current_status_label": current_label,
             "target_status": target_status,
+            "target_status_label": target_label,
             "ask_label": ask_label,
             "sales_amt": amt,
             "comment_text": collected.get("comment_text") or "",

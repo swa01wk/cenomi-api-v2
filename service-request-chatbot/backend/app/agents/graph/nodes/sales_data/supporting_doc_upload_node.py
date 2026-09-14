@@ -97,29 +97,26 @@ def _prompt_for_file(row: dict[str, Any]) -> dict[str, Any]:
     start = row.get("sales_period_start", "")
     end = row.get("sales_period_end", "")
     status = row.get("status", "")
-    label = STATUS_LABELS.get(status, status)
     ask_label = ASK_UPLOAD_LABELS.get(status, "document")
     copy = _ask_copy(status)
     comment = (row.get("comment_text") or "").strip()
     target = TENANT_RESPONSE_STATUS.get(status, "RE_UPLOADED")
     amt = row.get("sales_amt")
     amt_str = (
-        f"\nCurrent amount: **SAR {float(amt):,.2f}** (you can update it after attaching the file)."
+        f" Current amount: **SAR {float(amt):,.2f}**."
         if amt is not None and amt != ""
         else ""
     )
 
-    admin_note = f'\n\nSales Data team comment: *"{comment}"*' if comment else ""
+    # Kept deliberately short — status/ask-type/target-status labels are
+    # internal jargon the tenant doesn't need up front; the confirm card
+    # (after attaching) shows the full detail as an actual table instead of
+    # cramming it into this plain-text prompt.
+    admin_note = f' Note from the Sales Data team: *"{comment}"*.' if comment else ""
     message = (
-        f"Please upload {copy['prompt_verb']} (PDF or image) for lease "
-        f"**{lease_code}** ({start} – {end}).\n\n"
-        f"Ask type: **{ask_label}**\n"
-        f"Current status: **{label}**"
-        f"{amt_str}\n"
-        f"After you attach the file I will submit it as **{target}**."
-        f"{admin_note}\n\n"
-        "A **comment is required** (same as the portal). "
-        "Use the attachment button below, or drag and drop the file."
+        f"Please attach {copy['prompt_verb']} for lease **{lease_code}** "
+        f"({start} – {end}).{amt_str}{admin_note}\n\n"
+        "A comment is required — attach the file below."
     )
     return {
         "workflow_stage": "AWAITING_DOC_UPLOAD",

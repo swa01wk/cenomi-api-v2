@@ -55,6 +55,34 @@ def unwrap_sales_data_rows(body: Any) -> list[dict[str, Any]]:
     return []
 
 
+def _extract_backend_error_message(resp: httpx.Response) -> str:
+    """Pull a clean, human-readable message out of a 4xx cenomi-api body.
+
+    Never surfaces the raw response body to the user — that used to happen
+    verbatim in update_sales_data_status's 400 handler (``error: resp.text``),
+    which put a raw JSON/Go error string directly into the chat message.
+    """
+    try:
+        body = resp.json()
+    except ValueError:
+        return "The request was rejected. Please try again."
+    if not isinstance(body, dict):
+        return "The request was rejected. Please try again."
+    errors = body.get("errors") or body.get("detail", {}).get("errors") or []
+    if isinstance(errors, list) and errors:
+        messages = [
+            str(e.get("message")) for e in errors
+            if isinstance(e, dict) and e.get("message")
+        ]
+        if messages:
+            return "; ".join(messages)
+    for key in ("message", "error", "detail"):
+        value = body.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return "The request was rejected. Please try again."
+
+
 def unwrap_file_upload_response(body: Any) -> dict[str, Any]:
     """Flatten live Cenomi PUT /files ``{ success, data }`` to a dict with document_id.
 
@@ -199,7 +227,13 @@ class SalesDataApiClient:
             )
 
         if resp.status_code == 400:
-            return {"success": False, "error": resp.text}
+            log.error(
+                "update_sales_data_status.backend_400",
+                response_body=resp.text[:2000],
+                request_payload=payload,
+            )
+            message = _extract_backend_error_message(resp)
+            return {"success": False, "error": message}
 
         resp.raise_for_status()
         return {"success": True}
