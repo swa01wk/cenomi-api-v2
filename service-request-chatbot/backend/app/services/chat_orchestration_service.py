@@ -603,8 +603,17 @@ class ChatOrchestrationService:
             for e in (result_state.get("validation_errors") or [])
             if e.get("validation_type") == "date_format" and e.get("field")
         })
+        # Handover-only: the "sr_preview_card" shape below (fixed
+        # requestType="Handover Service Request" + Handover FIELD_LABELS via
+        # _fields_from_collected) is meaningless — and actively misleading —
+        # for any other agent. Observed live: a Sales Data Agent turn
+        # (active_agent="sales_data_agent", collected_data={lease_code: ...}
+        # from the supporting-doc-upload flow) still got a draft_preview
+        # card labelled "Handover Service Request", because this block used
+        # to build one unconditionally whenever collected_data was non-empty.
+        is_handover_agent = result_state.get("active_agent") == "rdd_handover_agent"
         draft_preview: dict[str, Any] | None = None
-        if collected or cleared_fields:
+        if is_handover_agent and (collected or cleared_fields):
             from app.agents.graph.nodes.handover.preview_node import _fields_from_collected
             draft_preview = {
                 "type": "sr_preview_card",

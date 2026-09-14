@@ -180,6 +180,13 @@ def _confirm_ui(collected: dict[str, Any], extra: str = "") -> dict[str, Any]:
         "response_message": message,
         "response_ui": {
             "type": "supporting_doc_confirm",
+            # Without this, response_generation's LLM rewrite is free to
+            # paraphrase this confirmation/error text — observed producing a
+            # fabricated "issue with the sales period date format, please
+            # re-enter the start date" out of what was really just a missing
+            # comment_text, sending the tenant down a dead-end asking for a
+            # date the flow never needed at all.
+            "verbatim": True,
             "lease_code": lease_code,
             "lease_id": collected.get("lease_id"),
             "sales_period_start": start,

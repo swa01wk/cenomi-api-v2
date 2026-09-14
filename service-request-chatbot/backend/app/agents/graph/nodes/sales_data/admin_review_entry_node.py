@@ -337,7 +337,19 @@ async def _load_reviewable(
     # be the actual trigger for the multi-second/timeout slowdown observed
     # on this admin path specifically (a plain unscoped fetch was ~200ms
     # before all_my_companies existed).
-    rows = await client.get_sales_data(disable_pagination=True, all_my_companies=False)
+    #
+    # status is the bigger fix: without it this pulled the ENTIRE sales-data
+    # table (observed: 135MB, ~19s on the wire alone, plus JSON-decoding and
+    # filtering that in Python) just to keep the ~4 reviewable statuses out
+    # of possibly tens of thousands of rows. cenomi-api's own portal listing
+    # page already filters server-side with a comma-separated status list
+    # (see salesdataApi.ts) — do the same here instead of fetching everything
+    # and filtering client-side in _reviewable().
+    rows = await client.get_sales_data(
+        disable_pagination=True,
+        all_my_companies=False,
+        status=",".join(sorted(_REVIEWABLE_STATUSES)),
+    )
     submitted = _reviewable(rows)
     backend_refs["admin_review_rows"] = submitted
     return submitted
@@ -383,7 +395,11 @@ async def admin_review_entry_node(state: ServiceRequestState) -> dict[str, Any]:
         token = get_current_bearer_token()
         client = SalesDataApiClient(bearer_token=token)
         try:
-            rows = await client.get_sales_data(disable_pagination=True, all_my_companies=False)
+            rows = await client.get_sales_data(
+                disable_pagination=True,
+                all_my_companies=False,
+                status=",".join(sorted(_REVIEWABLE_STATUSES)),
+            )
         except Exception:
             # Was silently swallowed with no log line — the only signal that
             # anything went wrong was the generic user-facing message, with

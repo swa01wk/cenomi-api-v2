@@ -18,10 +18,12 @@ from app.agents.graph.nodes.sales_data.supporting_doc_submission_node import (
     supporting_doc_submission_node,
 )
 from app.agents.graph.nodes.sales_data.supporting_doc_upload_node import (
+    _document_id_from_upload,
     _requested_need_status,
     supporting_doc_upload_node,
 )
 from app.agents.graph.nodes.supervisor_node import _sales_data_shortcut
+from app.api.routes.supporting_doc_upload import get_uploaded_doc, store_uploaded_doc
 
 
 _NEED_ROWS = [
@@ -222,6 +224,151 @@ async def test_kind_filter_picks_supporting_when_no_lease() -> None:
 
     assert result["collected_data"]["lease_code"] == "LC-1004"
     assert result["response_ui"]["current_status"] == "NEED_UPLOAD_SUPPORTING_DOCUMENT"
+
+
+@pytest.mark.asyncio
+async def test_put_files_failure_restores_upload_prompt_and_drops_cache() -> None:
+    """PUT /files raising must not leave the user with no way to retry.
+
+    Regression guard for the bug where a failed upload left
+    ``response_ui`` unset (defaulting to a bare ``{"type": "message"}`` with
+    no ``show_file_upload``) and silently kept the same rejected bytes
+    cached, so a "silent refresh" turn would just resubmit the identical
+    payload and fail again forever.
+    """
+    doc_session_id = "sess-doc-fail-1"
+    store_uploaded_doc(doc_session_id, "pos.pdf", "application/pdf", b"%PDF-1.4 fake bytes")
+
+    client = AsyncMock()
+    client.upload_file = AsyncMock(side_effect=RuntimeError("connection reset"))
+    with (
+        patch(
+            "app.agents.graph.nodes.sales_data.supporting_doc_upload_node.get_current_bearer_token",
+            return_value="tok",
+        ),
+        patch(
+            "app.agents.graph.nodes.sales_data.supporting_doc_upload_node.SalesDataApiClient",
+            return_value=client,
+        ),
+    ):
+        result = await supporting_doc_upload_node(
+            _state(
+                collected_data={
+                    "lease_id": 6,
+                    "lease_code": "LC-1004",
+                    "current_status": "NEED_UPLOAD_SUPPORTING_DOCUMENT",
+                    "sales_period_start": "2026-07-01",
+                    "sales_period_end": "2026-07-31",
+                    "sales_amt": 72000.0,
+                },
+                backend_refs={"doc_session_id": doc_session_id},
+            )
+        )
+
+    assert result["workflow_stage"] == "AWAITING_DOC_UPLOAD"
+    assert result["status"] == "WAITING_FOR_USER"
+    ui = result["response_ui"]
+    assert ui["type"] == "supporting_doc_prompt"
+    assert ui["show_file_upload"] is True
+    assert ui["lease_code"] == "LC-1004"
+    assert "upload failed" in result["response_message"].lower()
+    # Retry must require a fresh attach, not silently resend the rejected bytes.
+    assert get_uploaded_doc(doc_session_id) is None
+    assert "doc_session_id" not in (result.get("backend_refs") or {})
+    assert "document_id" not in result["collected_data"]
+
+
+@pytest.mark.asyncio
+async def test_missing_document_id_restores_upload_prompt() -> None:
+    """A 200 response from /files with no document_id must also offer a retry."""
+    doc_session_id = "sess-doc-fail-2"
+    store_uploaded_doc(doc_session_id, "audit.pdf", "application/pdf", b"%PDF-1.4 fake bytes")
+
+    client = AsyncMock()
+    client.upload_file = AsyncMock(return_value={"size_bytes": 123})  # no document_id
+    with (
+        patch(
+            "app.agents.graph.nodes.sales_data.supporting_doc_upload_node.get_current_bearer_token",
+            return_value="tok",
+        ),
+        patch(
+            "app.agents.graph.nodes.sales_data.supporting_doc_upload_node.SalesDataApiClient",
+            return_value=client,
+        ),
+    ):
+        result = await supporting_doc_upload_node(
+            _state(
+                collected_data={
+                    "lease_id": 7,
+                    "lease_code": "LC-1005",
+                    "current_status": "NEED_UPLOAD_AUDITED_SALES",
+                    "sales_period_start": "2026-07-01",
+                    "sales_period_end": "2026-07-31",
+                    "sales_amt": 185000.0,
+                },
+                backend_refs={"doc_session_id": doc_session_id},
+            )
+        )
+
+    ui = result["response_ui"]
+    assert ui["type"] == "supporting_doc_prompt"
+    assert ui["show_file_upload"] is True
+    assert get_uploaded_doc(doc_session_id) is None
+
+
+@pytest.mark.asyncio
+async def test_live_files_envelope_is_accepted_as_document_id() -> None:
+    """PUT /files returns {success, data.document_id}; the node must not miss it."""
+    doc_session_id = "sess-doc-ok-envelope"
+    store_uploaded_doc(doc_session_id, "pos.pdf", "application/pdf", b"%PDF-1.4 fake bytes")
+
+    client = AsyncMock()
+    client.upload_file = AsyncMock(
+        return_value={
+            "success": True,
+            "data": {
+                "document_id": "live-doc-uuid",
+                "file_path": "common-file-upload/sales-data/1/pos.pdf",
+            },
+        }
+    )
+    with (
+        patch(
+            "app.agents.graph.nodes.sales_data.supporting_doc_upload_node.get_current_bearer_token",
+            return_value="tok",
+        ),
+        patch(
+            "app.agents.graph.nodes.sales_data.supporting_doc_upload_node.SalesDataApiClient",
+            return_value=client,
+        ),
+    ):
+        result = await supporting_doc_upload_node(
+            _state(
+                collected_data={
+                    "lease_id": 6,
+                    "lease_code": "t0106037",
+                    "current_status": "NEED_UPLOAD_SUPPORTING_DOCUMENT",
+                    "sales_period_start": "2026-07-01",
+                    "sales_period_end": "2026-07-31",
+                    "sales_amt": 72000.0,
+                },
+                backend_refs={"doc_session_id": doc_session_id},
+            )
+        )
+
+    assert result["workflow_stage"] == "AWAITING_DOC_CONFIRM"
+    assert result["collected_data"]["document_id"] == "live-doc-uuid"
+    client.upload_file.assert_awaited()
+    kwargs = client.upload_file.await_args.kwargs
+    assert kwargs["lease_code"] == "t0106037"
+    assert kwargs["document_type_id"] == "SD_SUP_DOC"
+
+
+def test_document_id_from_upload_shapes() -> None:
+    assert _document_id_from_upload({"document_id": "flat"}) == "flat"
+    assert _document_id_from_upload({"success": True, "data": {"document_id": "nested"}}) == "nested"
+    assert _document_id_from_upload({"success": True, "data": {}}) is None
+    assert _document_id_from_upload({"size_bytes": 123}) is None
 
 
 @pytest.mark.asyncio

@@ -14,7 +14,6 @@ the backend can apply per-tenant scoping.
 
 from __future__ import annotations
 
-import io
 import logging
 import os
 from typing import Any
@@ -54,6 +53,28 @@ def unwrap_sales_data_rows(body: Any) -> list[dict[str, Any]]:
         if isinstance(lst, list):
             return [r for r in lst if isinstance(r, dict)]
     return []
+
+
+def unwrap_file_upload_response(body: Any) -> dict[str, Any]:
+    """Flatten live Cenomi PUT /files ``{ success, data }`` to a dict with document_id.
+
+    Live cenomi-api returns::
+
+        {"success": true, "data": {"document_id": "<uuid>", "file_path": "...", ...}}
+
+    Mock backends and already-flat payloads return ``document_id`` at the top
+    level. Callers (supporting-doc node) read ``result["document_id"]``.
+    """
+    if not isinstance(body, dict):
+        return {}
+    data = body.get("data")
+    if isinstance(data, dict):
+        merged = {**body, **data}
+        doc_id = data.get("document_id") or data.get("id")
+        if doc_id:
+            merged["document_id"] = doc_id
+        return merged
+    return body
 
 
 # ---------------------------------------------------------------------------
@@ -218,15 +239,20 @@ class SalesDataApiClient:
         *,
         document_type_id: str | None = None,
         lease_id: int | None = None,
+        lease_code: str | None = None,
     ) -> dict[str, Any]:
-        """Upload a file via PUT /files and return the document_id.
+        """Upload a file via PUT /files and return a flat dict with document_id.
 
-        Live Cenomi: ``PUT /api/v1/files?file_extension=&document_type_id=&lease_id=&file_name=``.
-        Mock backend aliases the same path (and still serves ``PUT /files``).
+        Live Cenomi expects **raw binary** in the body (same as the portal and
+        the ops-agent platform client), not multipart. Query string carries
+        ``file_extension``, ``document_type_id``, ``lease_id`` / ``lease_code``,
+        ``file_name``. The JSON envelope is ``{ success, data: { document_id } }``.
         """
-        headers = {}
+        headers: dict[str, str] = {}
         if self._token:
             headers["Authorization"] = f"Bearer {self._token}"
+        if content_type:
+            headers["Content-Type"] = content_type
 
         ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
         params: dict[str, Any] = {"file_name": filename}
@@ -234,27 +260,21 @@ class SalesDataApiClient:
             params["file_extension"] = ext
         if document_type_id:
             params["document_type_id"] = document_type_id
-        if lease_id is not None:
+        if lease_id is not None and str(lease_id).strip() not in ("", "0", "None"):
             params["lease_id"] = lease_id
+        if lease_code:
+            params["lease_code"] = lease_code
 
         async with httpx.AsyncClient(timeout=60.0) as client:
             resp = await client.put(
                 f"{self._base}/api/v1/files",
                 headers=headers,
                 params=params,
-                files={"file": (filename, io.BytesIO(file_bytes), content_type)},
+                content=file_bytes,
             )
 
         resp.raise_for_status()
-        body = resp.json()
-        # Live cenomi-api wraps the payload as {"success": true, "data": {...
-        # "document_id": ...}} — the caller (supporting_doc_upload_node) reads
-        # document_id off the top level per this method's own docstring, so
-        # returning the envelope unwrapped made every successful upload look
-        # like it failed with "file server did not return a document ID".
-        if isinstance(body, dict) and isinstance(body.get("data"), dict):
-            return body["data"]
-        return body
+        return unwrap_file_upload_response(resp.json())
 
     # ── GET /api/v1/sales-data/template ────────────────────────────────────
 
