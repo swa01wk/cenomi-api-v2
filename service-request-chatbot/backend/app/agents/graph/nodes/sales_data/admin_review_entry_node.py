@@ -61,6 +61,23 @@ _DOC_HINTS = ("supporting", "audited", "request doc", "extra doc", "need documen
 _LC_RE = re.compile(r"\bLC[-\s]?(\d{3,})\b", re.I)
 _BARE_NUM_RE = re.compile(r"\b(\d{3,5})\b")
 _ISO_DATE_RE = re.compile(r"\b(20\d{2}-\d{2}-\d{2})\b")
+# The platform's real lease codes ("t0106037") — _LC_RE/_BARE_NUM_RE only
+# recognise the internal "LC-1234" demo format and 3-5 digit bare numbers,
+# neither of which matches a real code's letter-prefix + longer digit run.
+_REAL_LEASE_CODE_RE = re.compile(r"\b[a-zA-Z]\d{5,}\b")
+
+
+def _extract_lease_codes(message: str) -> list[str]:
+    """Real-format lease codes ("t0106037") mentioned in a typed message."""
+    found: list[str] = []
+    seen: set[str] = set()
+    for match in _REAL_LEASE_CODE_RE.finditer(message or ""):
+        code = match.group(0)
+        key = code.lower()
+        if key not in seen:
+            seen.add(key)
+            found.append(code)
+    return found
 
 
 def _lease_context_bits(row: dict[str, Any]) -> str:
@@ -322,7 +339,7 @@ def _confirm_patch(
     }
 
 
-_ADMIN_REVIEW_LIST_LIMIT = 50
+_ADMIN_REVIEW_LIST_LIMIT = 10
 
 
 async def _load_reviewable(
@@ -426,24 +443,53 @@ async def admin_review_entry_node(state: ServiceRequestState) -> dict[str, Any]:
 
     # ── REVIEW_SALES_DATA — list submissions ───────────────────────────────
     looks_like_action = any(h in user_message.lower() for h in _ACTION_HINTS)
-    if (
+    is_next_page = action_override == "admin_review_next_page"
+    if is_next_page or (
         intent == "REVIEW_SALES_DATA"
         and not collected.get("admin_action")
         and not looks_like_action
     ):
+        # Opened from a specific notification ("review this submission"),
+        # or the admin named a lease directly ("review lease t0106037") —
+        # either way scope the fetch to that one lease instead of listing
+        # every reviewable row platform-wide. Without this, clicking a
+        # single notification showed the entire backlog because nothing
+        # here ever looked at notification_context/the typed lease code.
+        notification_lease = str(
+            (backend_refs.get("notification_context") or {}).get("lease_code") or ""
+        ).strip()
+        typed_codes = _extract_lease_codes(user_message)
+        scoped_lease = notification_lease or (typed_codes[0] if typed_codes else "")
+
+        page = int(collected.get("admin_review_page") or 1)
+        if is_next_page:
+            page += 1
+
         token = get_current_bearer_token()
         client = SalesDataApiClient(bearer_token=token)
         try:
-            # Bounded, same reasoning as _load_reviewable: this listing only
-            # ever displays the first 10 rows (submitted[:10] below), and
-            # "SUBMITTED" alone can span the platform's entire history, so
-            # disable_pagination=True was fetching everything just to show
-            # ten of them.
-            rows = await client.get_sales_data(
-                all_my_companies=False,
-                status=",".join(sorted(_REVIEWABLE_STATUSES)),
-                limit=_ADMIN_REVIEW_LIST_LIMIT,
-            )
+            if scoped_lease:
+                rows = await client.get_sales_data(
+                    disable_pagination=True,
+                    all_my_companies=False,
+                    lease_code=scoped_lease,
+                )
+                total_count = len(rows)
+            else:
+                # Bounded page, not disable_pagination=True: "SUBMITTED"
+                # alone can span the platform's entire history (a row keeps
+                # it indefinitely once approved/archived rows are
+                # excluded), and the table only ever shows one page at a
+                # time anyway (Next fetches the rest on demand) —
+                # total_count still comes from cenomi-api's own count, so
+                # the displayed "N submissions" figure stays exact even
+                # though only one page of rows is fetched.
+                rows, total_count = await client.get_sales_data_page(
+                    all_my_companies=False,
+                    status=",".join(sorted(_REVIEWABLE_STATUSES)),
+                    page=page,
+                    limit=_ADMIN_REVIEW_LIST_LIMIT,
+                )
         except Exception:
             # Was silently swallowed with no log line — the only signal that
             # anything went wrong was the generic user-facing message, with
@@ -456,23 +502,28 @@ async def admin_review_entry_node(state: ServiceRequestState) -> dict[str, Any]:
 
         submitted = _reviewable(rows)
         if not submitted:
+            if is_next_page:
+                return {
+                    "status": "WAITING_FOR_USER",
+                    "workflow_stage": "ADMIN_REVIEW",
+                    "response_message": "That was the last page — no more submissions.",
+                }
             return {
                 "status": "WAITING_FOR_USER",
                 "workflow_stage": "ADMIN_REVIEW",
                 "response_message": "No submitted sales data awaiting review at this time.",
             }
 
+        collected["admin_review_page"] = page
         backend_refs["admin_review_rows"] = submitted
-        # The fetch is capped at _ADMIN_REVIEW_LIST_LIMIT rows (see
-        # _load_reviewable's comment) — len(submitted) is no longer
-        # necessarily the true total, so don't imply it is when the cap was
-        # actually hit.
-        count_label = (
-            f"{len(submitted)}+" if len(submitted) >= _ADMIN_REVIEW_LIST_LIMIT
-            else str(len(submitted))
-        )
-        lines = [f"📋 **{count_label} submission(s) awaiting review:**\n"]
-        for r in submitted[:10]:
+        has_more = not scoped_lease and page * _ADMIN_REVIEW_LIST_LIMIT < total_count
+        range_start = (page - 1) * _ADMIN_REVIEW_LIST_LIMIT + 1
+        range_end = range_start + len(submitted) - 1
+        lines = [
+            f"📋 **{total_count} submission(s) awaiting review** "
+            f"(showing {range_start}–{range_end}):\n"
+        ]
+        for r in submitted[:_ADMIN_REVIEW_LIST_LIMIT]:
             badge = ADMIN_TABLE_STATUS_LABELS.get(str(r.get("status") or ""), r.get("status") or "")
             lines.append(
                 f"• **{r['lease_code']}** | "
@@ -480,8 +531,8 @@ async def admin_review_entry_node(state: ServiceRequestState) -> dict[str, Any]:
                 f"{r.get('sales_period_start', '')} – {r.get('sales_period_end', '')} | "
                 f"SAR {float(r.get('sales_amt', 0)):,.2f} | {badge}"
             )
-        if len(submitted) > 10:
-            lines.append(f"_...and {len(submitted) - 10} more._")
+        if has_more:
+            lines.append(f"\n_...and {total_count - range_end} more — say **next** to see more._")
         lines.append(
             "\nSame as the portal **Ask upload** menu — tell me:\n"
             "• **Approve** a lease\n"
@@ -496,11 +547,16 @@ async def admin_review_entry_node(state: ServiceRequestState) -> dict[str, Any]:
         return {
             "status": "WAITING_FOR_USER",
             "workflow_stage": "ADMIN_REVIEW",
+            "collected_data": collected,
             "backend_refs": backend_refs,
             "response_message": "\n".join(lines),
             "response_ui": {
                 "type": "admin_sales_data_list",
-                "rows": submitted,
+                "verbatim": True,
+                "rows": submitted[:_ADMIN_REVIEW_LIST_LIMIT],
+                "total_count": total_count,
+                "page": page,
+                "has_more": has_more,
                 "message": "\n".join(lines),
             },
         }

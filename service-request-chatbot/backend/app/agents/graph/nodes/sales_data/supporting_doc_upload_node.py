@@ -25,7 +25,10 @@ from app.agents.schemas.sales_data_schema import (
     TENANT_RESPONSE_STATUS,
 )
 from app.agents.services.permission_service import graph_permission_guard
-from app.agents.services.sales_data_api_client import SalesDataApiClient
+from app.agents.services.sales_data_api_client import (
+    SalesDataApiClient,
+    normalize_period_date,
+)
 from app.api.routes.supporting_doc_upload import get_uploaded_doc, pop_uploaded_doc
 from app.core.request_context import get_current_bearer_token
 from app.observability.decorators import trace_node
@@ -263,6 +266,21 @@ async def supporting_doc_upload_node(state: ServiceRequestState) -> dict[str, An
                 "response_message": message,
                 "response_ui": {"type": "message", "message": message, "verbatim": True},
             }
+
+        # Normalize the raw live-API datetime ("2026-05-01T04:00:00+04:00")
+        # down to a bare date here, once, before it enters collected_data —
+        # otherwise it flows straight through to the PATCH /sales-data
+        # payload later in supporting_doc_submission_node, which
+        # cenomi-api rejects (400) since it expects a plain date, and it
+        # also renders as ugly raw ISO text anywhere shown to the tenant.
+        # Same normalization partition_rows_by_lease_access already applies
+        # for the CSV/manual-entry paths — this flow reads GET /sales-data
+        # rows directly instead, so it never went through that helper.
+        for r in rows:
+            if r.get("sales_period_start"):
+                r["sales_period_start"] = normalize_period_date(r["sales_period_start"])
+            if r.get("sales_period_end"):
+                r["sales_period_end"] = normalize_period_date(r["sales_period_end"])
 
         action_rows = [r for r in rows if r.get("status") in TENANT_ACTION_STATUSES]
         wanted_kind = _requested_need_status(user_message)

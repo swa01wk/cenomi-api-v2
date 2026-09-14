@@ -53,13 +53,7 @@ async def supporting_doc_confirmation_node(state: ServiceRequestState) -> dict[s
             pass
 
     def _missing_comment_response() -> dict[str, Any]:
-        prompt = _confirm_ui(
-            collected,
-            extra=(
-                "A **comment is required** before I can submit — same as the portal. "
-                "Add a short note (for example: *POS report attached*) and confirm again."
-            ),
-        )
+        prompt = _confirm_ui(collected)
         prompt["collected_data"] = collected
         return prompt
 
@@ -139,7 +133,7 @@ def _resume_upload_after_cancel(
     return prompt
 
 
-def _confirm_ui(collected: dict[str, Any], extra: str = "") -> dict[str, Any]:
+def _confirm_ui(collected: dict[str, Any]) -> dict[str, Any]:
     lease_code = collected.get("lease_code", "")
     start = collected.get("sales_period_start", "")
     end = collected.get("sales_period_end", "")
@@ -151,18 +145,15 @@ def _confirm_ui(collected: dict[str, Any], extra: str = "") -> dict[str, Any]:
     ask_label = ASK_UPLOAD_LABELS.get(current_status, "Document")
     amt = collected.get("sales_amt")
 
-    # Short by design — the card (SalesDataSupportingDocConfirmCard.tsx)
-    # renders the lease/period/file/amount/status detail as an actual HTML
-    # table from response_ui's fields below; this plain-text bubble used to
-    # duplicate all of that as a markdown pipe-table, which the chat surface
-    # doesn't render as a real table — just literal "| Field | Value |" text.
-    extra_block = f"\n\n{extra}" if extra else ""
+    # As short as the original implementation — the card
+    # (SalesDataSupportingDocConfirmCard.tsx) already renders lease/period/
+    # file/amount/status as an actual table from response_ui's fields below,
+    # and the Confirm/Cancel buttons make "reply yes/no" instructions
+    # redundant. Every call to this shows the same single line regardless
+    # of whether it's the first prompt or a retry after a missing comment.
     message = (
-        f"Please confirm this **{ask_label}** upload for lease **{lease_code}** "
-        f"({start} – {end}).\n\n"
-        "A comment is required. Reply **yes** to submit, or **no** to attach "
-        "a different file."
-        f"{extra_block}"
+        "A comment is required before I can submit. Add a short note "
+        "(for example: *POS report attached*) and confirm again."
     )
 
     return {

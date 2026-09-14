@@ -107,7 +107,8 @@ def test_select_all_and_mixed_actions() -> None:
 async def test_review_sales_data_lists_submitted_rows() -> None:
     client = AsyncMock()
     pending = {**_ROWS[0], "status": "PENDING", "lease_code": "LC-1001"}
-    client.get_sales_data = AsyncMock(return_value=[pending, *_ROWS])
+    rows = [pending, *_ROWS]
+    client.get_sales_data_page = AsyncMock(return_value=(rows, len(rows)))
     with (
         patch(
             "app.agents.graph.nodes.sales_data.admin_review_entry_node.get_current_bearer_token",
@@ -311,7 +312,7 @@ async def test_review_list_includes_uploaded_supporting_and_audited() -> None:
         },
     ]
     client = AsyncMock()
-    client.get_sales_data = AsyncMock(return_value=rows)
+    client.get_sales_data_page = AsyncMock(return_value=(rows, len(rows)))
     with (
         patch(
             "app.agents.graph.nodes.sales_data.admin_review_entry_node.get_current_bearer_token",

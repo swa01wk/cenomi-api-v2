@@ -55,6 +55,22 @@ def unwrap_sales_data_rows(body: Any) -> list[dict[str, Any]]:
     return []
 
 
+def extract_total_count(body: Any, fallback: int) -> int:
+    """Pull ``total_count`` out of the live GET /sales-data envelope.
+
+    Falls back to the given row-count length (mock backend / bare list
+    shapes carry no total_count at all) so callers can still show an exact
+    figure when the row list already is the whole result.
+    """
+    if isinstance(body, dict):
+        data = body.get("data")
+        if isinstance(data, dict):
+            total = data.get("total_count")
+            if isinstance(total, int):
+                return total
+    return fallback
+
+
 def _extract_backend_error_message(resp: httpx.Response) -> str:
     """Pull a clean, human-readable message out of a 4xx cenomi-api body.
 
@@ -157,6 +173,54 @@ class SalesDataApiClient:
         matches what a chat assistant helping "this person with their own
         data" should already do.
         """
+        resp = await self._get_sales_data_raw(
+            disable_pagination=disable_pagination,
+            status=status,
+            lease_code=lease_code,
+            page=page,
+            limit=limit,
+            all_my_companies=all_my_companies,
+        )
+        return unwrap_sales_data_rows(resp.json())
+
+    async def get_sales_data_page(
+        self,
+        *,
+        status: str | None = None,
+        lease_code: str | list[str] | None = None,
+        page: int = 1,
+        limit: int = 10,
+        all_my_companies: bool = True,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """Like get_sales_data, but also returns the real total_count.
+
+        For a bounded/paginated listing (admin review's table) where the
+        displayed "N submissions" figure needs to be exact even though only
+        one page of rows is fetched — unlike get_sales_data, which discards
+        total_count and only returns the row list.
+        """
+        resp = await self._get_sales_data_raw(
+            disable_pagination=False,
+            status=status,
+            lease_code=lease_code,
+            page=page,
+            limit=limit,
+            all_my_companies=all_my_companies,
+        )
+        body = resp.json()
+        rows = unwrap_sales_data_rows(body)
+        return rows, extract_total_count(body, fallback=len(rows))
+
+    async def _get_sales_data_raw(
+        self,
+        *,
+        disable_pagination: bool,
+        status: str | None,
+        lease_code: str | list[str] | None,
+        page: int,
+        limit: int,
+        all_my_companies: bool,
+    ) -> httpx.Response:
         params: dict[str, Any] = {"page": page, "limit": limit}
         if disable_pagination:
             params["disable_pagination"] = "true"
@@ -186,7 +250,7 @@ class SalesDataApiClient:
             )
 
         resp.raise_for_status()
-        return unwrap_sales_data_rows(resp.json())
+        return resp
 
     # ── POST /api/v1/sales-data ─────────────────────────────────────────────
 
@@ -337,7 +401,7 @@ def _norm_lease_name(value: str | None) -> str:
     return " ".join(str(value or "").casefold().split())
 
 
-def _normalize_period_date(value: str | None) -> str:
+def normalize_period_date(value: str | None) -> str:
     """Reduce any date-ish string to bare YYYY-MM-DD.
 
     Handles a live cenomi-api row's raw date string, which may carry a time
@@ -368,7 +432,7 @@ def _period_year_month(value: str | None) -> str:
     of sales_period_start — so Layer 2 matching mirrors that granularity
     instead of demanding an exact date range.
     """
-    return _normalize_period_date(value)[:7]
+    return normalize_period_date(value)[:7]
 
 
 def canonical_brand_name(backend_row: dict[str, Any]) -> str:
@@ -522,8 +586,8 @@ def partition_rows_by_lease_access(
             # POST /sales-data submission payload, which cenomi-api rejected
             # with a 400 ("sales period start date doesn't match the
             # pending record") since it expects a plain date.
-            "sales_period_start": _normalize_period_date(backend_row["sales_period_start"]),
-            "sales_period_end": _normalize_period_date(backend_row["sales_period_end"]),
+            "sales_period_start": normalize_period_date(backend_row["sales_period_start"]),
+            "sales_period_end": normalize_period_date(backend_row["sales_period_end"]),
             "current_status": backend_row["status"],
             "brand": expected_brand or (row.get("brand") or ""),
             "property": expected_property or (row.get("property") or ""),
