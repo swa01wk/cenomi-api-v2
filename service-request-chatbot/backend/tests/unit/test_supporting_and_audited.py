@@ -501,7 +501,7 @@ async def test_admin_request_supporting_document_confirms_ask_upload() -> None:
 
     assert result["workflow_stage"] == "ADMIN_CONFIRM"
     assert result["collected_data"]["admin_action"] == "NEED_UPLOAD_SUPPORTING_DOCUMENT"
-    assert result["response_ui"]["action_label"] == "Ask upload — Supporting document"
+    assert result["response_ui"]["action_label"] == "Request document"
 
 
 @pytest.mark.asyncio
@@ -543,7 +543,7 @@ async def test_admin_request_audited_sales_confirms_ask_upload() -> None:
         )
 
     assert result["collected_data"]["admin_action"] == "NEED_UPLOAD_AUDITED_SALES"
-    assert result["response_ui"]["action_label"] == "Ask upload — Audited sales data"
+    assert result["response_ui"]["action_label"] == "Request audited sales"
 
 
 @pytest.mark.asyncio

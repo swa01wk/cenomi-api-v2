@@ -298,26 +298,33 @@ def _confirm_patch(
         unmatched_str = (
             " (Could not match: " + ", ".join(f"**{c}**" for c in unmatched) + " — skipped.)"
         )
-    action_label = ADMIN_ACTION_LABELS.get(action, action)
+    # Button label on the confirm card must match the actual action — the
+    # old ADMIN_ACTION_LABELS ("Accept", "Ask upload — Sales data") reads
+    # fine inline but is a bad button label ("Approve" is what the button on
+    # an approval should say, not "Accept"), and the message must not tell
+    # the admin to type yes/no when the card already renders Confirm/Cancel
+    # buttons — that mismatch was actively confusing.
     action_verb = {
         "APPROVED": "Approve",
         "NEED_REUPLOAD": "Request a re-upload for",
         "NEED_UPLOAD_SUPPORTING_DOCUMENT": "Request a supporting document for",
         "NEED_UPLOAD_AUDITED_SALES": "Request audited sales for",
-    }.get(action, action_label)
+    }.get(action, ADMIN_ACTION_LABELS.get(action, action))
+    button_label = {
+        "APPROVED": "Approve",
+        "NEED_REUPLOAD": "Request reupload",
+        "NEED_UPLOAD_SUPPORTING_DOCUMENT": "Request document",
+        "NEED_UPLOAD_AUDITED_SALES": "Request audited sales",
+    }.get(action, ADMIN_ACTION_LABELS.get(action, action))
 
     if len(targets) == 1:
-        message = (
-            f"{action_verb} {_fmt_target(targets[0])}?{comment_str}{unmatched_str}\n\n"
-            "Reply **yes** to confirm or **no** to cancel."
-        )
+        message = f"{action_verb} {_fmt_target(targets[0])}?{comment_str}{unmatched_str}"
     else:
         lease_lines = "\n".join(f"• {_fmt_target(t)}" for t in targets)
         message = (
             f"{action_verb} these {len(targets)} submissions?\n\n"
             f"{lease_lines}"
-            f"{comment_str}{unmatched_str}\n\n"
-            "Reply **yes** to confirm or **no** to cancel."
+            f"{comment_str}{unmatched_str}"
         )
     return {
         "collected_data": collected,
@@ -336,7 +343,7 @@ def _confirm_patch(
             # admin needs to know exactly which one they're confirming.
             "verbatim": True,
             "action": action,
-            "action_label": action_label,
+            "action_label": button_label,
             "lease_code": first.get("lease_code", ""),
             "targets": targets,
             "comment_text": comment,
@@ -558,19 +565,16 @@ async def admin_review_entry_node(state: ServiceRequestState) -> dict[str, Any]:
         # was internal jargon, not something to show an admin). The message
         # is just the count plus what actions are available.
         noun = "submission" if total_count == 1 else "submissions"
-        lines = [f"📋 **{total_count} {noun} awaiting review.**\n"]
-        if has_more:
-            lines.append(f"_Showing the first {len(submitted)} — say **next** to see more._\n")
-        lines.append(
-            "Tell me what to do:\n"
-            "• **Approve** a lease\n"
-            "• **Request reupload** (sales data)\n"
-            "• **Request supporting document**\n"
-            "• **Request audited sales**\n\n"
-            "For example: "
-            + _action_examples(submitted)
-            + "."
+        page_note = (
+            f" (showing the first {len(submitted)} — use the arrows below for more)"
+            if has_more
+            else ""
         )
+        lines = [
+            f"You have **{total_count} {noun}** awaiting review{page_note}. "
+            "Use the buttons in the table, or just tell me what to do — "
+            "for example " + _action_examples(submitted) + "."
+        ]
 
         return {
             "status": "WAITING_FOR_USER",

@@ -129,7 +129,7 @@ async def test_review_sales_data_lists_submitted_rows() -> None:
     assert codes == ["LC-2001", "LC-2002"]
     assert "LC-1001" not in codes
     assert "Approve LC-2001" in result["response_message"]
-    assert "3 submissions awaiting review" in result["response_message"]
+    assert "3 submissions" in result["response_message"] and "awaiting review" in result["response_message"]
 
     client = AsyncMock()
     client.get_sales_data = AsyncMock(return_value=_ROWS)
@@ -371,6 +371,6 @@ async def test_review_list_includes_uploaded_supporting_and_audited() -> None:
     codes = [r["lease_code"] for r in ui_rows]
     assert codes == ["LC-2001", "LC-2002"]
     assert "LC-1004" not in codes
-    assert "3 submissions awaiting review" in result["response_message"]
+    assert "3 submissions" in result["response_message"] and "awaiting review" in result["response_message"]
     assert any(r.get("property_name") == "Riyadh Park" for r in ui_rows)
     assert any(r.get("company_name") == "Centrepoint Co" for r in ui_rows)
