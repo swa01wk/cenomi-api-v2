@@ -322,10 +322,46 @@ def _confirm_patch(
     }
 
 
+_ADMIN_REVIEW_LIST_LIMIT = 50
+
+
 async def _load_reviewable(
     backend_refs: dict[str, Any],
+    lease_codes: list[str] | None = None,
+    need_all: bool = False,
 ) -> list[dict[str, Any]]:
+    """Fetch reviewable rows, scoped as tightly as the caller can manage.
+
+    ``lease_codes`` (the admin typed "Approve LC-1234", not a blanket
+    "review"/"approve all") lets us skip the broad listing fetch entirely —
+    cenomi-api's ``lease_code`` query param is exact and cheap, unlike the
+    status-filtered listing below, which can still be large: _REVIEWABLE_
+    STATUSES includes "SUBMITTED", a status a row keeps indefinitely once
+    approved-and-archived rows are excluded, potentially spanning the
+    platform's entire history across every lease, not just a current
+    backlog. Only use the cache/listing path when acting on a specific,
+    already-identified set of leases isn't possible (plain "review sales
+    data", or "approve all").
+    """
     cached = backend_refs.get("admin_review_rows")
+    if lease_codes:
+        if isinstance(cached, list) and cached:
+            wanted = {c.strip().lower() for c in lease_codes if c}
+            from_cache = [
+                r for r in _reviewable(cached)
+                if str(r.get("lease_code", "")).strip().lower() in wanted
+            ]
+            if from_cache:
+                return from_cache
+        token = get_current_bearer_token()
+        client = SalesDataApiClient(bearer_token=token)
+        rows = await client.get_sales_data(
+            disable_pagination=True,
+            all_my_companies=False,
+            lease_code=lease_codes,
+        )
+        return _reviewable(rows)
+
     if isinstance(cached, list) and cached:
         return _reviewable(cached)
     token = get_current_bearer_token()
@@ -338,17 +374,20 @@ async def _load_reviewable(
     # on this admin path specifically (a plain unscoped fetch was ~200ms
     # before all_my_companies existed).
     #
-    # status is the bigger fix: without it this pulled the ENTIRE sales-data
-    # table (observed: 135MB, ~19s on the wire alone, plus JSON-decoding and
-    # filtering that in Python) just to keep the ~4 reviewable statuses out
-    # of possibly tens of thousands of rows. cenomi-api's own portal listing
-    # page already filters server-side with a comma-separated status list
-    # (see salesdataApi.ts) — do the same here instead of fetching everything
-    # and filtering client-side in _reviewable().
+    # status narrows the *kind* of row, but "SUBMITTED" alone can still span
+    # the platform's entire history (a row keeps that status indefinitely
+    # unless/until approved) — plausibly still tens of thousands of rows.
+    # The listing only ever displays the first 10 (see submitted[:10]
+    # below), so there is no reason to also disable pagination and fetch
+    # everything just to compute an exact count — UNLESS the caller is
+    # actually about to act on every one of them ("approve all"), where a
+    # bounded page would silently approve only the first N and leave the
+    # rest untouched with no indication anything was skipped.
     rows = await client.get_sales_data(
-        disable_pagination=True,
+        disable_pagination=need_all,
         all_my_companies=False,
         status=",".join(sorted(_REVIEWABLE_STATUSES)),
+        limit=_ADMIN_REVIEW_LIST_LIMIT,
     )
     submitted = _reviewable(rows)
     backend_refs["admin_review_rows"] = submitted
@@ -395,10 +434,15 @@ async def admin_review_entry_node(state: ServiceRequestState) -> dict[str, Any]:
         token = get_current_bearer_token()
         client = SalesDataApiClient(bearer_token=token)
         try:
+            # Bounded, same reasoning as _load_reviewable: this listing only
+            # ever displays the first 10 rows (submitted[:10] below), and
+            # "SUBMITTED" alone can span the platform's entire history, so
+            # disable_pagination=True was fetching everything just to show
+            # ten of them.
             rows = await client.get_sales_data(
-                disable_pagination=True,
                 all_my_companies=False,
                 status=",".join(sorted(_REVIEWABLE_STATUSES)),
+                limit=_ADMIN_REVIEW_LIST_LIMIT,
             )
         except Exception:
             # Was silently swallowed with no log line — the only signal that
@@ -419,7 +463,15 @@ async def admin_review_entry_node(state: ServiceRequestState) -> dict[str, Any]:
             }
 
         backend_refs["admin_review_rows"] = submitted
-        lines = [f"📋 **{len(submitted)} submission(s) awaiting review:**\n"]
+        # The fetch is capped at _ADMIN_REVIEW_LIST_LIMIT rows (see
+        # _load_reviewable's comment) — len(submitted) is no longer
+        # necessarily the true total, so don't imply it is when the cap was
+        # actually hit.
+        count_label = (
+            f"{len(submitted)}+" if len(submitted) >= _ADMIN_REVIEW_LIST_LIMIT
+            else str(len(submitted))
+        )
+        lines = [f"📋 **{count_label} submission(s) awaiting review:**\n"]
         for r in submitted[:10]:
             badge = ADMIN_TABLE_STATUS_LABELS.get(str(r.get("status") or ""), r.get("status") or "")
             lines.append(
@@ -520,7 +572,11 @@ async def admin_review_entry_node(state: ServiceRequestState) -> dict[str, Any]:
             collected["comment_text"] = comment
 
         try:
-            reviewable = await _load_reviewable(backend_refs)
+            reviewable = await _load_reviewable(
+                backend_refs,
+                lease_codes=requested if requested and not select_all else None,
+                need_all=select_all,
+            )
         except Exception:
             log.error("admin_review_entry.load_reviewable_failed", exc_info=True)
             return {

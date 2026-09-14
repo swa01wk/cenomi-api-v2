@@ -135,7 +135,7 @@ class SalesDataApiClient:
         *,
         disable_pagination: bool = False,
         status: str | None = None,
-        lease_code: str | None = None,
+        lease_code: str | list[str] | None = None,
         page: int = 1,
         limit: int = 100,
         all_my_companies: bool = True,
@@ -163,6 +163,10 @@ class SalesDataApiClient:
         if status:
             params["status"] = status
         if lease_code:
+            # cenomi-api parses this as r.URL.Query()["lease_code"] — a
+            # repeated-query-param slice, not comma-split like status — so a
+            # list value here must produce ?lease_code=A&lease_code=B, which
+            # httpx does natively when the params value is a list.
             params["lease_code"] = lease_code
         if all_my_companies:
             params["all_my_companies"] = "true"
