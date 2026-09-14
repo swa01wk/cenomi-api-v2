@@ -68,6 +68,32 @@ _PERIOD_FOR_MONTH_RE = re.compile(
     r"\b(?:for|of)\s+month\s+([A-Za-z]+(?:\s+\d{4})?)",
     re.IGNORECASE,
 )
+# Admin-facing review notifications use a different template entirely —
+# "Please review the sales data for t0106037 corresponding to 31/12/2024" —
+# which neither of the above (tenant "as of month X" wording) matches at
+# all, so period_hint came back empty and the admin review flow had no way
+# to narrow a lease's many monthly rows down to the one this notification
+# was actually about.
+_PERIOD_CORRESPONDING_TO_RE = re.compile(
+    r"corresponding to\s+(\d{1,2})/(\d{1,2})/(\d{4})",
+    re.IGNORECASE,
+)
+
+
+def extract_period_date(text: str | None) -> str | None:
+    """ISO date ("2024-12-31") from an admin "corresponding to DD/MM/YYYY" notification."""
+    raw = (text or "").strip()
+    if not raw:
+        return None
+    match = _PERIOD_CORRESPONDING_TO_RE.search(raw)
+    if not match:
+        return None
+    day, month, year = match.groups()
+    try:
+        from datetime import date
+        return date(int(year), int(month), int(day)).isoformat()
+    except ValueError:
+        return None
 
 
 def is_sales_data_notification_ref(ref: dict[str, Any] | None) -> bool:
@@ -123,16 +149,18 @@ def sales_data_intent_for_ref(ref: dict[str, Any]) -> str:
 def build_sales_data_notification_context(ref: dict[str, Any]) -> dict[str, str]:
     """Handoff payload the Sales Data Agent reads from ``backend_refs``."""
     lease_code = str(ref.get("id") or ref.get("lease_code") or "").strip()
+    raw_message = str(ref.get("message") or ref.get("en") or "")
     period_hint = str(ref.get("period_hint") or ref.get("period_label") or "").strip()
     if not period_hint:
-        period_hint = extract_sales_period_hint(
-            str(ref.get("message") or ref.get("en") or "")
-        )
+        period_hint = extract_sales_period_hint(raw_message)
     ctx: dict[str, str] = {
         "lease_code": lease_code,
         "period_hint": period_hint,
         "source": "notification",
     }
+    period_date = extract_period_date(raw_message)
+    if period_date:
+        ctx["period_date"] = period_date
     key = str(ref.get("key") or ref.get("sub_category") or "").strip()
     if key:
         ctx["key"] = key

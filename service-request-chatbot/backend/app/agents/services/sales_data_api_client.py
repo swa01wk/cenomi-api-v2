@@ -35,6 +35,26 @@ def _base_url() -> str:
     return os.getenv("SALES_DATA_API_BASE_URL", _DEFAULT_BASE_URL).rstrip("/")
 
 
+def _normalize_row_dates(row: dict[str, Any]) -> dict[str, Any]:
+    """Bare-date sales_period_start/end on a single GET /sales-data row.
+
+    Live cenomi-api returns these as a full datetime-with-offset
+    ("2026-05-01T04:00:00+04:00"). Fixed at this one shared source instead
+    of in each consuming node — that had already been done three separate
+    times in three separate call sites (CSV/manual-entry validation,
+    supporting-doc upload, admin review/approve) after the same raw string
+    kept leaking into a PATCH/POST payload cenomi-api rejects (expects a
+    plain date) and into every message shown to the user. Any code reading
+    a row through this module now gets an already-clean date and never
+    needs to re-derive or re-validate it.
+    """
+    if row.get("sales_period_start"):
+        row["sales_period_start"] = normalize_period_date(row["sales_period_start"])
+    if row.get("sales_period_end"):
+        row["sales_period_end"] = normalize_period_date(row["sales_period_end"])
+    return row
+
+
 def unwrap_sales_data_rows(body: Any) -> list[dict[str, Any]]:
     """Normalise live Cenomi and mock GET /sales-data envelopes to a row list.
 
@@ -42,17 +62,18 @@ def unwrap_sales_data_rows(body: Any) -> list[dict[str, Any]]:
     Mock: ``{ data: [ ...rows ] }`` or a bare list.
     """
     if isinstance(body, list):
-        return [r for r in body if isinstance(r, dict)]
-    if not isinstance(body, dict):
-        return []
-    data = body.get("data", body)
-    if isinstance(data, list):
-        return [r for r in data if isinstance(r, dict)]
-    if isinstance(data, dict):
-        lst = data.get("list")
-        if isinstance(lst, list):
-            return [r for r in lst if isinstance(r, dict)]
-    return []
+        rows = [r for r in body if isinstance(r, dict)]
+    elif not isinstance(body, dict):
+        rows = []
+    else:
+        data = body.get("data", body)
+        if isinstance(data, list):
+            rows = [r for r in data if isinstance(r, dict)]
+        elif isinstance(data, dict) and isinstance(data.get("list"), list):
+            rows = [r for r in data["list"] if isinstance(r, dict)]
+        else:
+            rows = []
+    return [_normalize_row_dates(r) for r in rows]
 
 
 def extract_total_count(body: Any, fallback: int) -> int:

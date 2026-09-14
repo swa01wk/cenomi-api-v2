@@ -25,7 +25,10 @@ from app.agents.schemas.sales_data_schema import (
     ADMIN_ACTION_LABELS,
     ADMIN_TABLE_STATUS_LABELS,
 )
-from app.agents.services.sales_data_api_client import SalesDataApiClient
+from app.agents.services.sales_data_api_client import (
+    SalesDataApiClient,
+    normalize_period_date,
+)
 from app.core.request_context import get_current_bearer_token
 from app.observability.decorators import trace_node
 
@@ -328,6 +331,13 @@ def _confirm_patch(
         "response_message": message,
         "response_ui": {
             "type": "admin_confirm",
+            # Without this, response_generation's LLM rewrite condenses this
+            # into something like "Got it! You've chosen to approve the
+            # submissions for lease code t0106037" — dropping the period
+            # this message deliberately lists per target, which matters a
+            # lot when one lease has many months awaiting review and the
+            # admin needs to know exactly which one they're confirming.
+            "verbatim": True,
             "action": action,
             "action_label": action_label,
             "lease_code": first.get("lease_code", ""),
@@ -455,9 +465,14 @@ async def admin_review_entry_node(state: ServiceRequestState) -> dict[str, Any]:
         # every reviewable row platform-wide. Without this, clicking a
         # single notification showed the entire backlog because nothing
         # here ever looked at notification_context/the typed lease code.
-        notification_lease = str(
-            (backend_refs.get("notification_context") or {}).get("lease_code") or ""
-        ).strip()
+        notification_ctx = backend_refs.get("notification_context") or {}
+        notification_lease = str(notification_ctx.get("lease_code") or "").strip()
+        # Admin-facing review notifications ("...corresponding to
+        # 31/12/2024") name one specific period, not just a lease — a lease
+        # can have many months awaiting review, and without this the whole
+        # backlog for that lease came back instead of the one submission
+        # the notification was actually about.
+        notification_period_date = str(notification_ctx.get("period_date") or "").strip()
         typed_codes = _extract_lease_codes(user_message)
         scoped_lease = notification_lease or (typed_codes[0] if typed_codes else "")
 
@@ -474,6 +489,14 @@ async def admin_review_entry_node(state: ServiceRequestState) -> dict[str, Any]:
                     all_my_companies=False,
                     lease_code=scoped_lease,
                 )
+                if notification_period_date:
+                    rows = [
+                        r for r in rows
+                        if normalize_period_date(r.get("sales_period_end"))
+                        == notification_period_date
+                        or normalize_period_date(r.get("sales_period_start"))
+                        == notification_period_date
+                    ] or rows
                 total_count = len(rows)
             else:
                 # Bounded page, not disable_pagination=True: "SUBMITTED"
