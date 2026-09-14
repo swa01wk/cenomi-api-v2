@@ -68,32 +68,73 @@ _PERIOD_FOR_MONTH_RE = re.compile(
     r"\b(?:for|of)\s+month\s+([A-Za-z]+(?:\s+\d{4})?)",
     re.IGNORECASE,
 )
-# Admin-facing review notifications use a different template entirely —
-# "Please review the sales data for t0106037 corresponding to 31/12/2024" —
-# which neither of the above (tenant "as of month X" wording) matches at
-# all, so period_hint came back empty and the admin review flow had no way
-# to narrow a lease's many monthly rows down to the one this notification
-# was actually about.
-_PERIOD_CORRESPONDING_TO_RE = re.compile(
+# Admin-facing review notifications ("SALES_DATA_SUBMITTED") use a template
+# entirely different from the tenant "as of month X" wording above —
+# "Please review the sales data for {brand·mall} corresponding to {period}" —
+# and cenomi-api's own getYearMonthDate() picks ONE of three period shapes
+# depending on the lease's reporting frequency (sales_data_sync_usecase.go):
+#   monthly -> "month September"      (no year — always the current one)
+#   yearly  -> "year 2026"
+#   other   -> "5/9/2026"             (D/M/YYYY, NOT zero-padded)
+# The monthly case is the common one and wasn't matched at all before, so
+# period_hint/period_date came back empty for most real admin notifications
+# and the whole lease history showed instead of the one month being reviewed.
+_PERIOD_CORRESPONDING_TO_DATE_RE = re.compile(
     r"corresponding to\s+(\d{1,2})/(\d{1,2})/(\d{4})",
     re.IGNORECASE,
 )
+_PERIOD_CORRESPONDING_TO_MONTH_RE = re.compile(
+    r"corresponding to\s+month\s+([A-Za-z]+)",
+    re.IGNORECASE,
+)
+_PERIOD_CORRESPONDING_TO_YEAR_RE = re.compile(
+    r"corresponding to\s+year\s+(\d{4})",
+    re.IGNORECASE,
+)
+_MONTH_NAME_TO_NUM = {
+    "january": 1, "february": 2, "march": 3, "april": 4, "may": 5, "june": 6,
+    "july": 7, "august": 8, "september": 9, "october": 10, "november": 11,
+    "december": 12,
+}
 
 
 def extract_period_date(text: str | None) -> str | None:
-    """ISO date ("2024-12-31") from an admin "corresponding to DD/MM/YYYY" notification."""
+    """Year-month prefix ("2024-12") from an admin "corresponding to ..."
+    notification — day-level precision isn't always available (the monthly-
+    frequency case only ever names a month, no year), so callers should
+    match rows by year-month, not by exact date.
+    """
     raw = (text or "").strip()
     if not raw:
         return None
-    match = _PERIOD_CORRESPONDING_TO_RE.search(raw)
-    if not match:
-        return None
-    day, month, year = match.groups()
-    try:
-        from datetime import date
-        return date(int(year), int(month), int(day)).isoformat()
-    except ValueError:
-        return None
+
+    match = _PERIOD_CORRESPONDING_TO_DATE_RE.search(raw)
+    if match:
+        day, month, year = match.groups()
+        try:
+            from datetime import date
+            return date(int(year), int(month), int(day)).isoformat()[:7]
+        except ValueError:
+            return None
+
+    match = _PERIOD_CORRESPONDING_TO_MONTH_RE.search(raw)
+    if match:
+        month_num = _MONTH_NAME_TO_NUM.get(match.group(1).strip().lower())
+        if month_num:
+            from datetime import date
+            today = date.today()
+            # cenomi-api's monthly-frequency case never names a year — the
+            # notification is always about the most recent occurrence of
+            # that month, i.e. this year unless that month hasn't happened
+            # yet this year, in which case it was last year.
+            year = today.year if month_num <= today.month else today.year - 1
+            return f"{year:04d}-{month_num:02d}"
+
+    match = _PERIOD_CORRESPONDING_TO_YEAR_RE.search(raw)
+    if match:
+        return match.group(1)
+
+    return None
 
 
 def is_sales_data_notification_ref(ref: dict[str, Any] | None) -> bool:

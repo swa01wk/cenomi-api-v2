@@ -285,31 +285,40 @@ def _confirm_patch(
     collected["sales_period_start"] = first.get("sales_period_start", "")
     collected["sales_period_end"] = first.get("sales_period_end", "")
 
-    lease_lines = []
-    for t in targets:
+    def _fmt_target(t: dict[str, Any]) -> str:
         amt = t.get("sales_amt")
         amt_str = f" — SAR {float(amt):,.2f}" if amt is not None and amt != "" else ""
         period = t.get("sales_period_start") or ""
-        period_bit = f" ({period[:7]})" if period else ""
-        lease_lines.append(f"• **{t.get('lease_code')}**{period_bit}{amt_str}")
-    comment_str = f'\nComment: "{comment}"' if comment else ""
+        period_bit = f" for {period[:7]}" if period else ""
+        return f"**{t.get('lease_code')}**{period_bit}{amt_str}"
+
+    comment_str = f' Comment: "{comment}".' if comment else ""
     unmatched_str = ""
     if unmatched:
         unmatched_str = (
-            "\n\nI could not match: "
-            + ", ".join(f"**{c}**" for c in unmatched)
-            + ". Those were skipped."
+            " (Could not match: " + ", ".join(f"**{c}**" for c in unmatched) + " — skipped.)"
         )
     action_label = ADMIN_ACTION_LABELS.get(action, action)
-    noun = "submission" if len(targets) == 1 else "submissions"
-    message = (
-        f"Please confirm:\n\n"
-        f"**Action:** {action_label}\n"
-        f"**{len(targets)} {noun}:**\n"
-        + "\n".join(lease_lines)
-        + f"{comment_str}{unmatched_str}\n\n"
-        "Reply **yes** to confirm or **no** to cancel."
-    )
+    action_verb = {
+        "APPROVED": "Approve",
+        "NEED_REUPLOAD": "Request a re-upload for",
+        "NEED_UPLOAD_SUPPORTING_DOCUMENT": "Request a supporting document for",
+        "NEED_UPLOAD_AUDITED_SALES": "Request audited sales for",
+    }.get(action, action_label)
+
+    if len(targets) == 1:
+        message = (
+            f"{action_verb} {_fmt_target(targets[0])}?{comment_str}{unmatched_str}\n\n"
+            "Reply **yes** to confirm or **no** to cancel."
+        )
+    else:
+        lease_lines = "\n".join(f"• {_fmt_target(t)}" for t in targets)
+        message = (
+            f"{action_verb} these {len(targets)} submissions?\n\n"
+            f"{lease_lines}"
+            f"{comment_str}{unmatched_str}\n\n"
+            "Reply **yes** to confirm or **no** to cancel."
+        )
     return {
         "collected_data": collected,
         "backend_refs": backend_refs,
@@ -442,7 +451,8 @@ async def admin_review_entry_node(state: ServiceRequestState) -> dict[str, Any]:
     # ── REVIEW_SALES_DATA — list submissions ───────────────────────────────
     looks_like_action = any(h in user_message.lower() for h in _ACTION_HINTS)
     is_next_page = action_override == "admin_review_next_page"
-    if is_next_page or (
+    is_prev_page = action_override == "admin_review_prev_page"
+    if is_next_page or is_prev_page or (
         intent == "REVIEW_SALES_DATA"
         and not collected.get("admin_action")
         and not looks_like_action
@@ -455,11 +465,13 @@ async def admin_review_entry_node(state: ServiceRequestState) -> dict[str, Any]:
         # here ever looked at notification_context/the typed lease code.
         notification_ctx = backend_refs.get("notification_context") or {}
         notification_lease = str(notification_ctx.get("lease_code") or "").strip()
-        # Admin-facing review notifications ("...corresponding to
-        # 31/12/2024") name one specific period, not just a lease — a lease
+        # Admin-facing review notifications ("...corresponding to month
+        # May" / "...corresponding to year 2026" / "...corresponding to
+        # 5/9/2026") name one specific period, not just a lease — a lease
         # can have many months awaiting review, and without this the whole
         # backlog for that lease came back instead of the one submission
-        # the notification was actually about.
+        # the notification was actually about. This is a year-month prefix
+        # ("2026-05"), not a full date — see extract_period_date().
         notification_period_date = str(notification_ctx.get("period_date") or "").strip()
         typed_codes = _extract_lease_codes(user_message)
         scoped_lease = notification_lease or (typed_codes[0] if typed_codes else "")
@@ -467,6 +479,8 @@ async def admin_review_entry_node(state: ServiceRequestState) -> dict[str, Any]:
         page = int(collected.get("admin_review_page") or 1)
         if is_next_page:
             page += 1
+        elif is_prev_page:
+            page = max(1, page - 1)
 
         token = get_current_bearer_token()
         client = SalesDataApiClient(bearer_token=token)
@@ -478,11 +492,14 @@ async def admin_review_entry_node(state: ServiceRequestState) -> dict[str, Any]:
                     lease_code=scoped_lease,
                 )
                 if notification_period_date:
+                    # extract_period_date() returns a year-month prefix, not
+                    # a full date — the notification's monthly-frequency
+                    # case only ever names a month, never a day.
                     rows = [
                         r for r in rows
-                        if normalize_period_date(r.get("sales_period_end"))
+                        if normalize_period_date(r.get("sales_period_end"))[:7]
                         == notification_period_date
-                        or normalize_period_date(r.get("sales_period_start"))
+                        or normalize_period_date(r.get("sales_period_start"))[:7]
                         == notification_period_date
                     ] or rows
                 total_count = len(rows)
@@ -519,6 +536,12 @@ async def admin_review_entry_node(state: ServiceRequestState) -> dict[str, Any]:
                     "workflow_stage": "ADMIN_REVIEW",
                     "response_message": "That was the last page — no more submissions.",
                 }
+            if is_prev_page:
+                return {
+                    "status": "WAITING_FOR_USER",
+                    "workflow_stage": "ADMIN_REVIEW",
+                    "response_message": "That was the first page.",
+                }
             return {
                 "status": "WAITING_FOR_USER",
                 "workflow_stage": "ADMIN_REVIEW",
@@ -528,6 +551,7 @@ async def admin_review_entry_node(state: ServiceRequestState) -> dict[str, Any]:
         collected["admin_review_page"] = page
         backend_refs["admin_review_rows"] = submitted
         has_more = not scoped_lease and page * _ADMIN_REVIEW_LIST_LIMIT < total_count
+        has_prev = not scoped_lease and page > 1
         # The table card (response_ui.rows) already renders every row's
         # detail — repeating each one as a bullet line in the message text
         # too was pure duplication (and the "Same as the portal" phrasing
@@ -561,6 +585,7 @@ async def admin_review_entry_node(state: ServiceRequestState) -> dict[str, Any]:
                 "total_count": total_count,
                 "page": page,
                 "has_more": has_more,
+                "has_prev": has_prev,
                 "message": "\n".join(lines),
             },
         }
