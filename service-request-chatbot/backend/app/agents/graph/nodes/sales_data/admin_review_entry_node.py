@@ -21,10 +21,7 @@ from app.agents.llm.gateway import get_default_gateway as get_llm_gateway
 from app.agents.prompts.sales_data_manual_entry_prompt import (
     SALES_DATA_ADMIN_EXTRACTION_SYSTEM_PROMPT,
 )
-from app.agents.schemas.sales_data_schema import (
-    ADMIN_ACTION_LABELS,
-    ADMIN_TABLE_STATUS_LABELS,
-)
+from app.agents.schemas.sales_data_schema import ADMIN_ACTION_LABELS
 from app.agents.services.sales_data_api_client import (
     SalesDataApiClient,
     normalize_period_date,
@@ -81,15 +78,6 @@ def _extract_lease_codes(message: str) -> list[str]:
             seen.add(key)
             found.append(code)
     return found
-
-
-def _lease_context_bits(row: dict[str, Any]) -> str:
-    """Portal list columns: property, company, brand (from GET /sales-data)."""
-    property_name = (row.get("property_name") or row.get("mall_name") or "").strip()
-    company = (row.get("company_name") or "").strip()
-    brand = (row.get("brand_name") or "").strip()
-    parts = [p for p in (property_name, company, brand) if p]
-    return " · ".join(parts) if parts else "—"
 
 
 def _action_examples(rows: list[dict[str, Any]] | None = None) -> str:
@@ -540,24 +528,17 @@ async def admin_review_entry_node(state: ServiceRequestState) -> dict[str, Any]:
         collected["admin_review_page"] = page
         backend_refs["admin_review_rows"] = submitted
         has_more = not scoped_lease and page * _ADMIN_REVIEW_LIST_LIMIT < total_count
-        range_start = (page - 1) * _ADMIN_REVIEW_LIST_LIMIT + 1
-        range_end = range_start + len(submitted) - 1
-        lines = [
-            f"📋 **{total_count} submission(s) awaiting review** "
-            f"(showing {range_start}–{range_end}):\n"
-        ]
-        for r in submitted[:_ADMIN_REVIEW_LIST_LIMIT]:
-            badge = ADMIN_TABLE_STATUS_LABELS.get(str(r.get("status") or ""), r.get("status") or "")
-            lines.append(
-                f"• **{r['lease_code']}** | "
-                f"{_lease_context_bits(r)} | "
-                f"{r.get('sales_period_start', '')} – {r.get('sales_period_end', '')} | "
-                f"SAR {float(r.get('sales_amt', 0)):,.2f} | {badge}"
-            )
+        # The table card (response_ui.rows) already renders every row's
+        # detail — repeating each one as a bullet line in the message text
+        # too was pure duplication (and the "Same as the portal" phrasing
+        # was internal jargon, not something to show an admin). The message
+        # is just the count plus what actions are available.
+        noun = "submission" if total_count == 1 else "submissions"
+        lines = [f"📋 **{total_count} {noun} awaiting review.**\n"]
         if has_more:
-            lines.append(f"\n_...and {total_count - range_end} more — say **next** to see more._")
+            lines.append(f"_Showing the first {len(submitted)} — say **next** to see more._\n")
         lines.append(
-            "\nSame as the portal **Ask upload** menu — tell me:\n"
+            "Tell me what to do:\n"
             "• **Approve** a lease\n"
             "• **Request reupload** (sales data)\n"
             "• **Request supporting document**\n"
@@ -603,7 +584,15 @@ async def admin_review_entry_node(state: ServiceRequestState) -> dict[str, Any]:
 
         fields: dict[str, Any] = {}
         det_action = _deterministic_action(user_message)
-        det_codes = _lease_tokens_from_message(user_message)
+        # Real-format codes ("t0106037", from the review table's own Approve
+        # button) first — _lease_tokens_from_message only recognises the
+        # internal "LC-1234" demo format and bare digit runs, so a real code
+        # fell through to the LLM path every time, which is slower and (for
+        # a message like "Approve t0106037 for 2026-05-01") not guaranteed
+        # to also carry the period through to det_codes.
+        det_codes = _extract_lease_codes(user_message) or _lease_tokens_from_message(
+            user_message
+        )
         det_all = _select_all(user_message)
         need_llm = det_action is None or (not det_codes and not det_all)
 

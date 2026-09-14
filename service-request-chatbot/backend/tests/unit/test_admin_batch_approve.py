@@ -129,7 +129,7 @@ async def test_review_sales_data_lists_submitted_rows() -> None:
     assert codes == ["LC-2001", "LC-2002"]
     assert "LC-1001" not in codes
     assert "Approve LC-2001" in result["response_message"]
-    assert "Submitted" in result["response_message"]
+    assert "3 submissions awaiting review" in result["response_message"]
 
     client = AsyncMock()
     client.get_sales_data = AsyncMock(return_value=_ROWS)
@@ -157,6 +157,46 @@ async def test_review_sales_data_lists_submitted_rows() -> None:
     assert result["response_ui"]["type"] == "admin_confirm"
     assert len(result["response_ui"]["targets"]) == 2
     assert "LC-2002" in result["response_message"]
+
+
+@pytest.mark.asyncio
+async def test_approve_real_lease_code_with_period_targets_one_month_only() -> None:
+    """The review table's own Approve button ("Approve t0106037 for
+    2026-05-01") must confirm only that one row, not every month the lease
+    has awaiting review — this was the reported bug: clicking Approve on a
+    single row in an 18-row list confirmed all 18.
+    """
+    rows = [
+        {
+            "lease_id": 9,
+            "lease_code": "t0106037",
+            "status": "SUBMITTED",
+            "sales_period_start": f"2026-{month:02d}-01",
+            "sales_period_end": f"2026-{month:02d}-28",
+            "sales_amt": 100000.0 + month,
+        }
+        for month in (4, 5, 6)
+    ]
+    client = AsyncMock()
+    client.get_sales_data = AsyncMock(return_value=rows)
+    with (
+        patch(
+            "app.agents.graph.nodes.sales_data.admin_review_entry_node.get_current_bearer_token",
+            return_value="tok",
+        ),
+        patch(
+            "app.agents.graph.nodes.sales_data.admin_review_entry_node.SalesDataApiClient",
+            return_value=client,
+        ),
+    ):
+        result = await admin_review_entry_node(
+            _state(user_message="Approve t0106037 for 2026-05-01")
+        )
+
+    assert result["workflow_stage"] == "ADMIN_CONFIRM"
+    targets = result["collected_data"]["admin_targets"]
+    assert len(targets) == 1
+    assert targets[0]["sales_period_start"] == "2026-05-01"
 
 
 @pytest.mark.asyncio
@@ -327,9 +367,10 @@ async def test_review_list_includes_uploaded_supporting_and_audited() -> None:
             _state(intent="REVIEW_SALES_DATA", user_message="review sales data")
         )
 
-    codes = [r["lease_code"] for r in result["response_ui"]["rows"]]
+    ui_rows = result["response_ui"]["rows"]
+    codes = [r["lease_code"] for r in ui_rows]
     assert codes == ["LC-2001", "LC-2002"]
     assert "LC-1004" not in codes
-    assert result["response_message"].count("Submitted") >= 2
-    assert "Riyadh Park" in result["response_message"]
-    assert "Centrepoint Co" in result["response_message"]
+    assert "3 submissions awaiting review" in result["response_message"]
+    assert any(r.get("property_name") == "Riyadh Park" for r in ui_rows)
+    assert any(r.get("company_name") == "Centrepoint Co" for r in ui_rows)
