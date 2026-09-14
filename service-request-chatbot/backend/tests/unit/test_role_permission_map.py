@@ -39,6 +39,7 @@ class TestRolePermissionMapShape:
             "OPERATIONS",
             "DD_ENGINEER",
             "ADMIN",
+            "OPERATION_EXECUTIVES",
         }.issubset(ROLE_PERMISSION_MAP.keys())
 
     def test_all_values_are_frozensets(self) -> None:

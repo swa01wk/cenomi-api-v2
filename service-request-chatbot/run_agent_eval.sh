@@ -9,6 +9,8 @@
 #   4  FM        (~10 min)  L134–L139 — FM_REVIEW lifecycle
 #   5  RDD       (~12 min)  L140–L145 — RDD_REVIEW lifecycle
 #   6  Full-LC   (~25 min)  L146–L173 — full lifecycle + battle + multi-file (L173)
+#   8  FAQ       (~3 min)   S201, S208–S212
+#   9  Work Permit (~15 min) S207, S240–S244 + L240–L245 review hops
 #   all           All tiers in sequence (equivalent to old a+b+c)
 #
 # Usage:
@@ -28,6 +30,7 @@
 #   ./run_agent_eval.sh --no-start --tier 6h,6i,6j     # TRADING full suite
 #   ./run_agent_eval.sh --no-start --tier 6a,6b,6c,6d,6e,6f,6g,6h,6i,6j  # all Fitout per-agent
 #   ./run_agent_eval.sh --no-start --tier 8        # FAQ + RBAC
+#   ./run_agent_eval.sh --no-start --tier 9        # Work Permit create + review hops
 #   ./run_agent_eval.sh --no-start --tier sd0      # Sales Data smoke (~2 min)
 #   ./run_agent_eval.sh --no-start --tier sd1      # Sales Data happy path
 #   ./run_agent_eval.sh --no-start --tier sd2      # Sales Data edge cases
@@ -89,7 +92,7 @@ done
 
 # Expand tier aliases
 if [[ "$TIERS" == "all" ]]; then
-  TIERS="0,0p,1,2,3,3a,3b,3c,3d,3e,3f,3g,3h,3i,4,5,6a,6b,6c,6d,6e,6f,6g,6h,6i,6j,8,sd0,sd1,sd2,sd3"
+  TIERS="0,0p,1,2,3,3a,3b,3c,3d,3e,3f,3g,3h,3i,4,5,6a,6b,6c,6d,6e,6f,6g,6h,6i,6j,8,9,sd0,sd1,sd2,sd3"
 fi
 if [[ "$TIERS" == "sd" ]]; then
   TIERS="sd0,sd1,sd2,sd3"
@@ -400,6 +403,13 @@ for tier in "${TIER_LIST[@]}"; do
     8)
       _run_scenarios_tier 8 "FAQ + RBAC — help queries, status, RBAC denials (S201, S208–S212)" "tier_8_faq_rbac"
       ;;
+    9)
+      _run_scenarios_tier 9 "Work Permit create — intent, packed create, RBAC (S240–S244)" "tier_9_wp_create"
+      _run_lifecycle_tier 9 "Work Permit review hops — Hot/Cold/Maint/Ops + reject + RBAC (L240–L245)" "tier_9_wp_review"
+      ;;
+    notif)
+      _run_scenarios_tier notif "Notification agent — inbox listing, filters, routing (S250–S255)" "tier_9_notifications"
+      ;;
     # ── Sales Data Agent tiers ────────────────────────────────────────────────
     sd0)
       _run_sales_data_tier "sd0" "Sales Data Smoke — upload intent + RBAC (SD200–SD201)" "tier_sd0_smoke"
@@ -586,6 +596,8 @@ TIER_INFO = [
     ("6jlc", "TRADING Battle+RBAC LC",   "tier_6j_trading_battle_lc", True),
     # FAQ + RBAC
     ("8",    "FAQ + RBAC",               "tier_8_faq_rbac",           False),
+    ("9",    "WP create flat",           "tier_9_wp_create",          False),
+    ("9lc",  "WP review hops",           "tier_9_wp_review",          True),
     # ── Sales Data Agent ──────────────────────────────────────────────────────
     ("sd0",  "Sales Data Smoke",         "tier_sd0_smoke",            False),
     ("sd1",  "Sales Data Happy",         "tier_sd1_happy",            False),
@@ -689,6 +701,8 @@ _STEM_MAP = {
     "6j":   "tier_6j_trading_battle",
     "6jlc": "tier_6j_trading_battle_lc",
     "8":    "tier_8_faq_rbac",
+    "9":    "tier_9_wp_create",
+    "9lc":  "tier_9_wp_review",
     # Sales Data Agent
     "sd0":  "tier_sd0_smoke",
     "sd1":  "tier_sd1_happy",
