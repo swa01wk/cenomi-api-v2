@@ -89,10 +89,11 @@ class TestReviewActions:
     @pytest.mark.parametrize(
         ("kind", "outcome"),
         [
-            ("approved", "was approved"),
-            ("more_info", "was sent back for more information"),
-            ("reassigned", "was reassigned"),
-            ("report_submitted", "had its RDD Handover Report submitted"),
+            ("approved", "was approved from the form"),
+            ("more_info", "is now back with the initiator"),
+            ("rejected", "was rejected from the form"),
+            ("reassigned", "was reassigned from the form"),
+            ("report_submitted", "RDD Handover Report for Service Request"),
         ],
     )
     async def test_the_form_action_is_reported_and_confirmation_retired(
@@ -105,6 +106,17 @@ class TestReviewActions:
         assert "**321040**" in result["response_message"]
         assert result["confirmation_status"] is None
         assert "workflow_stage" not in result  # the next turn re-syncs from the platform
+        assert result["response_decorations"] == {"promote_preview": True}
+
+    @pytest.mark.asyncio
+    async def test_asking_for_more_info_says_where_the_sr_went(self) -> None:
+        result = await form_action_sync_node(  # type: ignore[arg-type]
+            _state("form_action_done:more_info", workflow_stage="FM_REVIEW")
+        )
+        assert result["response_message"] == (
+            "You've asked for more information — Service Request **321040** "
+            "is now back with the initiator."
+        )
 
     @pytest.mark.asyncio
     async def test_no_sr_id_claims_nothing(self) -> None:

@@ -27,10 +27,17 @@ _CREATE_LABELS: dict[str, str] = {
 }
 
 _REVIEW_OUTCOMES: dict[str, str] = {
-    "approved": "was approved",
-    "more_info": "was sent back for more information",
-    "reassigned": "was reassigned",
-    "report_submitted": "had its RDD Handover Report submitted",
+    "approved": "Done — Service Request **{sr_id}** was approved from the form.",
+    "more_info": (
+        "You've asked for more information — Service Request **{sr_id}** "
+        "is now back with the initiator."
+    ),
+    "rejected": "Done — Service Request **{sr_id}** was rejected from the form.",
+    "reassigned": "Done — Service Request **{sr_id}** was reassigned from the form.",
+    "report_submitted": (
+        "Done — the RDD Handover Report for Service Request **{sr_id}** was "
+        "submitted from the form."
+    ),
 }
 
 
@@ -92,8 +99,10 @@ async def form_action_sync_node(state: ServiceRequestState) -> dict[str, Any]:
             },
         }
 
-    outcome = _REVIEW_OUTCOMES.get(kind, "was updated")
-    message = f"Done — Service Request **{sr_id}** {outcome} from the form."
+    template = _REVIEW_OUTCOMES.get(
+        kind, "Done — Service Request **{sr_id}** was updated from the form."
+    )
+    message = template.format(sr_id=sr_id)
     return {
         "backend_refs": backend_refs,
         "status": "WAITING_FOR_USER",
@@ -101,4 +110,8 @@ async def form_action_sync_node(state: ServiceRequestState) -> dict[str, Any]:
         "confirmation_required": False,
         "response_message": message,
         "response_ui": {"type": "message", "message": message, "verbatim": True},
+        # Show the SR as it now stands under the message, the way the chat
+        # previews an SR it opens — a send-back leaves the reviewer looking at
+        # the request that went back to the initiator.
+        "response_decorations": {"promote_preview": True},
     }
