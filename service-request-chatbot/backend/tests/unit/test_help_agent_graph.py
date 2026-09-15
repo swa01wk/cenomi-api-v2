@@ -36,6 +36,8 @@ from app.agents.graph.help_agent_graph import (
     _route_after_sync,
     _route_after_validation,
     _route_after_supervisor,
+    _route_after_work_permit_entry,
+    _route_after_merge,
     _should_open_existing_sr,
     _SR_ACTION_INTENTS,
 )
@@ -131,6 +133,22 @@ class TestRouteAfterSync:
         result = _route_after_sync(state)
         assert result == "response_generation"
 
+    def test_wp_dd_review_routes_to_work_permit_entry(self) -> None:
+        state = _state(
+            active_agent="work_permit_agent",
+            workflow_stage="WP_DD_REVIEW",
+            backend_refs={"sr_id": "10001"},
+        )
+        assert _route_after_sync(state) == "work_permit_entry"
+
+    def test_wp_dd_review_without_agent_still_finds_wp_entry(self) -> None:
+        state = _state(
+            active_agent="",
+            workflow_stage="WP_DD_REVIEW",
+            backend_refs={"sr_id": "10001"},
+        )
+        assert _route_after_sync(state) == "work_permit_entry"
+
 
 # ---------------------------------------------------------------------------
 # _should_open_existing_sr
@@ -175,6 +193,20 @@ class TestShouldOpenExistingSr:
         )
         assert _should_open_existing_sr(state) is False
 
+    def test_false_for_create_work_permit_even_with_sr_id(self) -> None:
+        state = _state(
+            intent="CREATE_WORK_PERMIT_SR",
+            backend_refs={"sr_id": "10001"},
+        )
+        assert _should_open_existing_sr(state) is False
+
+    def test_true_for_approve_work_permit_with_sr_id(self) -> None:
+        state = _state(
+            intent="APPROVE_WORK_PERMIT_SR",
+            backend_refs={"sr_id": "10001"},
+        )
+        assert _should_open_existing_sr(state) is True
+
 
 # ---------------------------------------------------------------------------
 # _route_after_validation
@@ -189,9 +221,11 @@ class TestRouteAfterValidation:
             "lease_code": "LC-001", "lease_id": "LEASE-001", "brand_id": "BR-001",
             "mall": "Test Mall", "brand": "Test Brand", "lease": "Lease A",
             "unit_codes": ["U-01"], "city": "Riyadh", "contracted_area": 150,
+            "already_handovered": "initiate_handover",
             "title": "handover-LC-001-test", "description": "Test",
             "startDate": "2026-07-01", "endDate": "2026-07-03",
             "inspectionTime": "",   # optional — explicitly declined
+            "inspectionEndTime": "",  # optional — explicitly declined
             "inspection_done_by": "FM_MANAGER", "notes": "", "comments": "",
         }
 
@@ -298,12 +332,18 @@ class TestRouteAfterSupervisor:
         assert result == "preview"
 
     def test_unregistered_intent_routes_to_faq_fallback(self) -> None:
-        """A brand-new intent not in any registry falls back to faq_node safely."""
-        state = _state(intent="CREATE_WORK_PERMIT", status="IN_PROGRESS")
-        # CREATE_WORK_PERMIT is not in _SR_ACTION_INTENTS yet (no work permit registered)
+        """A string that is not a registered action intent falls back to faq_node."""
+        state = _state(intent="NOT_A_REGISTERED_INTENT", status="IN_PROGRESS")
         result = _route_after_supervisor(state)
-        # Should fall through to FAQ (safe fallback) since it's not an action intent
         assert result == "faq_node"
+
+    def test_create_work_permit_sr_routes_to_registry(self) -> None:
+        state = _state(intent="CREATE_WORK_PERMIT_SR", status="IN_PROGRESS")
+        assert _route_after_supervisor(state) == "registry"
+
+    def test_approve_work_permit_sr_routes_to_registry(self) -> None:
+        state = _state(intent="APPROVE_WORK_PERMIT_SR", status="IN_PROGRESS")
+        assert _route_after_supervisor(state) == "registry"
 
     def test_waiting_for_user_routes_to_response_generation(self) -> None:
         state = _state(intent="CREATE_RDD_SERVICE_REQUEST", status="WAITING_FOR_USER")
@@ -356,6 +396,10 @@ class TestSRActionIntentsDerived:
     def test_unknown_is_not_action_intent(self) -> None:
         assert "UNKNOWN" not in _SR_ACTION_INTENTS
 
+    def test_work_permit_intents_are_action_intents(self) -> None:
+        assert "CREATE_WORK_PERMIT_SR" in _SR_ACTION_INTENTS
+        assert "APPROVE_WORK_PERMIT_SR" in _SR_ACTION_INTENTS
+
 
 # ---------------------------------------------------------------------------
 # handover_entry_node — CREATE_SR stage pinning
@@ -383,4 +427,40 @@ class TestHandoverEntryStage:
                 "user_message": "update",
             }
         )
-        assert result == {}
+        assert "workflow_stage" not in result
+        assert result.get("status") == "IN_PROGRESS"
+
+
+# ---------------------------------------------------------------------------
+# Work Permit entry / merge routing
+# ---------------------------------------------------------------------------
+
+
+class TestWorkPermitGraphRouting:
+    def test_confirm_routes_to_merge_not_waiting(self) -> None:
+        state = _state(
+            confirmation_status="CONFIRMED",
+            status="WAITING_FOR_USER",
+            workflow_stage="WP_DD_REVIEW",
+            active_agent="work_permit_agent",
+        )
+        assert _route_after_work_permit_entry(state) == "merge_state"
+
+    def test_wp_review_skips_lease_lookup(self) -> None:
+        state = _state(
+            workflow_stage="WP_FM_REVIEW",
+            active_agent="work_permit_agent",
+            collected_data={},
+            selected_lease=None,
+        )
+        assert _route_after_merge(state) == "validation"
+
+    def test_wp_review_validation_goes_to_wp_confirmation(self) -> None:
+        state = _state(
+            active_agent="work_permit_agent",
+            workflow_stage="WP_DD_REVIEW",
+            collected_data={},
+            validation_errors=[],
+            confirmation_status=None,
+        )
+        assert _route_after_validation(state) == "work_permit_confirmation"

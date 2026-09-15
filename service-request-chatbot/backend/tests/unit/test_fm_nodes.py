@@ -107,7 +107,8 @@ class TestFMReviewEntryNode:
         assert result["backend_refs"]["fm_action"] == "approve"
 
     @pytest.mark.asyncio
-    async def test_approve_fm_review_without_docs_asks_upload(self) -> None:
+    async def test_approve_fm_review_without_docs_is_allowed(self) -> None:
+        """No FM document is mandatory — the readiness date alone is the gate."""
         state = _state(
             action_override="approve_fm_review",
             backend_refs={"user_role": "FM_MANAGER", "sr_id": "sr-123"},
@@ -115,8 +116,20 @@ class TestFMReviewEntryNode:
             documents=[],
         )
         result = await fm_review_entry_node(state)
+        assert result["backend_refs"]["fm_action"] == "approve"
+        assert result["status"] != "WAITING_FOR_USER"
+
+    @pytest.mark.asyncio
+    async def test_approve_fm_review_without_the_date_asks_for_it(self) -> None:
+        state = _state(
+            action_override="approve_fm_review",
+            backend_refs={"user_role": "FM_MANAGER", "sr_id": "sr-123"},
+            collected_data={},
+            documents=[],
+        )
+        result = await fm_review_entry_node(state)
         assert result["status"] == "WAITING_FOR_USER"
-        assert "document_requirement" in (result.get("response_decorations") or {})
+        assert "unit readiness date" in result["response_message"].lower()
         assert "fm_action" not in (result.get("backend_refs") or {})
 
     @pytest.mark.asyncio

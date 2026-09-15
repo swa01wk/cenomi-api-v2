@@ -220,3 +220,34 @@ class TestHandedOverRBAC:
         """B2 gap: DD_ENGINEER must NOT have CREATE_HANDED_OVER_SR."""
         dd = ROLE_PERMITTED_INTENTS.get("DD_ENGINEER", frozenset())
         assert "CREATE_HANDED_OVER_SR" not in dd
+
+
+# ---------------------------------------------------------------------------
+# Work Permit intents
+# ---------------------------------------------------------------------------
+
+
+class TestWorkPermitRBAC:
+    def test_mall_manager_can_create_and_approve_wp(self) -> None:
+        mm = ROLE_PERMITTED_INTENTS.get("MALL_MANAGER", frozenset())
+        assert "CREATE_WORK_PERMIT_SR" in mm
+        assert "APPROVE_WORK_PERMIT_SR" in mm
+
+    def test_fm_cannot_create_wp_but_can_approve(self) -> None:
+        fm = ROLE_PERMITTED_INTENTS.get("FM_MANAGER", frozenset())
+        assert "CREATE_WORK_PERMIT_SR" not in fm
+        assert "APPROVE_WORK_PERMIT_SR" in fm
+
+    def test_dd_cannot_create_wp_but_can_approve(self) -> None:
+        dd = ROLE_PERMITTED_INTENTS.get("DD_ENGINEER", frozenset())
+        assert "CREATE_WORK_PERMIT_SR" not in dd
+        assert "APPROVE_WORK_PERMIT_SR" in dd
+
+    def test_operation_executives_can_approve_wp_only(self) -> None:
+        oe = ROLE_PERMITTED_INTENTS.get("OPERATION_EXECUTIVES", frozenset())
+        assert "APPROVE_WORK_PERMIT_SR" in oe
+        assert "CREATE_WORK_PERMIT_SR" not in oe
+
+    def test_wp_intents_in_all_intents(self) -> None:
+        assert "CREATE_WORK_PERMIT_SR" in ALL_INTENTS
+        assert "APPROVE_WORK_PERMIT_SR" in ALL_INTENTS

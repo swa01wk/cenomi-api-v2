@@ -40,7 +40,7 @@ ACTION_PERMISSION_MAP: dict[str, str] = {
     # ── Handover: Read / view ─────────────────────────────────────────────────
     "VIEW_HANDOVER_SR": "VIEW_FIT_OUT_HANDOVER",
 
-    # ── Work Permit: CREATE stage (Mall Manager) ──────────────────────────────
+    # ── Work Permit: CREATE stage (Mall Manager / contractor) ─────────────────
     "CREATE_WORK_PERMIT_SR": "CAN_RAISE_WORK_PERMIT_SR",
 
     # ── Work Permit: Read / view ──────────────────────────────────────────────
@@ -77,6 +77,10 @@ ROLE_PERMISSION_MAP: dict[str, frozenset[str]] = {
         "CAN_FM_REVIEW_HANDOVER_SR",
         "CAN_APPROVE_FM_HANDOVER_SR",
         "VIEW_FIT_OUT_HANDOVER",
+        "VIEW_WORK_PERMIT",
+    }),
+    # Cold L2 Work Permit hop (workflow 6). No create permission.
+    "OPERATION_EXECUTIVES": frozenset({
         "VIEW_WORK_PERMIT",
     }),
     "DD_ENGINEER": frozenset({
@@ -256,6 +260,39 @@ class PermissionService:
     def ensure_can_create_work_permit(self, auth: AuthContext) -> None:
         """Assert the caller may raise a new Work Permit Service Request."""
         self.check("CREATE_WORK_PERMIT_SR", auth)
+
+    def ensure_can_approve_work_permit(
+        self,
+        auth: AuthContext,
+        *,
+        workflow_stage: str | None = None,
+        in_progress_roles: set[str] | frozenset[str] | None = None,
+    ) -> None:
+        """Assert the caller may PATCH approve/reject the current WP hop.
+
+        Platform rule: the user's role must match an IN_PROGRESS operation's
+        ``assigned_role``. There is no ``APPROVE_SR_WORK_PERMIT`` permission.
+        """
+        from app.agents.schemas.work_permit_schema import WP_REVIEW_ROLES, normalize_wp_role
+
+        expanded: set[str] = {r.upper() for r in auth.roles}
+        for role_name in list(expanded):
+            expanded |= {p.upper() for p in ROLE_PERMISSION_MAP.get(role_name, frozenset())}
+        if "ADMIN" in expanded or auth.is_global_admin:
+            return
+
+        allowed: set[str] = set()
+        if in_progress_roles:
+            allowed = {normalize_wp_role(r) for r in in_progress_roles}
+        elif workflow_stage:
+            allowed = set(WP_REVIEW_ROLES.get(workflow_stage or "", frozenset()))
+
+        if expanded & allowed:
+            return
+        raise PermissionDeniedError(
+            action="APPROVE_WORK_PERMIT_SR",
+            required_role="IN_PROGRESS_ASSIGNED_ROLE",
+        )
 
     def ensure_can_submit_sales_data(self, auth: AuthContext) -> None:
         """Assert the caller may POST CSV / manual sales data."""

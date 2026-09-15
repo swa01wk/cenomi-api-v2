@@ -17,6 +17,13 @@ from uuid import UUID
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.observability.analytics_constants import (
+    EVENT_SR_LIFECYCLE_COMPLETED,
+    EVENT_SR_SUBMITTED,
+    TERMINAL_WORKFLOW_STAGES,
+    TOOL_TYPE_SR_CREATE,
+)
+from app.observability.analytics_emit import emit_analytics
 from app.observability.cost_calculator import calculate_llm_cost
 from app.observability.repositories.llm_call_repo import LLMCallRepository
 from app.observability.repositories.run_repo import RunRepository
@@ -56,6 +63,8 @@ class TraceManager:
         # Initialized in start_trace(), cleared by pop() in finish_trace()/fail_trace().
         self._trace_token_totals: dict[UUID, int] = {}
         self._trace_cost_totals: dict[UUID, Decimal] = {}
+        # trace_id → (session_id, user_id) for product-event emission
+        self._trace_context: dict[UUID, tuple[UUID, UUID]] = {}
 
     # ------------------------------------------------------------------
     # Trace lifecycle
@@ -87,6 +96,7 @@ class TraceManager:
             # Initialize per-trace accumulators for this turn
             self._trace_token_totals[row.id] = 0
             self._trace_cost_totals[row.id] = Decimal("0")
+            self._trace_context[row.id] = (_to_uuid(session_id), _to_uuid(user_id))
             log.info("trace.started", trace_id=str(row.id))
             return row.id
         except Exception:
@@ -107,6 +117,7 @@ class TraceManager:
         workflow_stage_after: str | None = None,
         total_token_count: int | None = None,
         estimated_cost: Decimal | None = None,
+        answer_status: str | None = None,
     ) -> None:
         """Mark a trace as successfully completed."""
         try:
@@ -130,6 +141,7 @@ class TraceManager:
                 # Explicit caller values take precedence; fall back to accumulators
                 total_token_count=total_token_count or accumulated_tokens,
                 estimated_cost=estimated_cost or accumulated_cost,
+                answer_status=answer_status,
             )
             if final_state:
                 await self.capture_state_snapshot(
@@ -144,6 +156,8 @@ class TraceManager:
                 status=status,
                 latency_ms=latency_ms,
             )
+            await self._maybe_emit_lifecycle(trace_id, final_state, workflow_stage_after)
+            self._trace_context.pop(trace_id, None)
         except Exception:
             log.exception("trace_manager.finish_trace.failed", trace_id=str(trace_id))
 
@@ -163,6 +177,7 @@ class TraceManager:
             # Clean up accumulators — cost is not written for failed traces
             self._trace_token_totals.pop(trace_id, None)
             self._trace_cost_totals.pop(trace_id, None)
+            self._trace_context.pop(trace_id, None)
             await self._trace_repo.complete(
                 trace_id,
                 status="FAILED",
@@ -171,6 +186,7 @@ class TraceManager:
                 intent=intent,
                 workflow_stage_before=workflow_stage_before,
                 total_latency_ms=latency_ms,
+                answer_status="FAILED",
             )
             if final_state:
                 await self.capture_state_snapshot(
@@ -344,6 +360,8 @@ class TraceManager:
                 latency_ms=latency_ms,
                 error_message=error_message,
             )
+            if success and tool_type == TOOL_TYPE_SR_CREATE:
+                await self._maybe_emit_sr_submitted(trace_id, response_payload)
         except Exception:
             log.exception(
                 "trace_manager.capture_tool_call.failed",
@@ -433,6 +451,55 @@ class TraceManager:
         """Return the most recently started trace_id, or ``None``."""
         return self._active_trace_id
 
+    async def _maybe_emit_sr_submitted(
+        self, trace_id: UUID, response_payload: dict[str, Any] | None
+    ) -> None:
+        ctx = self._trace_context.get(trace_id)
+        if ctx is None:
+            return
+        session_id, user_id = ctx
+        sr_id = _payload_sr_id(response_payload)
+        await emit_analytics(
+            self._session,
+            user_id=user_id,
+            session_id=session_id,
+            event_name=EVENT_SR_SUBMITTED,
+            trace_id=trace_id,
+            properties={"sr_id": sr_id} if sr_id else {},
+            once=True,
+            dedupe_sr_id=sr_id,
+        )
+
+    async def _maybe_emit_lifecycle(
+        self,
+        trace_id: UUID,
+        final_state: dict[str, Any] | None,
+        workflow_stage_after: str | None,
+    ) -> None:
+        ctx = self._trace_context.get(trace_id)
+        if ctx is None:
+            return
+        state = final_state or {}
+        stage = workflow_stage_after or state.get("workflow_stage")
+        ui = state.get("response_ui") or {}
+        complete = bool(ui.get("workflow_complete")) or stage in TERMINAL_WORKFLOW_STAGES
+        if not complete:
+            return
+        session_id, user_id = ctx
+        refs = state.get("backend_refs") or {}
+        sr_id = refs.get("sr_id") or state.get("sr_id")
+        sr_id_str = str(sr_id) if sr_id else None
+        await emit_analytics(
+            self._session,
+            user_id=user_id,
+            session_id=session_id,
+            event_name=EVENT_SR_LIFECYCLE_COMPLETED,
+            trace_id=trace_id,
+            properties={"sr_id": sr_id_str, "workflow_stage": stage},
+            once=True,
+            dedupe_sr_id=sr_id_str,
+        )
+
 
 # ---------------------------------------------------------------------------
 # Internal helpers
@@ -440,3 +507,16 @@ class TraceManager:
 
 def _to_uuid(value: str | UUID) -> UUID:
     return value if isinstance(value, UUID) else UUID(str(value))
+
+
+def _payload_sr_id(payload: dict[str, Any] | None) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+    for key in ("sr_id", "id", "serviceRequestId", "service_request_id"):
+        value = payload.get(key)
+        if value:
+            return str(value)
+    nested = payload.get("data")
+    if isinstance(nested, dict):
+        return _payload_sr_id(nested)
+    return None

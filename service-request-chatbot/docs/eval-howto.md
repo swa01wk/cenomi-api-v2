@@ -9,7 +9,7 @@ No Docker orchestration needed for the two-terminal dev workflow.
 
 | Tier | Runner | Scenarios | Scope | Typical runtime |
 |------|--------|-----------|-------|-----------------|
-| **0** | `run_eval.py` + `run_lifecycle_eval.py` | S201–S202 + L203 | Smoke — fast sanity gate | ~60 s |
+| **0** | `run_eval.py` + `run_lifecycle_eval.py` | S201–S207 + L203 | Smoke — fast sanity gate | ~60 s |
 | **1** | `run_eval.py` | S1–S15 | Core CREATE_SR happy path | ~5 min |
 | **2** | `run_eval.py` | S16–S33, S60–S64 | Edge — corrections, multi-field, API, lease eligibility | ~8 min |
 | **3** | `run_eval.py` | S34–S59 | Battle — issues 1–7 from `agent_ui_fixes.md` | ~12 min |
@@ -83,6 +83,9 @@ cd "/Users/swa/Desktop/cenomi 3/cenomi-api-v2/service-request-chatbot"
 # --- Fitout confirm only (~15 min) ---
 ./run_agent_eval.sh --no-start --tier 8
 
+# --- Work Permit create + review hops (~15 min) ---
+./run_agent_eval.sh --no-start --tier 9
+
 # --- Everything (~90 min) ---
 ./run_agent_eval.sh --no-start --tier all
 
@@ -148,13 +151,22 @@ python -m tests.eval.run_lifecycle_eval --scenarios 134 --verbose
 | S34–S59 | `run_eval.py` | Agent fix battle tests (Tier 3) |
 | S60–S62 | `run_eval.py` | Additional coverage (Tier 2) |
 | S70–S83 | `run_eval.py` | Fitout Confirm — FOS/END/TRADING yes/no branch (Tier 8) |
-| S201–S202 | `run_eval.py` | Smoke scenarios (Tier 0) |
+| S201–S207 | `run_eval.py` | Smoke scenarios (Tier 0), including Work Permit S207 |
+| S240–S244 | `run_eval.py` | Work Permit create / intent / RBAC (Tier 9) |
 | L134–L139 | `run_lifecycle_eval.py` | FM\_REVIEW phase (Tier 4) |
 | L140–L145 | `run_lifecycle_eval.py` | RDD\_REVIEW phase (Tier 5) |
 | L146–L172 | `run_lifecycle_eval.py` | Full lifecycle (Tier 6) |
 | L203 | `run_lifecycle_eval.py` | FM smoke scenario (Tier 0) |
+| L240–L245 | `run_lifecycle_eval.py` | Work Permit review hops (Tier 9) |
 
-Lifecycle IDs are in the 130–203 range to avoid collision with regular scenario IDs.
+```bash
+# Work Permit create + review hops
+./run_agent_eval.sh --no-start --tier 9
+python -m tests.eval.run_eval --tier 9
+python -m tests.eval.run_lifecycle_eval --tier 9
+```
+
+Lifecycle IDs 240–245 are Work Permit review hops (item 3638).
 
 ---
 

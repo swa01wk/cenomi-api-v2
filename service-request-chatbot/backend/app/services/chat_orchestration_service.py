@@ -40,6 +40,18 @@ from app.types.chat import AuthContext
 get_compiled_graph = get_compiled_help_graph
 
 
+def _is_on_a_service_request_form(msp_context: dict[str, Any] | None) -> bool:
+    """True when the page context names a specific Service Request type.
+
+    The chat widget publishes the SR form's own help labels, so a turn sent
+    from a Service Request page already says which SR the user is working on.
+    Their reviewer inbox is a different job and does not belong on top of it.
+    """
+    if not isinstance(msp_context, dict):
+        return False
+    return bool(str(msp_context.get("help_subcategory") or "").strip())
+
+
 def _build_auth_context(role: str | None) -> AuthContext:
     """Build an AuthContext from a role string using the ROLE_PERMISSION_MAP.
 
@@ -64,6 +76,13 @@ from app.db.models import ChatSession
 from app.db.repositories.audit_log_repo import AuditLogRepository
 from app.db.repositories.chat_message_repo import ChatMessageRepository
 from app.db.repositories.chat_session_repo import ChatSessionRepository
+from app.observability.analytics_constants import (
+    EVENT_FIELD_CORRECTED,
+    EVENT_FLOW_CANCELLED,
+    EVENT_SESSION_STARTED,
+    FLOW_CANCEL_ACTIONS,
+)
+from app.observability.analytics_emit import emit_analytics
 from app.observability.trace_manager import TraceManager
 
 log = structlog.get_logger(__name__)
@@ -144,6 +163,10 @@ class ChatTurnState:
     sr_id: str | None = None
     action_result: str | None = None  # "success" | "failed" | None
     confirmation_status: str | None = None
+    # "guided" | "open" — whether the user asked the assistant to drive the
+    # form. The client locks or unlocks the form on this; it cannot infer the
+    # mode from the active field, which is named in both modes.
+    guided_tour: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -156,6 +179,9 @@ class ChatTurnResult:
     trace_id: UUID | None
     draft_preview: dict[str, Any] | None = None
     faq_sources: list[dict] = field(default_factory=list)
+    # Persisted chat_messages.id of the assistant reply — the durable
+    # per-message identity clients use to attach feedback.
+    assistant_message_id: UUID | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -285,13 +311,43 @@ class ChatOrchestrationService:
         # 1. Load or create session ----------------------------------------
         chat_session = await self._load_or_create_session(session_id, user_id)
         session_uuid = chat_session.id
+        is_new_session = session_id is None or chat_session.id != session_id
 
         log.info(
             "chat.turn_started",
             session_id=str(session_uuid),
             user_id=str(user_id),
-            is_new_session=(session_id is None or chat_session.id != session_id),
+            is_new_session=is_new_session,
         )
+
+        try:
+            await self._session_repo.touch(session_uuid)
+        except Exception:
+            log.exception("analytics.session_touch.failed", session_id=str(session_uuid))
+
+        if is_new_session:
+            await emit_analytics(
+                self._db,
+                user_id=user_id,
+                session_id=session_uuid,
+                event_name=EVENT_SESSION_STARTED,
+            )
+        if corrected_fields:
+            await emit_analytics(
+                self._db,
+                user_id=user_id,
+                session_id=session_uuid,
+                event_name=EVENT_FIELD_CORRECTED,
+                properties={"keys": sorted(str(k) for k in corrected_fields.keys())},
+            )
+        if action in FLOW_CANCEL_ACTIONS:
+            await emit_analytics(
+                self._db,
+                user_id=user_id,
+                session_id=session_uuid,
+                event_name=EVENT_FLOW_CANCELLED,
+                properties={"workflow_stage": chat_session.workflow_stage},
+            )
 
         # 2. Start trace -------------------------------------------------------
         trace_id = await self._trace_manager.start_trace(
@@ -421,10 +477,25 @@ class ChatOrchestrationService:
             user_role = derive_user_role(auth_context)
             if user_role:
                 backend_refs["user_role"] = user_role
-            if not sr_id and notification_ref is None and not chat_session.active_agent:
+            if (
+                not sr_id
+                and notification_ref is None
+                and not chat_session.active_agent
+                and not _is_on_a_service_request_form(msp_context)
+            ):
                 # Only show the Handover reviewer inbox when there is no active
                 # workflow.  Fitout/Trading confirmation agents in CREATE_SR stage
                 # have no sr_id yet but must not see the Handover SR picker.
+                #
+                # ``chat_session.active_agent`` is empty on the FIRST turn of a
+                # new session, so that check alone let the inbox through exactly
+                # when it does the most damage: an RDD Project Manager opening
+                # the Fitout Start Confirmation form and asking for one got the
+                # correct question plus five pending *handover* SRs underneath
+                # it, and tapping one moved the session into that handover —
+                # which then asked for the handover report's guideline link.
+                # Being on a Service Request form is the answer: that page says
+                # what they came to do, and it is not triage their queue.
                 inbox_deco = build_inbox_decorations(auth_context)
                 if inbox_deco:
                     initial_state["response_decorations"] = inbox_deco
@@ -519,6 +590,7 @@ class ChatOrchestrationService:
         graph_status: str = result_state.get("status") or "IN_PROGRESS"
 
         # 8. Finish trace -------------------------------------------------------
+        answer_status = _classify_answer_status(result_state, graph_status)
         if trace_id:
             await self._trace_manager.finish_trace(
                 trace_id=trace_id,
@@ -530,12 +602,13 @@ class ChatOrchestrationService:
                 sub_category=result_state.get("sub_category"),
                 workflow_stage_before=chat_session.workflow_stage,
                 workflow_stage_after=result_state.get("workflow_stage"),
+                answer_status=answer_status,
             )
 
         # 9. Persist assistant reply -------------------------------------------
         faq_sources: list[dict] = result_state.get("faq_sources") or []
         assistant_msg_time = datetime.now(timezone.utc)
-        await self._message_repo.create(
+        assistant_msg = await self._message_repo.create(
             session_id=session_uuid,
             role="assistant",
             content=response_message,
@@ -617,6 +690,15 @@ class ChatOrchestrationService:
             if cleared_fields:
                 draft_preview["cleared_fields"] = cleared_fields
 
+        # Published on every turn so the form knows whether to lock itself.
+        from app.agents.services import guided_tour_service
+
+        guided_tour_mode: str | None = (
+            guided_tour_service.mode(collected)
+            if guided_tour_service.answered(collected)
+            else None
+        )
+
         decorations: dict[str, Any] = dict(result_state.get("response_decorations") or {})
         response_ui = finalize_response_ui(
             response_ui,
@@ -640,10 +722,12 @@ class ChatOrchestrationService:
                 sr_id=sr_id,
                 action_result=action_result,
                 confirmation_status=result_state.get("confirmation_status"),
+                guided_tour=guided_tour_mode,
             ),
             trace_id=trace_id,
             draft_preview=draft_preview,
             faq_sources=faq_sources,
+            assistant_message_id=assistant_msg.id,
         )
 
     # ------------------------------------------------------------------
@@ -724,6 +808,30 @@ class ChatOrchestrationService:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _classify_answer_status(
+    result_state: dict[str, Any], graph_status: str
+) -> str:
+    """Classify a completed turn's outcome for analytics.
+
+    Precedence: an explicit ``answer_status`` set by an answer-producing node
+    (faq_node judges its own grounding) wins; otherwise fall back to turn-level
+    heuristics.  Failed turns never reach this — ``fail_trace`` stamps FAILED.
+    """
+    explicit = result_state.get("answer_status")
+    if explicit in ("ANSWERED", "PARTIAL", "UNANSWERED", "FAILED"):
+        return explicit
+
+    if graph_status == "FAILED":
+        return "FAILED"
+
+    # The supervisor could not resolve what the user wants — the turn ends in
+    # a clarification ask, which is a non-answer from the user's perspective.
+    if (result_state.get("intent") or "").upper() == "UNKNOWN":
+        return "UNANSWERED"
+
+    return "ANSWERED"
 
 
 def user_id_to_uuid(user_id: str) -> UUID:

@@ -297,7 +297,13 @@ async def test_rdd_asks_document_status_after_meeting_report_upload() -> None:
 @pytest.mark.asyncio
 async def test_rdd_rejected_report_skips_the_status_question() -> None:
     """A Rejected upload is auto-DISAPPROVED by merge_state_node, so asking
-    would only offer choices that get overwritten."""
+    would only offer choices that get overwritten.
+
+    It also skips the handover dates. A rejection ends the handover; actual
+    handover, fit-out start and fit-out end describe one that went ahead, so
+    the flow used to walk the reviewer through three dates that had no meaning
+    for the report they had just filed and would never be written.
+    """
     from app.agents.graph.nodes.shared.merge_state_node import merge_state_node
     from app.agents.graph.nodes.shared.missing_field_node import missing_field_node
 
@@ -326,7 +332,10 @@ async def test_rdd_rejected_report_skips_the_status_question() -> None:
             "backend_refs": {"sr_id": "8426"},
         }
     )
-    assert result["response_ui"]["field"] == "actual_handover_date"
+    # Nothing left to ask: the status is settled and the dates do not apply.
+    assert result.get("missing_fields") == []
+    assert result.get("response_ui") is None
+    assert result.get("status") == "IN_PROGRESS"
 
 
 def test_rdd_status_chips_bypass_re_extraction() -> None:
