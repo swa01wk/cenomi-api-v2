@@ -105,3 +105,65 @@ class TestDeletingTheReport:
         """Recomputed from the documents every turn, so a delete reopens it."""
         assert _keys(_card([_doc(MEETING)])) == [MEETING, OTHER]
         assert _keys(_card([])) == [MEETING, REJECTED, OTHER]
+
+
+# ---------------------------------------------------------------------------
+# The rebuilt card has to survive the turn that answers the upload
+# ---------------------------------------------------------------------------
+
+
+class TestTheRebuiltCardReachesTheClient:
+    """Seen live: documents already held the Meeting Report, yet the turn
+    carried chips only — so the client kept the card it had, the Rejected
+    report stayed on it, and both could be uploaded."""
+
+    def test_a_question_with_its_own_chips_still_carries_the_card(self) -> None:
+        from app.agents.graph.nodes.shared.missing_field_node import (
+            _carry_sr_decorations,
+        )
+
+        card = _card([_doc(MEETING)])
+        own = {"suggestions": {"kind": "labeled_options", "options": []}}
+        carried = _carry_sr_decorations(own, {"document_requirement": card})
+
+        assert carried["suggestions"] is own["suggestions"]
+        assert _keys(carried["document_requirement"]) == [MEETING, OTHER]
+
+    def test_the_question_keeps_its_own_card_when_it_has_one(self) -> None:
+        from app.agents.graph.nodes.shared.missing_field_node import (
+            _carry_sr_decorations,
+        )
+
+        own = {"document_requirement": _card([])}
+        carried = _carry_sr_decorations(own, {"document_requirement": _card([_doc(MEETING)])})
+        assert _keys(carried["document_requirement"]) == [MEETING, REJECTED, OTHER]
+
+    def test_nothing_inherited_changes_nothing(self) -> None:
+        from app.agents.graph.nodes.shared.missing_field_node import (
+            _carry_sr_decorations,
+        )
+
+        own = {"suggestions": {"kind": "labeled_options", "options": []}}
+        assert _carry_sr_decorations(own, None) == own
+        assert _carry_sr_decorations(own, {"promote_preview": True}) == own
+
+    def test_the_card_rides_the_question_to_the_client(self) -> None:
+        """End to end: filtered rows reach the client as refresh_card."""
+        from app.services.response_ui_finalize import finalize_response_ui
+        from app.agents.graph.nodes.shared.missing_field_node import (
+            _carry_sr_decorations,
+        )
+
+        deco = _carry_sr_decorations(
+            {"suggestions": {"kind": "labeled_options", "options": []}},
+            {"document_requirement": _card([_doc(MEETING)])},
+        )
+        ui = finalize_response_ui(
+            {"type": "text_question", "field": "actual_handover_date"},
+            deco,
+            draft_preview=None,
+            response_message="What is the actual handover date?",
+        )
+        refreshed = ui["refresh_card"]
+        assert [d["key"] for d in refreshed["documents"]] == [MEETING, OTHER]
+        assert REJECTED not in refreshed["uploadContext"]["allowedDocumentTypes"]

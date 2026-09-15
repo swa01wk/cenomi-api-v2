@@ -192,6 +192,34 @@ _NON_FIELD_VALIDATION_TYPES: frozenset[str] = frozenset({
 _STAGE_ACTION_SUGGESTION_KIND = "labeled_options"
 
 
+# Decorations that belong to the SR rather than to the question being asked,
+# so a question that brings chips of its own still carries them.
+_SR_DECORATION_KEYS: tuple[str, ...] = ("document_requirement",)
+
+
+def _carry_sr_decorations(
+    own: dict[str, Any],
+    inherited: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Keep the SR's own decorations when a question replaces the rest.
+
+    A question's chips replace the inherited decorations, which is how the
+    stage action ("Approve Review") is kept from rendering as the answer to
+    "Please share the unit readiness date". The upload card went with them —
+    and sr_status_sync rebuilds that card on every turn, so the turn answering
+    an upload is exactly the one that carried the rebuilt card. Dropped, the
+    client kept the card it had: after the Handover Meeting Report was
+    uploaded, the Rejected Fitout and Handover Report stayed on it, in the rows
+    and in the attach dropdown, and both could be uploaded.
+    """
+    carried = dict(own)
+    for key in _SR_DECORATION_KEYS:
+        value = (inherited or {}).get(key)
+        if value is not None and key not in carried:
+            carried[key] = value
+    return carried
+
+
 _FITOUT_CONFIRM_AGENTS: frozenset[str] = frozenset({
     "rdd_fitout_start_agent",
     "rdd_fitout_end_agent",
@@ -839,6 +867,28 @@ def _fitout_card_refresh(state: dict[str, Any]) -> dict[str, Any] | None:
 
 @trace_node("missing_field", "AGENT")
 async def missing_field_node(state: ServiceRequestState) -> dict[str, Any]:
+    """Ask for the next missing field, keeping the SR's own decorations.
+
+    A question that brings chips of its own replaces the inherited decorations
+    — on purpose, so a stage action never renders as the answer. The upload
+    card is not the question's, though: sr_status_sync rebuilds it on every
+    turn, and on the turn answering an upload it is the only thing that tells
+    the client the other report of the either-or pair has left the card. It is
+    carried here, once, whichever path built the question — carrying it in a
+    single branch missed the RDD "Report outcome and milestone dates" question,
+    which returns earlier, and the Rejected report stayed offered beside the
+    uploaded Meeting Report.
+    """
+    updates = await _ask_next_missing_field(state)
+    if "response_decorations" in updates:
+        updates["response_decorations"] = _carry_sr_decorations(
+            updates["response_decorations"],
+            state.get("response_decorations"),
+        )
+    return updates
+
+
+async def _ask_next_missing_field(state: ServiceRequestState) -> dict[str, Any]:
     """Ask for exactly one missing required field per turn.
 
     Also handles blocking validation errors (e.g. invalid date range) by asking
