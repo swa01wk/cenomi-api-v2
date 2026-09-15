@@ -23,6 +23,7 @@ import logging
 from datetime import date, datetime
 from typing import Any
 
+from app.agents.schemas.fitout_confirm_schema import SUBCAT_CONFIG as FITOUT_SUBCAT_CONFIG
 from app.agents.schemas.handover_schema import (
     ALL_DOCUMENT_TYPES,
     FM_ALLOWED_DOCUMENTS,
@@ -489,6 +490,53 @@ def validate_handed_over_dates(data: dict[str, Any]) -> list[ValidationResult]:
         )
 
     return results
+
+
+def validate_fitout_confirm_date_order(
+    sub_category: str | None, data: dict[str, Any]
+) -> list[ValidationResult]:
+    """A confirmed date may not fall before the milestone it follows.
+
+    Fitout Start on or after the Actual Handover, Fitout Complete on or after
+    the Fitout Start, Trading on or after the Fitout End — the rules the main
+    form enforces (dateAfterHandover / dateAfterFitoutStart /
+    dateAfterFitoutEnd). The assistant had none, and created a Fitout Start
+    confirmation whose start (27/08/2026) fell before the actual handover
+    (12/10/2026).
+
+    The prior milestone comes from the lease: it is read from the schema's
+    readonly key and, failing that, from the plain key the lease hydrates.
+    Equal dates are allowed. A pair with a side missing or unreadable is not
+    checked here.
+    """
+    cfg = FITOUT_SUBCAT_CONFIG.get(sub_category or "") or {}
+    field = cfg.get("actual_date_field")
+    prior_field = cfg.get("prior_milestone_field")
+    if not field or not prior_field:
+        return []
+    actual_raw = data.get(field)
+    prior_raw = data.get(prior_field) or data.get(prior_field.removesuffix("_readonly"))
+    if actual_raw in (None, "") or prior_raw in (None, ""):
+        return []
+    actual = _parse_date(actual_raw, field)
+    prior = _parse_date(prior_raw, prior_field)
+    if actual is None or prior is None or actual >= prior:
+        return []
+    earliest = prior.strftime("%d/%m/%Y")
+    return [
+        _result(
+            field=field,
+            validation_type="fitout_confirm_date_order",
+            passed=False,
+            message=(
+                f"The {cfg.get('actual_date_label', field)} you gave "
+                f"({actual.strftime('%d/%m/%Y')}) is before the "
+                f"{cfg.get('prior_milestone_label', prior_field)} ({earliest}). "
+                f"Please enter a date on or after {earliest}, in DD/MM/YYYY format."
+            ),
+            blocking=True,
+        )
+    ]
 
 
 def validate_rdd_date_order(data: dict[str, Any]) -> list[ValidationResult]:

@@ -336,3 +336,54 @@ class TestWindowSanity:
             },
         )
         assert suggested["fitout_end_date"] == "2026-11-20"
+
+
+def _card_after_meeting_report() -> dict[str, Any]:
+    """The card sr_status_sync builds once the Meeting Report is uploaded."""
+    return {
+        "documents": [
+            {"key": "DR_SR_HANDOVER_REPORT", "status": "uploaded"},
+            {"key": "SR_HANDOVER_OTHER", "status": "missing"},
+        ],
+        "uploadContext": {
+            "allowedDocumentTypes": ["DR_SR_HANDOVER_REPORT", "SR_HANDOVER_OTHER"],
+        },
+    }
+
+
+class TestTheUploadCardSurvives:
+    """Live: the rebuilt card (Rejected already gone) was wiped by the very
+    question that answers the upload, so the client kept offering Rejected."""
+
+    @pytest.mark.asyncio
+    async def test_combined_question_carries_the_card(
+        self, short_flow_on: None, no_platform_db: None
+    ) -> None:
+        state = _state(_rdd_ready())
+        state["response_decorations"] = {
+            "document_requirement": _card_after_meeting_report(),
+            "suggestions": {"kind": "labeled_options", "options": []},
+        }
+        result = await missing_field_node(state)
+
+        assert "Report outcome and milestone dates" in result["response_message"]
+        card = result["response_decorations"]["document_requirement"]
+        assert [d["key"] for d in card["documents"]] == [
+            "DR_SR_HANDOVER_REPORT",
+            "SR_HANDOVER_OTHER",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_single_outcome_question_carries_the_card(self) -> None:
+        state = _state(_rdd_ready())
+        state["response_decorations"] = {
+            "document_requirement": _card_after_meeting_report(),
+        }
+        result = await missing_field_node(state)
+
+        assert result["response_ui"]["field"] == "document_status"
+        # Either the node carried it, or it set no decorations and the card
+        # stays in state untouched — both reach the client.
+        decorations = result.get("response_decorations")
+        if decorations is not None:
+            assert "document_requirement" in decorations

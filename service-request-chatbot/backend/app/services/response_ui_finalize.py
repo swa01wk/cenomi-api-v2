@@ -34,6 +34,24 @@ def finalize_response_ui(
             "uploadContext": doc_req.get("uploadContext", {}),
             "message": result.get("message") or response_message,
         }
+    elif doc_req and not result.get("refresh_card"):
+        # This turn asks a question (or shows another card), so the rebuilt
+        # upload card cannot be its UI — but the card already on screen is out
+        # of date, and an upload is answered by exactly such a turn. Once one
+        # report of the either-or pair is uploaded the other leaves the card;
+        # dropped here, the client kept the card it had and went on offering
+        # the report that was no longer on it, so both could be uploaded.
+        # Ride along so the client swaps the card in place. An existing
+        # refresh_card (the fitout confirmation card) is left alone: it belongs
+        # to the question this turn is asking.
+        result = {
+            **result,
+            "refresh_card": {
+                "type": "document_requirement",
+                "documents": doc_req.get("documents", []),
+                "uploadContext": doc_req.get("uploadContext", {}),
+            },
+        }
 
     if deco.get("promote_preview") and draft_preview and result.get("type") == "message":
         promoted = dict(draft_preview)

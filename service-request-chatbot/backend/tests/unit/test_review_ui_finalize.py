@@ -429,3 +429,72 @@ def test_finalize_skips_suggestions_on_confirmation_card() -> None:
         response_message="Confirm?",
     )
     assert "suggestions" not in ui
+
+
+# ---------------------------------------------------------------------------
+# The rebuilt upload card rides a question as refresh_card (issue 28)
+# ---------------------------------------------------------------------------
+
+
+def _doc_req_deco() -> dict:
+    """Decorations as they look once the Meeting Report has been uploaded."""
+    return {
+        "document_requirement": {
+            "documents": [
+                {"key": "DR_SR_HANDOVER_REPORT", "status": "uploaded"},
+                {"key": "SR_HANDOVER_OTHER", "status": "missing"},
+            ],
+            "uploadContext": {
+                "session_id": "sess-1",
+                "sr_id": "321026",
+                "allowedDocumentTypes": [
+                    "DR_SR_HANDOVER_REPORT",
+                    "SR_HANDOVER_OTHER",
+                ],
+            },
+        }
+    }
+
+
+def test_finalize_sends_rebuilt_upload_card_with_a_question() -> None:
+    """Regression: the upload is answered by the next question, and the card
+    was dropped — so the client went on offering the Rejected report."""
+    ui = finalize_response_ui(
+        {"type": "text_question", "field": "actual_handover_date"},
+        _doc_req_deco(),
+        draft_preview=None,
+        response_message="What is the actual handover date?",
+    )
+    assert ui["type"] == "text_question"
+    card = ui["refresh_card"]
+    assert card["type"] == "document_requirement"
+    assert [d["key"] for d in card["documents"]] == [
+        "DR_SR_HANDOVER_REPORT",
+        "SR_HANDOVER_OTHER",
+    ]
+    assert "SR_REJECTED_HANDOVER_REPORT" not in card["uploadContext"][
+        "allowedDocumentTypes"
+    ]
+
+
+def test_finalize_still_promotes_the_card_onto_a_plain_message() -> None:
+    ui = finalize_response_ui(
+        {"type": "message"},
+        _doc_req_deco(),
+        draft_preview=None,
+        response_message="Please upload the report.",
+    )
+    assert ui["type"] == "document_requirement"
+    assert "refresh_card" not in ui
+
+
+def test_finalize_keeps_a_refresh_card_the_turn_already_set() -> None:
+    """The fitout card belongs to the question being asked; it wins."""
+    own = {"type": "confirmation_card", "fields": []}
+    ui = finalize_response_ui(
+        {"type": "text_question", "field": "delay_reason", "refresh_card": own},
+        _doc_req_deco(),
+        draft_preview=None,
+        response_message="Why the delay?",
+    )
+    assert ui["refresh_card"] is own
