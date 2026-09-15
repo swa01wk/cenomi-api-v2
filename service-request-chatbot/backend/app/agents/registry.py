@@ -60,7 +60,43 @@ SERVICE_REQUEST_AGENT_REGISTRY: dict[str, dict[str, AgentConfig]] = {
         },
     },
     "WORK_PERMIT": {
+        # Legacy registry key used by supervisor CREATE before subtype is known.
         "WORK_PERMIT": {
+            "agent_name": "work_permit_agent",
+            "display_name": "Work Permit Agent",
+            "schema_key": "work_permit_service_request_schema",
+        },
+        "CONSTRUCTION_HOT": {
+            "agent_name": "work_permit_agent",
+            "display_name": "Work Permit Agent",
+            "schema_key": "work_permit_service_request_schema",
+        },
+        "CONSTRUCTION_COLD": {
+            "agent_name": "work_permit_agent",
+            "display_name": "Work Permit Agent",
+            "schema_key": "work_permit_service_request_schema",
+        },
+        "CONSTRUCTION_ROOF_ACCESS": {
+            "agent_name": "work_permit_agent",
+            "display_name": "Work Permit Agent",
+            "schema_key": "work_permit_service_request_schema",
+        },
+        "MAINTENANCE_HOT": {
+            "agent_name": "work_permit_agent",
+            "display_name": "Work Permit Agent",
+            "schema_key": "work_permit_service_request_schema",
+        },
+        "MAINTENANCE_COLD": {
+            "agent_name": "work_permit_agent",
+            "display_name": "Work Permit Agent",
+            "schema_key": "work_permit_service_request_schema",
+        },
+        "MAINTENANCE_ROOF_ACCESS": {
+            "agent_name": "work_permit_agent",
+            "display_name": "Work Permit Agent",
+            "schema_key": "work_permit_service_request_schema",
+        },
+        "OPERATIONS": {
             "agent_name": "work_permit_agent",
             "display_name": "Work Permit Agent",
             "schema_key": "work_permit_service_request_schema",

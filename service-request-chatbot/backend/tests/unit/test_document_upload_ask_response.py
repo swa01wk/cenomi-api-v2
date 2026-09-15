@@ -1,7 +1,7 @@
 """Unit tests — build_document_upload_ask_response and is_fm_review_ready.
 
 Covers additions to review_decorations_service.py introduced in staging:
-- is_fm_review_ready()         public readiness gate (date + ≥1 FM doc)
+- is_fm_review_ready()         public readiness gate (unit readiness date)
 - build_document_upload_ask_response()  WAITING_FOR_USER payload with correct
                                message variant and upload card for FM / RDD.
 """
@@ -66,11 +66,19 @@ def _rdd_state(
 
 
 class TestIsFmReviewReady:
+    """The readiness date is the only thing FM approval waits on.
+
+    All three FM documents are optional — the upload card marks every row
+    ``required: False`` — so a reviewer with nothing to attach must still be
+    able to approve. Readiness used to also demand one FM document, which left
+    that reviewer looping on "Please upload at least one FM document".
+    """
+
     def test_false_when_no_date_no_doc(self) -> None:
         assert not is_fm_review_ready({}, [])
 
-    def test_false_when_date_but_no_doc(self) -> None:
-        assert not is_fm_review_ready({"unit_readiness_date": "2026-08-10"}, [])
+    def test_true_when_date_but_no_doc(self) -> None:
+        assert is_fm_review_ready({"unit_readiness_date": "2026-08-10"}, [])
 
     def test_false_when_doc_but_no_date(self) -> None:
         assert not is_fm_review_ready({}, [_CHECKLIST_DOC])
@@ -91,13 +99,13 @@ class TestIsFmReviewReady:
         """Fix 2: SR_COP_CHECKLIST_OTHER is the valid FM 'other' type."""
         assert is_fm_review_ready({"unit_readiness_date": "2026-08-10"}, [_COP_CHECKLIST_DOC])
 
-    def test_false_with_rdd_other_doc_and_date(self) -> None:
-        """Fix 2: SR_HANDOVER_OTHER is RDD-only — must not count for FM readiness."""
-        assert not is_fm_review_ready({"unit_readiness_date": "2026-08-10"}, [_OTHER_DOC])
+    def test_true_with_rdd_other_doc_and_date(self) -> None:
+        """An RDD-only type does not count for FM, but no longer has to."""
+        assert is_fm_review_ready({"unit_readiness_date": "2026-08-10"}, [_OTHER_DOC])
 
-    def test_rdd_doc_alone_not_sufficient_for_fm_ready(self) -> None:
-        """DR_SR_HANDOVER_REPORT is an RDD doc; it must not count for FM readiness."""
-        assert not is_fm_review_ready({"unit_readiness_date": "2026-08-10"}, [_RDD_DOC])
+    def test_true_with_rdd_doc_and_date(self) -> None:
+        """DR_SR_HANDOVER_REPORT is an RDD doc; the date still carries the gate."""
+        assert is_fm_review_ready({"unit_readiness_date": "2026-08-10"}, [_RDD_DOC])
 
     def test_mixed_docs_with_fm_doc_is_ready(self) -> None:
         assert is_fm_review_ready(
@@ -151,16 +159,27 @@ class TestBuildDocumentUploadAskResponseShape:
 # ---------------------------------------------------------------------------
 
 
+def _actions(result: dict[str, Any]) -> list[str]:
+    suggestions = (result.get("response_decorations") or {}).get("suggestions") or {}
+    return [str(option.get("action")) for option in suggestions.get("options", [])]
+
+
 class TestBuildDocumentUploadAskResponseFmMessages:
     def test_ask_message_when_not_ready(self) -> None:
-        """No date, no doc → 'please upload at least one FM document'."""
+        """No date → ask for the date, and say the documents are optional.
+
+        The old wording demanded a document ("Please upload at least one FM
+        document ... to continue"), which named the wrong blocker: documents
+        never block FM, the readiness date does.
+        """
         result = build_document_upload_ask_response(_fm_state())
         msg = result["response_message"].lower()
-        assert "please upload" in msg
-        assert "fm document" in msg or "handover checklist" in msg
+        assert "unit readiness date" in msg
+        assert "optional" in msg
+        assert "please upload at least one" not in msg
 
-    def test_review_message_when_ready(self) -> None:
-        """Date + FM doc present → softer 'Review the details' message."""
+    def test_continue_message_when_ready(self) -> None:
+        """Date present → the card stays open, saying the documents are optional."""
         result = build_document_upload_ask_response(
             _fm_state(
                 collected={"unit_readiness_date": "2026-08-10"},
@@ -168,15 +187,40 @@ class TestBuildDocumentUploadAskResponseFmMessages:
             )
         )
         msg = result["response_message"].lower()
-        assert "review the details" in msg
+        assert "optional" in msg
+        assert "continue" in msg
+        assert "please upload at least one" not in msg
+        assert "continue_fm_upload" in _actions(result)
+
+    def test_continue_is_offered_before_any_document(self) -> None:
+        """Nothing attached is a valid FM review — Continue must still be there."""
+        result = build_document_upload_ask_response(
+            _fm_state(collected={"unit_readiness_date": "2026-08-10"})
+        )
+        assert "continue_fm_upload" in _actions(result)
+
+    def test_continue_is_the_only_chip_on_the_card(self) -> None:
+        """No Save Progress beside it.
+
+        The card has its own Save button per document and Continue carries the
+        readiness date to the review, so a Save Progress chip here saved
+        nothing new and read as a third, competing way off the card.
+        """
+        result = build_document_upload_ask_response(
+            _fm_state(
+                collected={"unit_readiness_date": "2026-08-10", "comments": "typed"},
+                documents=[_CHECKLIST_DOC],
+            )
+        )
+        assert _actions(result) == ["continue_fm_upload"]
 
     def test_ask_message_when_date_missing_but_doc_present(self) -> None:
-        """Doc uploaded but date missing → still the 'please upload' variant."""
+        """Doc uploaded but date missing → still the readiness-date variant."""
         result = build_document_upload_ask_response(
             _fm_state(documents=[_CHECKLIST_DOC])
         )
         msg = result["response_message"].lower()
-        assert "please upload" in msg
+        assert "unit readiness date" in msg
 
 
 # ---------------------------------------------------------------------------

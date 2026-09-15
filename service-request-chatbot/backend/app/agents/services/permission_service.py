@@ -67,10 +67,6 @@ ROLE_PERMISSION_MAP: dict[str, frozenset[str]] = {
         "CAN_RAISE_WORK_PERMIT_SR",
         "VIEW_WORK_PERMIT",
     }),
-    # Cold L2 Work Permit hop (workflow 6). No create permission.
-    "OPERATION_EXECUTIVES": frozenset({
-        "VIEW_WORK_PERMIT",
-    }),
     "FM_MANAGER": frozenset({
         "CAN_FM_REVIEW_HANDOVER_SR",
         "CAN_APPROVE_FM_HANDOVER_SR",
@@ -81,6 +77,10 @@ ROLE_PERMISSION_MAP: dict[str, frozenset[str]] = {
         "CAN_FM_REVIEW_HANDOVER_SR",
         "CAN_APPROVE_FM_HANDOVER_SR",
         "VIEW_FIT_OUT_HANDOVER",
+        "VIEW_WORK_PERMIT",
+    }),
+    # Cold L2 Work Permit hop (workflow 6). No create permission.
+    "OPERATION_EXECUTIVES": frozenset({
         "VIEW_WORK_PERMIT",
     }),
     "DD_ENGINEER": frozenset({

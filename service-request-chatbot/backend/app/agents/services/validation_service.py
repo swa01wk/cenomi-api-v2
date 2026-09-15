@@ -39,7 +39,6 @@ from app.agents.schemas.work_permit_schema import (
 from app.types.service_request import ValidationIssueDTO
 
 # Minimum number of documents required at FM_REVIEW before save/approve.
-_FM_MIN_DOCUMENT_COUNT = 1
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +67,9 @@ _SINGLE_DATE_FIELDS: tuple[str, ...] = (
     "actual_fitout_start_date",
     "actual_fitout_end_date",
     "actual_trading_date",
+    # Work Permit create (snake_case — not Handover startDate/endDate).
+    "start_date",
+    "end_date",
 )
 
 _STAGE_DOCUMENT_ALLOWLIST: dict[str, frozenset[str]] = {
@@ -208,7 +210,12 @@ def validate_inspection_done_by(value: Any) -> ValidationResult:
 def validate_guideline_link(value: Any) -> ValidationResult:
     """Validate that ``guideLineLink`` is an absolute http(s) URL."""
     text = str(value or "").strip()
-    passed = text.startswith("http://") or text.startswith("https://")
+    # Schemes are case-insensitive (RFC 3986 §3.1), and a pasted "HTTPS://..."
+    # is a perfectly good link. Matching case-sensitively rejected it and — now
+    # that a refused URL is cleared from the draft — would have wiped it from
+    # the form too.
+    scheme = text.lower()
+    passed = scheme.startswith("http://") or scheme.startswith("https://")
     return _result(
         field="guideLineLink",
         validation_type="url",
@@ -253,11 +260,37 @@ def validate_date_formats(data: dict[str, Any]) -> list[ValidationResult]:
     return results
 
 
-def validate_start_end_date(start_date: Any, end_date: Any) -> ValidationResult:
-    """Validate that ``startDate`` is strictly before ``endDate``.
+def _parse_hhmm(value: Any) -> tuple[int, int] | None:
+    """Parse ``HH:MM`` (24-hour) into ``(hour, minute)``; ``None`` when unusable."""
+    text = str(value or "").strip()
+    if not text:
+        return None
+    parts = text.split(":")
+    if len(parts) < 2:
+        return None
+    try:
+        hour, minute = int(parts[0]), int(parts[1])
+    except ValueError:
+        return None
+    if 0 <= hour <= 23 and 0 <= minute <= 59:
+        return hour, minute
+    return None
 
-    Both values must be ISO-8601 date strings (``YYYY-MM-DD``).
-    Equal dates are considered invalid (start must be *before* end).
+
+def validate_start_end_date(
+    start_date: Any,
+    end_date: Any,
+    start_time: Any = None,
+    end_time: Any = None,
+) -> ValidationResult:
+    """Validate that the inspection ends after it starts.
+
+    Dates accept ``YYYY-MM-DD``, full ISO-8601, or ``DD/MM/YYYY``.
+
+    A one-day inspection is a real booking — 21/08 10:00 to 21/08 22:00 — so
+    when both clocks are known the same calendar date passes as long as the end
+    time is later. Without times there is nothing to separate two equal dates,
+    and the pair is rejected as before.
     """
     start = _parse_date(start_date, "startDate")
     end = _parse_date(end_date, "endDate")
@@ -287,16 +320,114 @@ def validate_start_end_date(start_date: Any, end_date: Any) -> ValidationResult:
             blocking=True,
         )
 
-    passed = start < end
+    if start < end:
+        return _result(
+            field="endDate",
+            validation_type="date_range",
+            passed=True,
+            message=f"Start date ({start}) is before end date ({end}).",
+            blocking=True,
+        )
+
+    if start == end:
+        # Judge the window that would actually be submitted. A clock the user
+        # never set is not unknown — the payload builder books it at
+        # _DEFAULT_INSPECTION_HOUR — so validating against "not set" rejected a
+        # booking that would have gone through unchanged.
+        #
+        # On an RDD review that was a dead end: the SR arrived with a same-day
+        # window and no start clock, the stage offers no field to set one, and
+        # every end time the reviewer typed was refused for not beating a start
+        # time that did not exist:
+        #
+        #   end time (6:00 PM) has to be later than the start time (not set)
+        from app.agents.services.payload_builder_service import (
+            _DEFAULT_INSPECTION_HOUR,
+        )
+
+        _default_hhmm = f"{_DEFAULT_INSPECTION_HOUR:02d}:00"
+        start_hhmm = _parse_hhmm(start_time) or _parse_hhmm(_default_hhmm)
+        end_hhmm = _parse_hhmm(end_time)
+        if start_hhmm and end_hhmm:
+            if end_hhmm > start_hhmm:
+                return _result(
+                    field="endDate",
+                    validation_type="date_range",
+                    passed=True,
+                    message=(
+                        f"Same-day inspection on {start}, "
+                        f"{start_time or _default_hhmm} to {end_time}."
+                    ),
+                    blocking=True,
+                )
+            return _result(
+                field="endDate",
+                validation_type="date_range",
+                passed=False,
+                message=(
+                    f"The inspection starts and ends on {start}, so the end "
+                    f"time ({end_time}) must be later than the start time "
+                    f"({start_time or _default_hhmm}). Give a later time, or a "
+                    "later end date."
+                ),
+                blocking=True,
+            )
+
     return _result(
         field="endDate",
         validation_type="date_range",
-        passed=passed,
+        passed=False,
         message=(
             f"The end date ({end}) must be after the start date ({start}). "
+            "Please provide a later end date, or the same date with a later time."
+        ),
+        blocking=True,
+    )
+
+
+def validate_wp_date_range(start_date: Any, end_date: Any) -> ValidationResult:
+    """Work Permit dates: ``start_date`` must not be after ``end_date``.
+
+    Same-day permits are valid (unlike Handover ``startDate < endDate``).
+    """
+    start = _parse_date(start_date, "start_date")
+    end = _parse_date(end_date, "end_date")
+
+    if start is None and end is None:
+        return _result(
+            field="start_date",
+            validation_type="date_range",
+            passed=False,
+            message="Cannot validate date range: both start and end dates are missing or unparseable.",
+            blocking=True,
+        )
+    if start is None:
+        return _result(
+            field="start_date",
+            validation_type="date_range",
+            passed=False,
+            message="Cannot validate date range: start date is missing or unparseable.",
+            blocking=True,
+        )
+    if end is None:
+        return _result(
+            field="end_date",
+            validation_type="date_range",
+            passed=False,
+            message="Cannot validate date range: end date is missing or unparseable.",
+            blocking=True,
+        )
+
+    passed = start <= end
+    return _result(
+        field="end_date",
+        validation_type="date_range",
+        passed=passed,
+        message=(
+            f"The end date ({end}) must be on or after the start date ({start}). "
             "Please provide a later end date."
             if not passed
-            else f"Start date ({start}) is before end date ({end})."
+            else f"Start date ({start}) is on or before end date ({end})."
         ),
         blocking=True,
     )
@@ -428,7 +559,12 @@ def validate_document_count(
     Rules
     -----
     FM_REVIEW:
-        At least one document must be uploaded (any FM-allowed type).
+        No requirement. All three FM documents (Handover Checklist, Site
+        Survey, COP Checklist / Other) are optional — the upload card marks
+        every row ``required: False`` — so a reviewer with nothing to attach
+        must still be able to save and approve. This used to raise a blocking
+        ``document_count`` error, which held the flow on the upload card with
+        no way past it.
     RDD_REVIEW:
         ``DR_SR_HANDOVER_REPORT`` must be present in the uploaded documents.
     Other stages:
@@ -436,24 +572,7 @@ def validate_document_count(
     """
     results: list[ValidationResult] = []
 
-    if workflow_stage == "FM_REVIEW":
-        count = len(documents or [])
-        passed = count >= _FM_MIN_DOCUMENT_COUNT
-        results.append(
-            _result(
-                field="_documents",
-                validation_type="document_count",
-                passed=passed,
-                message=(
-                    "At least one FM document must be uploaded before saving or approving."
-                    if not passed
-                    else f"{count} FM document(s) uploaded."
-                ),
-                blocking=True,
-            )
-        )
-
-    elif workflow_stage == "RDD_REVIEW":
+    if workflow_stage == "RDD_REVIEW":
         doc_types = {
             (doc.get("document_type") or doc.get("type") or doc.get("document_type_id") or "")
             for doc in (documents or [])
@@ -577,7 +696,26 @@ class ValidationService:
 
         # 1. Required fields
         if stage_def:
-            for r in validate_required_fields(data, stage_def.required_fields):
+            required = stage_def.required_fields
+            # A disapproved handover records no dates — the RDD form has no
+            # field for them — so they must not be asked for (handled in
+            # get_missing_fields) and must not block the submission either.
+            # Without this the reviewer was asked nothing and could still not
+            # submit, which is the worse half of the same bug.
+            if workflow_stage == "RDD_REVIEW":
+                from app.agents.schemas.handover_schema import (
+                    RDD_REJECTED_STATUS,
+                    RDD_REJECTED_UNASKED_FIELDS,
+                )
+
+                if (
+                    str(data.get("document_status") or "").strip().upper()
+                    == RDD_REJECTED_STATUS
+                ):
+                    required = tuple(
+                        f for f in required if f not in RDD_REJECTED_UNASKED_FIELDS
+                    )
+            for r in validate_required_fields(data, required):
                 if r["status"] == "FAILED":
                     errors.append(r)
 
@@ -622,8 +760,40 @@ class ValidationService:
                 errors.append(r)
 
         # 3. startDate < endDate (only when both fields are present)
-        if data.get("startDate") and data.get("endDate"):
-            r = validate_start_end_date(data["startDate"], data["endDate"])
+        #
+        # A create-time rule. The reviewer of an existing SR did not choose
+        # this window and has no field to change it: an FM-created SR whose
+        # start and end are the same instant left the approver blocked on
+        # "the end time has to be later than the start time" with nothing to
+        # act on. The window was accepted when the SR was raised; re-litigating
+        # it at review only stops the approval.
+        _REVIEW_STAGES = ("FM_REVIEW", "RDD_REVIEW", "APPROVE_SR")
+        if (
+            workflow_stage not in _REVIEW_STAGES
+            and data.get("startDate")
+            and data.get("endDate")
+        ):
+            r = validate_start_end_date(
+                data["startDate"],
+                data["endDate"],
+                # Stored clocks, so a same-day window can be told apart from a
+                # backwards one. Absent (long flow, before the time question)
+                # they are None and equal dates fail as they always did.
+                start_time=data.get("inspectionTime"),
+                end_time=data.get("inspectionEndTime") or data.get("inspectionTime"),
+            )
+            if r["status"] == "FAILED":
+                errors.append(r)
+
+        # 3b. Work Permit start_date ≤ end_date (same-day permits are allowed).
+        # Skip when either value already failed format so we don't double-report.
+        if (
+            data.get("start_date")
+            and data.get("end_date")
+            and _parse_date(data["start_date"], "start_date") is not None
+            and _parse_date(data["end_date"], "end_date") is not None
+        ):
+            r = validate_wp_date_range(data["start_date"], data["end_date"])
             if r["status"] == "FAILED":
                 errors.append(r)
 

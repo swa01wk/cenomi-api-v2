@@ -119,6 +119,22 @@ async def fm_review_entry_node(state: ServiceRequestState) -> dict[str, Any]:
         }
 
     # ── 1. Explicit UI actions ─────────────────────────────────────────────
+    if action_override == "continue_fm_upload":
+        from app.agents.services.review_decorations_service import (
+            FM_UPLOAD_GATE_DONE,
+            FM_UPLOAD_GATE_KEY,
+        )
+
+        collected = dict(state.get("collected_data") or {})
+        collected[FM_UPLOAD_GATE_KEY] = FM_UPLOAD_GATE_DONE
+        log.info("fm_review_entry.upload_gate_continued")
+        return {
+            "collected_data": collected,
+            "status": "IN_PROGRESS",
+            "response_decorations": {},
+            "response_ui": {},
+        }
+
     if action_override == "save_fm_progress":
         log.info("fm_review_entry.action_save_progress")
         backend_refs["fm_action"] = "save_progress"

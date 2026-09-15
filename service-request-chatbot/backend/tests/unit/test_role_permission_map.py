@@ -32,7 +32,7 @@ _svc = PermissionService()
 
 
 class TestRolePermissionMapShape:
-    def test_map_contains_handover_roles(self) -> None:
+    def test_map_has_core_and_wp_roles(self) -> None:
         assert {
             "MALL_MANAGER",
             "FM_MANAGER",
@@ -76,7 +76,7 @@ class TestRolePermissionMapShape:
     def test_dd_engineer_cannot_raise_sr(self) -> None:
         assert "CAN_RAISE_HANDOVER_SR" not in ROLE_PERMISSION_MAP["DD_ENGINEER"]
 
-    def test_handover_roles_have_view_permission(self) -> None:
+    def test_all_handover_roles_have_view_permission(self) -> None:
         for role in ("MALL_MANAGER", "FM_MANAGER", "OPERATIONS", "DD_ENGINEER", "ADMIN"):
             assert "VIEW_FIT_OUT_HANDOVER" in ROLE_PERMISSION_MAP[role], (
                 f"{role} missing VIEW_FIT_OUT_HANDOVER"
