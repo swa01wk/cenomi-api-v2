@@ -36,7 +36,7 @@
 #   ./run_agent_eval.sh --no-start --tier sd2      # Sales Data edge cases
 #   ./run_agent_eval.sh --no-start --tier sd3      # Sales Data admin + RBAC
 #   ./run_agent_eval.sh --no-start --tier sd       # all Sales Data tiers
-#   ./run_agent_eval.sh --no-start --tier all      # all tiers (incl. Sales Data)
+#   ./run_agent_eval.sh --no-start --tier all      # all tiers (incl. Work Permit + Sales Data)
 #   ./run_agent_eval.sh --no-start --verbose       # verbose turn-by-turn output
 #   ./run_agent_eval.sh --no-start --no-obs        # skip observability export
 #
