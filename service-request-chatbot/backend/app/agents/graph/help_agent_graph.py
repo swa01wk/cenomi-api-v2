@@ -50,6 +50,10 @@ from typing import Any
 from langgraph.graph import END, START, StateGraph
 
 # ── Shared infrastructure nodes ──────────────────────────────────────────────
+from app.agents.graph.nodes.shared.form_action_sync_node import (
+    form_action_sync_node,
+    is_form_action,
+)
 from app.agents.graph.nodes.shared.load_session_node import load_session_node
 from app.agents.graph.nodes.shared.save_state_node import save_state_node
 # supervisor_node lives at nodes/ root for test-patching compatibility
@@ -196,6 +200,11 @@ _FREE_TEXT_ANSWER_FIELDS: frozenset[str] = frozenset(
 
 def _route_after_load(state: dict[str, Any]) -> str:
     """Route to sr_status_sync when an SR ID exists; otherwise to agent/supervisor."""
+    # The step was done on the SR form. The chat reports it and ends the flow;
+    # it never repeats it — the create went through the form already, and a
+    # second one from the chat was the duplicate.
+    if is_form_action(state.get("action_override")):
+        return "form_action_sync"
     user_message = state.get("user_message") or ""
     _awaiting_free_text = state.get("active_field") in _FREE_TEXT_ANSWER_FIELDS
     if not _awaiting_free_text and _user_wants_preview(user_message):
@@ -791,6 +800,7 @@ def build_help_agent_graph():
     graph.add_node("document_upload", document_upload_node)
     graph.add_node("sr_status_sync", sr_status_sync_node)
     graph.add_node("new_request", new_request_node)
+    graph.add_node("form_action_sync", form_action_sync_node)
     graph.add_node("supervisor", supervisor_node)
     graph.add_node("faq_node", faq_node)
     graph.add_node("notification", notification_entry_node)
@@ -842,6 +852,7 @@ def build_help_agent_graph():
         {
             "sr_status_sync": "sr_status_sync",
             "new_request": "new_request",
+            "form_action_sync": "form_action_sync",
             "supervisor": "supervisor",
             "handover_entry": "handover_entry",
             "work_permit_entry": "work_permit_entry",
@@ -857,6 +868,8 @@ def build_help_agent_graph():
     # A new request raised from an open SR: its context is dropped, then the
     # supervisor classifies the message as it would on a fresh session.
     graph.add_edge("new_request", "supervisor")
+    # The form already did the step: reply and save, nothing in between.
+    graph.add_edge("form_action_sync", "save_state")
     graph.add_conditional_edges(
         "sr_status_sync",
         _route_after_sync,
