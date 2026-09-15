@@ -1110,6 +1110,15 @@ async def _ask_next_missing_field(state: ServiceRequestState) -> dict[str, Any]:
                             f"'{start_display} 6:00 PM'."
                         )
                     verbatim_question = True
+        elif v_type == "fitout_confirm_date_order" and error_field:
+            # The message names the refused date, the milestone it has to
+            # follow and the earliest valid date; the bare field question gave
+            # no sign which value was refused, or why.
+            next_field = error_field
+            next_question = first_error.get("message") or field_questions.get(
+                error_field, f"Please correct the value for: {error_field}"
+            )
+            verbatim_question = True
         elif error_field and error_field not in _effective_backend_fields:
             next_field = error_field
             next_question = field_questions.get(

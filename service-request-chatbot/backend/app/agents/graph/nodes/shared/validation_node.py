@@ -33,7 +33,10 @@ from app.agents.graph.state import ServiceRequestState
 from app.agents.schemas.fitout_confirm_schema import (
     get_missing_fields as fitout_get_missing_fields,
 )
-from app.agents.services.validation_service import ValidationService
+from app.agents.services.validation_service import (
+    ValidationService,
+    validate_fitout_confirm_date_order,
+)
 from app.observability.decorators import trace_node
 
 logger = logging.getLogger(__name__)
@@ -99,6 +102,11 @@ async def validation_node(state: ServiceRequestState) -> dict[str, Any]:
             }
             for f in missing_fields
         ]
+        # The confirmed date may not fall before the milestone it follows —
+        # the rule the main form enforces, which the assistant lacked.
+        validation_errors.extend(
+            validate_fitout_confirm_date_order(sub_category, collected_data)
+        )
     else:
         validation_errors = _validation_service.validate_draft(
             data=collected_data,
