@@ -26,7 +26,7 @@ from app.agents.schemas.sales_data_schema import (
 )
 from app.agents.services.permission_service import graph_permission_guard
 from app.agents.services.sales_data_api_client import SalesDataApiClient
-from app.api.routes.supporting_doc_upload import get_uploaded_doc
+from app.api.routes.supporting_doc_upload import get_uploaded_doc, pop_uploaded_doc
 from app.core.request_context import get_current_bearer_token
 from app.observability.decorators import trace_node
 
@@ -38,6 +38,25 @@ _ISO_DATE_RE = re.compile(r"\b(20\d{2}-\d{2}-\d{2})\b")
 
 def _normalise_lease(code: str) -> str:
     return code.upper().replace("_", "-")
+
+
+def _document_id_from_upload(result: Any) -> str | None:
+    """Read document_id from a flat payload or live Cenomi ``{ success, data }`` envelope."""
+    if not isinstance(result, dict):
+        return None
+    nested = result.get("data") if isinstance(result.get("data"), dict) else {}
+    for candidate in (
+        result.get("document_id"),
+        result.get("id"),
+        nested.get("document_id") if isinstance(nested, dict) else None,
+        nested.get("id") if isinstance(nested, dict) else None,
+    ):
+        if candidate is None:
+            continue
+        value = str(candidate).strip()
+        if value:
+            return value
+    return None
 
 
 def _lease_from_text(text: str) -> str | None:
@@ -78,29 +97,26 @@ def _prompt_for_file(row: dict[str, Any]) -> dict[str, Any]:
     start = row.get("sales_period_start", "")
     end = row.get("sales_period_end", "")
     status = row.get("status", "")
-    label = STATUS_LABELS.get(status, status)
     ask_label = ASK_UPLOAD_LABELS.get(status, "document")
     copy = _ask_copy(status)
     comment = (row.get("comment_text") or "").strip()
     target = TENANT_RESPONSE_STATUS.get(status, "RE_UPLOADED")
     amt = row.get("sales_amt")
     amt_str = (
-        f"\nCurrent amount: **SAR {float(amt):,.2f}** (you can update it after attaching the file)."
+        f" Current amount: **SAR {float(amt):,.2f}**."
         if amt is not None and amt != ""
         else ""
     )
 
-    admin_note = f'\n\nSales Data team comment: *"{comment}"*' if comment else ""
+    # Kept deliberately short — status/ask-type/target-status labels are
+    # internal jargon the tenant doesn't need up front; the confirm card
+    # (after attaching) shows the full detail as an actual table instead of
+    # cramming it into this plain-text prompt.
+    admin_note = f' Note from the Sales Data team: *"{comment}"*.' if comment else ""
     message = (
-        f"Please upload {copy['prompt_verb']} (PDF or image) for lease "
-        f"**{lease_code}** ({start} – {end}).\n\n"
-        f"Ask type: **{ask_label}**\n"
-        f"Current status: **{label}**"
-        f"{amt_str}\n"
-        f"After you attach the file I will submit it as **{target}**."
-        f"{admin_note}\n\n"
-        "A **comment is required** (same as the portal). "
-        "Use the attachment button below, or drag and drop the file."
+        f"Please attach {copy['prompt_verb']} for lease **{lease_code}** "
+        f"({start} – {end}).{amt_str}{admin_note}\n\n"
+        "A comment is required — attach the file below."
     )
     return {
         "workflow_stage": "AWAITING_DOC_UPLOAD",
@@ -108,6 +124,7 @@ def _prompt_for_file(row: dict[str, Any]) -> dict[str, Any]:
         "response_message": message,
         "response_ui": {
             "type": "supporting_doc_prompt",
+            "verbatim": True,
             "lease_code": lease_code,
             "lease_id": row.get("lease_id"),
             "sales_period_start": start,
@@ -118,10 +135,62 @@ def _prompt_for_file(row: dict[str, Any]) -> dict[str, Any]:
             "sales_amt": amt,
             "comment_text": comment or None,
             "show_file_upload": True,
-            "accept": ".pdf,image/*",
+            # Kept in sync with supporting_doc_upload.py's _ALLOWED_EXTENSIONS,
+            # which mirrors the live cenomi-api PUT /files allow-list — picking
+            # a format outside this set (e.g. GIF/WEBP/TIFF, which "image/*"
+            # alone would otherwise let through) used to cache fine here and
+            # only fail once forwarded to the real backend.
+            "accept": ".pdf,.png,.jpg,.jpeg,.doc,.xlsx,.zip",
             "message": message,
         },
     }
+
+
+def _upload_failure_retry(
+    collected: dict[str, Any],
+    backend_refs: dict[str, Any],
+    doc_session_id: str | None,
+    notice: str,
+) -> dict[str, Any]:
+    """Build the retry response for a failed PUT /files call.
+
+    Reuses ``_prompt_for_file`` so the response always carries
+    ``response_ui.show_file_upload = True`` — the exception branches used to
+    return a bare ``response_message`` with no ``response_ui`` at all, which
+    left any consumer that keys off ``ui.type`` (rather than
+    ``workflow_stage``) with no way to know an attachment control should be
+    shown, and the LLM response-rewrite node had nothing but the raw
+    exception text to work from.
+
+    The cached bytes that just failed are dropped (and ``doc_session_id``
+    cleared) so a retry always requires a fresh attach instead of silently
+    re-submitting the same bytes the backend just rejected — which would
+    otherwise reproduce the identical failure forever with no way out.
+    """
+    if doc_session_id:
+        pop_uploaded_doc(doc_session_id)
+    remaining = {
+        k: v for k, v in collected.items() if k not in {"document_id", "filename"}
+    }
+    refs = dict(backend_refs)
+    refs.pop("doc_session_id", None)
+    prompt = _prompt_for_file(
+        {
+            "lease_id": remaining.get("lease_id"),
+            "lease_code": remaining.get("lease_code"),
+            "sales_period_start": remaining.get("sales_period_start"),
+            "sales_period_end": remaining.get("sales_period_end"),
+            "status": remaining.get("current_status"),
+            "comment_text": remaining.get("admin_comment"),
+            "sales_amt": remaining.get("sales_amt"),
+        }
+    )
+    message = f"{notice}\n\n{prompt['response_message']}"
+    prompt["response_message"] = message
+    prompt["response_ui"]["message"] = message
+    prompt["collected_data"] = remaining
+    prompt["backend_refs"] = refs
+    return prompt
 
 
 def _list_rows_prompt(rows: list[dict[str, Any]]) -> dict[str, Any]:
@@ -152,6 +221,7 @@ def _list_rows_prompt(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "response_message": message,
         "response_ui": {
             "type": "supporting_doc_select",
+            "verbatim": True,
             "rows": ui_rows,
             "message": message,
         },
@@ -187,13 +257,16 @@ async def supporting_doc_upload_node(state: ServiceRequestState) -> dict[str, An
             rows = await client.get_sales_data(disable_pagination=True)
         except Exception:
             log.error("supporting_doc_upload.list_failed", exc_info=True)
+            message = "⚠️ I couldn't load your sales data right now. Please try again."
             return {
                 "status": "WAITING_FOR_USER",
-                "response_message": (
-                    "⚠️ I couldn't load your sales data right now. Please try again."
-                ),
+                "response_message": message,
+                "response_ui": {"type": "message", "message": message, "verbatim": True},
             }
 
+        # sales_period_start/end are already normalized to a bare date by
+        # unwrap_sales_data_rows (sales_data_api_client.py) — no need to
+        # redo it here.
         action_rows = [r for r in rows if r.get("status") in TENANT_ACTION_STATUSES]
         wanted_kind = _requested_need_status(user_message)
         if wanted_kind and not collected.get("lease_code"):
@@ -213,6 +286,7 @@ async def supporting_doc_upload_node(state: ServiceRequestState) -> dict[str, An
                 "response_message": message,
                 "response_ui": {
                     "type": "stale_notification",
+                    "verbatim": True,
                     "show_listing_link": True,
                     "message": message,
                 },
@@ -323,29 +397,36 @@ async def supporting_doc_upload_node(state: ServiceRequestState) -> dict[str, An
             content_type,
             document_type_id=document_type_id,
             lease_id=collected.get("lease_id"),
+            lease_code=collected.get("lease_code"),
         )
     except Exception as exc:
-        log.error("supporting_doc_upload.put_files_failed", exc_info=True)
-        return {
-            "collected_data": collected,
-            "backend_refs": backend_refs,
-            "status": "WAITING_FOR_USER",
-            "workflow_stage": "AWAITING_DOC_UPLOAD",
-            "response_message": (
-                f"⚠️ File upload failed: {exc}. Please try attaching the file again."
-            ),
-        }
+        log.error(
+            "supporting_doc_upload.put_files_failed",
+            exc_info=True,
+            lease_code=collected.get("lease_code"),
+            document_type_id=document_type_id,
+        )
+        return _upload_failure_retry(
+            collected,
+            backend_refs,
+            doc_session_id,
+            f"⚠️ The file upload failed ({exc}). Please attach the file again.",
+        )
 
-    document_id = result.get("document_id") or result.get("id")
+    document_id = _document_id_from_upload(result)
     if not document_id:
-        return {
-            "collected_data": collected,
-            "status": "WAITING_FOR_USER",
-            "workflow_stage": "AWAITING_DOC_UPLOAD",
-            "response_message": (
-                "⚠️ The file server did not return a document ID. Please try again."
-            ),
-        }
+        log.error(
+            "supporting_doc_upload.missing_document_id",
+            lease_code=collected.get("lease_code"),
+            document_type_id=document_type_id,
+            put_files_response=result,
+        )
+        return _upload_failure_retry(
+            collected,
+            backend_refs,
+            doc_session_id,
+            "⚠️ The file server did not return a document ID. Please attach the file again.",
+        )
 
     collected["document_id"] = document_id
     collected["filename"] = filename

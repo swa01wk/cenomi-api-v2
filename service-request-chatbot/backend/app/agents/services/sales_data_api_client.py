@@ -14,7 +14,6 @@ the backend can apply per-tenant scoping.
 
 from __future__ import annotations
 
-import io
 import logging
 import os
 from typing import Any
@@ -36,6 +35,26 @@ def _base_url() -> str:
     return os.getenv("SALES_DATA_API_BASE_URL", _DEFAULT_BASE_URL).rstrip("/")
 
 
+def _normalize_row_dates(row: dict[str, Any]) -> dict[str, Any]:
+    """Bare-date sales_period_start/end on a single GET /sales-data row.
+
+    Live cenomi-api returns these as a full datetime-with-offset
+    ("2026-05-01T04:00:00+04:00"). Fixed at this one shared source instead
+    of in each consuming node — that had already been done three separate
+    times in three separate call sites (CSV/manual-entry validation,
+    supporting-doc upload, admin review/approve) after the same raw string
+    kept leaking into a PATCH/POST payload cenomi-api rejects (expects a
+    plain date) and into every message shown to the user. Any code reading
+    a row through this module now gets an already-clean date and never
+    needs to re-derive or re-validate it.
+    """
+    if row.get("sales_period_start"):
+        row["sales_period_start"] = normalize_period_date(row["sales_period_start"])
+    if row.get("sales_period_end"):
+        row["sales_period_end"] = normalize_period_date(row["sales_period_end"])
+    return row
+
+
 def unwrap_sales_data_rows(body: Any) -> list[dict[str, Any]]:
     """Normalise live Cenomi and mock GET /sales-data envelopes to a row list.
 
@@ -43,17 +62,84 @@ def unwrap_sales_data_rows(body: Any) -> list[dict[str, Any]]:
     Mock: ``{ data: [ ...rows ] }`` or a bare list.
     """
     if isinstance(body, list):
-        return [r for r in body if isinstance(r, dict)]
+        rows = [r for r in body if isinstance(r, dict)]
+    elif not isinstance(body, dict):
+        rows = []
+    else:
+        data = body.get("data", body)
+        if isinstance(data, list):
+            rows = [r for r in data if isinstance(r, dict)]
+        elif isinstance(data, dict) and isinstance(data.get("list"), list):
+            rows = [r for r in data["list"] if isinstance(r, dict)]
+        else:
+            rows = []
+    return [_normalize_row_dates(r) for r in rows]
+
+
+def extract_total_count(body: Any, fallback: int) -> int:
+    """Pull ``total_count`` out of the live GET /sales-data envelope.
+
+    Falls back to the given row-count length (mock backend / bare list
+    shapes carry no total_count at all) so callers can still show an exact
+    figure when the row list already is the whole result.
+    """
+    if isinstance(body, dict):
+        data = body.get("data")
+        if isinstance(data, dict):
+            total = data.get("total_count")
+            if isinstance(total, int):
+                return total
+    return fallback
+
+
+def _extract_backend_error_message(resp: httpx.Response) -> str:
+    """Pull a clean, human-readable message out of a 4xx cenomi-api body.
+
+    Never surfaces the raw response body to the user — that used to happen
+    verbatim in update_sales_data_status's 400 handler (``error: resp.text``),
+    which put a raw JSON/Go error string directly into the chat message.
+    """
+    try:
+        body = resp.json()
+    except ValueError:
+        return "The request was rejected. Please try again."
     if not isinstance(body, dict):
-        return []
-    data = body.get("data", body)
-    if isinstance(data, list):
-        return [r for r in data if isinstance(r, dict)]
+        return "The request was rejected. Please try again."
+    errors = body.get("errors") or body.get("detail", {}).get("errors") or []
+    if isinstance(errors, list) and errors:
+        messages = [
+            str(e.get("message")) for e in errors
+            if isinstance(e, dict) and e.get("message")
+        ]
+        if messages:
+            return "; ".join(messages)
+    for key in ("message", "error", "detail"):
+        value = body.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return "The request was rejected. Please try again."
+
+
+def unwrap_file_upload_response(body: Any) -> dict[str, Any]:
+    """Flatten live Cenomi PUT /files ``{ success, data }`` to a dict with document_id.
+
+    Live cenomi-api returns::
+
+        {"success": true, "data": {"document_id": "<uuid>", "file_path": "...", ...}}
+
+    Mock backends and already-flat payloads return ``document_id`` at the top
+    level. Callers (supporting-doc node) read ``result["document_id"]``.
+    """
+    if not isinstance(body, dict):
+        return {}
+    data = body.get("data")
     if isinstance(data, dict):
-        lst = data.get("list")
-        if isinstance(lst, list):
-            return [r for r in lst if isinstance(r, dict)]
-    return []
+        merged = {**body, **data}
+        doc_id = data.get("document_id") or data.get("id")
+        if doc_id:
+            merged["document_id"] = doc_id
+        return merged
+    return body
 
 
 # ---------------------------------------------------------------------------
@@ -86,7 +172,7 @@ class SalesDataApiClient:
         *,
         disable_pagination: bool = False,
         status: str | None = None,
-        lease_code: str | None = None,
+        lease_code: str | list[str] | None = None,
         page: int = 1,
         limit: int = 100,
         all_my_companies: bool = True,
@@ -108,23 +194,76 @@ class SalesDataApiClient:
         matches what a chat assistant helping "this person with their own
         data" should already do.
         """
+        resp = await self._get_sales_data_raw(
+            disable_pagination=disable_pagination,
+            status=status,
+            lease_code=lease_code,
+            page=page,
+            limit=limit,
+            all_my_companies=all_my_companies,
+        )
+        return unwrap_sales_data_rows(resp.json())
+
+    async def get_sales_data_page(
+        self,
+        *,
+        status: str | None = None,
+        lease_code: str | list[str] | None = None,
+        page: int = 1,
+        limit: int = 10,
+        all_my_companies: bool = True,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """Like get_sales_data, but also returns the real total_count.
+
+        For a bounded/paginated listing (admin review's table) where the
+        displayed "N submissions" figure needs to be exact even though only
+        one page of rows is fetched — unlike get_sales_data, which discards
+        total_count and only returns the row list.
+        """
+        resp = await self._get_sales_data_raw(
+            disable_pagination=False,
+            status=status,
+            lease_code=lease_code,
+            page=page,
+            limit=limit,
+            all_my_companies=all_my_companies,
+        )
+        body = resp.json()
+        rows = unwrap_sales_data_rows(body)
+        return rows, extract_total_count(body, fallback=len(rows))
+
+    async def _get_sales_data_raw(
+        self,
+        *,
+        disable_pagination: bool,
+        status: str | None,
+        lease_code: str | list[str] | None,
+        page: int,
+        limit: int,
+        all_my_companies: bool,
+    ) -> httpx.Response:
         params: dict[str, Any] = {"page": page, "limit": limit}
         if disable_pagination:
             params["disable_pagination"] = "true"
         if status:
             params["status"] = status
         if lease_code:
+            # cenomi-api parses this as r.URL.Query()["lease_code"] — a
+            # repeated-query-param slice, not comma-split like status — so a
+            # list value here must produce ?lease_code=A&lease_code=B, which
+            # httpx does natively when the params value is a list.
             params["lease_code"] = lease_code
         if all_my_companies:
             params["all_my_companies"] = "true"
 
-        # This call regressed from ~200ms to 15s+ once all_my_companies=true
-        # started being sent on every request — right at (and sometimes past)
-        # the default 15s client timeout, causing intermittent failures.
-        # Bumped as a safety net while the underlying cenomi-api query is
-        # optimized; this masks the symptom, not the cause (see comment on
-        # all_my_companies above).
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        # This call regressed from ~200ms to 15-30s+ once all_my_companies=true
+        # started being sent on every request — the first bump to 30s still
+        # wasn't enough margin (observed admin_review_entry taking 30.3s and
+        # hitting it). Bumped again as a stopgap; this masks the symptom, not
+        # the cause — the underlying cenomi-api query still needs to be
+        # optimized (see comment on all_my_companies above). A 45s+ wait is
+        # not acceptable for an interactive chat turn either way.
+        async with httpx.AsyncClient(timeout=45.0) as client:
             resp = await client.get(
                 f"{self._base}/api/v1/sales-data",
                 headers=self._headers(),
@@ -132,7 +271,7 @@ class SalesDataApiClient:
             )
 
         resp.raise_for_status()
-        return unwrap_sales_data_rows(resp.json())
+        return resp
 
     # ── POST /api/v1/sales-data ─────────────────────────────────────────────
 
@@ -177,7 +316,13 @@ class SalesDataApiClient:
             )
 
         if resp.status_code == 400:
-            return {"success": False, "error": resp.text}
+            log.error(
+                "update_sales_data_status.backend_400",
+                response_body=resp.text[:2000],
+                request_payload=payload,
+            )
+            message = _extract_backend_error_message(resp)
+            return {"success": False, "error": message}
 
         resp.raise_for_status()
         return {"success": True}
@@ -217,15 +362,20 @@ class SalesDataApiClient:
         *,
         document_type_id: str | None = None,
         lease_id: int | None = None,
+        lease_code: str | None = None,
     ) -> dict[str, Any]:
-        """Upload a file via PUT /files and return the document_id.
+        """Upload a file via PUT /files and return a flat dict with document_id.
 
-        Live Cenomi: ``PUT /api/v1/files?file_extension=&document_type_id=&lease_id=&file_name=``.
-        Mock backend aliases the same path (and still serves ``PUT /files``).
+        Live Cenomi expects **raw binary** in the body (same as the portal and
+        the ops-agent platform client), not multipart. Query string carries
+        ``file_extension``, ``document_type_id``, ``lease_id`` / ``lease_code``,
+        ``file_name``. The JSON envelope is ``{ success, data: { document_id } }``.
         """
-        headers = {}
+        headers: dict[str, str] = {}
         if self._token:
             headers["Authorization"] = f"Bearer {self._token}"
+        if content_type:
+            headers["Content-Type"] = content_type
 
         ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
         params: dict[str, Any] = {"file_name": filename}
@@ -233,19 +383,21 @@ class SalesDataApiClient:
             params["file_extension"] = ext
         if document_type_id:
             params["document_type_id"] = document_type_id
-        if lease_id is not None:
+        if lease_id is not None and str(lease_id).strip() not in ("", "0", "None"):
             params["lease_id"] = lease_id
+        if lease_code:
+            params["lease_code"] = lease_code
 
         async with httpx.AsyncClient(timeout=60.0) as client:
             resp = await client.put(
                 f"{self._base}/api/v1/files",
                 headers=headers,
                 params=params,
-                files={"file": (filename, io.BytesIO(file_bytes), content_type)},
+                content=file_bytes,
             )
 
         resp.raise_for_status()
-        return resp.json()
+        return unwrap_file_upload_response(resp.json())
 
     # ── GET /api/v1/sales-data/template ────────────────────────────────────
 
@@ -270,7 +422,7 @@ def _norm_lease_name(value: str | None) -> str:
     return " ".join(str(value or "").casefold().split())
 
 
-def _normalize_period_date(value: str | None) -> str:
+def normalize_period_date(value: str | None) -> str:
     """Reduce any date-ish string to bare YYYY-MM-DD.
 
     Handles a live cenomi-api row's raw date string, which may carry a time
@@ -301,7 +453,7 @@ def _period_year_month(value: str | None) -> str:
     of sales_period_start — so Layer 2 matching mirrors that granularity
     instead of demanding an exact date range.
     """
-    return _normalize_period_date(value)[:7]
+    return normalize_period_date(value)[:7]
 
 
 def canonical_brand_name(backend_row: dict[str, Any]) -> str:
@@ -385,11 +537,16 @@ def partition_rows_by_lease_access(
     Returns:
       valid, no_access, no_pending_row, identity_mismatch, accessible_lease_codes
     """
-    accessible: set[str] = {r["lease_code"] for r in backend_rows}
+    # Lease codes are compared case/whitespace-insensitively, same as
+    # brand/property below — a manually-typed or LLM-extracted lease code
+    # ("T0106013", stray spaces, ...) must match the platform's canonical
+    # casing ("t0106013") or every legitimately accessible lease falsely
+    # reports "no access".
+    accessible: set[str] = {_norm_lease_name(r["lease_code"]) for r in backend_rows}
     pending_index: dict[tuple[str, str], dict] = {}
     for r in backend_rows:
         if r["status"] in ("PENDING", "NEED_REUPLOAD"):
-            key = (r["lease_code"], _period_year_month(r["sales_period_start"]))
+            key = (_norm_lease_name(r["lease_code"]), _period_year_month(r["sales_period_start"]))
             pending_index[key] = r
 
     valid: list[dict] = []
@@ -401,9 +558,9 @@ def partition_rows_by_lease_access(
         lc = row.get("lease_code", "")
         start = row.get("sales_period_start", "")
         end = row.get("sales_period_end", "")
-        norm_key = (lc, _period_year_month(start))
+        norm_key = (_norm_lease_name(lc), _period_year_month(start))
 
-        if lc not in accessible:
+        if _norm_lease_name(lc) not in accessible:
             no_access.append({**row, "_error": f"You don't have access to lease {lc}."})
             continue
         if norm_key not in pending_index:
@@ -438,6 +595,11 @@ def partition_rows_by_lease_access(
 
         valid.append({
             **row,
+            # Canonical casing, not whatever the user typed/LLM extracted
+            # ("T0106013" vs "t0106013") — matching accessible/pending_index
+            # keys are normalized, but the submission payload should carry
+            # the platform's own spelling.
+            "lease_code": backend_row["lease_code"],
             "lease_id": backend_row["lease_id"],
             # Bare YYYY-MM-DD, not the raw "2024-12-31T04:00:00+04:00" the
             # live API returns — that datetime-with-offset string was being
@@ -445,8 +607,8 @@ def partition_rows_by_lease_access(
             # POST /sales-data submission payload, which cenomi-api rejected
             # with a 400 ("sales period start date doesn't match the
             # pending record") since it expects a plain date.
-            "sales_period_start": _normalize_period_date(backend_row["sales_period_start"]),
-            "sales_period_end": _normalize_period_date(backend_row["sales_period_end"]),
+            "sales_period_start": normalize_period_date(backend_row["sales_period_start"]),
+            "sales_period_end": normalize_period_date(backend_row["sales_period_end"]),
             "current_status": backend_row["status"],
             "brand": expected_brand or (row.get("brand") or ""),
             "property": expected_property or (row.get("property") or ""),

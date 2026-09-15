@@ -21,11 +21,11 @@ from app.agents.llm.gateway import get_default_gateway as get_llm_gateway
 from app.agents.prompts.sales_data_manual_entry_prompt import (
     SALES_DATA_ADMIN_EXTRACTION_SYSTEM_PROMPT,
 )
-from app.agents.schemas.sales_data_schema import (
-    ADMIN_ACTION_LABELS,
-    ADMIN_TABLE_STATUS_LABELS,
+from app.agents.schemas.sales_data_schema import ADMIN_ACTION_LABELS
+from app.agents.services.sales_data_api_client import (
+    SalesDataApiClient,
+    normalize_period_date,
 )
-from app.agents.services.sales_data_api_client import SalesDataApiClient
 from app.core.request_context import get_current_bearer_token
 from app.observability.decorators import trace_node
 
@@ -61,15 +61,23 @@ _DOC_HINTS = ("supporting", "audited", "request doc", "extra doc", "need documen
 _LC_RE = re.compile(r"\bLC[-\s]?(\d{3,})\b", re.I)
 _BARE_NUM_RE = re.compile(r"\b(\d{3,5})\b")
 _ISO_DATE_RE = re.compile(r"\b(20\d{2}-\d{2}-\d{2})\b")
+# The platform's real lease codes ("t0106037") — _LC_RE/_BARE_NUM_RE only
+# recognise the internal "LC-1234" demo format and 3-5 digit bare numbers,
+# neither of which matches a real code's letter-prefix + longer digit run.
+_REAL_LEASE_CODE_RE = re.compile(r"\b[a-zA-Z]\d{5,}\b")
 
 
-def _lease_context_bits(row: dict[str, Any]) -> str:
-    """Portal list columns: property, company, brand (from GET /sales-data)."""
-    property_name = (row.get("property_name") or row.get("mall_name") or "").strip()
-    company = (row.get("company_name") or "").strip()
-    brand = (row.get("brand_name") or "").strip()
-    parts = [p for p in (property_name, company, brand) if p]
-    return " · ".join(parts) if parts else "—"
+def _extract_lease_codes(message: str) -> list[str]:
+    """Real-format lease codes ("t0106037") mentioned in a typed message."""
+    found: list[str] = []
+    seen: set[str] = set()
+    for match in _REAL_LEASE_CODE_RE.finditer(message or ""):
+        code = match.group(0)
+        key = code.lower()
+        if key not in seen:
+            seen.add(key)
+            found.append(code)
+    return found
 
 
 def _action_examples(rows: list[dict[str, Any]] | None = None) -> str:
@@ -277,31 +285,47 @@ def _confirm_patch(
     collected["sales_period_start"] = first.get("sales_period_start", "")
     collected["sales_period_end"] = first.get("sales_period_end", "")
 
-    lease_lines = []
-    for t in targets:
+    def _fmt_target(t: dict[str, Any]) -> str:
         amt = t.get("sales_amt")
         amt_str = f" — SAR {float(amt):,.2f}" if amt is not None and amt != "" else ""
         period = t.get("sales_period_start") or ""
-        period_bit = f" ({period[:7]})" if period else ""
-        lease_lines.append(f"• **{t.get('lease_code')}**{period_bit}{amt_str}")
-    comment_str = f'\nComment: "{comment}"' if comment else ""
+        period_bit = f" for {period[:7]}" if period else ""
+        return f"**{t.get('lease_code')}**{period_bit}{amt_str}"
+
+    comment_str = f' Comment: "{comment}".' if comment else ""
     unmatched_str = ""
     if unmatched:
         unmatched_str = (
-            "\n\nI could not match: "
-            + ", ".join(f"**{c}**" for c in unmatched)
-            + ". Those were skipped."
+            " (Could not match: " + ", ".join(f"**{c}**" for c in unmatched) + " — skipped.)"
         )
-    action_label = ADMIN_ACTION_LABELS.get(action, action)
-    noun = "submission" if len(targets) == 1 else "submissions"
-    message = (
-        f"Please confirm:\n\n"
-        f"**Action:** {action_label}\n"
-        f"**{len(targets)} {noun}:**\n"
-        + "\n".join(lease_lines)
-        + f"{comment_str}{unmatched_str}\n\n"
-        "Reply **yes** to confirm or **no** to cancel."
-    )
+    # Button label on the confirm card must match the actual action — the
+    # old ADMIN_ACTION_LABELS ("Accept", "Ask upload — Sales data") reads
+    # fine inline but is a bad button label ("Approve" is what the button on
+    # an approval should say, not "Accept"), and the message must not tell
+    # the admin to type yes/no when the card already renders Confirm/Cancel
+    # buttons — that mismatch was actively confusing.
+    action_verb = {
+        "APPROVED": "Approve",
+        "NEED_REUPLOAD": "Request a re-upload for",
+        "NEED_UPLOAD_SUPPORTING_DOCUMENT": "Request a supporting document for",
+        "NEED_UPLOAD_AUDITED_SALES": "Request audited sales for",
+    }.get(action, ADMIN_ACTION_LABELS.get(action, action))
+    button_label = {
+        "APPROVED": "Approve",
+        "NEED_REUPLOAD": "Request reupload",
+        "NEED_UPLOAD_SUPPORTING_DOCUMENT": "Request document",
+        "NEED_UPLOAD_AUDITED_SALES": "Request audited sales",
+    }.get(action, ADMIN_ACTION_LABELS.get(action, action))
+
+    if len(targets) == 1:
+        message = f"{action_verb} {_fmt_target(targets[0])}?{comment_str}{unmatched_str}"
+    else:
+        lease_lines = "\n".join(f"• {_fmt_target(t)}" for t in targets)
+        message = (
+            f"{action_verb} these {len(targets)} submissions?\n\n"
+            f"{lease_lines}"
+            f"{comment_str}{unmatched_str}"
+        )
     return {
         "collected_data": collected,
         "backend_refs": backend_refs,
@@ -311,8 +335,15 @@ def _confirm_patch(
         "response_message": message,
         "response_ui": {
             "type": "admin_confirm",
+            # Without this, response_generation's LLM rewrite condenses this
+            # into something like "Got it! You've chosen to approve the
+            # submissions for lease code t0106037" — dropping the period
+            # this message deliberately lists per target, which matters a
+            # lot when one lease has many months awaiting review and the
+            # admin needs to know exactly which one they're confirming.
+            "verbatim": True,
             "action": action,
-            "action_label": action_label,
+            "action_label": button_label,
             "lease_code": first.get("lease_code", ""),
             "targets": targets,
             "comment_text": comment,
@@ -322,15 +353,73 @@ def _confirm_patch(
     }
 
 
+_ADMIN_REVIEW_LIST_LIMIT = 10
+
+
 async def _load_reviewable(
     backend_refs: dict[str, Any],
+    lease_codes: list[str] | None = None,
+    need_all: bool = False,
 ) -> list[dict[str, Any]]:
+    """Fetch reviewable rows, scoped as tightly as the caller can manage.
+
+    ``lease_codes`` (the admin typed "Approve LC-1234", not a blanket
+    "review"/"approve all") lets us skip the broad listing fetch entirely —
+    cenomi-api's ``lease_code`` query param is exact and cheap, unlike the
+    status-filtered listing below, which can still be large: _REVIEWABLE_
+    STATUSES includes "SUBMITTED", a status a row keeps indefinitely once
+    approved-and-archived rows are excluded, potentially spanning the
+    platform's entire history across every lease, not just a current
+    backlog. Only use the cache/listing path when acting on a specific,
+    already-identified set of leases isn't possible (plain "review sales
+    data", or "approve all").
+    """
     cached = backend_refs.get("admin_review_rows")
+    if lease_codes:
+        if isinstance(cached, list) and cached:
+            wanted = {c.strip().lower() for c in lease_codes if c}
+            from_cache = [
+                r for r in _reviewable(cached)
+                if str(r.get("lease_code", "")).strip().lower() in wanted
+            ]
+            if from_cache:
+                return from_cache
+        token = get_current_bearer_token()
+        client = SalesDataApiClient(bearer_token=token)
+        rows = await client.get_sales_data(
+            disable_pagination=True,
+            all_my_companies=False,
+            lease_code=lease_codes,
+        )
+        return _reviewable(rows)
+
     if isinstance(cached, list) and cached:
         return _reviewable(cached)
     token = get_current_bearer_token()
     client = SalesDataApiClient(bearer_token=token)
-    rows = await client.get_sales_data(disable_pagination=True)
+    # SALES_DATA_TEAM/admin JWTs carry tenant_profile_id=0 (unscoped) —
+    # cenomi-api already returns every row platform-wide for that case with
+    # no extra filter. all_my_companies=true is meant for a TENANT spanning
+    # several of their OWN companies; it's meaningless here and appears to
+    # be the actual trigger for the multi-second/timeout slowdown observed
+    # on this admin path specifically (a plain unscoped fetch was ~200ms
+    # before all_my_companies existed).
+    #
+    # status narrows the *kind* of row, but "SUBMITTED" alone can still span
+    # the platform's entire history (a row keeps that status indefinitely
+    # unless/until approved) — plausibly still tens of thousands of rows.
+    # The listing only ever displays the first 10 (see submitted[:10]
+    # below), so there is no reason to also disable pagination and fetch
+    # everything just to compute an exact count — UNLESS the caller is
+    # actually about to act on every one of them ("approve all"), where a
+    # bounded page would silently approve only the first N and leave the
+    # rest untouched with no indication anything was skipped.
+    rows = await client.get_sales_data(
+        disable_pagination=need_all,
+        all_my_companies=False,
+        status=",".join(sorted(_REVIEWABLE_STATUSES)),
+        limit=_ADMIN_REVIEW_LIST_LIMIT,
+    )
     submitted = _reviewable(rows)
     backend_refs["admin_review_rows"] = submitted
     return submitted
@@ -368,16 +457,94 @@ async def admin_review_entry_node(state: ServiceRequestState) -> dict[str, Any]:
 
     # ── REVIEW_SALES_DATA — list submissions ───────────────────────────────
     looks_like_action = any(h in user_message.lower() for h in _ACTION_HINTS)
-    if (
+    is_next_page = action_override == "admin_review_next_page"
+    is_prev_page = action_override == "admin_review_prev_page"
+    if is_next_page or is_prev_page or (
         intent == "REVIEW_SALES_DATA"
         and not collected.get("admin_action")
         and not looks_like_action
     ):
+        # Opened from a specific notification ("review this submission"),
+        # or the admin named a lease directly ("review lease t0106037") —
+        # either way scope the fetch to that one lease instead of listing
+        # every reviewable row platform-wide. Without this, clicking a
+        # single notification showed the entire backlog because nothing
+        # here ever looked at notification_context/the typed lease code.
+        notification_ctx = backend_refs.get("notification_context") or {}
+        notification_lease = str(notification_ctx.get("lease_code") or "").strip()
+        # Admin-facing review notifications ("...corresponding to month
+        # May" / "...corresponding to year 2026" / "...corresponding to
+        # 5/9/2026") name one specific period, not just a lease — a lease
+        # can have many months awaiting review, and without this the whole
+        # backlog for that lease came back instead of the one submission
+        # the notification was actually about. This is a year-month prefix
+        # ("2026-05") OR, for the yearly-frequency case, a bare 4-digit
+        # year ("2026") — see extract_period_date(). Match with startswith,
+        # never exact/length-equal comparison, or the yearly case (4 chars)
+        # can never match a row's 7-char normalized prefix.
+        notification_period_date = str(notification_ctx.get("period_date") or "").strip()
+        typed_codes = _extract_lease_codes(user_message)
+        scoped_lease = notification_lease or (typed_codes[0] if typed_codes else "")
+
+        page = int(collected.get("admin_review_page") or 1)
+        if is_next_page:
+            page += 1
+        elif is_prev_page:
+            page = max(1, page - 1)
+
         token = get_current_bearer_token()
         client = SalesDataApiClient(bearer_token=token)
         try:
-            rows = await client.get_sales_data(disable_pagination=True)
+            notification_period_stale = False
+            if scoped_lease:
+                rows = await client.get_sales_data(
+                    disable_pagination=True,
+                    all_my_companies=False,
+                    lease_code=scoped_lease,
+                )
+                if notification_period_date:
+                    # startswith, not exact/length-equal comparison: the
+                    # yearly-frequency case gives a bare 4-digit year, the
+                    # common monthly case gives a 7-char "YYYY-MM" prefix —
+                    # a row's normalized date is always the longer string.
+                    period_rows = [
+                        r for r in rows
+                        if normalize_period_date(r.get("sales_period_end")).startswith(
+                            notification_period_date
+                        )
+                        or normalize_period_date(r.get("sales_period_start")).startswith(
+                            notification_period_date
+                        )
+                    ]
+                    # No silent fallback to the whole lease history here —
+                    # that defeated the entire point of period-scoping in
+                    # exactly the case it matters most (a stale notification
+                    # for a submission that's since been approved/reuploaded
+                    # past this period). Tell the admin plainly instead.
+                    if not period_rows and rows:
+                        notification_period_stale = True
+                    rows = period_rows
+                total_count = len(rows)
+            else:
+                # Bounded page, not disable_pagination=True: "SUBMITTED"
+                # alone can span the platform's entire history (a row keeps
+                # it indefinitely once approved/archived rows are
+                # excluded), and the table only ever shows one page at a
+                # time anyway (Next fetches the rest on demand) —
+                # total_count still comes from cenomi-api's own count, so
+                # the displayed "N submissions" figure stays exact even
+                # though only one page of rows is fetched.
+                rows, total_count = await client.get_sales_data_page(
+                    all_my_companies=False,
+                    status=",".join(sorted(_REVIEWABLE_STATUSES)),
+                    page=page,
+                    limit=_ADMIN_REVIEW_LIST_LIMIT,
+                )
         except Exception:
+            # Was silently swallowed with no log line — the only signal that
+            # anything went wrong was the generic user-facing message, with
+            # no way to tell a timeout apart from any other failure.
+            log.error("admin_review_entry.get_sales_data_failed", exc_info=True)
             return {
                 "status": "WAITING_FOR_USER",
                 "response_message": "⚠️ Could not fetch sales data. Please try again.",
@@ -385,43 +552,70 @@ async def admin_review_entry_node(state: ServiceRequestState) -> dict[str, Any]:
 
         submitted = _reviewable(rows)
         if not submitted:
+            if is_next_page:
+                return {
+                    "status": "WAITING_FOR_USER",
+                    "workflow_stage": "ADMIN_REVIEW",
+                    "response_message": "That was the last page — no more submissions.",
+                }
+            if is_prev_page:
+                return {
+                    "status": "WAITING_FOR_USER",
+                    "workflow_stage": "ADMIN_REVIEW",
+                    "response_message": "That was the first page.",
+                }
+            if notification_period_stale:
+                return {
+                    "status": "WAITING_FOR_USER",
+                    "workflow_stage": "ADMIN_REVIEW",
+                    "response_message": (
+                        f"That submission for **{scoped_lease}** is no longer awaiting "
+                        "review for the period this notification named — it may have "
+                        "already been reviewed. Say \"review sales data\" to see what's "
+                        "currently pending."
+                    ),
+                }
             return {
                 "status": "WAITING_FOR_USER",
                 "workflow_stage": "ADMIN_REVIEW",
                 "response_message": "No submitted sales data awaiting review at this time.",
             }
 
+        collected["admin_review_page"] = page
         backend_refs["admin_review_rows"] = submitted
-        lines = [f"📋 **{len(submitted)} submission(s) awaiting review:**\n"]
-        for r in submitted[:10]:
-            badge = ADMIN_TABLE_STATUS_LABELS.get(str(r.get("status") or ""), r.get("status") or "")
-            lines.append(
-                f"• **{r['lease_code']}** | "
-                f"{_lease_context_bits(r)} | "
-                f"{r.get('sales_period_start', '')} – {r.get('sales_period_end', '')} | "
-                f"SAR {float(r.get('sales_amt', 0)):,.2f} | {badge}"
-            )
-        if len(submitted) > 10:
-            lines.append(f"_...and {len(submitted) - 10} more._")
-        lines.append(
-            "\nSame as the portal **Ask upload** menu — tell me:\n"
-            "• **Approve** a lease\n"
-            "• **Request reupload** (sales data)\n"
-            "• **Request supporting document**\n"
-            "• **Request audited sales**\n\n"
-            "For example: "
-            + _action_examples(submitted)
-            + "."
+        has_more = not scoped_lease and page * _ADMIN_REVIEW_LIST_LIMIT < total_count
+        has_prev = not scoped_lease and page > 1
+        # The table card (response_ui.rows) already renders every row's
+        # detail — repeating each one as a bullet line in the message text
+        # too was pure duplication (and the "Same as the portal" phrasing
+        # was internal jargon, not something to show an admin). The message
+        # is just the count plus what actions are available.
+        noun = "submission" if total_count == 1 else "submissions"
+        page_note = (
+            f" (showing the first {len(submitted)} — use the arrows below for more)"
+            if has_more
+            else ""
         )
+        lines = [
+            f"You have **{total_count} {noun}** awaiting review{page_note}. "
+            "Use the buttons in the table, or just tell me what to do — "
+            "for example " + _action_examples(submitted) + "."
+        ]
 
         return {
             "status": "WAITING_FOR_USER",
             "workflow_stage": "ADMIN_REVIEW",
+            "collected_data": collected,
             "backend_refs": backend_refs,
             "response_message": "\n".join(lines),
             "response_ui": {
                 "type": "admin_sales_data_list",
-                "rows": submitted,
+                "verbatim": True,
+                "rows": submitted[:_ADMIN_REVIEW_LIST_LIMIT],
+                "total_count": total_count,
+                "page": page,
+                "has_more": has_more,
+                "has_prev": has_prev,
                 "message": "\n".join(lines),
             },
         }
@@ -445,7 +639,15 @@ async def admin_review_entry_node(state: ServiceRequestState) -> dict[str, Any]:
 
         fields: dict[str, Any] = {}
         det_action = _deterministic_action(user_message)
-        det_codes = _lease_tokens_from_message(user_message)
+        # Real-format codes ("t0106037", from the review table's own Approve
+        # button) first — _lease_tokens_from_message only recognises the
+        # internal "LC-1234" demo format and bare digit runs, so a real code
+        # fell through to the LLM path every time, which is slower and (for
+        # a message like "Approve t0106037 for 2026-05-01") not guaranteed
+        # to also carry the period through to det_codes.
+        det_codes = _extract_lease_codes(user_message) or _lease_tokens_from_message(
+            user_message
+        )
         det_all = _select_all(user_message)
         need_llm = det_action is None or (not det_codes and not det_all)
 
@@ -493,8 +695,13 @@ async def admin_review_entry_node(state: ServiceRequestState) -> dict[str, Any]:
             collected["comment_text"] = comment
 
         try:
-            reviewable = await _load_reviewable(backend_refs)
+            reviewable = await _load_reviewable(
+                backend_refs,
+                lease_codes=requested if requested and not select_all else None,
+                need_all=select_all,
+            )
         except Exception:
+            log.error("admin_review_entry.load_reviewable_failed", exc_info=True)
             return {
                 "status": "WAITING_FOR_USER",
                 "response_message": "⚠️ Could not fetch sales data. Please try again.",

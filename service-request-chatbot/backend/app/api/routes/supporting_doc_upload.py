@@ -28,9 +28,20 @@ _DOC_CACHE: dict[str, dict[str, Any]] = {}
 
 MAX_SIZE_BYTES = 10 * 1024 * 1024  # 10 MB
 
+# Must mirror the live cenomi-api PUT /files extension allow-list exactly
+# (file_upload/delivery/http/file_upload_handler.go — newFileUploadRequest).
+# That handler 400s with "invalid file extension found" for anything outside
+# {xlsx, png, doc, pdf, jpg, jpeg, zip} for the sales-data document types
+# used here (SD_RE_UPL / SD_SUP_DOC / SD_AUD_DOC — none of the doc-type-
+# specific bypasses for archived-drawing / user-guide / HSE video formats
+# apply to this flow).  This route used to accept a broader set (docx, xls,
+# gif, webp, bmp, tif/tiff) — those files cached here without error, only to
+# have the real PUT /files call fail downstream in
+# supporting_doc_upload_node, which read as "document upload is failing"
+# with no indication of why. Reject them up front instead, with a message
+# that says which formats are actually accepted.
 _ALLOWED_EXTENSIONS = frozenset({
-    "pdf", "png", "jpg", "jpeg", "gif", "webp", "bmp", "tif", "tiff",
-    "doc", "docx", "xls", "xlsx",
+    "pdf", "png", "jpg", "jpeg", "doc", "xlsx", "zip",
 })
 
 _ALLOWED_CONTENT_TYPES = frozenset({
@@ -38,14 +49,10 @@ _ALLOWED_CONTENT_TYPES = frozenset({
     "application/octet-stream",
     "image/png",
     "image/jpeg",
-    "image/gif",
-    "image/webp",
-    "image/bmp",
-    "image/tiff",
     "application/msword",
-    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-    "application/vnd.ms-excel",
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "application/zip",
+    "application/x-zip-compressed",
 })
 
 
@@ -95,8 +102,8 @@ async def upload_supporting_doc(
         raise HTTPException(
             status_code=400,
             detail=(
-                "Unsupported file type. Please upload a PDF, image, "
-                "or office document."
+                "Unsupported file type. Please upload one of: PDF, PNG, "
+                "JPG/JPEG, DOC, XLSX, or ZIP."
             ),
         )
 

@@ -107,7 +107,8 @@ def test_select_all_and_mixed_actions() -> None:
 async def test_review_sales_data_lists_submitted_rows() -> None:
     client = AsyncMock()
     pending = {**_ROWS[0], "status": "PENDING", "lease_code": "LC-1001"}
-    client.get_sales_data = AsyncMock(return_value=[pending, *_ROWS])
+    rows = [pending, *_ROWS]
+    client.get_sales_data_page = AsyncMock(return_value=(rows, len(rows)))
     with (
         patch(
             "app.agents.graph.nodes.sales_data.admin_review_entry_node.get_current_bearer_token",
@@ -128,7 +129,7 @@ async def test_review_sales_data_lists_submitted_rows() -> None:
     assert codes == ["LC-2001", "LC-2002"]
     assert "LC-1001" not in codes
     assert "Approve LC-2001" in result["response_message"]
-    assert "Submitted" in result["response_message"]
+    assert "3 submissions" in result["response_message"] and "awaiting review" in result["response_message"]
 
     client = AsyncMock()
     client.get_sales_data = AsyncMock(return_value=_ROWS)
@@ -156,6 +157,140 @@ async def test_review_sales_data_lists_submitted_rows() -> None:
     assert result["response_ui"]["type"] == "admin_confirm"
     assert len(result["response_ui"]["targets"]) == 2
     assert "LC-2002" in result["response_message"]
+
+
+@pytest.mark.asyncio
+async def test_approve_real_lease_code_with_period_targets_one_month_only() -> None:
+    """The review table's own Approve button ("Approve t0106037 for
+    2026-05-01") must confirm only that one row, not every month the lease
+    has awaiting review — this was the reported bug: clicking Approve on a
+    single row in an 18-row list confirmed all 18.
+    """
+    rows = [
+        {
+            "lease_id": 9,
+            "lease_code": "t0106037",
+            "status": "SUBMITTED",
+            "sales_period_start": f"2026-{month:02d}-01",
+            "sales_period_end": f"2026-{month:02d}-28",
+            "sales_amt": 100000.0 + month,
+        }
+        for month in (4, 5, 6)
+    ]
+    client = AsyncMock()
+    client.get_sales_data = AsyncMock(return_value=rows)
+    with (
+        patch(
+            "app.agents.graph.nodes.sales_data.admin_review_entry_node.get_current_bearer_token",
+            return_value="tok",
+        ),
+        patch(
+            "app.agents.graph.nodes.sales_data.admin_review_entry_node.SalesDataApiClient",
+            return_value=client,
+        ),
+    ):
+        result = await admin_review_entry_node(
+            _state(user_message="Approve t0106037 for 2026-05-01")
+        )
+
+    assert result["workflow_stage"] == "ADMIN_CONFIRM"
+    targets = result["collected_data"]["admin_targets"]
+    assert len(targets) == 1
+    assert targets[0]["sales_period_start"] == "2026-05-01"
+
+
+@pytest.mark.asyncio
+async def test_notification_year_only_period_scopes_to_one_row() -> None:
+    """Yearly-frequency admin notifications name only a bare year
+    ("corresponding to year 2026") — extract_period_date returns "2026",
+    which must still narrow the lease's rows by startswith, not fail to
+    match because it's shorter than a row's "YYYY-MM" prefix.
+    """
+    rows = [
+        {
+            "lease_id": 9,
+            "lease_code": "t0106037",
+            "status": "SUBMITTED",
+            "sales_period_start": f"{year}-01-01",
+            "sales_period_end": f"{year}-12-31",
+            "sales_amt": 100000.0,
+        }
+        for year in (2025, 2026)
+    ]
+    client = AsyncMock()
+    client.get_sales_data = AsyncMock(return_value=rows)
+    with (
+        patch(
+            "app.agents.graph.nodes.sales_data.admin_review_entry_node.get_current_bearer_token",
+            return_value="tok",
+        ),
+        patch(
+            "app.agents.graph.nodes.sales_data.admin_review_entry_node.SalesDataApiClient",
+            return_value=client,
+        ),
+    ):
+        result = await admin_review_entry_node(
+            _state(
+                intent="REVIEW_SALES_DATA",
+                user_message="",
+                backend_refs={
+                    "notification_context": {
+                        "lease_code": "t0106037",
+                        "period_date": "2026",
+                    }
+                },
+            )
+        )
+
+    ui_rows = result["response_ui"]["rows"]
+    assert len(ui_rows) == 1
+    assert ui_rows[0]["sales_period_start"] == "2026-01-01"
+
+
+@pytest.mark.asyncio
+async def test_notification_stale_period_reports_clearly_not_whole_history() -> None:
+    """If the notification's period matches nothing (already actioned since),
+    the fix must say so plainly instead of silently falling back to showing
+    the lease's entire history — that fallback defeated the whole point of
+    period-scoping in exactly the case it matters most.
+    """
+    rows = [
+        {
+            "lease_id": 9,
+            "lease_code": "t0106037",
+            "status": "SUBMITTED",
+            "sales_period_start": "2025-01-01",
+            "sales_period_end": "2025-12-31",
+            "sales_amt": 100000.0,
+        }
+    ]
+    client = AsyncMock()
+    client.get_sales_data = AsyncMock(return_value=rows)
+    with (
+        patch(
+            "app.agents.graph.nodes.sales_data.admin_review_entry_node.get_current_bearer_token",
+            return_value="tok",
+        ),
+        patch(
+            "app.agents.graph.nodes.sales_data.admin_review_entry_node.SalesDataApiClient",
+            return_value=client,
+        ),
+    ):
+        result = await admin_review_entry_node(
+            _state(
+                intent="REVIEW_SALES_DATA",
+                user_message="",
+                backend_refs={
+                    "notification_context": {
+                        "lease_code": "t0106037",
+                        "period_date": "2026",
+                    }
+                },
+            )
+        )
+
+    assert "response_ui" not in result
+    assert "no longer awaiting review" in result["response_message"]
 
 
 @pytest.mark.asyncio
@@ -311,7 +446,7 @@ async def test_review_list_includes_uploaded_supporting_and_audited() -> None:
         },
     ]
     client = AsyncMock()
-    client.get_sales_data = AsyncMock(return_value=rows)
+    client.get_sales_data_page = AsyncMock(return_value=(rows, len(rows)))
     with (
         patch(
             "app.agents.graph.nodes.sales_data.admin_review_entry_node.get_current_bearer_token",
@@ -326,9 +461,10 @@ async def test_review_list_includes_uploaded_supporting_and_audited() -> None:
             _state(intent="REVIEW_SALES_DATA", user_message="review sales data")
         )
 
-    codes = [r["lease_code"] for r in result["response_ui"]["rows"]]
+    ui_rows = result["response_ui"]["rows"]
+    codes = [r["lease_code"] for r in ui_rows]
     assert codes == ["LC-2001", "LC-2002"]
     assert "LC-1004" not in codes
-    assert result["response_message"].count("Submitted") >= 2
-    assert "Riyadh Park" in result["response_message"]
-    assert "Centrepoint Co" in result["response_message"]
+    assert "3 submissions" in result["response_message"] and "awaiting review" in result["response_message"]
+    assert any(r.get("property_name") == "Riyadh Park" for r in ui_rows)
+    assert any(r.get("company_name") == "Centrepoint Co" for r in ui_rows)

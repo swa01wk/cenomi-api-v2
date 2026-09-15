@@ -46,24 +46,42 @@ async def supporting_doc_confirmation_node(state: ServiceRequestState) -> dict[s
     if comment:
         collected["comment_text"] = comment
 
+    invalid_amount = False
     if "sales_amt" in corrected_fields and corrected_fields.get("sales_amt") is not None:
         try:
-            collected["sales_amt"] = float(corrected_fields["sales_amt"])
+            amt = float(corrected_fields["sales_amt"])
         except (TypeError, ValueError):
-            pass
+            invalid_amount = True
+        else:
+            # A corrected amount is genuine fresh tenant input (they're
+            # editing the figure as part of this reupload), so it gets the
+            # same sanity check the CSV/manual-entry paths already apply —
+            # a silently-accepted zero or negative amount would otherwise
+            # reach cenomi-api's PATCH unchecked.
+            if amt <= 0:
+                invalid_amount = True
+            else:
+                collected["sales_amt"] = amt
 
     def _missing_comment_response() -> dict[str, Any]:
-        prompt = _confirm_ui(
-            collected,
-            extra=(
-                "A **comment is required** before I can submit — same as the portal. "
-                "Add a short note (for example: *POS report attached*) and confirm again."
-            ),
-        )
+        prompt = _confirm_ui(collected, comment_missing=True)
         prompt["collected_data"] = collected
         return prompt
 
+    def _invalid_amount_response() -> dict[str, Any]:
+        return {
+            "collected_data": collected,
+            "workflow_stage": "AWAITING_DOC_CONFIRM",
+            "status": "WAITING_FOR_USER",
+            "response_message": (
+                "That amount doesn't look right — enter a positive sales figure."
+            ),
+            "response_ui": {"type": "message", "verbatim": True},
+        }
+
     if action_override in ("confirm", "confirm_supporting_doc"):
+        if invalid_amount:
+            return _invalid_amount_response()
         if not (collected.get("comment_text") or "").strip():
             log.info("supporting_doc_confirmation.comment_required")
             return _missing_comment_response()
@@ -84,6 +102,8 @@ async def supporting_doc_confirmation_node(state: ServiceRequestState) -> dict[s
 
     if workflow_stage == "AWAITING_DOC_CONFIRM" and user_message:
         if _contains_phrase(user_message, _CONFIRM_PHRASES):
+            if invalid_amount:
+                return _invalid_amount_response()
             if not (collected.get("comment_text") or "").strip():
                 return _missing_comment_response()
             log.info("supporting_doc_confirmation.confirmed_by_text")
@@ -139,7 +159,7 @@ def _resume_upload_after_cancel(
     return prompt
 
 
-def _confirm_ui(collected: dict[str, Any], extra: str = "") -> dict[str, Any]:
+def _confirm_ui(collected: dict[str, Any], *, comment_missing: bool = False) -> dict[str, Any]:
     lease_code = collected.get("lease_code", "")
     start = collected.get("sales_period_start", "")
     end = collected.get("sales_period_end", "")
@@ -149,29 +169,21 @@ def _confirm_ui(collected: dict[str, Any], extra: str = "") -> dict[str, Any]:
     current_label = STATUS_LABELS.get(current_status, current_status)
     target_label = STATUS_LABELS.get(target_status, target_status)
     ask_label = ASK_UPLOAD_LABELS.get(current_status, "Document")
-    comment_display = collected.get("comment_text") or "—"
     amt = collected.get("sales_amt")
-    amt_display = (
-        f"SAR {float(amt):,.2f}" if amt is not None and amt != "" else "—"
-    )
 
-    extra_block = f"\n\n{extra}" if extra else ""
-    message = (
-        f"Please confirm this **{ask_label}** upload:\n\n"
-        f"| Field | Value |\n"
-        f"|---|---|\n"
-        f"| Lease | **{lease_code}** |\n"
-        f"| Period | **{start} – {end}** |\n"
-        f"| File | **{filename}** |\n"
-        f"| Ask type | {ask_label} |\n"
-        f"| Amount | {amt_display} |\n"
-        f"| Current status | {current_label} |\n"
-        f"| New status | {target_label} |\n"
-        f"| Comment | {comment_display} |\n\n"
-        "A **comment is required**. You may also update the sales amount. "
-        "Reply **yes** to submit, or **no** to attach a different file."
-        f"{extra_block}"
-    )
+    # The card (SalesDataSupportingDocConfirmCard.tsx) already renders
+    # lease/period/file/amount/status as an actual table from response_ui's
+    # fields below, and the Confirm/Cancel buttons make "reply yes/no"
+    # instructions redundant — so both messages stay short. But they must
+    # differ: this used to show "A comment is required" even on the very
+    # first view of the card, before the tenant had done anything wrong.
+    if comment_missing:
+        message = (
+            "A comment is required before I can submit. Add a short note "
+            "(for example: *POS report attached*) and confirm again."
+        )
+    else:
+        message = "Add a short comment (for example: *POS report attached*), then confirm."
 
     return {
         "confirmation_status": "PENDING",
@@ -180,13 +192,22 @@ def _confirm_ui(collected: dict[str, Any], extra: str = "") -> dict[str, Any]:
         "response_message": message,
         "response_ui": {
             "type": "supporting_doc_confirm",
+            # Without this, response_generation's LLM rewrite is free to
+            # paraphrase this confirmation/error text — observed producing a
+            # fabricated "issue with the sales period date format, please
+            # re-enter the start date" out of what was really just a missing
+            # comment_text, sending the tenant down a dead-end asking for a
+            # date the flow never needed at all.
+            "verbatim": True,
             "lease_code": lease_code,
             "lease_id": collected.get("lease_id"),
             "sales_period_start": start,
             "sales_period_end": end,
             "filename": filename,
             "current_status": current_status,
+            "current_status_label": current_label,
             "target_status": target_status,
+            "target_status_label": target_label,
             "ask_label": ask_label,
             "sales_amt": amt,
             "comment_text": collected.get("comment_text") or "",

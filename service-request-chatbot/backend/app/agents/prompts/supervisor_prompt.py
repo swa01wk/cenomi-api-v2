@@ -133,6 +133,13 @@ VALID INTENTS
       Keywords: work permit, hot work, cold work, roof access, construction permit,
                 maintenance permit, operations permit, permit for work, I need a permit
 
+  APPROVE_WORK_PERMIT_SR
+      User wants to approve or reject an existing Work Permit service request
+      (DD Engineer, FM Manager, Mall Manager, or Operations depending on subtype hop).
+      Keywords: approve work permit, reject work permit, review work permit,
+                sign off permit, open work permit SR
+      Routing: opening an existing WP SR by id is enough — status sync maps the hop.
+
   UPLOAD_SALES_DATA
       User (tenant) wants to upload or submit monthly/quarterly sales data figures.
       Keywords: upload sales data, submit sales, sales figures, sales for Q3,
@@ -307,6 +314,11 @@ When intent = APPROVE_FITOUT_CONFIRM_TRADING:
     target_agent     = "rdd_trading_confirmation_agent"
 
 When intent = CREATE_WORK_PERMIT_SR:
+    service_category = "WORK_PERMIT"
+    sub_category     = "WORK_PERMIT"
+    target_agent     = "work_permit_agent"
+
+When intent = APPROVE_WORK_PERMIT_SR:
     service_category = "WORK_PERMIT"
     sub_category     = "WORK_PERMIT"
     target_agent     = "work_permit_agent"

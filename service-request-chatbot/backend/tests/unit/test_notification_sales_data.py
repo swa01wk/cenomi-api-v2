@@ -8,8 +8,11 @@ from app.agents.services.notification_inbox_service import (
     NotificationGroup,
     NotificationInboxResult,
 )
+from datetime import date
+
 from app.agents.services.notification_sales_data import (
     build_sales_data_notification_context,
+    extract_period_date,
     extract_sales_period_hint,
     is_sales_data_notification_ref,
     sales_data_intent_for_ref,
@@ -28,6 +31,38 @@ def test_extract_period_hint_with_year() -> None:
         "Please submit sales data as of August 2026 for Brand@Mall."
     )
     assert hint == "month August 2026"
+
+
+def test_extract_period_date_month_name_only() -> None:
+    # cenomi-api's real, monthly-frequency admin notification (no year at
+    # all — getYearMonthDate() only ever names the month for these leases).
+    result = extract_period_date(
+        "In response to your request, Tenant has uploaded supporting "
+        "documents for t0106037-Brand Ipekyol-Juri Mall corresponding to "
+        "month May"
+    )
+    today = date.today()
+    year = today.year if 5 <= today.month else today.year - 1
+    assert result == f"{year:04d}-05"
+
+
+def test_extract_period_date_year_only() -> None:
+    assert (
+        extract_period_date("Please review the sales data for X corresponding to year 2026")
+        == "2026"
+    )
+
+
+def test_extract_period_date_bare_date() -> None:
+    assert (
+        extract_period_date("Please review the sales data for X corresponding to 5/9/2026")
+        == "2026-09"
+    )
+
+
+def test_extract_period_date_no_match() -> None:
+    assert extract_period_date("Please submit sales data as of month August for X.") is None
+    assert extract_period_date(None) is None
 
 
 def test_is_sales_data_ref_by_sub_category() -> None:

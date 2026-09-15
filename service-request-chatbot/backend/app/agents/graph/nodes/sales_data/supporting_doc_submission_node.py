@@ -37,23 +37,30 @@ async def supporting_doc_submission_node(state: ServiceRequestState) -> dict[str
     comment = (collected.get("comment_text") or "").strip()
 
     if not lease_id or not document_id:
+        message = "Missing lease or document ID. Please attach the file again."
         return {
             "status": "WAITING_FOR_USER",
             "workflow_stage": "AWAITING_DOC_UPLOAD",
-            "response_message": (
-                "Missing lease or document ID. Please attach the file again."
-            ),
+            "response_message": message,
+            # Every branch below needs its own verbatim response_ui — without
+            # one at all, response_generation's LLM rewrite has nothing to
+            # anchor on and is free to invent unrelated specifics (observed:
+            # a fabricated "sales period date format" issue out of what was
+            # really a missing comment_text).
+            "response_ui": {"type": "message", "message": message, "verbatim": True},
         }
 
     if not comment:
+        message = (
+            "A **comment is required** before I can submit this file. "
+            "Add a short note and confirm again."
+        )
         return {
             "status": "WAITING_FOR_USER",
             "workflow_stage": "AWAITING_DOC_CONFIRM",
             "collected_data": collected,
-            "response_message": (
-                "A **comment is required** before I can submit this file. "
-                "Add a short note and confirm again."
-            ),
+            "response_message": message,
+            "response_ui": {"type": "message", "message": message, "verbatim": True},
         }
 
     payload: dict[str, Any] = {
@@ -80,19 +87,21 @@ async def supporting_doc_submission_node(state: ServiceRequestState) -> dict[str
         result = await client.update_sales_data_status(payload)
     except Exception as exc:
         log.error("supporting_doc_submission.failed", exc_info=True)
+        message = f"⚠️ Update failed: {exc}. Please try again."
         return {
             "status": "WAITING_FOR_USER",
             "workflow_stage": "AWAITING_DOC_CONFIRM",
-            "response_message": f"⚠️ Update failed: {exc}. Please try again.",
+            "response_message": message,
+            "response_ui": {"type": "message", "message": message, "verbatim": True},
         }
 
     if not result.get("success"):
+        message = f"⚠️ Update failed: {result.get('error', 'Unknown error')}."
         return {
             "status": "WAITING_FOR_USER",
             "workflow_stage": "AWAITING_DOC_CONFIRM",
-            "response_message": (
-                f"⚠️ Update failed: {result.get('error', 'Unknown error')}."
-            ),
+            "response_message": message,
+            "response_ui": {"type": "message", "message": message, "verbatim": True},
         }
 
     label = STATUS_LABELS.get(new_status, new_status)
@@ -115,6 +124,7 @@ async def supporting_doc_submission_node(state: ServiceRequestState) -> dict[str
         "response_message": message,
         "response_ui": {
             "type": "supporting_doc_success",
+            "verbatim": True,
             "lease_code": lease_code,
             "status": new_status,
             "document_id": document_id,
