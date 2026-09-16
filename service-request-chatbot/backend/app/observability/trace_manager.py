@@ -18,7 +18,9 @@ import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.observability.analytics_constants import (
+    EVENT_SR_APPROVED,
     EVENT_SR_LIFECYCLE_COMPLETED,
+    EVENT_SR_REJECTED,
     EVENT_SR_SUBMITTED,
     TERMINAL_WORKFLOW_STAGES,
     TOOL_TYPE_SR_CREATE,
@@ -76,8 +78,14 @@ class TraceManager:
         user_id: str | UUID,
         input_message: str,
         metadata: dict[str, Any] | None = None,
+        dimensions: dict[str, Any] | None = None,
     ) -> UUID | None:
         """Create a new AgentTrace and return its UUID.
+
+        ``dimensions`` carries who asked and from where — ``channel``,
+        ``user_roles``, ``mall_names``, ``property_ids``, ``is_global_admin``
+        — so usage can later be segmented without reaching back into the
+        platform directory.
 
         Returns ``None`` if persistence fails; the caller should treat a
         ``None`` trace_id as a signal that tracing is unavailable for this
@@ -90,6 +98,7 @@ class TraceManager:
                 status="IN_PROGRESS",
                 input_message=input_message,
                 metadata=metadata or {},
+                dimensions=dimensions,
             )
             self._active_trace_id = row.id
             self._trace_start_times[row.id] = time.monotonic()
@@ -469,6 +478,44 @@ class TraceManager:
             once=True,
             dedupe_sr_id=sr_id,
         )
+
+    async def emit_sr_decision(
+        self,
+        trace_id: UUID,
+        *,
+        approved: bool,
+        sr_id: str | None,
+        flow: str,
+        stage: str | None,
+        actor_roles: list[str] | None = None,
+    ) -> None:
+        """Record a reviewer's approve / reject on an existing SR.
+
+        Deduplicated per (session, sr_id, event) — a retried turn that
+        re-sends the same decision does not count twice.  Never raises.
+        """
+        try:
+            ctx = self._trace_context.get(trace_id)
+            if ctx is None:
+                return
+            session_id, user_id = ctx
+            properties: dict[str, Any] = {"flow": flow, "stage": stage}
+            if sr_id:
+                properties["sr_id"] = str(sr_id)
+            if actor_roles:
+                properties["actor_roles"] = actor_roles
+            await emit_analytics(
+                self._session,
+                user_id=user_id,
+                session_id=session_id,
+                event_name=EVENT_SR_APPROVED if approved else EVENT_SR_REJECTED,
+                trace_id=trace_id,
+                properties=properties,
+                once=bool(sr_id),
+                dedupe_sr_id=str(sr_id) if sr_id else None,
+            )
+        except Exception:
+            log.exception("trace_manager.emit_sr_decision.failed", trace_id=str(trace_id))
 
     async def _maybe_emit_lifecycle(
         self,

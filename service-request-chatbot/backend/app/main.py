@@ -12,6 +12,7 @@ from app.api.routes.chat import router as chat_router
 from app.api.routes.chat import service_request_router
 from app.api.routes.chat_feedback import router as chat_feedback_router
 from app.api.routes.dashboard import router as dashboard_router
+from app.api.routes.command_center import router as command_center_router
 from app.api.routes.msp_chat import msp_chat_router
 from app.api.routes import notifications as notifications_routes
 from app.api.routes import session_analytics as session_analytics_routes
@@ -84,6 +85,8 @@ def create_app() -> FastAPI:
     application.include_router(obs_analytics.router, prefix=settings.api_v1_prefix, tags=["analytics-v1"])
     # Assistant-admin dashboard — contract consumed by the tenant frontend
     application.include_router(dashboard_router, prefix=settings.api_v1_prefix)
+    # AI Command Center — the four-section analytics contract (ticket 3784)
+    application.include_router(command_center_router, prefix=settings.api_v1_prefix)
 
     # ── v2 routes (current — new callers should use these) ────────────────────
 

@@ -87,6 +87,32 @@ class AnalyticsFilters:
     agent: str | None = None
     user_id: UUID | None = None
 
+    def scoped_trace_ids(self) -> Any | None:
+        """Sub-select of trace ids matching agent/user, or None when unscoped.
+
+        Tables hanging off a trace (runs, tool and LLM calls, feedback) carry
+        no agent or user of their own; they are scoped through their trace.
+        """
+        if self.agent is None and self.user_id is None:
+            return None
+        clauses: list[Any] = []
+        if self.agent is not None:
+            clauses.append(AgentTrace.active_agent == self.agent)
+        if self.user_id is not None:
+            clauses.append(AgentTrace.user_id == self.user_id)
+        return select(AgentTrace.id).where(*clauses)
+
+    def scoped_session_ids(self) -> Any | None:
+        """Sub-select of session ids the agent/user filter touches, or None."""
+        if self.agent is None and self.user_id is None:
+            return None
+        clauses: list[Any] = []
+        if self.agent is not None:
+            clauses.append(AgentTrace.active_agent == self.agent)
+        if self.user_id is not None:
+            clauses.append(AgentTrace.user_id == self.user_id)
+        return select(AgentTrace.session_id).where(*clauses)
+
     def trace_clauses(self) -> list[Any]:
         clauses: list[Any] = []
         if self.from_date is not None:
@@ -578,6 +604,12 @@ class AnalyticsRepository:
             clauses.append(AgentFeedback.created_at <= filters.to_date)
         if filters.user_id is not None:
             clauses.append(AgentFeedback.user_id == filters.user_id)
+        if filters.agent is not None:
+            clauses.append(
+                AgentFeedback.trace_id.in_(
+                    select(AgentTrace.id).where(AgentTrace.active_agent == filters.agent)
+                )
+            )
         if max_score is not None:
             clauses.append(AgentFeedback.score <= max_score)
 
@@ -639,6 +671,9 @@ class AnalyticsRepository:
             clauses.append(ChatMessage.created_at >= filters.from_date)
         if filters.to_date is not None:
             clauses.append(ChatMessage.created_at <= filters.to_date)
+        scoped_sessions = filters.scoped_session_ids()
+        if scoped_sessions is not None:
+            clauses.append(ChatMessage.session_id.in_(scoped_sessions))
 
         per_session = (
             select(
@@ -1050,6 +1085,9 @@ class AnalyticsRepository:
             clauses.append(AgentRun.started_at >= filters.from_date)
         if filters.to_date is not None:
             clauses.append(AgentRun.started_at <= filters.to_date)
+        scoped_traces = filters.scoped_trace_ids()
+        if scoped_traces is not None:
+            clauses.append(AgentRun.trace_id.in_(scoped_traces))
 
         rows = await self._session.execute(
             select(
@@ -1097,6 +1135,9 @@ class AnalyticsRepository:
             clauses.append(AgentToolCall.created_at >= filters.from_date)
         if filters.to_date is not None:
             clauses.append(AgentToolCall.created_at <= filters.to_date)
+        scoped_traces = filters.scoped_trace_ids()
+        if scoped_traces is not None:
+            clauses.append(AgentToolCall.trace_id.in_(scoped_traces))
 
         rows = await self._session.execute(
             select(
@@ -1143,6 +1184,9 @@ class AnalyticsRepository:
             clauses.append(AgentLLMCall.created_at >= filters.from_date)
         if filters.to_date is not None:
             clauses.append(AgentLLMCall.created_at <= filters.to_date)
+        scoped_traces = filters.scoped_trace_ids()
+        if scoped_traces is not None:
+            clauses.append(AgentLLMCall.trace_id.in_(scoped_traces))
 
         rows = await self._session.execute(
             select(

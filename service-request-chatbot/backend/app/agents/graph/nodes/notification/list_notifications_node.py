@@ -14,6 +14,7 @@ Responsibilities (spec §2.1):
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 import structlog
@@ -30,7 +31,9 @@ from app.agents.services.notification_payload import (
     group_summary as _group_summary,
     serialize_groups as _serialize_groups,
 )
+from app.observability.analytics_constants import TOOL_TYPE_NOTIFICATION_INBOX
 from app.observability.decorators import trace_node
+from app.observability.tool_capture import record_tool_call
 from app.types.chat import AuthContext
 
 log = structlog.get_logger(__name__)
@@ -72,8 +75,30 @@ async def _list_response(state: ServiceRequestState) -> dict[str, Any]:
         filters = parse_notification_list_filters(state.get("user_message") or "")
     service = get_notification_inbox_service()
     roles = auth.roles if auth is not None else frozenset()
+    started = time.monotonic()
     inbox = await service.fetch_inbox(
         user_id=user_id, roles=roles, filters=filters, page=page
+    )
+    await record_tool_call(
+        state,
+        tool_name="notification_inbox_api.fetch",
+        tool_type=TOOL_TYPE_NOTIFICATION_INBOX,
+        # A fan-out where some sources failed still rendered a list; count it
+        # as a success but keep the partial errors visible in the message.
+        success=inbox.success,
+        latency_ms=int((time.monotonic() - started) * 1000),
+        error=inbox.error
+        or (
+            "; ".join(f"{sub}: {err}" for sub, err in inbox.partial_errors.items())
+            if inbox.partial_errors
+            else None
+        ),
+        request_payload={
+            "page": page,
+            "unread": filters.unread,
+            "sub_categories": list(filters.sub_categories or ()),
+        },
+        response_payload={"total": inbox.total, "groups": len(inbox.groups)},
     )
 
     if not inbox.success:

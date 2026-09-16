@@ -37,14 +37,16 @@ from app.agents.services.review_decorations_service import (
 )
 from app.agents.services.service_request_api_service import get_service_request_api_service
 from app.db.repositories.audit_log_repo import AuditLogRepository
+from app.observability.analytics_constants import FLOW_HANDOVER_RDD, TOOL_TYPE_SR_PATCH
 from app.observability.decorators import trace_node
+from app.observability.tool_capture import record_sr_decision
 from app.observability.redaction import redact
 
 logger = logging.getLogger(__name__)
 
 _permission_service = PermissionService()
 _TOOL_NAME = "service_request_api.rdd.submit_report"
-_TOOL_TYPE = "API"
+_TOOL_TYPE = TOOL_TYPE_SR_PATCH
 
 _RDD_ROLES: frozenset[str] = frozenset({"DD_ENGINEER"})
 _RDD_FINISHED: frozenset[str] = frozenset({"FINISHED", "APPROVED"})
@@ -414,6 +416,13 @@ async def rdd_api_submission_node(state: ServiceRequestState) -> dict[str, Any]:
         )
 
     backend_refs["rdd_status"] = "REPORT_SUBMITTED"
+    await record_sr_decision(
+        state,
+        approved=True,
+        sr_id=submitted_sr_id,
+        flow=FLOW_HANDOVER_RDD,
+        stage="RDD_REVIEW",
+    )
     if trace_manager is not None and session_id is not None:
         try:
             repo = AuditLogRepository(trace_manager._session)

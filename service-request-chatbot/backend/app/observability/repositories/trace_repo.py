@@ -65,9 +65,16 @@ class TraceRepository:
         workflow_stage_before: str | None = None,
         input_message: str | None = None,
         metadata: dict[str, Any] | None = None,
+        dimensions: dict[str, Any] | None = None,
     ) -> AgentTrace:
         """Insert a new AgentTrace and flush to obtain the DB-generated id."""
+        dims = dimensions or {}
         row = AgentTrace(
+            channel=dims.get("channel"),
+            user_roles=dims.get("user_roles"),
+            mall_names=dims.get("mall_names"),
+            property_ids=dims.get("property_ids"),
+            is_global_admin=dims.get("is_global_admin"),
             id=uuid4(),
             session_id=session_id,
             user_id=user_id,

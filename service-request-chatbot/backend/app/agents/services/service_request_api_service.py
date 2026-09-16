@@ -199,6 +199,18 @@ class AbstractServiceRequestAPIService(ABC):
 # ---------------------------------------------------------------------------
 
 
+# Stamped on every SR the assistant creates, so the platform can tell
+# assistant-created SRs from form-created ones (cenomi-api migration
+# 1789482400, ``service_request.created_via``).  Platform builds without the
+# column ignore the unknown field.
+CREATED_VIA_AI_ASSISTANT = "AI_ASSISTANT"
+
+
+def with_created_via(payload: dict[str, Any]) -> dict[str, Any]:
+    """Return ``payload`` marked as created by the AI assistant (not mutated)."""
+    return {**payload, "created_via": CREATED_VIA_AI_ASSISTANT}
+
+
 class HttpServiceRequestAPIService(AbstractServiceRequestAPIService):
     """Production adapter — delegates all platform calls to
     ``ServiceRequestPlatformClient``.
@@ -214,6 +226,7 @@ class HttpServiceRequestAPIService(AbstractServiceRequestAPIService):
     ) -> ServiceRequestCreationResult:
         """POST /service-requests and return a ``ServiceRequestCreationResult``."""
         wall_start = time.monotonic()
+        payload = with_created_via(payload)
         result = await self._client.create_service_request(payload)
         latency_ms = result.latency_ms or int((time.monotonic() - wall_start) * 1000)
 
