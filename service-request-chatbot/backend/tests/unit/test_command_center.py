@@ -141,6 +141,7 @@ def _zero_row() -> SimpleNamespace:
         "contained", "rated", "create_intent", "create_intent_submitted", "srs",
         "completed", "submitted", "assisted", "corrected", "avg_seconds",
         "median_seconds", "total_seconds", "avg_turns", "total_questions",
+        "not_recorded", "multiple", "calls", "failed", "avg_ms", "p95_ms",
     ]
     return SimpleNamespace(**{n: 0 for n in names})
 
@@ -156,6 +157,11 @@ def _zero_row() -> SimpleNamespace:
         ("answer_trend", {}),
         ("intent_distribution", {}),
         ("channel_distribution", {}),
+        ("claim_distribution", {"dimension": "mall"}),
+        ("claim_distribution", {"dimension": "role"}),
+        ("function_distribution", {}),
+        ("productivity_by_function", {}),
+        ("decision_step_times", {}),
         ("failure_reasons", {}),
         ("agent_scorecard", {}),
         ("sr_outcomes", {}),
@@ -198,6 +204,17 @@ async def test_decision_times_group_by_reuses_one_sr_id_expression() -> None:
 def _stub_repo() -> AsyncMock:
     repo = AsyncMock()
     repo.turn_totals = AsyncMock(return_value=_totals())
+    repo.thumbs_totals = AsyncMock(return_value={
+        "replies": 20, "voted_replies": 8, "up": 6, "down": 2,
+        "by_source": {"help_answer": {"up": 4, "down": 1},
+                      "sr_step": {"up": 1, "down": 1},
+                      "sr_created": {"up": 1, "down": 0}},
+    })
+    repo.thumbs_daily = AsyncMock(return_value=[{"date": "2026-09-16", "up": 6, "down": 2}])
+    repo.thumbs_by_function = AsyncMock(
+        return_value=[{"function": "handover", "replies": 12, "up": 4, "down": 2}]
+    )
+    repo.downvoted_replies = AsyncMock(return_value=[])
     repo.user_activity = AsyncMock(
         return_value={"active_users": 4, "new_users": 1, "repeat_users": 2, "questions": 10}
     )
@@ -239,6 +256,21 @@ def _stub_repo() -> AsyncMock:
     repo.containment = AsyncMock(return_value={"sessions": 4, "contained": 3})
     repo.agent_breakdown = AsyncMock(return_value=[])
     repo.intent_distribution = AsyncMock(return_value=[])
+    repo.claim_distribution = AsyncMock(
+        return_value={
+            "items": [{"key": "Nakheel Mall", "questions": 5, "sessions": 2, "users": 1}],
+            "not_recorded_questions": 3,
+            "multiple_questions": 2,
+        }
+    )
+    repo.function_distribution = AsyncMock(
+        return_value=[{"function": "handover", "questions": 4, "sessions": 2, "users": 1,
+                       "classified": 4, "answered": 4}]
+    )
+    repo.productivity_by_function = AsyncMock(
+        return_value=[{"function": "handover", "srs_created": 3, "srs_completed": 1}]
+    )
+    repo.decision_step_times = AsyncMock(return_value=[])
     repo.channel_distribution = AsyncMock(
         return_value=[{"channel": "copilot_rail", "questions": 6, "sessions": 3, "users": 2}]
     )
@@ -266,10 +298,11 @@ def _fresh_cache():
     cc.clear_cache()
 
 
-async def _call(handler, **kwargs):
+async def _call(handler, platform=None, **kwargs):
     with (
         patch.object(cc, "CommandCenterRepository", return_value=_stub_repo()),
         patch.object(cc, "_resolve_user_names", new=AsyncMock(return_value={})),
+        patch.object(cc, "ai_share_of_service_requests", new=AsyncMock(return_value=platform)),
     ):
         return await handler(db=AsyncMock(), filters=WINDOW, **kwargs)
 
@@ -281,8 +314,10 @@ async def test_overview_route_runs() -> None:
     assert set(kpis) == {
         "active_users", "interactions", "srs_created", "answer_rate", "avg_rating",
         "sr_completion_rate", "p95_latency_ms", "llm_cost", "tool_reliability",
-        "escalation_rate",
+        "escalation_rate", "thumbs_up_rate",
     }
+    assert kpis["thumbs_up_rate"]["value"] == 0.75
+    assert kpis["thumbs_up_rate"]["previous"] == 0.75
     assert kpis["answer_rate"]["coverage"]["denominator"] == 10
     assert kpis["llm_cost"]["pricing_coverage"] == 0.5
     assert kpis["sr_completion_rate"]["value"] == 0.3333
@@ -292,6 +327,9 @@ async def test_usage_route_runs() -> None:
     data = (await _call(cc.command_center_usage))["data"]
     kpis = data["kpis"]
     assert data["by_channel"][0]["channel"] == "copilot_rail"
+    assert data["by_mall"]["items"][0]["key"] == "Nakheel Mall"
+    assert data["by_role"]["not_recorded_questions"] == 3
+    assert data["by_function"][0]["function"] == "handover"
     assert kpis["repeat_user_rate"]["value"] == 0.5
     assert kpis["containment_rate"]["value"] == 0.75
 
@@ -301,6 +339,11 @@ async def test_performance_route_runs() -> None:
     kpis = body["data"]["kpis"]
     assert kpis["positive"]["value"] == 1.0
     assert kpis["feedback_participation"]["value"] == 0.25
+    assert kpis["thumbs_up_rate"] == {"value": 0.75, "numerator": 6, "denominator": 8}
+    assert kpis["thumbs_participation"]["value"] == 0.4
+    assert body["data"]["thumbs"]["by_source"]["sr_step"] == {"up": 1, "down": 1}
+    assert body["data"]["thumbs_by_function"][0]["function"] == "handover"
+    assert body["data"]["thumbs_trend"][0]["up"] == 6
     assert kpis["llm_parse_failure_rate"]["value"] == 0.05
     assert body["data"]["comments"]["has_next"] is False
 
@@ -311,6 +354,22 @@ async def test_productivity_route_runs() -> None:
     assert kpis["approval_rate"]["value"] == 0.6667
     assert kpis["human_intervention_rate"]["value"] == 0.3333
     assert kpis["cost_per_sr_usd"]["value"] == 0.03
+    # Platform unavailable (not migrated / not configured): no share, not 0%.
+    assert kpis["ai_share_of_srs"] is None
+
+
+async def test_productivity_reports_ai_share_from_the_platform() -> None:
+    platform = {
+        "total": 20,
+        "ai": 5,
+        "by_function": [{"function": "handover", "total": 20, "ai": 5}],
+    }
+    data = (
+        await _call(cc.command_center_productivity, platform=platform, page=1, page_size=20)
+    )["data"]
+    assert data["kpis"]["ai_share_of_srs"] == {"value": 0.25, "numerator": 5, "denominator": 20}
+    assert data["platform_srs_by_function"][0]["ai"] == 5
+    assert data["by_function"][0]["function"] == "handover"
 
 
 async def test_rows_get_a_display_name() -> None:
@@ -341,3 +400,9 @@ async def test_query_failure_becomes_a_500_not_a_traceback() -> None:
     ):
         await cc.command_center_usage(db=AsyncMock(), filters=WINDOW)
     assert exc.value.status_code == 500
+
+
+def test_thumbs_up_rate_block() -> None:
+    assert cc.thumbs_up_rate({"up": 3, "down": 1})["value"] == 0.75
+    # No votes: nothing measured, not 0%.
+    assert cc.thumbs_up_rate({"up": 0, "down": 0})["value"] is None

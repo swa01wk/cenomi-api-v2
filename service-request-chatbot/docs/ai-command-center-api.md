@@ -32,7 +32,8 @@ Responses are cached in-process for 60 s per (section, window, agent, paging).
 - **Headline with delta** = `{ "value", "previous", "delta" }` against the same-length window before (`window.previous`).
 - **Answer Rate** always carries `coverage` (classified ÷ questions); **LLM cost** carries `pricing_coverage` (priced calls ÷ calls). Show both beside the number.
 - Labels: `answer_rate` is **"AI Answer Rate"**, never "Response Accuracy". `sr_submission_rate` (K20) and `sr_completion_rate` (K21) are different numbers.
-- `by_channel` = `[{channel, questions, sessions, users}]` per surface (`copilot_rail`, `copilot_panel`, `msp_help`, `unknown`). `by_mall` and `by_role` stay `[]` until their read side ships (the data is recorded from migration 010 onward).
+- **Thumbs** are counted against the voted reply's trace: the window, `agent` and business function mean "replies given in this window". `thumbs_up_rate` = 👍 ÷ (👍 + 👎); `thumbs_participation` = replies with a vote ÷ replies (turns with assistant text). `source` is where the reply sat: `help_answer` (no workflow stage), `sr_step` (inside an SR flow), `sr_created` (SR created / completed stage).
+- `by_channel` = `[{channel, questions, sessions, users}]` per surface (`copilot_rail`, `copilot_panel`, `msp_help`, `unknown`). `by_mall` / `by_role` = `{items: [{key, questions, sessions, users}], not_recorded_questions, multiple_questions}`. Malls are attributed only for users with a single mall (the token lists every mall a user may access); multi-mall users are `multiple_questions`. Roles are expanded. Recorded from migration 010 onward.
 
 ## Known data limits
 
@@ -93,6 +94,12 @@ Arrays show their first element only. Values are from a local database, for illu
       "previous": null,
       "delta": null,
       "ratings": 14
+    },
+    "thumbs_up_rate": {
+      "value": 0.75,
+      "numerator": 6,
+      "denominator": 8,
+      "previous": null
     },
     "sr_completion_rate": {
       "value": 0.3824,
@@ -167,6 +174,8 @@ Arrays show their first element only. Values are from a local database, for illu
       "cost": 5.051651,
       "avg_rating": 5.0,
       "ratings": 6,
+      "thumbs_up": 4,
+      "thumbs_down": 1,
       "tool_calls": 692,
       "tool_failures": 19
     }
@@ -338,6 +347,16 @@ Arrays show their first element only. Values are from a local database, for illu
       "numerator": 13,
       "denominator": 697
     },
+    "thumbs_up_rate": {
+      "value": 0.75,
+      "numerator": 6,
+      "denominator": 8
+    },
+    "thumbs_participation": {
+      "value": 0.004,
+      "numerator": 8,
+      "denominator": 2141
+    },
     "tool_reliability": {
       "value": 0.9745,
       "numerator": 726,
@@ -392,6 +411,34 @@ Arrays show their first element only. Values are from a local database, for illu
       "avg_rating": 5.0
     }
   },
+  "thumbs": {
+    "up": 6,
+    "down": 2,
+    "by_source": {
+      "help_answer": { "up": 4, "down": 1 },
+      "sr_step": { "up": 1, "down": 1 },
+      "sr_created": { "up": 1, "down": 0 }
+    }
+  },
+  "thumbs_trend": [
+    { "date": "2026-09-16", "up": 6, "down": 2 }
+  ],
+  "thumbs_by_function": [
+    { "function": "handover", "replies": 1765, "up": 4, "down": 2 }
+  ],
+  "downvoted_replies": [
+    {
+      "trace_id": "f7d842a3-b00c-4ba5-8fc3-8b290eb37878",
+      "session_id": "05fa42da-58d8-43de-9f75-18636c56f33c",
+      "agent": "help_agent",
+      "agent_label": "Help Agent",
+      "question": "What documents do I need for a handover?",
+      "answer": "First 300 characters of the reply…",
+      "source": "help_answer",
+      "down_votes": 1,
+      "replied_at": "2026-09-16T10:12:03Z"
+    }
+  ],
   "rating_trend": [
     {
       "date": "2026-08-04",
@@ -618,3 +665,20 @@ Arrays show their first element only. Values are from a local database, for illu
 }
 ```
 
+
+## Thumbs on replies — `PUT /api/v2/chat/feedback/thumbs`
+
+Written by the tenant widget under every assistant reply (all agents). Same headers as
+`POST /chat/feedback` (`x-internal-api-token` + the AI session bearer token).
+
+```json
+{ "trace_id": "<chat response trace_id>", "value": "up" | "down" | null, "message_id": "<optional>" }
+```
+
+- One vote per user per reply (`ux_agent_feedback_turn_thumbs`, migration 011); a new value replaces
+  the old one, `null` clears it. No reason is collected.
+- `200` → `{ "trace_id", "value", "feedback": { … } | null }`; `401` not signed in; `403` another
+  user's reply; `404` unknown trace; `422` any other value.
+- Stored as `agent_feedback` `feedback_type = TURN_THUMBS`, `label = THUMBS_UP | THUMBS_DOWN`,
+  `source` derived from the trace (`help_answer` / `sr_step` / `sr_created`), `metadata.agent`.
+  Audit action `feedback.thumbs`.

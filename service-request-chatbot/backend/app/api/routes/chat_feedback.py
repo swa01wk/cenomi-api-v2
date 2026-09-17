@@ -1,7 +1,10 @@
-"""End-user chat feedback endpoint.
+"""End-user chat feedback endpoints.
 
 POST /chat/feedback — star rating (1–5) + optional comment attached to one
 agent turn, identified by the ``trace_id`` every chat response now returns.
+
+PUT /chat/feedback/thumbs — 👍 / 👎 on any assistant reply, from any agent.
+No reason is asked for; sending ``value: null`` clears the vote.
 
 Two collection surfaces share this route:
 
@@ -33,8 +36,17 @@ from pydantic import BaseModel, Field
 
 from app.api.routes.msp_chat import _require_service_token
 from app.core.security import get_auth_context
+from app.db.models import AgentTrace
 from app.db.repositories.audit_log_repo import AuditLogRepository
 from app.db.session import DbSession
+from app.observability.analytics_constants import (
+    LABEL_THUMBS_DOWN,
+    LABEL_THUMBS_UP,
+    SR_CREATED_STAGES,
+    THUMBS_SOURCE_HELP,
+    THUMBS_SOURCE_SR_CREATED,
+    THUMBS_SOURCE_SR_STEP,
+)
 from app.observability.repositories.feedback_repo import FeedbackRepository
 from app.observability.repositories.trace_repo import TraceRepository
 from app.observability.schemas.api_models import FeedbackResponse
@@ -92,6 +104,64 @@ class ChatFeedbackResponse(BaseModel):
     )
 
 
+class ChatThumbsRequest(BaseModel):
+    """Thumbs vote on one assistant reply."""
+
+    trace_id: UUID = Field(
+        description="Trace id of the reply being voted on (from the chat response)."
+    )
+    value: Literal["up", "down"] | None = Field(
+        description="'up', 'down', or null to clear the caller's vote.",
+        examples=["up"],
+    )
+    message_id: UUID | None = Field(
+        default=None,
+        description="Persisted assistant message id (chat response message_id).",
+    )
+
+
+class ChatThumbsResponse(BaseModel):
+    """The caller's vote after the change."""
+
+    trace_id: UUID
+    value: Literal["up", "down"] | None
+    feedback: FeedbackResponse | None = Field(
+        default=None, description="The stored vote; null once cleared."
+    )
+
+
+_THUMBS_LABELS = {"up": LABEL_THUMBS_UP, "down": LABEL_THUMBS_DOWN}
+
+
+def _caller_uuid(auth: AuthContext, detail: str) -> UUID:
+    if auth.subject_id in _ANONYMOUS_SUBJECTS:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=detail)
+    return user_id_to_uuid(auth.subject_id)
+
+
+async def _own_trace(db: DbSession, trace_id: UUID, user_uuid: UUID, detail: str) -> AgentTrace:
+    trace = await TraceRepository(db).get(trace_id)
+    if trace is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Trace {trace_id} not found",
+        )
+    # Both chat routes derive the trace user_id from the JWT subject via the
+    # same user_id_to_uuid mapping, so a legitimate vote always matches.
+    if trace.user_id != user_uuid:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=detail)
+    return trace
+
+
+def thumbs_source(workflow_stage: str | None) -> str:
+    """Where the voted reply sat: a help answer, a step in an SR flow, or the SR result."""
+    if not workflow_stage:
+        return THUMBS_SOURCE_HELP
+    if workflow_stage in SR_CREATED_STAGES:
+        return THUMBS_SOURCE_SR_CREATED
+    return THUMBS_SOURCE_SR_STEP
+
+
 @router.post(
     "/chat/feedback",
     response_model=ChatFeedbackResponse,
@@ -116,27 +186,11 @@ async def submit_chat_feedback(
     auth: AuthContext = Depends(get_auth_context),
 ) -> ChatFeedbackResponse:
     """Record (or update) the caller's rating for one agent turn."""
-    if auth.subject_id in _ANONYMOUS_SUBJECTS:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Sign in to rate this answer.",
-        )
-    user_uuid = user_id_to_uuid(auth.subject_id)
-
-    trace = await TraceRepository(db).get(body.trace_id)
-    if trace is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Trace {body.trace_id} not found",
-        )
-    # A user may only rate their own turns.  Both chat routes derive the trace
-    # user_id from the JWT subject via the same user_id_to_uuid mapping, so a
-    # legitimate rating always matches.
-    if trace.user_id != user_uuid:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="You can only rate your own conversations.",
-        )
+    user_uuid = _caller_uuid(auth, "Sign in to rate this answer.")
+    # A user may only rate their own turns.
+    trace = await _own_trace(
+        db, body.trace_id, user_uuid, "You can only rate your own conversations."
+    )
 
     row, created = await FeedbackRepository(db).upsert_user_rating(
         trace_id=body.trace_id,
@@ -177,4 +231,71 @@ async def submit_chat_feedback(
 
     return ChatFeedbackResponse(
         feedback=FeedbackResponse.model_validate(row), created=created
+    )
+
+
+@router.put(
+    "/chat/feedback/thumbs",
+    response_model=ChatThumbsResponse,
+    summary="Thumbs up / down on an assistant reply",
+    description=(
+        "Set, change or clear the caller's 👍 / 👎 on one reply from any agent.  "
+        "One vote per user and reply; no reason is collected.  Requires a "
+        "signed-in user; the vote is bound to the JWT subject."
+    ),
+    dependencies=[Depends(_require_service_token)],
+    responses={
+        status.HTTP_200_OK: {"description": "Vote stored or cleared."},
+        status.HTTP_401_UNAUTHORIZED: {"description": "Signed-in user required."},
+        status.HTTP_403_FORBIDDEN: {"description": "Reply belongs to another user."},
+        status.HTTP_404_NOT_FOUND: {"description": "Trace not found."},
+    },
+)
+async def set_chat_thumbs(
+    body: ChatThumbsRequest,
+    db: DbSession,
+    auth: AuthContext = Depends(get_auth_context),
+) -> ChatThumbsResponse:
+    """Record, change or clear the caller's thumbs vote for one reply."""
+    user_uuid = _caller_uuid(auth, "Sign in to rate this answer.")
+    trace = await _own_trace(
+        db, body.trace_id, user_uuid, "You can only rate your own conversations."
+    )
+    source = thumbs_source(trace.workflow_stage_after)
+    label = _THUMBS_LABELS.get(body.value) if body.value else None
+
+    row = await FeedbackRepository(db).set_turn_thumbs(
+        trace_id=body.trace_id,
+        user_id=user_uuid,
+        label=label,
+        session_id=trace.session_id,
+        message_id=body.message_id,
+        source=source,
+        metadata={"agent": trace.active_agent} if trace.active_agent else None,
+    )
+
+    await AuditLogRepository(db).create(
+        session_id=trace.session_id,
+        action="feedback.thumbs",
+        actor_user_id=user_uuid,
+        after_state={
+            "feedback_id": str(row.id) if row is not None else None,
+            "value": body.value,
+            "source": source,
+        },
+        metadata={"trace_id": str(body.trace_id), "agent": trace.active_agent},
+    )
+
+    log.info(
+        "chat_feedback.thumbs",
+        trace_id=str(body.trace_id),
+        user_id=str(user_uuid),
+        value=body.value,
+        source=source,
+    )
+
+    return ChatThumbsResponse(
+        trace_id=body.trace_id,
+        value=body.value,
+        feedback=FeedbackResponse.model_validate(row) if row is not None else None,
     )

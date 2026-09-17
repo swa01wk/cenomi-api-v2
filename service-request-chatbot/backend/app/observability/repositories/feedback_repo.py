@@ -10,11 +10,15 @@ from typing import Any
 from uuid import UUID, uuid4
 
 import structlog
-from sqlalchemy import select
+from sqlalchemy import delete, func, select, text
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import AgentFeedback
-from app.observability.analytics_constants import FEEDBACK_FLOW_USEFUL
+from app.observability.analytics_constants import (
+    FEEDBACK_FLOW_USEFUL,
+    FEEDBACK_TURN_THUMBS,
+)
 
 log = structlog.get_logger(__name__)
 
@@ -132,13 +136,80 @@ class FeedbackRepository:
         """Return an existing TURN_THUMBS row for this trace (+ user if given)."""
         stmt = select(AgentFeedback).where(
             AgentFeedback.trace_id == trace_id,
-            AgentFeedback.feedback_type == "TURN_THUMBS",
+            AgentFeedback.feedback_type == FEEDBACK_TURN_THUMBS,
         )
         if user_id is not None:
             stmt = stmt.where(AgentFeedback.user_id == user_id)
         stmt = stmt.order_by(AgentFeedback.created_at).limit(1)
         result = await self._session.execute(stmt)
         return result.scalar_one_or_none()
+
+    async def set_turn_thumbs(
+        self,
+        *,
+        trace_id: UUID,
+        user_id: UUID,
+        label: str | None,
+        session_id: UUID | None = None,
+        message_id: UUID | None = None,
+        source: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> AgentFeedback | None:
+        """Set, change or clear the caller's thumbs vote on one turn.
+
+        One statement each way, so quick repeated clicks cannot race: a vote
+        is an ``INSERT … ON CONFLICT`` against ``ux_agent_feedback_turn_thumbs``
+        (one TURN_THUMBS row per trace and user), and ``label=None`` deletes
+        the row and returns None.
+        """
+        if label is None:
+            await self._session.execute(
+                delete(AgentFeedback).where(
+                    AgentFeedback.trace_id == trace_id,
+                    AgentFeedback.user_id == user_id,
+                    AgentFeedback.feedback_type == FEEDBACK_TURN_THUMBS,
+                )
+            )
+            log.debug("agent_feedback.thumbs_cleared", trace_id=str(trace_id))
+            return None
+
+        insert_stmt = pg_insert(AgentFeedback).values(
+            id=uuid4(),
+            trace_id=trace_id,
+            user_id=user_id,
+            session_id=session_id,
+            message_id=message_id,
+            source=source,
+            feedback_type=FEEDBACK_TURN_THUMBS,
+            label=label,
+            metadata_=metadata or {},
+        )
+        upsert = insert_stmt.on_conflict_do_update(
+            index_elements=[AgentFeedback.trace_id, AgentFeedback.user_id],
+            # A literal, not a bound parameter, so Postgres can match the
+            # partial index predicate when inferring the conflict target.
+            index_where=text(f"feedback_type = '{FEEDBACK_TURN_THUMBS}'"),
+            set_={
+                "label": insert_stmt.excluded.label,
+                "message_id": func.coalesce(
+                    insert_stmt.excluded.message_id, AgentFeedback.message_id
+                ),
+                "source": func.coalesce(insert_stmt.excluded.source, AgentFeedback.source),
+            },
+        ).returning(AgentFeedback)
+        result = await self._session.execute(
+            select(AgentFeedback)
+            .from_statement(upsert)
+            .execution_options(populate_existing=True)
+        )
+        row = result.scalar_one()
+        log.debug(
+            "agent_feedback.thumbs_set",
+            feedback_id=str(row.id),
+            trace_id=str(trace_id),
+            label=label,
+        )
+        return row
 
     async def upsert_flow_useful(
         self,

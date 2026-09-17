@@ -36,6 +36,8 @@ from app.api.routes.dashboard import _resolve_user_names
 from app.api.routes.msp_chat import _require_service_token
 from app.db.session import DbSession
 from app.observability.repositories.analytics_repo import AnalyticsFilters
+from app.observability.analytics_access import require_analytics_viewer
+from app.observability.platform_stats import ai_share_of_service_requests
 from app.observability.repositories.command_center_repo import CommandCenterRepository
 
 log = structlog.get_logger(__name__)
@@ -217,6 +219,11 @@ def rating_sentiment(distribution: dict[str, int]) -> dict[str, Any]:
     }
 
 
+def thumbs_up_rate(thumbs: dict[str, Any]) -> dict[str, Any]:
+    """Share of 👍 among all thumbs votes on replies in the window."""
+    return ratio(thumbs["up"], thumbs["up"] + thumbs["down"])
+
+
 def cost_block(llm: dict[str, Any], total_cost: float) -> dict[str, Any]:
     """K18 LLM cost with the share of calls that could be priced."""
     return {
@@ -235,7 +242,7 @@ def cost_block(llm: dict[str, Any], total_cost: float) -> dict[str, Any]:
 @router.get(
     "/overview",
     summary="AI Dashboard — executive health for the window",
-    dependencies=[Depends(_require_service_token)],
+    dependencies=[Depends(_require_service_token), Depends(require_analytics_viewer)],
 )
 async def command_center_overview(
     db: DbSession, filters: AnalyticsFilters = Depends(_window_query)
@@ -258,6 +265,8 @@ async def command_center_overview(
         prev_srs = await repo.sr_outcomes(prev)
         tools = await repo.tool_health(filters)
         llm = await repo.llm_usage(filters)
+        thumbs = await repo.thumbs_totals(filters)
+        prev_thumbs = await repo.thumbs_totals(prev)
 
         answers = answer_rate_block(totals)
         prev_answers = answer_rate_block(prev_totals)
@@ -277,6 +286,10 @@ async def command_center_overview(
                     "avg_rating": {
                         **with_delta(ratings["avg_rating"], prev_ratings["avg_rating"]),
                         "ratings": ratings["ratings_count"],
+                    },
+                    "thumbs_up_rate": {
+                        **thumbs_up_rate(thumbs),
+                        "previous": thumbs_up_rate(prev_thumbs)["value"],
                     },
                     "sr_completion_rate": ratio(srs["srs_completed"], srs["srs_created"]),
                     "p95_latency_ms": with_delta(latency["p95"], prev_latency["p95"]),
@@ -302,7 +315,7 @@ async def command_center_overview(
 @router.get(
     "/usage",
     summary="AI Analytics — who uses the assistant, for what, and how much",
-    dependencies=[Depends(_require_service_token)],
+    dependencies=[Depends(_require_service_token), Depends(require_analytics_viewer)],
 )
 async def command_center_usage(
     db: DbSession, filters: AnalyticsFilters = Depends(_window_query)
@@ -335,14 +348,13 @@ async def command_center_usage(
                 "daily": await repo.daily_series(filters),
                 "by_agent": await repo.agent_breakdown(filters),
                 "by_intent": await repo.intent_distribution(filters),
+                "by_function": await repo.function_distribution(filters),
                 "workflow_funnel": await repo.workflow_funnel(filters),
                 "hourly_sessions": await repo.hourly_sessions(filters),
                 "top_questions": await repo.top_questions(filters, limit=10),
                 "top_users": await _named(db, await repo.top_users(filters, limit=10)),
-                # Mall and role segmentation arrive with the rest of the read
-                # side of migration 010; the keys exist so the page can render.
-                "by_mall": [],
-                "by_role": [],
+                "by_mall": await repo.claim_distribution(filters, dimension="mall"),
+                "by_role": await repo.claim_distribution(filters, dimension="role"),
                 "by_channel": await repo.channel_distribution(filters),
             }
         )
@@ -353,7 +365,7 @@ async def command_center_usage(
 @router.get(
     "/performance",
     summary="AI Performance — answer quality, feedback, latency and reliability",
-    dependencies=[Depends(_require_service_token)],
+    dependencies=[Depends(_require_service_token), Depends(require_analytics_viewer)],
 )
 async def command_center_performance(
     db: DbSession,
@@ -371,6 +383,7 @@ async def command_center_performance(
         totals = await repo.turn_totals(filters)
         ratings = await repo.rating_totals(filters)
         participation = await repo.feedback_participation(filters)
+        thumbs = await repo.thumbs_totals(filters)
         tools = await repo.tool_health(filters)
         llm = await repo.llm_usage(filters)
         offset = (page - 1) * page_size
@@ -393,6 +406,8 @@ async def command_center_performance(
                     "feedback_participation": ratio(
                         participation["rated_sessions"], participation["sessions"]
                     ),
+                    "thumbs_up_rate": thumbs_up_rate(thumbs),
+                    "thumbs_participation": ratio(thumbs["voted_replies"], thumbs["replies"]),
                     "tool_reliability": tool_reliability_block(tools),
                     "llm_parse_failure_rate": ratio(parse_failures, llm["total_calls"]),
                     "latency_ms": await repo.latency_percentiles(filters),
@@ -406,6 +421,14 @@ async def command_center_performance(
                     {"date": d["date"], "ratings": d["ratings"], "avg_rating": d["avg_rating"]}
                     for d in await repo.daily_series(filters)
                 ],
+                "thumbs": {
+                    "up": thumbs["up"],
+                    "down": thumbs["down"],
+                    "by_source": thumbs["by_source"],
+                },
+                "thumbs_trend": await repo.thumbs_daily(filters),
+                "thumbs_by_function": await repo.thumbs_by_function(filters),
+                "downvoted_replies": await repo.downvoted_replies(filters, limit=10),
                 "agent_scorecard": await repo.agent_scorecard(filters),
                 "node_latency": await repo.node_latency(filters),
                 "tool_health": tools,
@@ -429,7 +452,7 @@ async def command_center_performance(
 @router.get(
     "/productivity",
     summary="AI Productivity — service requests the assistant created and moved",
-    dependencies=[Depends(_require_service_token)],
+    dependencies=[Depends(_require_service_token), Depends(require_analytics_viewer)],
 )
 async def command_center_productivity(
     db: DbSession,
@@ -449,6 +472,7 @@ async def command_center_productivity(
         offset = (page - 1) * page_size
         log_items, log_total = await repo.sr_log(filters, limit=page_size, offset=offset)
         decisions = srs["approvals"] + srs["rejections"]
+        platform = await ai_share_of_service_requests(filters.from_date, filters.to_date)
 
         return _envelope(
             {
@@ -467,11 +491,20 @@ async def command_center_productivity(
                     "rejections": srs["rejections"],
                     "approval_rate": ratio(srs["approvals"], decisions),
                     "cost_per_sr_usd": ratio(round(submitted_cost, 6), srs["srs_created"]),
+                    # Of SRs created on the platform in the assistant's flows,
+                    # the share the assistant created (platform created_via).
+                    # None when the platform data is unavailable.
+                    "ai_share_of_srs": (
+                        ratio(platform["ai"], platform["total"]) if platform else None
+                    ),
                     "llm_cost": cost_block(llm, totals["total_cost"]),
                 },
                 "automation_mix": mix,
                 "decisions_by_flow": srs["decisions_by_flow"],
                 "decision_times": await repo.decision_times(filters),
+                "decision_step_times": await repo.decision_step_times(filters),
+                "by_function": await repo.productivity_by_function(filters),
+                "platform_srs_by_function": platform["by_function"] if platform else [],
                 "tasks_daily": await repo.tasks_daily(filters),
                 "by_agent": await repo.productivity_by_agent(filters),
                 "funnel": await repo.workflow_funnel(filters),

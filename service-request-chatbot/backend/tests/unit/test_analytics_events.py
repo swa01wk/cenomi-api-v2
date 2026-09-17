@@ -83,6 +83,7 @@ async def test_allowed_event_names_are_the_product_set() -> None:
         "flow_cancelled",
         "sr_approved",
         "sr_rejected",
+        "document_uploaded",
     }
 
 

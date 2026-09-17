@@ -32,6 +32,9 @@ EVENT_FLOW_CANCELLED = "flow_cancelled"
 # A reviewer's decision on an existing SR, recorded by the agent that sent it.
 EVENT_SR_APPROVED = "sr_approved"
 EVENT_SR_REJECTED = "sr_rejected"
+# A document upload to the platform (runs outside a chat turn, so it cannot be
+# an agent_tool_calls row); counted in tool reliability.
+EVENT_DOCUMENT_UPLOADED = "document_uploaded"
 
 ALLOWED_EVENT_NAMES: frozenset[str] = frozenset(
     {
@@ -43,6 +46,7 @@ ALLOWED_EVENT_NAMES: frozenset[str] = frozenset(
         EVENT_FLOW_CANCELLED,
         EVENT_SR_APPROVED,
         EVENT_SR_REJECTED,
+        EVENT_DOCUMENT_UPLOADED,
     }
 )
 
@@ -69,6 +73,12 @@ ALLOWED_FEEDBACK_TYPES: frozenset[str] = frozenset(
 
 LABEL_THUMBS_UP = "THUMBS_UP"
 LABEL_THUMBS_DOWN = "THUMBS_DOWN"
+
+# Where a thumbs vote was cast, derived from the voted trace's workflow stage.
+THUMBS_SOURCE_HELP = "help_answer"
+THUMBS_SOURCE_SR_STEP = "sr_step"
+THUMBS_SOURCE_SR_CREATED = "sr_created"
+SR_CREATED_STAGES: frozenset[str] = frozenset({"SR_CREATED", *TERMINAL_WORKFLOW_STAGES})
 LABEL_USEFUL = "USEFUL"
 LABEL_NOT_USEFUL = "NOT_USEFUL"
 

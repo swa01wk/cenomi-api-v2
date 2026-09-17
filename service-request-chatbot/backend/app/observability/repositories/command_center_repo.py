@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from sqlalchemy import Text, and_, cast, func, literal, or_, select
+from sqlalchemy import Integer, Text, and_, case, cast, func, literal, or_, select
 from sqlalchemy.sql import ColumnElement
 
 from app.agents.agent_display import agent_display_name
@@ -28,14 +28,22 @@ from app.db.models import (
     AgentTrace,
     AnalyticsEvent,
     ChatSession,
+    ServiceRequestDraft,
 )
 from app.observability.analytics_constants import (
     CREATE_SR_INTENTS,
+    EVENT_DOCUMENT_UPLOADED,
     EVENT_FIELD_CORRECTED,
     EVENT_SR_APPROVED,
     EVENT_SR_LIFECYCLE_COMPLETED,
     EVENT_SR_REJECTED,
     EVENT_SR_SUBMITTED,
+    FEEDBACK_TURN_THUMBS,
+    LABEL_THUMBS_DOWN,
+    LABEL_THUMBS_UP,
+    THUMBS_SOURCE_HELP,
+    THUMBS_SOURCE_SR_CREATED,
+    THUMBS_SOURCE_SR_STEP,
 )
 from app.observability.display_labels import tool_label
 from app.observability.repositories.analytics_repo import (
@@ -45,7 +53,59 @@ from app.observability.repositories.analytics_repo import (
 )
 
 _NOT_ANSWERED = ("UNANSWERED", "FAILED")
+
+# Business functions: the workflows the assistant runs today, keyed off the
+# SR sub-category (Handover and Handed-over are one function).
+FUNCTION_HANDOVER = "handover"
+FUNCTION_FITOUT_START = "fitout_start"
+FUNCTION_FITOUT_END = "fitout_end"
+FUNCTION_TRADING = "trading_confirmation"
+FUNCTION_WORK_PERMIT = "work_permit"
+FUNCTION_NOTIFICATIONS = "notifications"
+FUNCTION_GENERAL_HELP = "general_help"
+
+SUB_CATEGORY_FUNCTIONS: dict[str, str] = {
+    "HANDOVER": FUNCTION_HANDOVER,
+    "HANDED_OVER": FUNCTION_HANDOVER,
+    "FIT_OUT_CONFIRM_FOS": FUNCTION_FITOUT_START,
+    "FIT_OUT_CONFIRM_END": FUNCTION_FITOUT_END,
+    "FIT_OUT_CONFIRM_TRADING": FUNCTION_TRADING,
+}
+
+UPLOAD_TOOL_NAME = "document_upload_api"
+
+
+def business_function(
+    sub_category: Any, service_category: Any, active_agent: Any
+) -> ColumnElement[str]:
+    """SQL expression mapping a trace (or draft) to its business function."""
+    return case(
+        *[(sub_category == key, literal(value)) for key, value in SUB_CATEGORY_FUNCTIONS.items()],
+        (service_category == "WORK_PERMIT", literal(FUNCTION_WORK_PERMIT)),
+        (active_agent == "notification_agent", literal(FUNCTION_NOTIFICATIONS)),
+        else_=literal(FUNCTION_GENERAL_HELP),
+    )
 _USER_RATING = "USER_RATING"
+_THUMBS_SOURCES = (THUMBS_SOURCE_HELP, THUMBS_SOURCE_SR_STEP, THUMBS_SOURCE_SR_CREATED)
+_ANSWER_SNIPPET_CHARS = 300
+
+
+def _is_reply() -> ColumnElement[bool]:
+    """A turn where the assistant said something the user could vote on."""
+    return func.length(func.trim(func.coalesce(AgentTrace.output_message, ""))) > 0
+
+
+def _thumbs_join_clauses(filters: AnalyticsFilters) -> list[Any]:
+    """Thumbs votes on replies in the window: scoped by the voted trace."""
+    return [*filters.trace_clauses(), AgentFeedback.feedback_type == FEEDBACK_TURN_THUMBS]
+
+
+def _up() -> ColumnElement[bool]:
+    return AgentFeedback.label == LABEL_THUMBS_UP
+
+
+def _down() -> ColumnElement[bool]:
+    return AgentFeedback.label == LABEL_THUMBS_DOWN
 _FAILURE_PREFIX_CHARS = 80
 
 
@@ -222,6 +282,146 @@ class CommandCenterRepository(AnalyticsRepository):
         ).one()
         return {"sessions": int(row.sessions or 0), "rated_sessions": int(row.rated or 0)}
 
+    # ------------------------------------------------------------------
+    # Thumbs up / down on replies
+    # ------------------------------------------------------------------
+    # Votes are counted against the reply's trace, so the window, agent and
+    # function filters mean "replies given in this window", the same as every
+    # other turn KPI.  One vote per user per reply (index from migration 011).
+
+    async def thumbs_totals(self, filters: AnalyticsFilters) -> dict[str, Any]:
+        """Replies, voted replies, 👍 / 👎 counts, and the split by where the reply sat."""
+        replies = (
+            await self._session.execute(
+                select(func.count(AgentTrace.id)).where(*filters.trace_clauses(), _is_reply())
+            )
+        ).scalar_one() or 0
+        row = (
+            await self._session.execute(
+                select(
+                    func.count(func.distinct(AgentFeedback.trace_id)).label("voted"),
+                    func.count(AgentFeedback.id).filter(_up()).label("up"),
+                    func.count(AgentFeedback.id).filter(_down()).label("down"),
+                    *[
+                        func.count(AgentFeedback.id)
+                        .filter(AgentFeedback.source == source, label_clause)
+                        .label(f"{source}_{name}")
+                        for source in _THUMBS_SOURCES
+                        for name, label_clause in (("up", _up()), ("down", _down()))
+                    ],
+                )
+                .select_from(AgentFeedback)
+                .join(AgentTrace, AgentTrace.id == AgentFeedback.trace_id)
+                .where(*_thumbs_join_clauses(filters))
+            )
+        ).one()
+        return {
+            "replies": int(replies),
+            "voted_replies": int(row.voted or 0),
+            "up": int(row.up or 0),
+            "down": int(row.down or 0),
+            "by_source": {
+                source: {
+                    "up": int(getattr(row, f"{source}_up") or 0),
+                    "down": int(getattr(row, f"{source}_down") or 0),
+                }
+                for source in _THUMBS_SOURCES
+            },
+        }
+
+    async def thumbs_daily(self, filters: AnalyticsFilters) -> list[dict[str, Any]]:
+        """👍 / 👎 per day of the voted reply."""
+        day = func.date_trunc("day", AgentTrace.created_at).label("day")
+        rows = await self._session.execute(
+            select(
+                day,
+                func.count(AgentFeedback.id).filter(_up()).label("up"),
+                func.count(AgentFeedback.id).filter(_down()).label("down"),
+            )
+            .select_from(AgentFeedback)
+            .join(AgentTrace, AgentTrace.id == AgentFeedback.trace_id)
+            .where(*_thumbs_join_clauses(filters))
+            .group_by(day)
+            .order_by(day)
+        )
+        return [
+            {"date": r.day.date().isoformat(), "up": r.up or 0, "down": r.down or 0}
+            for r in rows
+        ]
+
+    async def _thumbs_by(self, filters: AnalyticsFilters, key: Any) -> dict[Any, dict[str, int]]:
+        rows = await self._session.execute(
+            select(
+                key.label("key"),
+                func.count(AgentFeedback.id).filter(_up()).label("up"),
+                func.count(AgentFeedback.id).filter(_down()).label("down"),
+            )
+            .select_from(AgentFeedback)
+            .join(AgentTrace, AgentTrace.id == AgentFeedback.trace_id)
+            .where(*_thumbs_join_clauses(filters))
+            .group_by(key)
+        )
+        return {r.key: {"up": r.up or 0, "down": r.down or 0} for r in rows}
+
+    async def thumbs_by_function(self, filters: AnalyticsFilters) -> list[dict[str, Any]]:
+        """Replies and 👍 / 👎 per business function."""
+        function = business_function(
+            AgentTrace.sub_category, AgentTrace.service_category, AgentTrace.active_agent
+        )
+        replies = await self._session.execute(
+            select(function.label("function"), func.count(AgentTrace.id).label("replies"))
+            .where(*filters.trace_clauses(), _is_reply())
+            .group_by(function)
+            .order_by(func.count(AgentTrace.id).desc())
+        )
+        votes = await self._thumbs_by(filters, function)
+        return [
+            {
+                "function": r.function,
+                "replies": r.replies or 0,
+                "up": votes.get(r.function, {}).get("up", 0),
+                "down": votes.get(r.function, {}).get("down", 0),
+            }
+            for r in replies
+        ]
+
+    async def downvoted_replies(
+        self, filters: AnalyticsFilters, *, limit: int = 10
+    ) -> list[dict[str, Any]]:
+        """Most recent 👎 replies with the question and the start of the answer."""
+        rows = await self._session.execute(
+            select(
+                AgentTrace.id.label("trace_id"),
+                AgentTrace.session_id,
+                AgentTrace.active_agent,
+                AgentTrace.input_message,
+                func.left(AgentTrace.output_message, _ANSWER_SNIPPET_CHARS).label("answer"),
+                AgentTrace.created_at.label("replied_at"),
+                func.max(AgentFeedback.source).label("source"),
+                func.count(AgentFeedback.id).label("votes"),
+            )
+            .select_from(AgentFeedback)
+            .join(AgentTrace, AgentTrace.id == AgentFeedback.trace_id)
+            .where(*_thumbs_join_clauses(filters), _down())
+            .group_by(AgentTrace.id)
+            .order_by(AgentTrace.created_at.desc())
+            .limit(limit)
+        )
+        return [
+            {
+                "trace_id": str(r.trace_id),
+                "session_id": str(r.session_id),
+                "agent": r.active_agent,
+                "agent_label": agent_display_name(r.active_agent),
+                "question": r.input_message,
+                "answer": r.answer,
+                "source": r.source,
+                "down_votes": r.votes or 0,
+                "replied_at": r.replied_at,
+            }
+            for r in rows
+        ]
+
     async def answer_trend(self, filters: AnalyticsFilters) -> list[dict[str, Any]]:
         """Per-day Answer Rate over questions, with its classification coverage.
 
@@ -282,6 +482,179 @@ class CommandCenterRepository(AnalyticsRepository):
                 "questions": r.questions or 0,
                 "sessions": r.sessions or 0,
                 "users": r.users or 0,
+            }
+            for r in rows
+        ]
+
+    async def claim_distribution(
+        self, filters: AnalyticsFilters, *, dimension: str, limit: int = 15
+    ) -> dict[str, Any]:
+        """Usage per mall or per role.
+
+        **Mall** is the mall a question was about, in this order:
+
+        1. the mall of the lease on the session's SR draft (every SR flow
+           records it);
+        2. otherwise the user's own mall, when the login token lists exactly
+           one — the token lists every mall a user may access, so a user with
+           several is counted in ``multiple_questions`` instead of in each.
+
+        **Role** comes from the token and is expanded (a user normally holds
+        one), so role rows may sum past the total.
+
+        Questions with neither are ``not_recorded_questions``.
+        """
+        clauses = [*filters.trace_clauses(), _is_real_question()]
+        if dimension == "role":
+            return await self._role_distribution(clauses, limit)
+
+        draft_mall = (
+            select(
+                ServiceRequestDraft.session_id.label("session_id"),
+                func.max(
+                    func.nullif(
+                        func.trim(ServiceRequestDraft.collected_data.op("->>")("mall")), ""
+                    )
+                ).label("mall"),
+            )
+            .group_by(ServiceRequestDraft.session_id)
+            .subquery()
+        )
+        claims = AgentTrace.mall_names
+        is_array = func.jsonb_typeof(claims) == "array"
+        single_claim = case(
+            (and_(is_array, func.jsonb_array_length(claims) == 1), claims.op("->>")(0)),
+            else_=None,
+        )
+        mall = func.coalesce(draft_mall.c.mall, single_claim).label("mall")
+        base = (
+            select(
+                AgentTrace.id.label("trace_id"),
+                AgentTrace.session_id.label("session_id"),
+                AgentTrace.user_id.label("user_id"),
+                mall,
+                case(
+                    (and_(is_array, func.jsonb_array_length(claims) > 1), literal(True)),
+                    else_=literal(False),
+                ).label("multi"),
+                claims.is_(None).label("no_claim"),
+            )
+            .select_from(AgentTrace)
+            .outerjoin(draft_mall, draft_mall.c.session_id == AgentTrace.session_id)
+            .where(*clauses)
+            .subquery()
+        )
+        rows = await self._session.execute(
+            select(
+                base.c.mall.label("key"),
+                func.count(base.c.trace_id).label("questions"),
+                func.count(func.distinct(base.c.session_id)).label("sessions"),
+                func.count(func.distinct(base.c.user_id)).label("users"),
+            )
+            .where(base.c.mall.is_not(None))
+            .group_by(base.c.mall)
+            .order_by(func.count(base.c.trace_id).desc())
+            .limit(limit)
+        )
+        totals = (
+            await self._session.execute(
+                select(
+                    func.count(base.c.trace_id)
+                    .filter(base.c.mall.is_(None), base.c.multi.is_(True))
+                    .label("multiple"),
+                    func.count(base.c.trace_id)
+                    .filter(base.c.mall.is_(None), base.c.multi.is_(False))
+                    .label("not_recorded"),
+                )
+            )
+        ).one()
+        return {
+            "items": [
+                {
+                    "key": r.key,
+                    "questions": r.questions or 0,
+                    "sessions": r.sessions or 0,
+                    "users": r.users or 0,
+                }
+                for r in rows
+            ],
+            "not_recorded_questions": int(totals.not_recorded or 0),
+            "multiple_questions": int(totals.multiple or 0),
+        }
+
+    async def _role_distribution(self, clauses: list[Any], limit: int) -> dict[str, Any]:
+        column = AgentTrace.user_roles
+        is_array = func.jsonb_typeof(column) == "array"
+        value = func.jsonb_array_elements_text(column).table_valued("value").lateral()
+        rows = await self._session.execute(
+            select(
+                value.c.value.label("key"),
+                func.count(func.distinct(AgentTrace.id)).label("questions"),
+                func.count(func.distinct(AgentTrace.session_id)).label("sessions"),
+                func.count(func.distinct(AgentTrace.user_id)).label("users"),
+            )
+            .select_from(AgentTrace)
+            .join(value, literal(True))
+            .where(*clauses, column.is_not(None), is_array)
+            .group_by(value.c.value)
+            .order_by(func.count(func.distinct(AgentTrace.id)).desc())
+            .limit(limit)
+        )
+        totals = (
+            await self._session.execute(
+                select(
+                    func.count(AgentTrace.id).filter(column.is_(None)).label("not_recorded"),
+                    func.count(AgentTrace.id)
+                    .filter(column.is_not(None), is_array, func.jsonb_array_length(column) > 1)
+                    .label("multiple"),
+                ).where(*clauses)
+            )
+        ).one()
+        return {
+            "items": [
+                {
+                    "key": r.key,
+                    "questions": r.questions or 0,
+                    "sessions": r.sessions or 0,
+                    "users": r.users or 0,
+                }
+                for r in rows
+            ],
+            "not_recorded_questions": int(totals.not_recorded or 0),
+            # Users holding several roles.
+            "multiple_questions": int(totals.multiple or 0),
+        }
+
+    async def function_distribution(self, filters: AnalyticsFilters) -> list[dict[str, Any]]:
+        """Questions, sessions, users and answer rate per business function."""
+        function = business_function(
+            AgentTrace.sub_category, AgentTrace.service_category, AgentTrace.active_agent
+        ).label("function")
+        rows = await self._session.execute(
+            select(
+                function,
+                func.count(AgentTrace.id).label("questions"),
+                func.count(func.distinct(AgentTrace.session_id)).label("sessions"),
+                func.count(func.distinct(AgentTrace.user_id)).label("users"),
+                func.count(AgentTrace.id)
+                .filter(AgentTrace.answer_status.is_not(None))
+                .label("classified"),
+                func.count(AgentTrace.id)
+                .filter(AgentTrace.answer_status == "ANSWERED")
+                .label("answered"),
+            )
+            .where(*filters.trace_clauses(), _is_real_question())
+            .group_by(function)
+            .order_by(func.count(AgentTrace.id).desc())
+        )
+        return [
+            {
+                "function": r.function,
+                "questions": r.questions or 0,
+                "sessions": r.sessions or 0,
+                "users": r.users or 0,
+                "classified": r.classified or 0,
+                "answered": r.answered or 0,
             }
             for r in rows
         ]
@@ -411,6 +784,7 @@ class CommandCenterRepository(AnalyticsRepository):
         )
         ratings = {r.agent: r for r in rating_rows}
         tools = {r.agent: r for r in tool_rows}
+        thumbs = await self._thumbs_by(filters, AgentTrace.active_agent)
 
         scorecard: list[dict[str, Any]] = []
         for r in quality_rows:
@@ -432,6 +806,8 @@ class CommandCenterRepository(AnalyticsRepository):
                         else None
                     ),
                     "ratings": rating.ratings if rating is not None else 0,
+                    "thumbs_up": thumbs.get(r.agent, {}).get("up", 0),
+                    "thumbs_down": thumbs.get(r.agent, {}).get("down", 0),
                     "tool_calls": tool.calls if tool is not None else 0,
                     "tool_failures": tool.failed if tool is not None else 0,
                 }
@@ -774,6 +1150,156 @@ class CommandCenterRepository(AnalyticsRepository):
             }
             for r in rows
         ]
+
+    async def productivity_by_function(self, filters: AnalyticsFilters) -> list[dict[str, Any]]:
+        """SRs created and completed per business function.
+
+        The function comes from the create turn's trace; backfilled events have
+        no trace, so they fall back to the session's SR draft.
+        """
+        draft = (
+            select(
+                ServiceRequestDraft.session_id.label("session_id"),
+                func.max(ServiceRequestDraft.sub_category).label("sub_category"),
+                func.max(ServiceRequestDraft.service_category).label("service_category"),
+            )
+            .group_by(ServiceRequestDraft.session_id)
+            .subquery()
+        )
+        function = business_function(
+            func.coalesce(AgentTrace.sub_category, draft.c.sub_category),
+            func.coalesce(AgentTrace.service_category, draft.c.service_category),
+            AgentTrace.active_agent,
+        ).label("function")
+        completed_srs = select(AnalyticsEvent.properties.op("->>")("sr_id")).where(
+            AnalyticsEvent.event_name == EVENT_SR_LIFECYCLE_COMPLETED,
+            AnalyticsEvent.properties.op("->>")("sr_id").is_not(None),
+        )
+        rows = await self._session.execute(
+            select(
+                function,
+                func.count(func.distinct(_sr_key())).label("srs"),
+                func.count(func.distinct(_sr_key()))
+                .filter(AnalyticsEvent.properties.op("->>")("sr_id").in_(completed_srs))
+                .label("completed"),
+            )
+            .select_from(AnalyticsEvent)
+            .outerjoin(AgentTrace, AgentTrace.id == AnalyticsEvent.trace_id)
+            .outerjoin(draft, draft.c.session_id == AnalyticsEvent.session_id)
+            .where(*_event_clauses(filters, EVENT_SR_SUBMITTED))
+            .group_by(function)
+            .order_by(func.count(func.distinct(_sr_key())).desc())
+        )
+        return [
+            {"function": r.function, "srs_created": r.srs or 0, "srs_completed": r.completed or 0}
+            for r in rows
+        ]
+
+    async def decision_step_times(self, filters: AnalyticsFilters) -> list[dict[str, Any]]:
+        """Hours each review step took, per flow and stage.
+
+        A step runs from the SR's previous milestone — its creation or the
+        prior reviewer's decision — to this decision, so a work permit that
+        passes DD, FM and MM review yields one duration per stage.
+        """
+        sr_id = AnalyticsEvent.properties.op("->>")("sr_id")
+        ordered = (
+            select(
+                sr_id.label("sr_id"),
+                AnalyticsEvent.event_name.label("event_name"),
+                func.coalesce(AnalyticsEvent.properties.op("->>")("flow"), "unknown").label("flow"),
+                func.coalesce(AnalyticsEvent.properties.op("->>")("stage"), "unknown").label("stage"),
+                AnalyticsEvent.occurred_at.label("occurred_at"),
+                func.lag(AnalyticsEvent.occurred_at)
+                .over(partition_by=sr_id, order_by=AnalyticsEvent.occurred_at)
+                .label("previous_at"),
+            )
+            .where(
+                AnalyticsEvent.event_name.in_(
+                    [EVENT_SR_SUBMITTED, EVENT_SR_APPROVED, EVENT_SR_REJECTED]
+                ),
+                sr_id.is_not(None),
+            )
+            .subquery()
+        )
+        hours = func.extract("epoch", ordered.c.occurred_at - ordered.c.previous_at) / 3600.0
+        window: list[Any] = [
+            ordered.c.event_name.in_([EVENT_SR_APPROVED, EVENT_SR_REJECTED]),
+            ordered.c.previous_at.is_not(None),
+        ]
+        if filters.from_date is not None:
+            window.append(ordered.c.occurred_at >= filters.from_date)
+        if filters.to_date is not None:
+            window.append(ordered.c.occurred_at <= filters.to_date)
+        if filters.agent is not None:
+            window.append(
+                ordered.c.sr_id.in_(
+                    select(AnalyticsEvent.properties.op("->>")("sr_id")).where(
+                        *_event_clauses(filters, EVENT_SR_SUBMITTED, EVENT_SR_APPROVED, EVENT_SR_REJECTED)
+                    )
+                )
+            )
+        rows = await self._session.execute(
+            select(
+                ordered.c.flow,
+                ordered.c.stage,
+                func.count().label("decisions"),
+                func.avg(hours).label("avg_hours"),
+                func.percentile_cont(0.5).within_group(hours.asc()).label("median_hours"),
+            )
+            .where(*window)
+            .group_by(ordered.c.flow, ordered.c.stage)
+            .order_by(ordered.c.flow, ordered.c.stage)
+        )
+        return [
+            {
+                "flow": r.flow,
+                "stage": r.stage,
+                "decisions": r.decisions or 0,
+                "avg_hours": round(float(r.avg_hours), 2) if r.avg_hours is not None else None,
+                "median_hours": (
+                    round(float(r.median_hours), 2) if r.median_hours is not None else None
+                ),
+            }
+            for r in rows
+        ]
+
+    async def tool_health(self, filters: AnalyticsFilters) -> list[dict[str, Any]]:
+        """Platform API health, including document uploads.
+
+        Uploads run outside a chat turn, so they have no trace and are not in
+        ``agent_tool_calls``; they are recorded as ``document_uploaded`` events
+        and merged in here as one more tool.
+        """
+        health = await super().tool_health(filters)
+        latency = cast(AnalyticsEvent.properties.op("->>")("latency_ms"), Integer)
+        succeeded = AnalyticsEvent.properties.op("->>")("success") == "true"
+        row = (
+            await self._session.execute(
+                select(
+                    func.count(AnalyticsEvent.id).label("calls"),
+                    func.count(AnalyticsEvent.id).filter(~succeeded).label("failed"),
+                    func.avg(latency).label("avg_ms"),
+                    func.percentile_cont(0.95).within_group(latency.asc()).label("p95_ms"),
+                ).where(*_event_clauses(filters, EVENT_DOCUMENT_UPLOADED))
+            )
+        ).one()
+        calls = int(row.calls or 0)
+        if calls:
+            failed = int(row.failed or 0)
+            health.append(
+                {
+                    "tool": UPLOAD_TOOL_NAME,
+                    "tool_label": tool_label(UPLOAD_TOOL_NAME),
+                    "calls": calls,
+                    "failed": failed,
+                    "success_rate": round((calls - failed) / calls, 4),
+                    "avg_ms": round(float(row.avg_ms)) if row.avg_ms is not None else 0,
+                    "p95_ms": round(float(row.p95_ms)) if row.p95_ms is not None else 0,
+                }
+            )
+            health.sort(key=lambda item: item["calls"], reverse=True)
+        return health
 
     async def sr_log(
         self, filters: AnalyticsFilters, *, limit: int = 20, offset: int = 0

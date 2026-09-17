@@ -62,6 +62,7 @@ _TOOL_LABELS: dict[str, str] = {
     "service_request_api.work_permit.create": "Create work permit",
     "service_request_api.work_permit.review": "Review work permit",
     "notification_inbox_api.fetch": "Load notifications",
+    "document_upload_api": "Upload document",
 }
 
 # Prompts, named for the job they do rather than the file they live in.

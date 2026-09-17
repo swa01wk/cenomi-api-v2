@@ -28,6 +28,7 @@ from app.observability.analytics_constants import (
     EVENT_FLOW_CANCELLED,
     EVENT_SESSION_ENDED,
     EVENT_SESSION_STARTED,
+    EVENT_DOCUMENT_UPLOADED,
     EVENT_SR_APPROVED,
     EVENT_SR_LIFECYCLE_COMPLETED,
     EVENT_SR_REJECTED,
@@ -91,7 +92,7 @@ def run_checks() -> list[tuple[str, bool, str]]:
 
     # ── Event / feedback vocabulary ──────────────────────────────────────
     check(
-        "eight product events",
+        "nine product events",
         ALLOWED_EVENT_NAMES
         == {
             EVENT_SESSION_STARTED,
@@ -102,6 +103,7 @@ def run_checks() -> list[tuple[str, bool, str]]:
             EVENT_FLOW_CANCELLED,
             EVENT_SR_APPROVED,
             EVENT_SR_REJECTED,
+            EVENT_DOCUMENT_UPLOADED,
         },
         str(sorted(ALLOWED_EVENT_NAMES)),
     )
