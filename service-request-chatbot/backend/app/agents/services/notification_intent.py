@@ -176,6 +176,7 @@ _SUB_CATEGORY_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
         re.compile(r"\bfit[\s-]?out\s+(end|complet\w*)\b", re.IGNORECASE),
     ),
     ("FIT_OUT_CONFIRM_TRADING", re.compile(r"\btrading\b", re.IGNORECASE)),
+    ("SALES_DATA", re.compile(r"\bsales[\s-]?data\b", re.IGNORECASE)),
 )
 
 

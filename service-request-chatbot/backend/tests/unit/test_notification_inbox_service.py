@@ -33,6 +33,21 @@ class TestAudienceSelection:
     def test_fm_manager_only_handover(self) -> None:
         assert _select_sub_categories(frozenset({"FM_MANAGER"}), None) == ("HANDOVER",)
 
+    def test_tenant_sales_data_only(self) -> None:
+        assert _select_sub_categories(
+            frozenset({"TENANT_CSV_UPLOADER"}), None
+        ) == ("SALES_DATA",)
+
+    def test_platform_billing_contact_sales_data_only(self) -> None:
+        assert _select_sub_categories(
+            frozenset({"BILLING_CONTACT", "LEASING_MANAGER"}), None
+        ) == ("SALES_DATA",)
+
+    def test_sales_approver_sales_data_only(self) -> None:
+        assert _select_sub_categories(
+            frozenset({"SALES_DATA_APPROVER"}), None
+        ) == ("SALES_DATA",)
+
     def test_operations_handover_and_trading(self) -> None:
         assert _select_sub_categories(frozenset({"OPERATIONS"}), None) == (
             "HANDOVER",

@@ -30,6 +30,10 @@ from typing import Any
 import httpx
 import structlog
 
+from app.agents.schemas.help_agent_schema import (
+    SALES_DATA_APPROVER_PLATFORM_ROLES,
+    SALES_DATA_TENANT_PLATFORM_ROLES,
+)
 from app.core.config import settings
 
 log = structlog.get_logger(__name__)
@@ -44,6 +48,7 @@ NOTIFICATION_SUB_CATEGORIES: tuple[str, ...] = (
     "FIT_OUT_CONFIRM_FOS",
     "FIT_OUT_CONFIRM_END",
     "FIT_OUT_CONFIRM_TRADING",
+    "SALES_DATA",
 )
 
 _SUB_CATEGORY_PATHS: dict[str, str] = {
@@ -51,6 +56,7 @@ _SUB_CATEGORY_PATHS: dict[str, str] = {
     "FIT_OUT_CONFIRM_FOS": "/notifications/agent/fit-out-confirm-fos",
     "FIT_OUT_CONFIRM_END": "/notifications/agent/fit-out-confirm-end",
     "FIT_OUT_CONFIRM_TRADING": "/notifications/agent/fit-out-confirm-trading",
+    "SALES_DATA": "/notifications/agent/sales-data",
 }
 
 # Tool audiences per the platform spec.  Used only to SKIP endpoints the user
@@ -63,6 +69,11 @@ _SUB_CATEGORY_AUDIENCE: dict[str, frozenset[str]] = {
     # Trading confirmations are raised against the mall, not RDD — the
     # scheduler targets MALL_MANAGER and OPERATIONS (mirrors the Go handler).
     "FIT_OUT_CONFIRM_TRADING": frozenset({"MALL_MANAGER", "OPERATIONS"}),
+    "SALES_DATA": frozenset(
+        {"TENANT_CSV_UPLOADER", "TENANT_DOC_UPLOADER", "SALES_DATA_APPROVER"}
+    )
+    | SALES_DATA_TENANT_PLATFORM_ROLES
+    | SALES_DATA_APPROVER_PLATFORM_ROLES,
 }
 
 SUB_CATEGORY_LABELS: dict[str, str] = {
@@ -70,6 +81,7 @@ SUB_CATEGORY_LABELS: dict[str, str] = {
     "FIT_OUT_CONFIRM_FOS": "Fit-out Start Confirmation",
     "FIT_OUT_CONFIRM_END": "Fit-out End Confirmation",
     "FIT_OUT_CONFIRM_TRADING": "Trading Confirmation",
+    "SALES_DATA": "Sales Data",
 }
 
 
@@ -99,6 +111,7 @@ class NotificationItem:
     lease_id: str | None = None
     unique_property_id: str | None = None
     notification_type: str | None = None
+    template_key: str | None = None
 
 
 @dataclass(slots=True)
@@ -196,6 +209,11 @@ def _parse_item(entry: dict[str, Any], sub_category: str) -> NotificationItem:
     # ``message`` only exists on some legacy payload shapes.
     message_en = str(text_content.get("en") or text_content.get("message") or "").strip()
     message_ar = str(text_content.get("ar") or "").strip() or None
+    template_key = str(text_content.get("key") or "").strip() or None
+    ntype = (
+        str(entry.get("notification_type") or text_content.get("type") or "").strip()
+        or None
+    )
     return NotificationItem(
         notification_id=str(entry.get("id") or entry.get("notification_id") or ""),
         sr_id=sr_id,
@@ -207,7 +225,8 @@ def _parse_item(entry: dict[str, Any], sub_category: str) -> NotificationItem:
         action_required=bool(entry.get("action_required", True)),
         lease_id=str(lease) if lease not in (None, 0, "") else None,
         unique_property_id=str(prop) if prop not in (None, 0, "") else None,
-        notification_type=entry.get("notification_type"),
+        notification_type=ntype,
+        template_key=template_key,
     )
 
 
@@ -439,6 +458,24 @@ _MOCK_FIXTURES: dict[str, list[dict[str, Any]]] = {
             "read_at": None,
             "action_required": True,
             "notification_type": "SERVICE_REQUEST",
+        },
+    ],
+    "SALES_DATA": [
+        {
+            "id": "ntf-sd-001",
+            "text_content": {
+                "en": "Please submit sales data as of month August for Brand@Mall.",
+                "ar": "",
+                "type": "SALES_DATA",
+                "key": "SALES_DATA_PENDING",
+                "id": "LC-1001",
+                "category": "PENDING",
+            },
+            "created_at": "2026-08-25T08:00:00Z",
+            "read_at": None,
+            "action_required": True,
+            "notification_type": "SALES_DATA",
+            "lease_id": 1,
         },
     ],
 }

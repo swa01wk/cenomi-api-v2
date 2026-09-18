@@ -14,6 +14,7 @@ from app.agents.services.notification_inbox_service import (
     SUB_CATEGORY_LABELS,
     NotificationInboxResult,
 )
+from app.agents.services.notification_sales_data import SALES_DATA_SUB_CATEGORY
 
 # Lease-activation template: "Contract t0112426 is now active. ..." — fixed
 # wording from the platform's GetNotificationContentWithIDOnly.
@@ -34,10 +35,21 @@ def row_payload(item: Any) -> dict[str, Any]:
     yet — that is what the notification asks the Mall Manager to do).
     """
     is_activation = item.notification_type == _LEASE_ACTIVATION_TYPE
+    is_sales = (
+        item.sub_category == SALES_DATA_SUB_CATEGORY
+        or str(item.notification_type or "").upper() == "SALES_DATA"
+        or str(item.template_key or "").upper().startswith("SALES_DATA_")
+    )
+    if is_sales:
+        kind = "sales_data"
+    elif is_activation:
+        kind = "lease_activation"
+    else:
+        kind = "service_request"
     row: dict[str, Any] = {
         "notification_id": item.notification_id,
-        "kind": "lease_activation" if is_activation else "service_request",
-        "sr_id": None if is_activation else item.sr_id,
+        "kind": kind,
+        "sr_id": None if (is_activation or is_sales) else item.sr_id,
         # Row-level per the reconciled spec — the Open handler reads the row,
         # never the parent group.
         "sub_category": item.sub_category,
@@ -49,6 +61,12 @@ def row_payload(item: Any) -> dict[str, Any]:
         "lease_id": item.lease_id,
         "unique_property_id": item.unique_property_id,
     }
+    if item.template_key:
+        row["key"] = item.template_key
+    if is_sales:
+        # text_content.id is the lease code (PMSTenantCode), not an SR id.
+        row["lease_code"] = item.sr_id
+        row["notification_type"] = item.notification_type or "SALES_DATA"
     if is_activation:
         match = _LEASE_CODE_RE.search(item.message or "")
         row["lease_code"] = match.group(1) if match else None
@@ -65,7 +83,11 @@ def serialize_groups(result: NotificationInboxResult) -> list[dict[str, Any]]:
             # Reconciled spec: service_category + action_required_count are
             # group-level contract fields; the count is authoritative here —
             # the FE must not recompute it from the rows.
-            "service_category": "FIT_OUT_AND_HANDOVER",
+            "service_category": (
+                "SALES_DATA"
+                if group.sub_category == SALES_DATA_SUB_CATEGORY
+                else "FIT_OUT_AND_HANDOVER"
+            ),
             "sub_category": group.sub_category,
             "label": SUB_CATEGORY_LABELS.get(group.sub_category, group.sub_category),
             "total_count": group.total_count,

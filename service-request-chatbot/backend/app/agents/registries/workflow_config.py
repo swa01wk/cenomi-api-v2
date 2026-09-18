@@ -257,10 +257,11 @@ def _fitout_confirm_extraction_prompt() -> str:
 
         "## Lease identification\n"
         "lease_code: Short alphanumeric tenant lease identifier — typically 7-10 characters "
-        "such as 't0105712', 'T0208831', 'LC-1234'. "
+        "such as 't0105712', 'T0028604', 'LC-1234'. "
+        "Copy the identifier exactly from the user; never invent one or reuse an example. "
         "It may appear after 'lease', 'for lease', 'unit', or standalone. "
         "Example: 'Confirm fitout for lease t0105712' → lease_code: 't0105712'. "
-        "Example: 'Confirm trading for t0105712' → lease_code: 't0105712'.\n"
+        "Example: 'Confirm trading for LC-1234' → lease_code: 'LC-1234'.\n"
         "brand: Tenant brand name (e.g. 'Nike', 'Zara').\n"
         "mall: Mall or property name (e.g. 'Riyadh Park').\n"
         "company: Tenant company or legal entity name.\n\n"
@@ -480,6 +481,40 @@ def _build_trading_confirm_config() -> WorkflowConfig:
     )
 
 
+def _build_sales_data_config() -> WorkflowConfig:
+    """Build the ``WorkflowConfig`` for the Sales Data Agent.
+
+    The Sales Data Agent handles the full tenant CSV upload and manual entry
+    lifecycle, plus admin review/approve flows.  It does NOT use the shared
+    field_extraction / lease_lookup / validation pipeline — it manages its own
+    CSV parsing and Layer 1/2 validation nodes.
+
+    The ``collection_stages`` and ``confirmation_nodes`` are intentionally empty
+    because the sales data flow bypasses the shared pipeline and uses its own
+    dedicated nodes.  ``action_intents`` drive supervisor routing only.
+    """
+    return WorkflowConfig(
+        agent_name="sales_data_agent",
+        extraction_prompt="",  # not used — sales data uses its own extraction nodes
+        field_questions={},    # not used — sales data uses its own missing-field node
+        stage_sync_nodes={},   # no platform SR sync required
+        collection_stages=frozenset(),  # bypasses shared pipeline
+        confirmation_nodes={},          # bypasses shared pipeline
+        terminal_stages=frozenset({"SALES_DATA_COMPLETE"}),
+        backend_fields=frozenset(),
+        auto_generated_fields=frozenset(),
+        lease_trigger_fields=(),
+        action_intents=frozenset({
+            "UPLOAD_SALES_DATA",
+            "ENTER_SALES_DATA_MANUAL",
+            "CHECK_SALES_DATA_STATUS",
+            "UPLOAD_SUPPORTING_DOCUMENT",
+            "REVIEW_SALES_DATA",
+            "APPROVE_SALES_DATA",
+        }),
+    )
+
+
 def _init_registry() -> None:
     """Populate the registry with all built-in workflow configs."""
     rdd_cfg = _build_rdd_config()
@@ -494,6 +529,9 @@ def _init_registry() -> None:
         _build_trading_confirm_config(),
     ):
         WORKFLOW_CONFIG_REGISTRY[cfg.agent_name] = cfg
+
+    sd_cfg = _build_sales_data_config()
+    WORKFLOW_CONFIG_REGISTRY[sd_cfg.agent_name] = sd_cfg
 
 
 _init_registry()

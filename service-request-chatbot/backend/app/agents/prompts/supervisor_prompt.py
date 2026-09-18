@@ -43,9 +43,12 @@ VALID INTENTS
       User is asking a question about the platform, workflows, roles, documents,
       or procedures. Not an action — they want information or guidance.
       Examples: "How do I submit a service request?", "What documents do I need?",
-                "What is FM review?", "Who is the DD Engineer?", "Hi", greetings,
-                any question not related to performing a specific SR action.
-      This is the DEFAULT intent. When in doubt, use ASK_HELP.
+                "What is FM review?", "Who is the DD Engineer?", "Hi", greetings.
+      Do NOT use ASK_HELP for sales-data questions about pending/submitted records
+      ("what data are pending?", "show pending sales") — those are
+      REVIEW_SALES_DATA (admin) or CHECK_SALES_DATA_STATUS (tenant).
+      This is the DEFAULT intent only when the message is genuinely about
+      platform how-to, not a request to list or act on records.
 
   CREATE_RDD_SERVICE_REQUEST
       User wants to raise / create a new RDD handover service request.
@@ -137,6 +140,59 @@ VALID INTENTS
                 sign off permit, open work permit SR
       Routing: opening an existing WP SR by id is enough — status sync maps the hop.
 
+  UPLOAD_SALES_DATA
+      User (tenant) wants to upload or submit monthly/quarterly sales data figures.
+      Keywords: upload sales data, submit sales, sales figures, sales for Q3,
+                "I want to submit sales data", "upload my sales", sales CSV,
+                "sales for August", sales report, monthly sales, revenue figures,
+                "submit sales for lease", "upload sales for", "I have sales to submit"
+      NOTE: TENANT_CSV_UPLOADER or TENANT_DOC_UPLOADER roles only.
+
+  ENTER_SALES_DATA_MANUAL
+      User (tenant) wants to type/enter sales figures directly in chat rather than uploading a file.
+      Keywords: "sales for August is X", "my sales amount is", "enter sales manually",
+                "type my sales", "sales for LC-1234 is 85000", "I made SAR 100,000 in August",
+                "sales amount for this month", notification-driven single entry
+      Examples: "Sales for August 2026, lease LC-1234, amount SAR 85,000"
+      NOTE: Use this when user provides specific figures inline without mentioning file upload.
+
+  CHECK_SALES_DATA_STATUS
+      User wants to check the status of their sales data submissions.
+      Keywords: "check my sales status", "what is the status of my sales data",
+                "has my sales been approved", "pending sales", "sales data status",
+                "show my submissions", "what sales do I need to submit",
+                "what data are pending", "what's pending", "pending data"
+      Prefer this over ASK_HELP whenever the user asks what is pending/submitted.
+
+  UPLOAD_SUPPORTING_DOCUMENT
+      User (tenant) wants to respond to a NEED_REUPLOAD / supporting-document /
+      audited-sales request by attaching a PDF or image — NOT a CSV.
+      Keywords: "upload supporting document", "attach POS report", "upload audited sales",
+                "I need to respond to document request", "re-upload a PDF", "upload a PDF",
+                "NEED_REUPLOAD", "need re-upload PDF", "reupload pdf", "attach the PDF",
+                "upload again", "attach again", "I want to upload again"
+      After the tenant cancels a supporting-document confirm card, "upload again"
+      is UPLOAD_SUPPORTING_DOCUMENT (PDF), not UPLOAD_SALES_DATA (CSV).
+      NOTE: TENANT_CSV_UPLOADER or TENANT_DOC_UPLOADER roles only.
+      Do NOT use this for CSV sales-data uploads — those are UPLOAD_SALES_DATA.
+
+  REVIEW_SALES_DATA
+      Admin or SALES_DATA_TEAM wants to review pending / submitted sales data.
+      Keywords: "review sales data", "pending approvals", "sales data to review",
+                "show submitted sales", "review tenant sales", "what data are pending",
+                "what's pending", "show pending", "pending submissions",
+                "what is awaiting review", "review list", "show me the review list"
+      NOTE: SALES_DATA_APPROVER or ADMIN roles only.
+      Questions about pending sales-data records from an admin are THIS intent,
+      not ASK_HELP.
+
+  APPROVE_SALES_DATA
+      Admin wants to approve, reject, or take action on a specific sales data submission.
+      Keywords: "approve sales for LC-1234", "approve sales data", "reject sales",
+                "request reupload", "need supporting document", "request audited sales",
+                "ask upload", "ask for extra doc", "ask for audited sales"
+      NOTE: SALES_DATA_APPROVER or ADMIN roles only.
+
   CHECK_SERVICE_REQUEST_STATUS
       User wants to know the current status of a service request.
       Keywords: status, progress, where is, track, check, what happened to
@@ -146,6 +202,10 @@ VALID INTENTS
       current session, or wants to review the service request before submitting.
       Keywords: preview, show me, show what you have, what have we collected,
                 show details, review, can you show it, show the request
+      Do NOT use this for TENANT_CSV_UPLOADER, TENANT_DOC_UPLOADER, or
+      SALES_DATA_APPROVER. Those users are talking about sales submissions —
+      use CHECK_SALES_DATA_STATUS (tenant) or REVIEW_SALES_DATA (admin),
+      never a handover preview.
 
   LIST_NOTIFICATIONS
       User wants to browse their notification inbox / alerts / pending items.
@@ -156,13 +216,16 @@ VALID INTENTS
                 pending handover notifications, fitout confirmations pending
       Filtered variants stay LIST_NOTIFICATIONS: "show unread notifications",
       "handover notifications", "fit-out start / FOS notifications",
-      "trading notifications" — the filter is parsed downstream.
+      "trading notifications", "sales data notifications" — the filter is
+      parsed downstream.
       Routing: target_agent = "notification_agent"
 
   OPEN_NOTIFICATION
       System-set only — never classify this from text.  The UI sends
-      active_notification_id when the user taps Open on a notification and
-      the backend seeds the SR workflow directly.
+      active_notification_id when the user taps Open on a notification.
+      Handover / fit-out: id is the SR number → sr_status_sync.
+      Sales data: sub_category SALES_DATA (or key SALES_DATA_*), id is the
+      lease code → sales_data_agent with notification_context.
 
   GET_NOTIFICATION_DETAIL
       User wants an explanation or details of a specific notification.
@@ -252,6 +315,36 @@ When intent = APPROVE_WORK_PERMIT_SR:
     service_category = "WORK_PERMIT"
     sub_category     = "WORK_PERMIT"
     target_agent     = "work_permit_agent"
+
+When intent = UPLOAD_SALES_DATA:
+    service_category = "SALES_DATA"
+    sub_category     = "BULK_UPLOAD"
+    target_agent     = "sales_data_agent"
+
+When intent = ENTER_SALES_DATA_MANUAL:
+    service_category = "SALES_DATA"
+    sub_category     = "MANUAL_ENTRY"
+    target_agent     = "sales_data_agent"
+
+When intent = CHECK_SALES_DATA_STATUS:
+    service_category = "SALES_DATA"
+    sub_category     = "STATUS_CHECK"
+    target_agent     = "sales_data_agent"
+
+When intent = UPLOAD_SUPPORTING_DOCUMENT:
+    service_category = "SALES_DATA"
+    sub_category     = "SUPPORTING_DOC"
+    target_agent     = "sales_data_agent"
+
+When intent = REVIEW_SALES_DATA:
+    service_category = "SALES_DATA"
+    sub_category     = "ADMIN_REVIEW"
+    target_agent     = "sales_data_agent"
+
+When intent = APPROVE_SALES_DATA:
+    service_category = "SALES_DATA"
+    sub_category     = "ADMIN_REVIEW"
+    target_agent     = "sales_data_agent"
 
 When intent = CHECK_SERVICE_REQUEST_STATUS:
     service_category = null

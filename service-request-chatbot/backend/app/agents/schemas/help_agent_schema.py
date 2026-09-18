@@ -60,6 +60,23 @@ ALL_INTENTS: frozenset[str] = _build_all_intents()
 # Role → permitted intents
 # ---------------------------------------------------------------------------
 
+_SALES_DATA_TENANT_INTENTS: frozenset[str] = frozenset(
+    {
+        "UPLOAD_SALES_DATA",
+        "ENTER_SALES_DATA_MANUAL",
+        "CHECK_SALES_DATA_STATUS",
+        "UPLOAD_SUPPORTING_DOCUMENT",
+    }
+)
+
+_SALES_DATA_ADMIN_INTENTS: frozenset[str] = frozenset(
+    {
+        "REVIEW_SALES_DATA",
+        "APPROVE_SALES_DATA",
+        "CHECK_SALES_DATA_STATUS",
+    }
+)
+
 ROLE_PERMITTED_INTENTS: dict[str, frozenset[str]] = {
     # Phase 1 actor — can create/update RDD SRs, create work permit SRs, and
     # create Already Trading (HANDED_OVER) SRs.
@@ -109,11 +126,43 @@ ROLE_PERMITTED_INTENTS: dict[str, frozenset[str]] = {
             "APPROVE_WORK_PERMIT_SR",
         }
     ),
+    # ── Sales Data roles ──────────────────────────────────────────────────
+    # Tenant uploading CSV sales data
+    "TENANT_CSV_UPLOADER": _SR_READ_INTENTS | _SALES_DATA_TENANT_INTENTS,
+    # Tenant uploading supporting documents
+    "TENANT_DOC_UPLOADER": _SR_READ_INTENTS | _SALES_DATA_TENANT_INTENTS,
+    # Sales data team member who reviews and approves
+    "SALES_DATA_APPROVER": _SR_READ_INTENTS | _SALES_DATA_ADMIN_INTENTS,
     # Unrestricted
     "ADMIN": ALL_INTENTS,
     # Cold L2 Work Permit hop (workflow 6).
     "OPERATION_EXECUTIVES": _SR_READ_INTENTS | frozenset({"APPROVE_WORK_PERMIT_SR"}),
 }
+
+# Live cenomi-api AI session JWTs stamp platform role names, not the demo
+# aliases (TENANT_CSV_UPLOADER / SALES_DATA_APPROVER). Keep both so inbox
+# skip-logic and supervisor shortcuts work against the dump / staging.
+SALES_DATA_TENANT_PLATFORM_ROLES: frozenset[str] = frozenset(
+    {
+        "AUTHORIZED_SIGNATORY",
+        "BILLING_CONTACT",
+        "PRIMARY_TENANT_CONTACT",
+        "COMPANY_ADMIN_CENTRAL",
+        # Live AI-session JWTs stamp the role name "COMPANY_ADMIN" (see the
+        # "Shop Manager / Company Admin" tenant user) — not "COMPANY_ADMIN_CENTRAL".
+        # Keep both so real tokens route the same as the assumed platform name.
+        "COMPANY_ADMIN",
+        "SHOP_MANAGER",
+        "FINANCIAL_CONTROLLER",
+        "LEASING_MANAGER",
+    }
+)
+SALES_DATA_APPROVER_PLATFORM_ROLES: frozenset[str] = frozenset({"SALES_DATA_TEAM"})
+
+for _role in SALES_DATA_TENANT_PLATFORM_ROLES:
+    ROLE_PERMITTED_INTENTS[_role] = _SR_READ_INTENTS | _SALES_DATA_TENANT_INTENTS
+for _role in SALES_DATA_APPROVER_PLATFORM_ROLES:
+    ROLE_PERMITTED_INTENTS[_role] = _SR_READ_INTENTS | _SALES_DATA_ADMIN_INTENTS
 
 
 def _rebuild_intents_for_roles() -> None:

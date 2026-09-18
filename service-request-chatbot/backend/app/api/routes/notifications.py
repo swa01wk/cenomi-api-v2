@@ -72,8 +72,8 @@ async def get_notification_inbox(
         default=None,
         description=(
             "Restrict to one group (HANDOVER, FIT_OUT_CONFIRM_FOS, "
-            "FIT_OUT_CONFIRM_END, FIT_OUT_CONFIRM_TRADING). Omit for all "
-            "groups the caller's roles allow."
+            "FIT_OUT_CONFIRM_END, FIT_OUT_CONFIRM_TRADING, SALES_DATA). "
+            "Omit for all groups the caller's roles allow."
         ),
     ),
     page: int = Query(default=1, ge=1, description="1-based page."),

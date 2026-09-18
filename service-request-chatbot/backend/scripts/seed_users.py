@@ -79,6 +79,34 @@ SEED_USERS = [
         "mall_names": [],
         "is_global_admin": True,
     },
+    # ── Sales Data demo users ──────────────────────────────────────────────────
+    {
+        "username": "tenant.csv@cenomi.com",
+        "email": "tenant.csv@cenomi.com",
+        "password": "test1234",
+        "role": "TENANT_CSV_UPLOADER",
+        "unique_property_ids": [],
+        "mall_names": [],
+        "is_global_admin": False,
+    },
+    {
+        "username": "tenant.doc@cenomi.com",
+        "email": "tenant.doc@cenomi.com",
+        "password": "test1234",
+        "role": "TENANT_DOC_UPLOADER",
+        "unique_property_ids": [],
+        "mall_names": [],
+        "is_global_admin": False,
+    },
+    {
+        "username": "sales.approver@cenomi.com",
+        "email": "sales.approver@cenomi.com",
+        "password": "test1234",
+        "role": "SALES_DATA_APPROVER",
+        "unique_property_ids": [],
+        "mall_names": [],
+        "is_global_admin": False,
+    },
 ]
 
 

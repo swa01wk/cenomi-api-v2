@@ -24,12 +24,6 @@ HANDOVER_FIELD_QUESTIONS: dict[str, str] = {
     "company": (
         "Ask the user for the tenant company name to search for matching leases."
     ),
-    "already_handovered": (
-        "Ask the user for the Handover Type. Present exactly two choices, clearly labelled: "
-        "1. Already Trading — the unit is already open and trading. "
-        "2. Initiate Handover — start the standard handover inspection. "
-        "Do NOT accept free-form answers; the user must pick one of these two options."
-    ),
     "title": (
         "Ask the user for a short title for this handover request. "
         "It is OPTIONAL — they can reply 'skip' or 'none' and the system "

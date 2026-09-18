@@ -91,6 +91,7 @@ def test_sub_category_to_agent_registry_backed() -> None:
     assert SUB_CATEGORY_TO_AGENT["FIT_OUT_CONFIRM_FOS"] == "rdd_fitout_start_agent"
     assert SUB_CATEGORY_TO_AGENT["FIT_OUT_CONFIRM_END"] == "rdd_fitout_end_agent"
     assert SUB_CATEGORY_TO_AGENT["FIT_OUT_CONFIRM_TRADING"] == "rdd_trading_confirmation_agent"
+    assert SUB_CATEGORY_TO_AGENT["SALES_DATA"] == "sales_data_agent"
     assert "FIT_OUT_CONFIRM_HO" not in SUB_CATEGORY_TO_AGENT
 
 
@@ -124,4 +125,67 @@ async def test_node_missing_ref_returns_error_turn() -> None:
     updates = await open_notification_node({"backend_refs": {}})
     assert "backend_refs" not in updates
     assert updates["response_ui"]["type"] == "message"
-    assert "service request" in updates["response_message"]
+    assert "service request" in updates["response_message"].lower() or "lease" in updates[
+        "response_message"
+    ].lower()
+
+
+@pytest.mark.asyncio
+async def test_sales_data_open_seeds_notification_context() -> None:
+    updates = await open_notification_node(
+        {
+            "active_notification_id": {
+                "id": "LC-1001",
+                "sub_category": "SALES_DATA",
+                "message": "Please submit sales data as of month August for Brand@Mall.",
+                "key": "SALES_DATA_PENDING",
+            },
+            "backend_refs": {},
+        }
+    )
+    assert updates["active_agent"] == "sales_data_agent"
+    assert updates["intent"] == "UPLOAD_SALES_DATA"
+    assert updates["service_category"] == "SALES_DATA"
+    assert "sr_id" not in updates["backend_refs"]
+    ctx = updates["backend_refs"]["notification_context"]
+    assert ctx["lease_code"] == "LC-1001"
+    assert ctx["period_hint"] == "month August"
+    assert ctx["source"] == "notification"
+    assert updates["corrected_fields"]["notification_context"] == ctx
+
+
+def test_sales_data_pending_key_maps_to_upload() -> None:
+    seed = build_open_notification_seed(
+        {"id": "LC-1001", "sub_category": "SALES_DATA_PENDING"},
+        session_active_agent=None,
+    )
+    assert seed["active_agent"] == "sales_data_agent"
+    assert seed["intent"] == "UPLOAD_SALES_DATA"
+
+
+def test_sales_data_supporting_doc_key_maps_to_doc_intent() -> None:
+    seed = build_open_notification_seed(
+        {
+            "id": "LC-1001",
+            "sub_category": "SALES_DATA",
+            "key": "SALES_DATA_NEED_UPLOAD_SUPPORTING_DOCUMENT",
+        },
+        session_active_agent=None,
+    )
+    assert seed["intent"] == "UPLOAD_SUPPORTING_DOCUMENT"
+
+
+def test_sales_data_submitted_maps_to_admin_review() -> None:
+    seed = build_open_notification_seed(
+        {"id": "LC-1001", "sub_category": "SALES_DATA_SUBMITTED"},
+        session_active_agent=None,
+    )
+    assert seed["intent"] == "REVIEW_SALES_DATA"
+
+
+def test_sales_data_open_sets_agent_even_if_session_has_handover() -> None:
+    seed = build_open_notification_seed(
+        {"id": "LC-1001", "sub_category": "SALES_DATA"},
+        session_active_agent="rdd_handover_agent",
+    )
+    assert seed["active_agent"] == "sales_data_agent"
