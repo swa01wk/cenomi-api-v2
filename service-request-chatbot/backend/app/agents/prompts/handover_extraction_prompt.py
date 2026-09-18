@@ -32,7 +32,7 @@ use, the expected format, and a short description.
 
 | Field key              | Format / values                  | Description                                      |
 |------------------------|----------------------------------|--------------------------------------------------|
-| lease_code             | string                           | Tenant lease identifier (e.g. "LC-1234")        |
+| lease_code             | string                           | Tenant lease identifier (e.g. "LC-1234", "t0105712", "T0028604"). Copy exactly from the user. |
 | mall                   | string                           | Mall or property name (e.g. "Riyadh Park")      |
 | brand                  | string                           | Tenant brand name (e.g. "Nike", "H&M")          |
 | company                | string                           | Tenant company / legal entity name (e.g. "Nike Saudi Arabia LLC") |
@@ -189,7 +189,7 @@ these keys in the "fields" object.
 ## Lease code vs mall / brand disambiguation — CRITICAL
 
 `lease_code` values are short alphanumeric identifiers such as `t0105712`,
-`LC-1234`, `T0208831`.  They are typically 6–10 characters with no spaces.
+`T0028604`, `LC-1234`. They are typically 6–10 characters with no spaces.
 
 **If the user's response contains a multi-word mall / property name** (e.g.,
 "Jawharat Jeddah mall", "Riyadh Park", "Dubai Festival City", "Mall of Arabia")
@@ -215,6 +215,7 @@ Examples:
 - Question: "Please share the lease code for this handover request."
   User: "t0105712"
   → Extract `lease_code: "t0105712"` (confidence 1.0) — this IS a lease code
+    (copy whatever identifier the user wrote; the examples above are format only).
 
 ## Handling question context — CRITICAL RULE
 

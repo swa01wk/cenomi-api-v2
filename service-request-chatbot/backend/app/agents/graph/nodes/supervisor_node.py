@@ -33,7 +33,11 @@ from app.agents.prompts.supervisor_prompt import (
     SUPERVISOR_SYSTEM_PROMPT,
 )
 from app.agents.registry import lookup_agent
-from app.agents.schemas.help_agent_schema import intents_for_roles
+from app.agents.schemas.help_agent_schema import (
+    SALES_DATA_APPROVER_PLATFORM_ROLES,
+    SALES_DATA_TENANT_PLATFORM_ROLES,
+    intents_for_roles,
+)
 from app.agents.schemas.supervisor_schema import SupervisorDecision
 from app.agents.services.sr_reference_parser import parse_sr_reference
 from app.agents.services.context_builder import build_agent_context, format_context_for_prompt
@@ -140,14 +144,235 @@ def _user_wants_preview(message: str) -> bool:
     return any(phrase in lowered for phrase in _PREVIEW_PHRASES)
 
 
+_ADMIN_SALES_ROLES = frozenset({"SALES_DATA_APPROVER", "ADMIN"}) | SALES_DATA_APPROVER_PLATFORM_ROLES
+_TENANT_SALES_ROLES = (
+    frozenset({"TENANT_CSV_UPLOADER", "TENANT_DOC_UPLOADER"})
+    | SALES_DATA_TENANT_PLATFORM_ROLES
+)
+
+# Natural-language openers that the LLM otherwise classifies as ASK_HELP
+# because they are phrased as questions ("what data are pending?").
+_ADMIN_REVIEW_PHRASES: tuple[str, ...] = (
+    "review sales",
+    "pending approval",
+    "pending approvals",
+    "awaiting review",
+    "show submitted",
+    "submitted sales",
+    "what is pending",
+    "what's pending",
+    "whats pending",
+    "what data are pending",
+    "what data is pending",
+    "what data pending",
+    "pending data",
+    "pending sales",
+    "pending submission",
+    "data pending",
+    "any pending",
+    "show pending",
+    "which are pending",
+    "sales data to review",
+    "submissions to review",
+    "tenant sales",
+    "review list",
+    "show me review",
+    "show the review",
+)
+
+_TENANT_STATUS_PHRASES: tuple[str, ...] = (
+    "check my sales",
+    "sales status",
+    "status of my sales",
+    "my submissions",
+    "what data are pending",
+    "what data is pending",
+    "what's pending",
+    "whats pending",
+    "pending sales",
+    "pending data",
+    "has my sales",
+    "show my sales",
+    "show pending",
+    "any pending",
+    "sales data status",
+)
+
+_TENANT_DOC_PHRASES: tuple[str, ...] = (
+    "supporting document",
+    "supporting doc",
+    "extra document",
+    "extra doc",
+    "audited sales",
+    "upload a pdf",
+    "re-upload a pdf",
+    "reupload a pdf",
+    "re-upload pdf",
+    "need a pdf",
+    "needs a pdf",
+    "upload again",
+    "attach again",
+    "attach a different",
+    "different file",
+)
+
+# Takes precedence over status phrases so a notification deep-link like
+# "pending sales data for lease <code>. I want to submit it" opens upload,
+# not another status summary.
+_TENANT_UPLOAD_PHRASES: tuple[str, ...] = (
+    "upload sales",
+    "upload my sales",
+    "i want to upload",
+    "i want to submit",
+    "submit it",
+    "submit sales",
+    "upload a csv",
+    "upload the file",
+    "upload csv",
+)
+
+
+def _sales_data_shortcut(
+    message: str, roles: list[str] | tuple[str, ...] | None
+) -> dict[str, Any] | None:
+    """Deterministic sales-data routing for common question phrasings.
+
+    Returns a supervisor-equivalent state patch, or None to fall through to the LLM.
+    """
+    if not roles:
+        return None
+    role_set = set(roles)
+    lowered = " ".join((message or "").lower().split())
+    if not lowered:
+        return None
+
+    if role_set & _ADMIN_SALES_ROLES:
+        if any(p in lowered for p in _ADMIN_REVIEW_PHRASES):
+            return {
+                "intent": "REVIEW_SALES_DATA",
+                "service_category": "SALES_DATA",
+                "sub_category": "ADMIN_REVIEW",
+                "active_agent": "sales_data_agent",
+                "status": "IN_PROGRESS",
+            }
+
+    if role_set & _TENANT_SALES_ROLES:
+        if any(p in lowered for p in _TENANT_DOC_PHRASES):
+            return {
+                "intent": "UPLOAD_SUPPORTING_DOCUMENT",
+                "service_category": "SALES_DATA",
+                "sub_category": "SUPPORTING_DOC",
+                "active_agent": "sales_data_agent",
+                "status": "IN_PROGRESS",
+            }
+        if any(p in lowered for p in _TENANT_UPLOAD_PHRASES):
+            return {
+                "intent": "UPLOAD_SALES_DATA",
+                "service_category": "SALES_DATA",
+                "sub_category": "BULK_UPLOAD",
+                "active_agent": "sales_data_agent",
+                "status": "IN_PROGRESS",
+            }
+        if any(p in lowered for p in _TENANT_STATUS_PHRASES):
+            return {
+                "intent": "CHECK_SALES_DATA_STATUS",
+                "service_category": "SALES_DATA",
+                "sub_category": "STATUS_CHECK",
+                "active_agent": "sales_data_agent",
+                "status": "IN_PROGRESS",
+            }
+
+    return None
+
+
+# Roles that only use the sales-data agent (no handover / work-permit actions).
+# SR preview / create / status replies are the wrong product surface for them.
+_SALES_DATA_ONLY_ROLES = _ADMIN_SALES_ROLES | _TENANT_SALES_ROLES
+_PLATFORM_SR_ROLES = frozenset(
+    {"MALL_MANAGER", "FM_MANAGER", "OPERATIONS", "DD_ENGINEER", "ADMIN"}
+)
+_SR_INTENTS_SALES_DATA_FALLBACK = frozenset(
+    {
+        "PREVIEW_SERVICE_REQUEST",
+        "CHECK_SERVICE_REQUEST_STATUS",
+        "CREATE_RDD_SERVICE_REQUEST",
+        "UPDATE_RDD_SERVICE_REQUEST",
+        "APPROVE_RDD_SERVICE_REQUEST",
+        "CREATE_HANDED_OVER_SR",
+        "CREATE_FITOUT_CONFIRM_FOS",
+        "CREATE_FITOUT_CONFIRM_END",
+        "CREATE_FITOUT_CONFIRM_TRADING",
+        "APPROVE_FITOUT_CONFIRM_FOS",
+        "APPROVE_FITOUT_CONFIRM_END",
+        "APPROVE_FITOUT_CONFIRM_TRADING",
+        "CREATE_WORK_PERMIT_SR",
+        "UNKNOWN",
+    }
+)
+
+
+def _is_sales_data_only_user(roles: list[str] | tuple[str, ...] | frozenset[str] | None) -> bool:
+    role_set = set(roles or [])
+    if role_set & _PLATFORM_SR_ROLES:
+        return False
+    return bool(role_set & _SALES_DATA_ONLY_ROLES)
+
+
+def _sales_data_unmatched_message(
+    roles: list[str] | tuple[str, ...] | frozenset[str] | None,
+) -> str:
+    role_set = set(roles or [])
+    if role_set & _ADMIN_SALES_ROLES:
+        return (
+            "I couldn't match that to a sales data action. "
+            "I can help you review submitted sales data, approve a submission, "
+            "or request a re-upload, supporting document, or audited sales. "
+            "Please rephrase what you'd like to do."
+        )
+    return (
+        "I couldn't match that to a sales data action. "
+        "I can help you upload a CSV, type your sales figures, "
+        "check your submission status, or upload a file if the team asked for "
+        "sales data, a supporting document, or audited sales. "
+        "Please rephrase what you'd like to do."
+    )
+
+
+def _sales_data_unmatched_patch(
+    roles: list[str] | tuple[str, ...] | frozenset[str] | None,
+    *,
+    intent: str = "UNKNOWN",
+) -> dict[str, Any]:
+    message = _sales_data_unmatched_message(roles)
+    return {
+        "intent": intent,
+        "status": "WAITING_FOR_USER",
+        "active_agent": None,
+        "response_message": message,
+        "response_ui": {
+            "type": "sales_data_unmatched",
+            "verbatim": True,
+            "message": message,
+        },
+    }
+
+
 def _build_user_content(state: ServiceRequestState) -> str:
     """Build the user-facing content string sent to the LLM.
 
+    Includes the current message, lightweight routing hints about the active
+    session, and up to 4 recent conversation turns so the model can classify
+    short follow-up messages in context (e.g. "8th june" when an update
+    workflow is already in progress).
     Compact context (authoritative fields, last 5 turns, viewing IDs) plus the
     current message — never the full event history.
     """
     context = build_agent_context(state)
     parts = [format_context_for_prompt(context)]
+
+    auth: AuthContext | None = state.get("auth_context")  # type: ignore[assignment]
+    if auth is not None and auth.roles:
+        parts.append(f"User roles: {', '.join(auth.roles)}")
 
     active_agent = state.get("active_agent")
     if active_agent:
@@ -301,10 +526,21 @@ async def supervisor_node(state: ServiceRequestState) -> dict[str, Any]:  # noqa
     # ── 1. Session continuity ──────────────────────────────────────────────
     # If a downstream agent is already handling this session and the user has
     # not explicitly requested a switch or a preview, delegate back immediately.
+    # Sales-data STATUS_LOOKUP is a one-shot: the next message must be
+    # reclassified (upload vs status vs typed entry) instead of staying stuck
+    # on CHECK_SALES_DATA_STATUS.
+    auth_early: AuthContext | None = state.get("auth_context")  # type: ignore[assignment]
+    early_roles = list(auth_early.roles) if auth_early is not None else None
+    shortcut = _sales_data_shortcut(user_message, early_roles)
+    sales_data_idle = active_agent == "sales_data_agent" and (
+        state.get("workflow_stage") or ""
+    ) in {"STATUS_LOOKUP", "SALES_DATA_COMPLETE"}
     if (
         active_agent
         and not _user_wants_to_switch(user_message)
         and not _user_wants_preview(user_message)
+        and shortcut is None
+        and not sales_data_idle
         and not should_bypass_for_notification_context(state)
     ):
         log.debug(
@@ -313,6 +549,43 @@ async def supervisor_node(state: ServiceRequestState) -> dict[str, Any]:  # noqa
             user_message=user_message[:120],
         )
         return {"active_agent": active_agent}
+
+    # ── 1b. Deterministic sales-data routing ───────────────────────────────
+    # Questions like "what data are pending?" are otherwise classified as
+    # ASK_HELP (FAQ) because ASK_HELP is the default for interrogatives.
+    if shortcut:
+        if auth_early is not None:
+            permitted = intents_for_roles(
+                auth_early.roles, auth_early.is_global_admin
+            )
+            if shortcut["intent"] not in permitted:
+                log.info(
+                    "supervisor.rbac_denied",
+                    intent=shortcut["intent"],
+                    roles=list(auth_early.roles),
+                    via="sales_data_shortcut",
+                )
+                if _is_sales_data_only_user(auth_early.roles):
+                    return _sales_data_unmatched_patch(
+                        auth_early.roles, intent=shortcut["intent"]
+                    )
+                role_display = ", ".join(sorted(auth_early.roles)) or "your role"
+                intent_display = shortcut["intent"].replace("_", " ").lower()
+                return {
+                    "intent": shortcut["intent"],
+                    "status": "WAITING_FOR_USER",
+                    "response_message": (
+                        f"Your role ({role_display}) does not permit this action "
+                        f"({intent_display}). "
+                        "I can answer platform questions or help with actions your role allows."
+                    ),
+                }
+        log.info(
+            "supervisor.sales_data_shortcut",
+            intent=shortcut["intent"],
+            user_message=user_message[:120],
+        )
+        return shortcut
 
     # ── 2. Open child LLM-call run span ───────────────────────────────────
     # ``_trace_node_run_id`` is injected by the ``@trace_node`` decorator
@@ -394,6 +667,8 @@ async def supervisor_node(state: ServiceRequestState) -> dict[str, Any]:  # noqa
 
     # ── 5. Handle LLM/parse failure → graceful degradation ────────────────
     if decision is None:
+        if _is_sales_data_only_user(early_roles):
+            return _sales_data_unmatched_patch(early_roles)
         return {
             "response_message": (
                 "The user's intent could not be determined due to an internal error. "
@@ -421,6 +696,11 @@ async def supervisor_node(state: ServiceRequestState) -> dict[str, Any]:  # noqa
             intent=decision.intent,
             confidence=decision.confidence,
         )
+        if _is_sales_data_only_user(early_roles):
+            return {
+                **_sales_data_unmatched_patch(early_roles, intent=decision.intent),
+                **sr_id_updates,
+            }
         return {
             "intent": decision.intent,
             **sr_id_updates,
@@ -432,7 +712,22 @@ async def supervisor_node(state: ServiceRequestState) -> dict[str, Any]:  # noqa
             "status": "WAITING_FOR_USER",
         }
 
-    # ── 7a. Preview intent — route to preview_node ────────────────────────
+    # ── 7a. Sales-data users must not fall into handover SR preview / create
+    if (
+        _is_sales_data_only_user(early_roles)
+        and decision.intent in _SR_INTENTS_SALES_DATA_FALLBACK
+    ):
+        log.info(
+            "supervisor.sales_data_unmatched",
+            intent=decision.intent,
+            user_message=user_message[:120],
+        )
+        return {
+            **_sales_data_unmatched_patch(early_roles, intent=decision.intent),
+            **sr_id_updates,
+        }
+
+    # ── 7b. Preview intent — route to preview_node ────────────────────────
     # PREVIEW_SERVICE_REQUEST has no downstream agent; preview_node fetches the
     # submitted SR from the platform API (if sr_id is available) or summarises
     # the draft collected_data.  Use IN_PROGRESS so _route_after_supervisor
@@ -445,7 +740,7 @@ async def supervisor_node(state: ServiceRequestState) -> dict[str, Any]:  # noqa
             "status": "IN_PROGRESS",
         }
 
-    # ── 7b. RBAC check ────────────────────────────────────────────────────
+    # ── 7c. RBAC check ────────────────────────────────────────────────────
     # Enforce role-based permissions before activating any agent.  The denial
     # message is set in returned state here (not in the routing function) so
     # that LangGraph propagates it correctly to response_generation_node.
@@ -458,6 +753,11 @@ async def supervisor_node(state: ServiceRequestState) -> dict[str, Any]:  # noqa
                 intent=decision.intent,
                 roles=list(auth.roles),
             )
+            if _is_sales_data_only_user(auth.roles):
+                return {
+                    **_sales_data_unmatched_patch(auth.roles, intent=decision.intent),
+                    **sr_id_updates,
+                }
             role_display = ", ".join(sorted(auth.roles)) or "your role"
             intent_display = decision.intent.replace("_", " ").lower()
             return {
@@ -472,7 +772,7 @@ async def supervisor_node(state: ServiceRequestState) -> dict[str, Any]:  # noqa
                 ),
             }
 
-    # ── 7c. Registry validation ────────────────────────────────────────────
+    # ── 7d. Registry validation ────────────────────────────────────────────
     # Cross-check the LLM's routing against the authoritative registry so a
     # hallucinated agent name never propagates downstream.
     agent_config = None

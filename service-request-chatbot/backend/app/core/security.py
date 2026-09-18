@@ -55,9 +55,17 @@ def get_auth_context(
         # when chatbot JWT_SECRET_KEY and platform AI_SESSION_TOKEN_SECRET diverge.
         return AuthContext(subject_id="unauthenticated", bearer_token=raw_token)
 
+    tenant_raw = payload.get("tenant_id")
+    if tenant_raw in (None, ""):
+        tenant_raw = payload.get("tenant_profile_id")
+    log.info(
+        "security.auth_context_resolved",
+        tenant_id=str(tenant_raw) if tenant_raw not in (None, "") else None,
+        roles=payload.get("roles", []),
+    )
     return AuthContext(
         subject_id=str(payload.get("user_id", payload.get("sub", "unknown"))),
-        tenant_id=payload.get("tenant_id"),
+        tenant_id=str(tenant_raw) if tenant_raw not in (None, "") else None,
         roles=frozenset(payload.get("roles", [])),
         unique_property_ids=tuple(int(x) for x in payload.get("unique_property_ids", [])),
         mall_names=tuple(payload.get("mall_names", [])),

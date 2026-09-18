@@ -24,7 +24,7 @@ from uuid import UUID, uuid4
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.core.security import get_auth_context
 from app.db.session import DbSession
@@ -54,19 +54,45 @@ service_request_router = APIRouter()
 
 
 class ActiveNotificationRef(BaseModel):
-    """Notification the user tapped "Open" on — carries the SR reference.
+    """Notification the user tapped "Open" on.
 
-    ``id`` is the platform SR id (``text_content.id`` on the notification
-    payload), NOT the notification row id.  ``sub_category`` lets the backend
-    seed the correct agent up front; when absent or unmapped, sr_status_sync
-    re-derives it from the SR payload.
+    For FIT_OUT_AND_HANDOVER, ``id`` is the platform SR id (``text_content.id``),
+    never the notification row id.  ``sub_category`` seeds the RDD/fitout agent.
+
+    For SALES_DATA, ``id`` is the lease code (PMSTenantCode). Optional
+    ``period_hint`` / ``message`` / ``key`` are parsed into
+    ``notification_context`` for the Sales Data Agent. Extra fields are kept
+    so the Open payload can grow without a schema bump.
     """
 
-    id: str = Field(description="Service request id from the notification payload.")
+    model_config = ConfigDict(extra="allow")
+
+    id: str = Field(
+        description=(
+            "SR id for handover/fit-out, or lease code for SALES_DATA "
+            "(notification text_content.id — not the notification row id)."
+        )
+    )
     sub_category: str | None = Field(
         default=None,
-        description="SR sub-category, e.g. HANDOVER / FIT_OUT_CONFIRM_FOS.",
-        examples=["HANDOVER"],
+        description="HANDOVER / FIT_OUT_CONFIRM_* / SALES_DATA.",
+        examples=["HANDOVER", "SALES_DATA"],
+    )
+    period_hint: str | None = Field(
+        default=None,
+        description="Sales-data period phrase, e.g. 'month August'.",
+    )
+    key: str | None = Field(
+        default=None,
+        description="Platform template key, e.g. SALES_DATA_PENDING.",
+    )
+    message: str | None = Field(
+        default=None,
+        description="EN notification body — used to parse period_hint if omitted.",
+    )
+    notification_type: str | None = Field(
+        default=None,
+        description="Platform notification_type, e.g. SALES_DATA.",
     )
 
     @field_validator("id", mode="before")
@@ -176,10 +202,10 @@ class ServiceRequestChatRequest(BaseModel):
     active_notification_id: ActiveNotificationRef | None = Field(
         default=None,
         description=(
-            "Sent when the user taps Open on a notification. Seeds the SR id "
-            "(and agent, when sub_category maps) and routes straight into "
-            "sr_status_sync — the OPEN_NOTIFICATION flow. A bare string is "
-            "accepted as the SR id (reconciled-spec fallback)."
+            "Sent when the user taps Open on a notification. For handover/fit-out "
+            "seeds the SR id and routes into sr_status_sync. For SALES_DATA, id is "
+            "the lease code and the turn lands in the Sales Data Agent. "
+            "A bare string is accepted as the SR id (reconciled-spec fallback)."
         ),
     )
 

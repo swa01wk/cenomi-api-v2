@@ -1,21 +1,24 @@
 """Open-notification node — the reconciled spec's ``open_notification_node``.
 
-A routing shim with no business logic (spec §2.1): it turns the UI's
-``active_notification_id`` into the open-SR seed and hands off to the EXISTING
-``sr_status_sync`` pipeline, which fetches the live SR, maps operations to a
-workflow stage, and lands in fm_review_entry / rdd_review_entry /
-fitout_confirm_entry.
+A routing shim with no business logic (spec §2.1):
+
+- **FIT_OUT_AND_HANDOVER** — turns ``active_notification_id`` into an open-SR
+  seed and hands off to ``sr_status_sync`` (fm / rdd / fitout entry).
+- **SALES_DATA** — ``text_content.id`` is a **lease code**, not an SR id.
+  Seeds ``backend_refs.notification_context`` and hands off to
+  ``sales_data_entry`` (no ``sr_status_sync``).
 
 Contract:
 - ``state["active_notification_id"]`` is a dict ``{id, sub_category?}`` or a
   bare string (treated as the SR id directly — spec fallback).
-- ``id`` is the SR id from the platform notification's ``text_content.id``,
-  never the notification row id.
-- ``sub_category`` maps to an agent via :data:`SUB_CATEGORY_TO_AGENT`; unmapped
-  values (FIT_OUT_CONFIRM_HO is decommissioned) seed the sr_id only and let
-  sr_status_sync re-derive from the SR payload.
-- A live session's ``active_agent`` is never clobbered.
-- Missing sr_id after all fallbacks → plain error message turn.
+- For SR notifications, ``id`` is ``text_content.id`` (SR number), never the
+  notification row id.
+- For sales-data notifications, ``id`` is the lease code (PMSTenantCode).
+  Optional ``period_hint`` / ``message`` / ``key`` refine the Sales Data Agent
+  first turn.
+- A live session's ``active_agent`` is never clobbered on the SR path.
+  Sales-data opens always set ``sales_data_agent`` (FE starts a new session).
+- Missing id after all fallbacks → plain error message turn.
 """
 
 from __future__ import annotations
@@ -26,6 +29,12 @@ import structlog
 
 from app.agents.graph.state import ServiceRequestState
 from app.agents.registry import SERVICE_REQUEST_AGENT_REGISTRY, lookup_agent
+from app.agents.services.notification_sales_data import (
+    SALES_DATA_SUB_CATEGORY,
+    build_sales_data_notification_context,
+    is_sales_data_notification_ref,
+    sales_data_intent_for_ref,
+)
 from app.observability.decorators import trace_node
 
 log = structlog.get_logger(__name__)
@@ -37,6 +46,7 @@ SUB_CATEGORY_TO_AGENT: dict[str, str] = {
     sub: cfg["agent_name"]
     for sub, cfg in SERVICE_REQUEST_AGENT_REGISTRY.get("FIT_OUT_AND_HANDOVER", {}).items()
 }
+SUB_CATEGORY_TO_AGENT[SALES_DATA_SUB_CATEGORY] = "sales_data_agent"
 
 
 def _normalise_ref(raw: Any) -> dict[str, Any] | None:
@@ -44,10 +54,15 @@ def _normalise_ref(raw: Any) -> dict[str, Any] | None:
     if isinstance(raw, str) and raw.strip():
         return {"id": raw.strip()}
     if isinstance(raw, dict) and str(raw.get("id") or "").strip():
-        return {
-            "id": str(raw["id"]).strip(),
-            "sub_category": str(raw.get("sub_category") or "").strip().upper() or None,
+        normalised = {
+            key: value
+            for key, value in raw.items()
+            if key != "sub_category"
         }
+        normalised["id"] = str(raw["id"]).strip()
+        sub = str(raw.get("sub_category") or "").strip().upper() or None
+        normalised["sub_category"] = sub
+        return normalised
     return None
 
 
@@ -58,12 +73,21 @@ def build_open_notification_seed(
 ) -> dict[str, Any]:
     """State updates for an OPEN_NOTIFICATION turn.
 
-    Maps the notification's ``sub_category`` to an agent via the registry when
-    possible; unmapped sub-categories seed nothing extra — ``sr_status_sync``
-    re-derives sub_category from the SR payload, and a state-level value would
-    incorrectly win its cascade.  A live session's ``active_agent`` is never
-    clobbered.
+    Sales-data refs seed the Sales Data Agent + ``notification_context``.
+    SR refs map ``sub_category`` via the FIT_OUT_AND_HANDOVER registry;
+    unmapped sub-categories seed nothing extra — ``sr_status_sync`` re-derives
+    sub_category from the SR payload.  A live session's ``active_agent`` is
+    never clobbered on the SR path.
     """
+    if is_sales_data_notification_ref(notification_ref):
+        intent = sales_data_intent_for_ref(notification_ref)
+        return {
+            "intent": intent,
+            "active_agent": "sales_data_agent",
+            "service_category": "SALES_DATA",
+            "sub_category": SALES_DATA_SUB_CATEGORY,
+        }
+
     updates: dict[str, Any] = {"intent": "OPEN_NOTIFICATION"}
     sub = str(notification_ref.get("sub_category") or "").strip().upper()
     agent_cfg = lookup_agent("FIT_OUT_AND_HANDOVER", sub) if sub else None
@@ -76,16 +100,16 @@ def build_open_notification_seed(
 
 @trace_node("open_notification", "AGENT")
 async def open_notification_node(state: ServiceRequestState) -> dict[str, Any]:
-    """LangGraph node: seed the open-SR handoff and continue to sr_status_sync."""
+    """LangGraph node: seed the SR or sales-data handoff."""
     ref = _normalise_ref(state.get("active_notification_id"))
     if ref is None:
-        log.warning("open_notification.missing_sr_id")
+        log.warning("open_notification.missing_id")
         return {
             "intent": "OPEN_NOTIFICATION",
             "response_message": (
-                "I couldn't work out which service request that notification "
-                "refers to. Please open it from the notifications page, or "
-                "tell me the service request number."
+                "I couldn't work out which item that notification refers to. "
+                "Please open it from the notifications page, or tell me the "
+                "lease code or service request number."
             ),
             "response_ui": {"type": "message"},
             "response_decorations": {},
@@ -96,8 +120,25 @@ async def open_notification_node(state: ServiceRequestState) -> dict[str, Any]:
         ref, session_active_agent=state.get("active_agent")
     )
     backend_refs = dict(state.get("backend_refs") or {})
-    backend_refs["sr_id"] = ref["id"]
     backend_refs["opened_from_notification"] = True
+
+    if is_sales_data_notification_ref(ref):
+        ctx = build_sales_data_notification_context(ref)
+        backend_refs.pop("sr_id", None)
+        backend_refs["notification_context"] = ctx
+        updates["backend_refs"] = backend_refs
+        corrected = dict(state.get("corrected_fields") or {})
+        corrected["notification_context"] = ctx
+        updates["corrected_fields"] = corrected
+        log.info(
+            "open_notification.seeded_sales_data",
+            lease_code=ctx.get("lease_code"),
+            period_hint=ctx.get("period_hint"),
+            intent=updates.get("intent"),
+        )
+        return updates
+
+    backend_refs["sr_id"] = ref["id"]
     updates["backend_refs"] = backend_refs
     log.info(
         "open_notification.seeded",

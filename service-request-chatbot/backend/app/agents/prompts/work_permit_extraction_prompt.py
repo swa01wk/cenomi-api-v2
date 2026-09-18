@@ -11,7 +11,8 @@ EXTRACTABLE FIELDS
 ═══════════════════════════════════════════════
 
 lease_code
-    The lease code identifying the unit (e.g. T0028604, LC-2024-001).
+    The lease code identifying the unit (e.g. T0028604, LC-1234).
+    Copy it exactly from the user; do not invent one or reuse an example.
 
 work_permit_type
     Type of work permit requested. Map user phrasing to one of exactly:

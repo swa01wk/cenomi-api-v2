@@ -7,13 +7,14 @@ Each *action* string (e.g. ``"CREATE_HANDOVER_SR"``) maps to a required
 contain.  If the caller does not hold the required permission a
 ``PermissionDeniedError`` is raised — never silently allowed.
 
-POC note: ``AuthContext.roles`` is currently populated from the stub
-``get_auth_context`` in ``core/security.py``.  When real JWT validation is
-wired the roles frozenset will be populated from token claims and this
-service will enforce them automatically.
+``AuthContext.roles`` is populated from JWT claims (portal
+``POST /auth/ai-session-token`` or chatbot ``/api/auth/login``), never from
+the chat request body. Role names are expanded via ``ROLE_PERMISSION_MAP``.
 """
 
 from __future__ import annotations
+
+from typing import Any
 
 from app.types.chat import AuthContext
 
@@ -48,6 +49,11 @@ ACTION_PERMISSION_MAP: dict[str, str] = {
     # ── Legacy entries (kept for backward compatibility) ──────────────────────
     "FM_APPROVAL": "CAN_APPROVE_HANDOVER_SR",
     "RDD_FINAL_APPROVAL": "CAN_APPROVE_HANDOVER_SR",
+
+    # ── Sales Data (platform permission names — same strings as cenomi-api) ──
+    "SUBMIT_SALES_DATA": "SALES_DATA_UPDATE",
+    "SUBMIT_SALES_DATA_SUPPORTING_DOC": "UPLOAD_SALES_DATA",
+    "APPROVE_SALES_DATA": "SALES_DATA_APPROVE",
 }
 
 # ---------------------------------------------------------------------------
@@ -90,8 +96,57 @@ ROLE_PERMISSION_MAP: dict[str, frozenset[str]] = {
         "VIEW_FIT_OUT_HANDOVER",
         "CAN_RAISE_WORK_PERMIT_SR",
         "VIEW_WORK_PERMIT",
+        "SALES_DATA_UPDATE",
+        "UPLOAD_SALES_DATA",
+        "REUPLOAD_SALES_DATA",
+        "SALES_DATA_APPROVE",
     }),
 }
+
+# Platform CSV submit (POST /sales-data) — SALES_DATA_UPDATE only.
+# FINANCIAL_CONTROLLER / SHOP_MANAGER are company-level contacts but do not
+# get this permission on the portal; they are omitted on purpose.
+_SALES_DATA_CSV_ROLES: frozenset[str] = frozenset(
+    {
+        "TENANT_CSV_UPLOADER",
+        "TENANT_DOC_UPLOADER",
+        "BILLING_CONTACT",
+        "LEASING_MANAGER",
+        "PRIMARY_TENANT_CONTACT",
+        "AUTHORIZED_SIGNATORY",
+        "COMPANY_ADMIN_CENTRAL",
+        "COMPANY_ADMIN",
+    }
+)
+# Platform PATCH supporting-doc / re-upload file — UPLOAD_SALES_DATA.
+# Billing Contact and Leasing Manager have SALES_DATA_UPDATE only.
+_SALES_DATA_DOC_ROLES: frozenset[str] = frozenset(
+    {
+        "TENANT_DOC_UPLOADER",
+        "PRIMARY_TENANT_CONTACT",
+        "AUTHORIZED_SIGNATORY",
+        "COMPANY_ADMIN_CENTRAL",
+        "COMPANY_ADMIN",
+    }
+)
+_SALES_DATA_APPROVE_ROLES: frozenset[str] = frozenset(
+    {"SALES_DATA_APPROVER", "SALES_DATA_TEAM"}
+)
+
+_SALES_CSV_PERMS = frozenset({"SALES_DATA_UPDATE"})
+_SALES_DOC_PERMS = frozenset(
+    {"SALES_DATA_UPDATE", "UPLOAD_SALES_DATA", "REUPLOAD_SALES_DATA"}
+)
+_SALES_APPROVE_PERMS = frozenset({"SALES_DATA_APPROVE"})
+
+for _role in _SALES_DATA_CSV_ROLES:
+    ROLE_PERMISSION_MAP[_role] = ROLE_PERMISSION_MAP.get(_role, frozenset()) | _SALES_CSV_PERMS
+for _role in _SALES_DATA_DOC_ROLES:
+    ROLE_PERMISSION_MAP[_role] = ROLE_PERMISSION_MAP.get(_role, frozenset()) | _SALES_DOC_PERMS
+for _role in _SALES_DATA_APPROVE_ROLES:
+    ROLE_PERMISSION_MAP[_role] = (
+        ROLE_PERMISSION_MAP.get(_role, frozenset()) | _SALES_APPROVE_PERMS
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -153,6 +208,9 @@ class PermissionService:
         with ``required_role="UNKNOWN_ACTION"``.  This prevents unclassified
         paths from silently bypassing permission enforcement.
         """
+        if auth.is_global_admin:
+            return
+
         required = ACTION_PERMISSION_MAP.get(action)
         if required is None:
             raise PermissionDeniedError(action=action, required_role="UNKNOWN_ACTION")
@@ -235,3 +293,36 @@ class PermissionService:
             action="APPROVE_WORK_PERMIT_SR",
             required_role="IN_PROGRESS_ASSIGNED_ROLE",
         )
+
+    def ensure_can_submit_sales_data(self, auth: AuthContext) -> None:
+        """Assert the caller may POST CSV / manual sales data."""
+        self.check("SUBMIT_SALES_DATA", auth)
+
+    def ensure_can_submit_sales_data_supporting_doc(self, auth: AuthContext) -> None:
+        """Assert the caller may PUT files + PATCH a NEED_* sales-data row."""
+        self.check("SUBMIT_SALES_DATA_SUPPORTING_DOC", auth)
+
+    def ensure_can_approve_sales_data(self, auth: AuthContext) -> None:
+        """Assert the caller may PATCH admin sales-data statuses."""
+        self.check("APPROVE_SALES_DATA", auth)
+
+
+def graph_permission_guard(state: Any, action: str) -> dict[str, Any] | None:
+    """RDD-style mutate-node guard.
+
+    Returns a user-facing denial patch when ``auth_context`` is present and
+    the action is not allowed. Returns ``None`` when there is no auth context
+    (tests / unauthenticated shadow mode) or the check passes.
+    """
+    auth = state.get("auth_context") if isinstance(state, dict) else None
+    if auth is None:
+        return None
+    try:
+        PermissionService().check(action, auth)
+    except PermissionDeniedError as exc:
+        return {
+            "status": "WAITING_FOR_USER",
+            "response_message": f"Permission denied: {exc}",
+            "response_ui": {"type": "message"},
+        }
+    return None

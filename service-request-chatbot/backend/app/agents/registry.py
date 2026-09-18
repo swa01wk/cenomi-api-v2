@@ -102,6 +102,33 @@ SERVICE_REQUEST_AGENT_REGISTRY: dict[str, dict[str, AgentConfig]] = {
             "schema_key": "work_permit_service_request_schema",
         },
     },
+    "SALES_DATA": {
+        "BULK_UPLOAD": {
+            "agent_name": "sales_data_agent",
+            "display_name": "Sales Data Agent",
+            "schema_key": "sales_data_schema",
+        },
+        "MANUAL_ENTRY": {
+            "agent_name": "sales_data_agent",
+            "display_name": "Sales Data Agent",
+            "schema_key": "sales_data_schema",
+        },
+        "STATUS_CHECK": {
+            "agent_name": "sales_data_agent",
+            "display_name": "Sales Data Agent",
+            "schema_key": "sales_data_schema",
+        },
+        "ADMIN_REVIEW": {
+            "agent_name": "sales_data_agent",
+            "display_name": "Sales Data Agent",
+            "schema_key": "sales_data_schema",
+        },
+        "SUPPORTING_DOC": {
+            "agent_name": "sales_data_agent",
+            "display_name": "Sales Data Agent",
+            "schema_key": "sales_data_schema",
+        },
+    },
 }
 
 

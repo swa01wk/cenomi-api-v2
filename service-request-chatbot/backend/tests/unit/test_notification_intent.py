@@ -163,6 +163,8 @@ from app.agents.services.notification_intent import parse_notification_list_filt
             ("HANDOVER", "FIT_OUT_CONFIRM_TRADING"),
             True,
         ),
+        ("show sales data notifications", ("SALES_DATA",), None),
+        ("unread sales-data alerts", ("SALES_DATA",), True),
     ],
 )
 def test_parse_notification_list_filters(message, subs, unread) -> None:

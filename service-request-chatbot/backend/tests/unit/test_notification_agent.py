@@ -9,6 +9,7 @@ import pytest
 
 from app.agents.graph.help_agent_graph import (
     _route_after_load,
+    _route_after_open_notification,
     _route_after_supervisor,
 )
 from app.agents.graph.nodes.notification.notification_entry_node import (
@@ -138,6 +139,28 @@ async def test_list_respects_role_audience() -> None:
         )
     subs = [g["sub_category"] for g in result["response_ui"]["groups"]]
     assert subs == ["HANDOVER", "FIT_OUT_CONFIRM_TRADING"]
+
+
+@pytest.mark.asyncio
+async def test_list_tenant_sees_sales_data_group() -> None:
+    with patch(
+        f"{_NODE_MODULE}.get_notification_inbox_service",
+        return_value=_mock_inbox_service(),
+    ):
+        result = await notification_entry_node(
+            _state(
+                user_message="Show my notifications",
+                auth_context=AuthContext(
+                    subject_id="101", roles=frozenset({"TENANT_CSV_UPLOADER"})
+                ),
+            )
+        )
+    groups = result["response_ui"]["groups"]
+    assert [g["sub_category"] for g in groups] == ["SALES_DATA"]
+    row = groups[0]["notifications"][0]
+    assert row["kind"] == "sales_data"
+    assert row["lease_code"] == "LC-1001"
+    assert row["sr_id"] is None
 
 
 @pytest.mark.asyncio
@@ -413,3 +436,31 @@ async def test_lease_activation_rows_marked_and_not_sr(monkeypatch) -> None:
     assert activation["lease_id"] == "271716"
     assert sr_row["kind"] == "service_request"
     assert sr_row["sr_id"] == "320971"
+
+
+def test_open_notification_sales_data_routes_to_sales_data_entry() -> None:
+    state = {
+        "active_agent": "sales_data_agent",
+        "backend_refs": {
+            "opened_from_notification": True,
+            "notification_context": {
+                "lease_code": "LC-1001",
+                "period_hint": "month August",
+                "source": "notification",
+            },
+        },
+    }
+    assert _route_after_open_notification(state) == "sales_data_entry"
+
+
+def test_open_notification_handover_still_routes_to_sync() -> None:
+    state = {
+        "active_agent": "rdd_handover_agent",
+        "backend_refs": {"sr_id": "11711", "opened_from_notification": True},
+    }
+    assert _route_after_open_notification(state) == "sr_status_sync"
+
+
+def test_open_notification_missing_id_routes_to_response() -> None:
+    assert _route_after_open_notification({"backend_refs": {}}) == "response_generation"
+

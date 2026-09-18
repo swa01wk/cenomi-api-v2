@@ -13,6 +13,8 @@ from app.api.routes.chat import service_request_router
 from app.api.routes.chat_feedback import router as chat_feedback_router
 from app.api.routes.dashboard import router as dashboard_router
 from app.api.routes.msp_chat import msp_chat_router
+from app.api.routes.sales_data_upload import router as sales_data_upload_router
+from app.api.routes.supporting_doc_upload import router as supporting_doc_upload_router
 from app.api.routes import notifications as notifications_routes
 from app.api.routes import session_analytics as session_analytics_routes
 from app.core.config import settings
@@ -88,6 +90,8 @@ def create_app() -> FastAPI:
     # ── v2 routes (current — new callers should use these) ────────────────────
 
     application.include_router(health.router, prefix=settings.api_v2_prefix, tags=["health-v2"])
+    application.include_router(sales_data_upload_router, prefix=settings.api_v2_prefix, tags=["sales-data"])
+    application.include_router(supporting_doc_upload_router, prefix=settings.api_v2_prefix, tags=["sales-data"])
     application.include_router(auth_router, prefix=settings.api_v2_prefix, tags=["auth-v2"])
     application.include_router(service_request_router, prefix=settings.api_v2_prefix, tags=["chat-v2"])
     application.include_router(
