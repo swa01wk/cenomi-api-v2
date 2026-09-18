@@ -74,6 +74,15 @@ ALLOWED_FEEDBACK_TYPES: frozenset[str] = frozenset(
 LABEL_THUMBS_UP = "THUMBS_UP"
 LABEL_THUMBS_DOWN = "THUMBS_DOWN"
 
+# Why a reply got 👎 — the chips in the widget's "Share feedback" panel.
+THUMBS_DOWN_REASONS: tuple[str, ...] = (
+    "INCORRECT_OR_INCOMPLETE",
+    "NOT_WHAT_I_ASKED",
+    "SLOW_OR_BUGGY",
+    "STYLE_OR_TONE",
+    "OTHER",
+)
+
 # Where a thumbs vote was cast, derived from the voted trace's workflow stage.
 THUMBS_SOURCE_HELP = "help_answer"
 THUMBS_SOURCE_SR_STEP = "sr_step"

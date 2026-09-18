@@ -210,11 +210,17 @@ def _stub_repo() -> AsyncMock:
                       "sr_step": {"up": 1, "down": 1},
                       "sr_created": {"up": 1, "down": 0}},
     })
+    repo.latency_daily = AsyncMock(
+        return_value=[{"date": "2026-09-16", "p50": 1200, "p95": 6100, "turns": 40}]
+    )
     repo.thumbs_daily = AsyncMock(return_value=[{"date": "2026-09-16", "up": 6, "down": 2}])
     repo.thumbs_by_function = AsyncMock(
         return_value=[{"function": "handover", "replies": 12, "up": 4, "down": 2}]
     )
     repo.downvoted_replies = AsyncMock(return_value=[])
+    repo.downvote_reasons = AsyncMock(
+        return_value=[{"reason": "INCORRECT_OR_INCOMPLETE", "votes": 2, "with_comment": 1}]
+    )
     repo.user_activity = AsyncMock(
         return_value={"active_users": 4, "new_users": 1, "repeat_users": 2, "questions": 10}
     )
@@ -314,7 +320,7 @@ async def test_overview_route_runs() -> None:
     assert set(kpis) == {
         "active_users", "interactions", "srs_created", "answer_rate", "avg_rating",
         "sr_completion_rate", "p95_latency_ms", "llm_cost", "tool_reliability",
-        "escalation_rate", "thumbs_up_rate",
+        "escalation_rate", "thumbs_up_rate", "p50_latency_ms",
     }
     assert kpis["thumbs_up_rate"]["value"] == 0.75
     assert kpis["thumbs_up_rate"]["previous"] == 0.75
@@ -344,6 +350,10 @@ async def test_performance_route_runs() -> None:
     assert body["data"]["thumbs"]["by_source"]["sr_step"] == {"up": 1, "down": 1}
     assert body["data"]["thumbs_by_function"][0]["function"] == "handover"
     assert body["data"]["thumbs_trend"][0]["up"] == 6
+    assert body["data"]["latency_trend"][0] == {
+        "date": "2026-09-16", "p50": 1200, "p95": 6100, "turns": 40
+    }
+    assert body["data"]["downvote_reasons"][0]["reason"] == "INCORRECT_OR_INCOMPLETE"
     assert kpis["llm_parse_failure_rate"]["value"] == 0.05
     assert body["data"]["comments"]["has_next"] is False
 

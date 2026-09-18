@@ -168,6 +168,31 @@ class CommandCenterRepository(AnalyticsRepository):
             for key in ("p50", "p95", "p99")
         }
 
+    async def latency_daily(self, filters: AnalyticsFilters) -> list[dict[str, Any]]:
+        """P50 and P95 end-to-end turn latency per day."""
+        ordered = AgentTrace.total_latency_ms.asc()
+        day = func.date_trunc("day", AgentTrace.created_at).label("day")
+        rows = await self._session.execute(
+            select(
+                day,
+                func.percentile_cont(0.5).within_group(ordered).label("p50"),
+                func.percentile_cont(0.95).within_group(ordered).label("p95"),
+                func.count(AgentTrace.id).label("turns"),
+            )
+            .where(*filters.trace_clauses(), AgentTrace.total_latency_ms.is_not(None))
+            .group_by(day)
+            .order_by(day)
+        )
+        return [
+            {
+                "date": r.day.date().isoformat(),
+                "p50": round(float(r.p50)) if r.p50 is not None else None,
+                "p95": round(float(r.p95)) if r.p95 is not None else None,
+                "turns": r.turns or 0,
+            }
+            for r in rows
+        ]
+
     # ------------------------------------------------------------------
     # Users (K1, K2, K3)
     # ------------------------------------------------------------------
@@ -385,6 +410,30 @@ class CommandCenterRepository(AnalyticsRepository):
             for r in replies
         ]
 
+    async def downvote_reasons(self, filters: AnalyticsFilters) -> list[dict[str, Any]]:
+        """👎 votes per reason picked in the widget; ``none`` = no reason given."""
+        reason = func.coalesce(
+            AgentFeedback.metadata_.op("->>")("reason"), literal("none")
+        ).label("reason")
+        rows = await self._session.execute(
+            select(
+                reason,
+                func.count(AgentFeedback.id).label("votes"),
+                func.count(AgentFeedback.id)
+                .filter(AgentFeedback.comment.is_not(None))
+                .label("with_comment"),
+            )
+            .select_from(AgentFeedback)
+            .join(AgentTrace, AgentTrace.id == AgentFeedback.trace_id)
+            .where(*_thumbs_join_clauses(filters), _down())
+            .group_by(reason)
+            .order_by(func.count(AgentFeedback.id).desc())
+        )
+        return [
+            {"reason": r.reason, "votes": r.votes or 0, "with_comment": r.with_comment or 0}
+            for r in rows
+        ]
+
     async def downvoted_replies(
         self, filters: AnalyticsFilters, *, limit: int = 10
     ) -> list[dict[str, Any]]:
@@ -398,6 +447,8 @@ class CommandCenterRepository(AnalyticsRepository):
                 func.left(AgentTrace.output_message, _ANSWER_SNIPPET_CHARS).label("answer"),
                 AgentTrace.created_at.label("replied_at"),
                 func.max(AgentFeedback.source).label("source"),
+                func.max(AgentFeedback.metadata_.op("->>")("reason")).label("reason"),
+                func.max(AgentFeedback.comment).label("comment"),
                 func.count(AgentFeedback.id).label("votes"),
             )
             .select_from(AgentFeedback)
@@ -416,6 +467,8 @@ class CommandCenterRepository(AnalyticsRepository):
                 "question": r.input_message,
                 "answer": r.answer,
                 "source": r.source,
+                "reason": r.reason,
+                "comment": r.comment,
                 "down_votes": r.votes or 0,
                 "replied_at": r.replied_at,
             }

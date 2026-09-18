@@ -48,7 +48,7 @@ A *question* is a trace whose input the user typed (silent refresh turns exclude
 | Average user rating | `kpis.avg_rating` | `rating_totals` | agent_feedback (`USER_RATING`) |
 | Thumbs-up rate | `kpis.thumbs_up_rate` | `thumbs_totals` | agent_feedback (`TURN_THUMBS`) joined to agent_traces |
 | SR completion rate | `kpis.sr_completion_rate` | `sr_outcomes` | analytics_events (`sr_lifecycle_completed`, matched on sr_id) |
-| P95 response time | `kpis.p95_latency_ms` | `latency_percentiles` | agent_traces.total_latency_ms |
+| P50 / P95 response time | `kpis.p50_latency_ms`, `kpis.p95_latency_ms` | `latency_percentiles` | agent_traces.total_latency_ms |
 | LLM cost (+ pricing coverage) | `kpis.llm_cost` | `turn_totals`, `llm_usage` | agent_traces, agent_llm_calls |
 | Tool reliability | `kpis.tool_reliability` | `tool_health` | agent_tool_calls |
 | Escalation rate | `kpis.escalation_rate` | `turn_totals` | agent_traces.answer_status |
@@ -81,9 +81,11 @@ A *question* is a trace whose input the user typed (silent refresh turns exclude
 | Feedback participation | `kpis.feedback_participation` | `feedback_participation` | agent_traces, agent_feedback |
 | Thumbs-up rate, vote participation, 👍 / 👎 by source | `kpis.thumbs_up_rate`, `thumbs_participation`, `thumbs` | `thumbs_totals` | agent_feedback (`TURN_THUMBS`), agent_traces |
 | Thumbs trend / by business function | `thumbs_trend`, `thumbs_by_function` | `thumbs_daily`, `thumbs_by_function` | agent_feedback, agent_traces |
-| Down-voted replies | `downvoted_replies` | `downvoted_replies` | agent_feedback, agent_traces |
+| Down-voted replies (with reason, details) | `downvoted_replies` | `downvoted_replies` | agent_feedback, agent_traces |
+| Why replies got 👎 | `downvote_reasons` | `downvote_reasons` | agent_feedback (`metadata.reason`, `comment`) |
 | LLM parse failures, token spend | `kpis.llm_parse_failure_rate`, `llm_usage` | `llm_usage` | agent_llm_calls |
 | Latency P50 / P95 / P99 | `kpis.latency_ms` | `latency_percentiles` | agent_traces |
+| Response time trend (daily P50 / P95) | `latency_trend` | `latency_daily` | agent_traces |
 | Node latency | `node_latency` | `node_latency` | agent_runs |
 | Failure reasons | `failure_reasons` | `failure_reasons` | agent_traces, agent_tool_calls |
 | Agent scorecard | `agent_scorecard` | `agent_scorecard` | agent_traces, agent_feedback, agent_tool_calls |
@@ -114,7 +116,7 @@ A *question* is a trace whose input the user typed (silent refresh turns exclude
 | `sr_lifecycle_completed` | `TraceManager.finish_trace` on `workflow_complete` or a terminal stage |
 | Tool calls | lease lookup, handover create, FM, RDD nodes; work-permit, fit-out, notification inbox via `record_tool_call`; document uploads as `document_uploaded` events |
 | Star ratings | tenant widget → `POST /api/v2/chat/feedback` |
-| 👍 / 👎 on every reply | tenant widget → `PUT /api/v2/chat/feedback/thumbs` |
+| 👍 / 👎 on every reply, 👎 reason and details | tenant widget → `PUT /api/v2/chat/feedback/thumbs` |
 | Usefulness, heartbeat, session end | tenant widget → `POST /api/v2/chat/sessions/{id}/feedback | heartbeat | end` |
 | `created_via` on the SR | AI backend create call → platform `POST /service-requests` |
 

@@ -219,11 +219,50 @@ async def test_thumbs_vote_recorded(
         session_id=trace.session_id,
         message_id=body.message_id,
         source="sr_step",
+        comment=None,
         metadata={"agent": "rdd_handover_agent"},
     )
     assert response.value == value
     assert (response.feedback is None) == (label is None)
     assert audit_create.await_args.kwargs["action"] == "feedback.thumbs"
+
+
+async def test_thumbs_down_with_reason_and_details(mock_session: AsyncMock) -> None:
+    auth = _auth()
+    trace = _own_trace(auth)
+    body = ChatThumbsRequest(
+        trace_id=uuid4(), value="down", reason="NOT_WHAT_I_ASKED", comment="  wrong lease  "
+    )
+
+    with (
+        patch("app.api.routes.chat_feedback.TraceRepository") as trace_repo_cls,
+        patch("app.api.routes.chat_feedback.FeedbackRepository") as fb_repo_cls,
+        patch("app.api.routes.chat_feedback.AuditLogRepository") as audit_repo_cls,
+    ):
+        trace_repo_cls.return_value.get = AsyncMock(return_value=trace)
+        set_thumbs = AsyncMock(
+            return_value=_thumbs_row(body.trace_id, trace.user_id, "THUMBS_DOWN")
+        )
+        fb_repo_cls.return_value.set_turn_thumbs = set_thumbs
+        audit_repo_cls.return_value.create = AsyncMock()
+
+        await set_chat_thumbs(body, mock_session, auth)
+
+    kwargs = set_thumbs.await_args.kwargs
+    assert kwargs["label"] == "THUMBS_DOWN"
+    assert kwargs["comment"] == "wrong lease"
+    assert kwargs["metadata"] == {"agent": "rdd_handover_agent", "reason": "NOT_WHAT_I_ASKED"}
+
+
+def test_thumbs_reason_only_with_down() -> None:
+    with pytest.raises(ValueError):
+        ChatThumbsRequest(trace_id=uuid4(), value="up", reason="OTHER")
+    with pytest.raises(ValueError):
+        ChatThumbsRequest(trace_id=uuid4(), value=None, comment="hm")
+    with pytest.raises(ValueError):
+        ChatThumbsRequest(trace_id=uuid4(), value="down", reason="SAFETY_OR_LEGAL")  # type: ignore[arg-type]
+    blank = ChatThumbsRequest(trace_id=uuid4(), value="down", comment="   ")
+    assert blank.comment is None
 
 
 def test_thumbs_rejects_other_values() -> None:
@@ -262,6 +301,8 @@ async def test_repo_thumbs_vote_is_one_upsert(mock_session: AsyncMock) -> None:
     )
     assert "ON CONFLICT (trace_id, user_id) WHERE feedback_type = 'TURN_THUMBS'" in sql
     assert "label = excluded.label" in sql
+    assert "comment = excluded.comment" in sql
+    assert "metadata = excluded.metadata" in sql
     mock_session.add.assert_not_called()
 
 

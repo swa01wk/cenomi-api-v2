@@ -29,6 +29,7 @@ Responses are cached in-process for 60 s per (section, window, agent, paging).
 
 - Envelope `{ "success": true, "data": { … } }`; errors `{ "detail": "…" }` with `422` / `500`.
 - **Ratio** = `{ "value", "numerator", "denominator" }`. `value` is `null` when `denominator` is 0 — render "no data", never 0%.
+- Daily series (`answer_trend`, `daily`, `thumbs_trend`, `latency_trend`, `tasks_daily`, `rating_trend`) list only days with data; the page fills every day of the window (counts → 0, rates and times → a gap).
 - **Headline with delta** = `{ "value", "previous", "delta" }` against the same-length window before (`window.previous`).
 - **Answer Rate** always carries `coverage` (classified ÷ questions); **LLM cost** carries `pricing_coverage` (priced calls ÷ calls). Show both beside the number.
 - Labels: `answer_rate` is **"AI Answer Rate"**, never "Response Accuracy". `sr_submission_rate` (K20) and `sr_completion_rate` (K21) are different numbers.
@@ -105,6 +106,11 @@ Arrays show their first element only. Values are from a local database, for illu
       "value": 0.3824,
       "numerator": 26,
       "denominator": 68
+    },
+    "p50_latency_ms": {
+      "value": 1922,
+      "previous": 2682,
+      "delta": -760
     },
     "p95_latency_ms": {
       "value": 7093,
@@ -420,11 +426,18 @@ Arrays show their first element only. Values are from a local database, for illu
       "sr_created": { "up": 1, "down": 0 }
     }
   },
+  "latency_trend": [
+    { "date": "2026-09-15", "p50": 2060, "p95": 5708, "turns": 226 }
+  ],
   "thumbs_trend": [
     { "date": "2026-09-16", "up": 6, "down": 2 }
   ],
   "thumbs_by_function": [
     { "function": "handover", "replies": 1765, "up": 4, "down": 2 }
+  ],
+  "downvote_reasons": [
+    { "reason": "INCORRECT_OR_INCOMPLETE", "votes": 3, "with_comment": 2 },
+    { "reason": "none", "votes": 1, "with_comment": 0 }
   ],
   "downvoted_replies": [
     {
@@ -435,6 +448,8 @@ Arrays show their first element only. Values are from a local database, for illu
       "question": "What documents do I need for a handover?",
       "answer": "First 300 characters of the reply…",
       "source": "help_answer",
+      "reason": "INCORRECT_OR_INCOMPLETE",
+      "comment": "The lease date is wrong",
       "down_votes": 1,
       "replied_at": "2026-09-16T10:12:03Z"
     }
@@ -672,13 +687,19 @@ Written by the tenant widget under every assistant reply (all agents). Same head
 `POST /chat/feedback` (`x-internal-api-token` + the AI session bearer token).
 
 ```json
-{ "trace_id": "<chat response trace_id>", "value": "up" | "down" | null, "message_id": "<optional>" }
+{ "trace_id": "<chat response trace_id>", "value": "up" | "down" | null, "message_id": "<optional>",
+  "reason": "INCORRECT_OR_INCOMPLETE" | "NOT_WHAT_I_ASKED" | "SLOW_OR_BUGGY" | "STYLE_OR_TONE" | "OTHER" | null,
+  "comment": "<optional, ≤ 2000 chars>" }
 ```
 
 - One vote per user per reply (`ux_agent_feedback_turn_thumbs`, migration 011); a new value replaces
-  the old one, `null` clears it. No reason is collected.
+  the old one, `null` clears it.
+- The widget saves the vote on the click. A 👎 then opens a "Share feedback" panel; submitting it sends
+  `value: "down"` again with `reason` and / or `comment`. Both are accepted only with `"down"` (`422`
+  otherwise); any later write replaces them, so switching to 👍 drops an earlier reason.
 - `200` → `{ "trace_id", "value", "feedback": { … } | null }`; `401` not signed in; `403` another
   user's reply; `404` unknown trace; `422` any other value.
 - Stored as `agent_feedback` `feedback_type = TURN_THUMBS`, `label = THUMBS_UP | THUMBS_DOWN`,
-  `source` derived from the trace (`help_answer` / `sr_step` / `sr_created`), `metadata.agent`.
+  `source` derived from the trace (`help_answer` / `sr_step` / `sr_created`), `metadata.agent`,
+  `metadata.reason`, `comment`.
   Audit action `feedback.thumbs`.

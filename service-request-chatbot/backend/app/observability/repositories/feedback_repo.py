@@ -153,9 +153,13 @@ class FeedbackRepository:
         session_id: UUID | None = None,
         message_id: UUID | None = None,
         source: str | None = None,
+        comment: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> AgentFeedback | None:
         """Set, change or clear the caller's thumbs vote on one turn.
+
+        The comment and metadata (agent, 👎 reason) are replaced on every
+        write, so switching to 👍 drops a reason given for an earlier 👎.
 
         One statement each way, so quick repeated clicks cannot race: a vote
         is an ``INSERT … ON CONFLICT`` against ``ux_agent_feedback_turn_thumbs``
@@ -182,6 +186,7 @@ class FeedbackRepository:
             source=source,
             feedback_type=FEEDBACK_TURN_THUMBS,
             label=label,
+            comment=comment,
             metadata_=metadata or {},
         )
         upsert = insert_stmt.on_conflict_do_update(
@@ -191,6 +196,8 @@ class FeedbackRepository:
             index_where=text(f"feedback_type = '{FEEDBACK_TURN_THUMBS}'"),
             set_={
                 "label": insert_stmt.excluded.label,
+                "comment": insert_stmt.excluded.comment,
+                "metadata": insert_stmt.excluded.metadata,
                 "message_id": func.coalesce(
                     insert_stmt.excluded.message_id, AgentFeedback.message_id
                 ),

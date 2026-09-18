@@ -4,7 +4,8 @@ POST /chat/feedback — star rating (1–5) + optional comment attached to one
 agent turn, identified by the ``trace_id`` every chat response now returns.
 
 PUT /chat/feedback/thumbs — 👍 / 👎 on any assistant reply, from any agent.
-No reason is asked for; sending ``value: null`` clears the vote.
+The vote is saved on the click; a 👎 may then carry an optional reason and
+details from the widget's "Share feedback" panel.  ``value: null`` clears it.
 
 Two collection surfaces share this route:
 
@@ -32,7 +33,7 @@ from uuid import UUID
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from app.api.routes.msp_chat import _require_service_token
 from app.core.security import get_auth_context
@@ -43,6 +44,7 @@ from app.observability.analytics_constants import (
     LABEL_THUMBS_DOWN,
     LABEL_THUMBS_UP,
     SR_CREATED_STAGES,
+    THUMBS_DOWN_REASONS,
     THUMBS_SOURCE_HELP,
     THUMBS_SOURCE_SR_CREATED,
     THUMBS_SOURCE_SR_STEP,
@@ -118,6 +120,23 @@ class ChatThumbsRequest(BaseModel):
         default=None,
         description="Persisted assistant message id (chat response message_id).",
     )
+    reason: Literal[THUMBS_DOWN_REASONS] | None = Field(  # type: ignore[valid-type]
+        default=None,
+        description="Why the reply was unhelpful — only with value 'down'.",
+    )
+    comment: str | None = Field(
+        default=None,
+        max_length=2000,
+        description="Optional details — only with value 'down'.",
+    )
+
+    @model_validator(mode="after")
+    def _reason_only_on_down(self) -> "ChatThumbsRequest":
+        if self.value != "down" and (self.reason or self.comment):
+            raise ValueError("reason and comment are only accepted with value 'down'")
+        if self.comment is not None:
+            self.comment = self.comment.strip() or None
+        return self
 
 
 class ChatThumbsResponse(BaseModel):
@@ -271,7 +290,12 @@ async def set_chat_thumbs(
         session_id=trace.session_id,
         message_id=body.message_id,
         source=source,
-        metadata={"agent": trace.active_agent} if trace.active_agent else None,
+        comment=body.comment,
+        metadata={
+            key: value
+            for key, value in (("agent", trace.active_agent), ("reason", body.reason))
+            if value
+        },
     )
 
     await AuditLogRepository(db).create(
@@ -282,6 +306,8 @@ async def set_chat_thumbs(
             "feedback_id": str(row.id) if row is not None else None,
             "value": body.value,
             "source": source,
+            "reason": body.reason,
+            "has_comment": bool(body.comment),
         },
         metadata={"trace_id": str(body.trace_id), "agent": trace.active_agent},
     )
