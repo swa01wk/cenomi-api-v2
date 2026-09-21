@@ -47,6 +47,7 @@ from pydantic import BaseModel, Field
 from app.core.config import settings
 from app.core.security import get_auth_context
 from app.db.session import DbSession
+from app.observability.analytics_constants import CHANNEL_MSP_HELP
 from app.services.chat_orchestration_service import (
     ChatOrchestrationService,
     ChatTurnResult,
@@ -272,6 +273,7 @@ async def _run_turn(
         auth_context=auth,
         language=body.language,
         msp_context=msp_context,
+        channel=CHANNEL_MSP_HELP,
     )
 
 

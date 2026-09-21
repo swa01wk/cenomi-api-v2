@@ -195,6 +195,8 @@ class FeedbackResponse(BaseModel):
             "sr_id": getattr(data, "sr_id", None),
             "run_id": data.run_id,
             "user_id": data.user_id,
+            "message_id": getattr(data, "message_id", None),
+            "source": source if isinstance(source := getattr(data, "source", None), str) else None,
             "feedback_type": data.feedback_type,
             "score": data.score,
             "label": data.label,
@@ -203,7 +205,7 @@ class FeedbackResponse(BaseModel):
             "created_at": data.created_at,
         }
 
-    @field_validator("trace_id", "session_id", "run_id", "user_id", mode="before")
+    @field_validator("trace_id", "session_id", "run_id", "user_id", "message_id", mode="before")
     @classmethod
     def _drop_non_uuid(cls, value: Any) -> Any:
         if value is None or isinstance(value, UUID):

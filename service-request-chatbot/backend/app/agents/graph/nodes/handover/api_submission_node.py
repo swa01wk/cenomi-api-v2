@@ -39,13 +39,14 @@ from app.agents.services.service_request_api_service import (
     get_service_request_api_service,
 )
 from app.db.repositories.audit_log_repo import AuditLogRepository
+from app.observability.analytics_constants import TOOL_TYPE_SR_CREATE
 from app.observability.decorators import trace_node
 from app.observability.redaction import redact
 
 logger = logging.getLogger(__name__)
 
 _TOOL_NAME = "service_request_api.create_service_request"
-_TOOL_TYPE = "API"
+_TOOL_TYPE = TOOL_TYPE_SR_CREATE
 
 # ---------------------------------------------------------------------------
 # Internal guards

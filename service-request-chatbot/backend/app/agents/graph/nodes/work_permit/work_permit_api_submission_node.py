@@ -24,7 +24,13 @@ from app.agents.schemas.work_permit_schema import (
 )
 from app.agents.services.permission_service import PermissionDeniedError, PermissionService
 from app.agents.services.service_request_api_service import get_service_request_api_service
+from app.observability.analytics_constants import (
+    FLOW_WORK_PERMIT,
+    TOOL_TYPE_SR_CREATE,
+    TOOL_TYPE_SR_PATCH,
+)
 from app.observability.decorators import trace_node
+from app.observability.tool_capture import record_sr_api_call, record_sr_decision
 
 _permission_service = PermissionService()
 
@@ -100,8 +106,22 @@ async def work_permit_api_submission_node(state: ServiceRequestState) -> dict[st
     if is_review:
         sr_id = backend_refs.get("sr_id", "")
         result = await svc.patch_service_request(sr_id, payload)
+        await record_sr_api_call(
+            state,
+            tool_name="service_request_api.work_permit.review",
+            tool_type=TOOL_TYPE_SR_PATCH,
+            request_payload=payload,
+            result=result,
+        )
     else:
         result = await svc.create_service_request(payload)
+        await record_sr_api_call(
+            state,
+            tool_name="service_request_api.work_permit.create",
+            tool_type=TOOL_TYPE_SR_CREATE,
+            request_payload=payload,
+            result=result,
+        )
 
     logger.info(
         "work_permit_api_submission_node: stage=%s status_code=%s sr_id=%s error=%s",
@@ -128,6 +148,14 @@ async def work_permit_api_submission_node(state: ServiceRequestState) -> dict[st
         backend_refs["correlation_id"] = result.correlation_id
 
     if is_review:
+        submitted = (payload.get("status") or "").upper()
+        await record_sr_decision(
+            state,
+            approved=submitted != "REJECTED",
+            sr_id=result.sr_id,
+            flow=FLOW_WORK_PERMIT,
+            stage=workflow_stage,
+        )
         return await _review_result(svc, backend_refs, payload, result.sr_id)
 
     return await _create_result(svc, backend_refs, payload, result.sr_id)

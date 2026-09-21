@@ -429,6 +429,21 @@ class AgentTrace(Base):
     metadata_: Mapped[dict[str, Any]] = mapped_column(
         "metadata", JSONB, default=dict, server_default="{}"
     )
+    # Segmentation dimensions stamped at trace start from the caller's JWT
+    # (migration 010).  NULL for anonymous shadow-mode turns and for traces
+    # written before 010.
+    channel: Mapped[str | None] = mapped_column(Text(), nullable=True, index=True)
+    # none_as_null: a missing claim is SQL NULL, not the JSON value ``null``.
+    user_roles: Mapped[list[Any] | None] = mapped_column(
+        JSONB(none_as_null=True), nullable=True
+    )
+    mall_names: Mapped[list[Any] | None] = mapped_column(
+        JSONB(none_as_null=True), nullable=True
+    )
+    property_ids: Mapped[list[Any] | None] = mapped_column(
+        JSONB(none_as_null=True), nullable=True
+    )
+    is_global_admin: Mapped[bool | None] = mapped_column(Boolean(), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), index=True
     )

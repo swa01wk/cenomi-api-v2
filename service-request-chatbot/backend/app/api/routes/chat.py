@@ -398,6 +398,7 @@ async def post_service_request_chat(
                 if body.notification_list_more
                 else None
             ),
+            channel=(body.context or {}).get("channel"),
         )
     except Exception as exc:
         bound_log.exception("api.chat.service_request.unhandled_error", error=str(exc))

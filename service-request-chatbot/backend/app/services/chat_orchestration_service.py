@@ -52,6 +52,27 @@ def _is_on_a_service_request_form(msp_context: dict[str, Any] | None) -> bool:
     return bool(str(msp_context.get("help_subcategory") or "").strip())
 
 
+def trace_dimensions(
+    auth_context: AuthContext | None, channel: str | None
+) -> dict[str, Any]:
+    """Who asked and from where, taken from the caller's JWT claims.
+
+    Anonymous shadow-mode turns carry no claims, so their role and mall
+    dimensions stay NULL rather than being recorded as empty lists.
+    """
+    dims: dict[str, Any] = {"channel": normalize_channel(channel)}
+    if auth_context is None or auth_context.subject_id in (
+        "anonymous",
+        "unauthenticated",
+    ):
+        return dims
+    dims["user_roles"] = sorted(str(r) for r in auth_context.roles)
+    dims["mall_names"] = list(auth_context.mall_names)
+    dims["property_ids"] = list(auth_context.unique_property_ids)
+    dims["is_global_admin"] = bool(auth_context.is_global_admin)
+    return dims
+
+
 def _build_auth_context(role: str | None) -> AuthContext:
     """Build an AuthContext from a role string using the ROLE_PERMISSION_MAP.
 
@@ -81,6 +102,7 @@ from app.observability.analytics_constants import (
     EVENT_FLOW_CANCELLED,
     EVENT_SESSION_STARTED,
     FLOW_CANCEL_ACTIONS,
+    normalize_channel,
 )
 from app.observability.analytics_emit import emit_analytics
 from app.observability.trace_manager import TraceManager
@@ -223,6 +245,7 @@ class ChatOrchestrationService:
         viewing_notification: dict[str, Any] | None = None,
         active_notification_id: dict[str, Any] | None = None,
         notification_list_more: dict[str, Any] | None = None,
+        channel: str | None = None,
     ) -> ChatTurnResult:
         """Run one turn, serialised against other turns for the same session.
 
@@ -247,6 +270,7 @@ class ChatOrchestrationService:
             viewing_notification=viewing_notification,
             active_notification_id=active_notification_id,
             notification_list_more=notification_list_more,
+            channel=channel,
         )
         if session_id is None:
             return await self._process_turn_serialised(**kwargs)
@@ -288,6 +312,7 @@ class ChatOrchestrationService:
         viewing_notification: dict[str, Any] | None = None,
         active_notification_id: dict[str, Any] | None = None,
         notification_list_more: dict[str, Any] | None = None,
+        channel: str | None = None,
     ) -> ChatTurnResult:
         """Execute one complete chat turn and return structured result."""
 
@@ -355,6 +380,7 @@ class ChatOrchestrationService:
             user_id=user_id,
             input_message=message,
             metadata={"attachments_count": len(attachments)},
+            dimensions=trace_dimensions(auth_context, channel),
         )
 
         # 3. Audit: turn started -----------------------------------------------

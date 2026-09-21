@@ -29,6 +29,12 @@ EVENT_SR_SUBMITTED = "sr_submitted"
 EVENT_SR_LIFECYCLE_COMPLETED = "sr_lifecycle_completed"
 EVENT_FIELD_CORRECTED = "field_corrected"
 EVENT_FLOW_CANCELLED = "flow_cancelled"
+# A reviewer's decision on an existing SR, recorded by the agent that sent it.
+EVENT_SR_APPROVED = "sr_approved"
+EVENT_SR_REJECTED = "sr_rejected"
+# A document upload to the platform (runs outside a chat turn, so it cannot be
+# an agent_tool_calls row); counted in tool reliability.
+EVENT_DOCUMENT_UPLOADED = "document_uploaded"
 
 ALLOWED_EVENT_NAMES: frozenset[str] = frozenset(
     {
@@ -38,6 +44,9 @@ ALLOWED_EVENT_NAMES: frozenset[str] = frozenset(
         EVENT_SR_LIFECYCLE_COMPLETED,
         EVENT_FIELD_CORRECTED,
         EVENT_FLOW_CANCELLED,
+        EVENT_SR_APPROVED,
+        EVENT_SR_REJECTED,
+        EVENT_DOCUMENT_UPLOADED,
     }
 )
 
@@ -64,6 +73,21 @@ ALLOWED_FEEDBACK_TYPES: frozenset[str] = frozenset(
 
 LABEL_THUMBS_UP = "THUMBS_UP"
 LABEL_THUMBS_DOWN = "THUMBS_DOWN"
+
+# Why a reply got 👎 — the chips in the widget's "Share feedback" panel.
+THUMBS_DOWN_REASONS: tuple[str, ...] = (
+    "INCORRECT_OR_INCOMPLETE",
+    "NOT_WHAT_I_ASKED",
+    "SLOW_OR_BUGGY",
+    "STYLE_OR_TONE",
+    "OTHER",
+)
+
+# Where a thumbs vote was cast, derived from the voted trace's workflow stage.
+THUMBS_SOURCE_HELP = "help_answer"
+THUMBS_SOURCE_SR_STEP = "sr_step"
+THUMBS_SOURCE_SR_CREATED = "sr_created"
+SR_CREATED_STAGES: frozenset[str] = frozenset({"SR_CREATED", *TERMINAL_WORKFLOW_STAGES})
 LABEL_USEFUL = "USEFUL"
 LABEL_NOT_USEFUL = "NOT_USEFUL"
 
@@ -88,6 +112,30 @@ FLOW_CANCEL_ACTIONS: frozenset[str] = frozenset(
 )
 
 TOOL_TYPE_SR_CREATE = "SERVICE_REQUEST_CREATE"
+TOOL_TYPE_SR_PATCH = "SERVICE_REQUEST_PATCH"
+TOOL_TYPE_NOTIFICATION_INBOX = "NOTIFICATION_INBOX"
+
+# Flows a reviewer decision belongs to (``sr_approved`` / ``sr_rejected``).
+FLOW_HANDOVER_FM = "handover_fm"
+FLOW_HANDOVER_RDD = "handover_rdd"
+FLOW_WORK_PERMIT = "work_permit"
+FLOW_FITOUT_CONFIRM = "fitout_confirm"
+
+# Where a chat turn came from.  Sent by the client as ``context.channel``;
+# anything else is stored as ``unknown`` rather than trusted verbatim.
+CHANNEL_COPILOT_RAIL = "copilot_rail"
+CHANNEL_COPILOT_PANEL = "copilot_panel"
+CHANNEL_MSP_HELP = "msp_help"
+CHANNEL_UNKNOWN = "unknown"
+ALLOWED_CHANNELS: frozenset[str] = frozenset(
+    {CHANNEL_COPILOT_RAIL, CHANNEL_COPILOT_PANEL, CHANNEL_MSP_HELP}
+)
+
+
+def normalize_channel(value: object) -> str:
+    """Return a known channel key, or ``unknown`` for anything else."""
+    text = str(value or "").strip().lower()
+    return text if text in ALLOWED_CHANNELS else CHANNEL_UNKNOWN
 
 
 def clamp_active_delta_ms(delta_ms: int, max_ms: int) -> int:

@@ -31,7 +31,9 @@ from app.agents.services.permission_service import PermissionDeniedError, Permis
 from app.agents.services.payload_builder_service import snapshot_create_payload_from_platform
 from app.agents.services.service_request_api_service import get_service_request_api_service
 from app.db.repositories.audit_log_repo import AuditLogRepository
+from app.observability.analytics_constants import FLOW_HANDOVER_FM, TOOL_TYPE_SR_PATCH
 from app.observability.decorators import trace_node
+from app.observability.tool_capture import record_sr_decision
 from app.observability.redaction import redact
 
 logger = logging.getLogger(__name__)
@@ -40,7 +42,7 @@ _permission_service = PermissionService()
 
 _TOOL_NAME_SAVE = "service_request_api.fm.patch_save_progress"
 _TOOL_NAME_APPROVE = "service_request_api.fm.patch_approve"
-_TOOL_TYPE = "API"
+_TOOL_TYPE = TOOL_TYPE_SR_PATCH
 
 _FM_ROLES: frozenset[str] = frozenset({"FM_MANAGER", "OPERATIONS"})
 _FM_FINISHED: frozenset[str] = frozenset({"FINISHED", "APPROVED"})
@@ -376,6 +378,9 @@ async def fm_api_submission_node(state: ServiceRequestState) -> dict[str, Any]:
             logger.warning("fm_api_submission_node: audit log write failed (non-fatal)", exc_info=True)
 
     if fm_action == "approve":
+        await record_sr_decision(
+            state, approved=True, sr_id=sr_id, flow=FLOW_HANDOVER_FM, stage="FM_REVIEW"
+        )
         fm_message = (
             f"Your Handover Service Request has been approved at the FM review stage. "
             f"Reference: **{sr_id}**."

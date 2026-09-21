@@ -20,6 +20,7 @@ draft's ``documents`` list so subsequent graph turns can reference it.
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any
 from uuid import UUID
 
@@ -38,6 +39,8 @@ from app.core.request_context import reset_current_auth_context, set_current_aut
 from app.core.security import get_auth_context
 from app.db.repositories.service_request_draft_repo import ServiceRequestDraftRepository
 from app.db.session import DbSession
+from app.observability.analytics_constants import EVENT_DOCUMENT_UPLOADED
+from app.observability.analytics_emit import emit_analytics
 from app.types.chat import AuthContext
 
 logger = logging.getLogger(__name__)
@@ -222,6 +225,42 @@ async def _hydrate_backend_refs_from_platform(
 # ---------------------------------------------------------------------------
 
 
+async def _record_upload(
+    db: DbSession,
+    *,
+    auth: AuthContext,
+    session_id: UUID | None,
+    document_type: str | None,
+    succeeded: bool,
+    latency_ms: int,
+) -> None:
+    """Record the platform upload for tool reliability.  Never raises.
+
+    Only uploads tied to a chat session are recorded (the event log is keyed
+    by session).  The event is committed straight away so a failed upload —
+    which ends the request with an error — is still counted.
+    """
+    if session_id is None or auth.subject_id in ("anonymous", "unauthenticated"):
+        return
+    try:
+        from app.services.chat_orchestration_service import user_id_to_uuid
+
+        await emit_analytics(
+            db,
+            user_id=user_id_to_uuid(auth.subject_id),
+            session_id=session_id,
+            event_name=EVENT_DOCUMENT_UPLOADED,
+            properties={
+                "success": succeeded,
+                "latency_ms": latency_ms,
+                "document_type": document_type,
+            },
+        )
+        await db.commit()
+    except Exception:
+        logger.warning("upload_document: analytics record failed (non-fatal)", exc_info=True)
+
+
 @router.post("/upload")
 async def upload_document(
     db: DbSession,
@@ -345,6 +384,7 @@ async def upload_document(
 
         # Forward the caller's AI session Bearer to PUT /files (agentic route).
         ctx_token = set_current_auth_context(auth)
+        upload_started = time.monotonic()
         try:
             upload_result = await _upload_service.upload_document(
                 file_bytes=file_bytes,
@@ -362,6 +402,15 @@ async def upload_document(
             )
         finally:
             reset_current_auth_context(ctx_token)
+
+        await _record_upload(
+            db,
+            auth=auth,
+            session_id=resolved_session_id,
+            document_type=document_type,
+            succeeded=not upload_result.error,
+            latency_ms=int((time.monotonic() - upload_started) * 1000),
+        )
 
         if upload_result.error:
             raise HTTPException(

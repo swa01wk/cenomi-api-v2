@@ -28,7 +28,10 @@ from app.observability.analytics_constants import (
     EVENT_FLOW_CANCELLED,
     EVENT_SESSION_ENDED,
     EVENT_SESSION_STARTED,
+    EVENT_DOCUMENT_UPLOADED,
+    EVENT_SR_APPROVED,
     EVENT_SR_LIFECYCLE_COMPLETED,
+    EVENT_SR_REJECTED,
     EVENT_SR_SUBMITTED,
     FEEDBACK_ADMIN_REVIEW,
     FEEDBACK_CSAT,
@@ -62,12 +65,34 @@ def _source(rel: str) -> str:
     return (_backend_root() / rel).read_text()
 
 
+def _revisions(source: str) -> tuple[str | None, str | None]:
+    """Read ``revision`` / ``down_revision`` constants from a migration."""
+    revision = None
+    down = None
+    for node in ast.parse(source).body:
+        target_name = None
+        value = None
+        if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            target_name = node.target.id
+            value = node.value
+        elif isinstance(node, ast.Assign):
+            names = [t.id for t in node.targets if isinstance(t, ast.Name)]
+            target_name = names[0] if names else None
+            value = node.value
+        if target_name in {"revision", "down_revision"} and isinstance(value, ast.Constant):
+            if target_name == "revision":
+                revision = value.value
+            else:
+                down = value.value
+    return revision, down
+
+
 def run_checks() -> list[tuple[str, bool, str]]:
     CHECKS.clear()
 
     # ── Event / feedback vocabulary ──────────────────────────────────────
     check(
-        "six product events",
+        "nine product events",
         ALLOWED_EVENT_NAMES
         == {
             EVENT_SESSION_STARTED,
@@ -76,6 +101,9 @@ def run_checks() -> list[tuple[str, bool, str]]:
             EVENT_SR_LIFECYCLE_COMPLETED,
             EVENT_FIELD_CORRECTED,
             EVENT_FLOW_CANCELLED,
+            EVENT_SR_APPROVED,
+            EVENT_SR_REJECTED,
+            EVENT_DOCUMENT_UPLOADED,
         },
         str(sorted(ALLOWED_EVENT_NAMES)),
     )
@@ -137,33 +165,23 @@ def run_checks() -> list[tuple[str, bool, str]]:
     s2, e2 = parse_window(None, naive)
     check("naive to-ts becomes UTC", e2.tzinfo is timezone.utc)
 
-    # ── Alembic 007 ──────────────────────────────────────────────────────
-    mig = _source("alembic/versions/007_agent_analytics.py")
-    tree = ast.parse(mig)
-    revision = None
-    down = None
-    for node in tree.body:
-        target_name = None
-        value = None
-        if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
-            target_name = node.target.id
-            value = node.value
-        elif isinstance(node, ast.Assign):
-            names = [t.id for t in node.targets if isinstance(t, ast.Name)]
-            target_name = names[0] if names else None
-            value = node.value
-        if target_name in {"revision", "down_revision"} and isinstance(value, ast.Constant):
-            if target_name == "revision":
-                revision = value.value
-            else:
-                down = value.value
-    check("alembic revision is 007", revision == "007", str(revision))
-    check("alembic revises 006", down == "006", str(down))
+    # ── Alembic 009 (renumbered from 007 when feedback analytics landed first)
+    mig = _source("alembic/versions/009_agent_analytics.py")
+    revision, down = _revisions(mig)
+    check("alembic revision is 009", revision == "009", str(revision))
+    check("alembic revises 008", down == "008", str(down))
     check("migration adds last_activity_at", "last_activity_at" in mig)
     check("migration adds client_active_ms", "client_active_ms" in mig)
     check("migration adds analytics_events", "analytics_events" in mig)
     check("migration makes trace_id nullable", "nullable=True" in mig)
     check("migration check constraint", "ck_agent_feedback_target" in mig)
+
+    # ── Alembic 010 — trace dimensions (ticket 3784) ─────────────────────
+    mig010 = _source("alembic/versions/010_trace_dimensions.py")
+    revision, down = _revisions(mig010)
+    check("alembic 010 revises 009", (revision, down) == ("010", "009"), f"{revision}<-{down}")
+    for column in ("channel", "user_roles", "mall_names", "property_ids", "is_global_admin"):
+        check(f"migration 010 adds {column}", f'"{column}"' in mig010)
 
     # ── Call-site honesty ────────────────────────────────────────────────
     faq = _source("app/agents/graph/nodes/faq/faq_node.py")
@@ -180,6 +198,34 @@ def run_checks() -> list[tuple[str, bool, str]]:
         "TraceManager emits lifecycle completed",
         "EVENT_SR_LIFECYCLE_COMPLETED" in tm,
     )
+
+    # ── Ticket 3784 write side ───────────────────────────────────────────
+    create_node = _source("app/agents/graph/nodes/handover/api_submission_node.py")
+    check(
+        "handover create typed SERVICE_REQUEST_CREATE (sr_submitted fires)",
+        "_TOOL_TYPE = TOOL_TYPE_SR_CREATE" in create_node,
+    )
+    check("TraceManager emits sr_approved / sr_rejected", "EVENT_SR_REJECTED" in tm)
+    for rel, flow in (
+        ("app/agents/graph/nodes/handover/fm_api_submission_node.py", "FLOW_HANDOVER_FM"),
+        ("app/agents/graph/nodes/handover/rdd_api_submission_node.py", "FLOW_HANDOVER_RDD"),
+        ("app/agents/graph/nodes/work_permit/work_permit_api_submission_node.py", "FLOW_WORK_PERMIT"),
+        ("app/agents/graph/nodes/fitout_confirm/fitout_confirm_api_submission_node.py", "FLOW_FITOUT_CONFIRM"),
+    ):
+        node = _source(rel)
+        check(f"{flow} records reviewer decisions", "record_sr_decision" in node and flow in node)
+    for rel in (
+        "app/agents/graph/nodes/work_permit/work_permit_api_submission_node.py",
+        "app/agents/graph/nodes/fitout_confirm/fitout_confirm_api_submission_node.py",
+    ):
+        check(f"{rel.split('/')[-1]} captures its SR API call", "record_sr_api_call" in _source(rel))
+    check("orchestration stamps trace dimensions", "trace_dimensions(" in orch)
+
+    # ── Ticket 3784 read side ────────────────────────────────────────────
+    cc = _source("app/api/routes/command_center.py")
+    for section in ("overview", "usage", "performance", "productivity"):
+        check(f"command center /{section} route", f'"/{section}"' in cc)
+    check("command center mounted", "command_center_router" in _source("app/main.py"))
 
     # ── HTTP contract files exist ────────────────────────────────────────
     check(

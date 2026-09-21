@@ -24,7 +24,13 @@ from uuid import UUID
 
 from app.agents.graph.state import ServiceRequestState
 from app.agents.services.service_request_api_service import get_service_request_api_service
+from app.observability.analytics_constants import (
+    FLOW_FITOUT_CONFIRM,
+    TOOL_TYPE_SR_CREATE,
+    TOOL_TYPE_SR_PATCH,
+)
 from app.observability.decorators import trace_node
+from app.observability.tool_capture import record_sr_api_call, record_sr_decision
 
 logger = logging.getLogger(__name__)
 
@@ -96,8 +102,22 @@ async def fitout_confirm_api_submission_node(state: ServiceRequestState) -> dict
     if workflow_stage == "APPROVE_SR":
         sr_id = backend_refs.get("sr_id", "")
         result = await svc.patch_service_request(sr_id, payload)
+        await record_sr_api_call(
+            state,
+            tool_name="service_request_api.fitout_confirm.update",
+            tool_type=TOOL_TYPE_SR_PATCH,
+            request_payload=payload,
+            result=result,
+        )
     else:
         result = await svc.create_service_request(payload)
+        await record_sr_api_call(
+            state,
+            tool_name="service_request_api.fitout_confirm.create",
+            tool_type=TOOL_TYPE_SR_CREATE,
+            request_payload=payload,
+            result=result,
+        )
 
     logger.info(
         "fitout_confirm_api_submission: stage=%s status_code=%s sr_id=%s error=%s",
@@ -133,6 +153,13 @@ async def fitout_confirm_api_submission_node(state: ServiceRequestState) -> dict
         submitted_status = (payload.get("status") or "").upper()
         if submitted_status == "APPROVED":
             sr_ref = result.sr_id or backend_refs.get("sr_id", "N/A")
+            await record_sr_decision(
+                state,
+                approved=True,
+                sr_id=result.sr_id or backend_refs.get("sr_id"),
+                flow=FLOW_FITOUT_CONFIRM,
+                stage=workflow_stage,
+            )
             success_message = (
                 f"Service Request **{sr_ref}** has been approved. "
                 "The fitout confirmation is now complete."

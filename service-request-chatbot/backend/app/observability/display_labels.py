@@ -57,6 +57,12 @@ _TOOL_LABELS: dict[str, str] = {
     "service_request_api.rdd.submit_report": "Submit RDD report",
     "service_request_api.fm.patch_approve": "Approve FM review",
     "service_request_api.fm.patch_save_progress": "Save FM progress",
+    "service_request_api.fitout_confirm.create": "Create fit-out confirmation",
+    "service_request_api.fitout_confirm.update": "Update fit-out confirmation",
+    "service_request_api.work_permit.create": "Create work permit",
+    "service_request_api.work_permit.review": "Review work permit",
+    "notification_inbox_api.fetch": "Load notifications",
+    "document_upload_api": "Upload document",
 }
 
 # Prompts, named for the job they do rather than the file they live in.
