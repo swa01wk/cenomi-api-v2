@@ -152,6 +152,15 @@ from app.agents.graph.nodes.handover.fm_api_submission_node import fm_api_submis
 from app.agents.graph.nodes.handover.rdd_api_submission_node import rdd_api_submission_node
 from app.agents.graph.state import ServiceRequestGraphState
 
+# ── Hoisted from routing-function bodies (previously re-imported on every
+# turn — Python caches the module either way, but hiding dependencies inside
+# hot functions is unconventional). Aliased because all three OPTIONAL_FIELDS
+# symbols share the same name across schema modules.
+from app.agents.services.help_interrupt_service import detect_help_interrupt
+from app.agents.schemas.fitout_confirm_schema import OPTIONAL_FIELDS as FITOUT_OPTIONAL_FIELDS
+from app.agents.schemas.work_permit_schema import OPTIONAL_FIELDS as WP_OPTIONAL_FIELDS
+from app.agents.schemas.handover_schema import OPTIONAL_FIELDS as HANDOVER_OPTIONAL_FIELDS
+
 # ---------------------------------------------------------------------------
 # Agent entry-node dispatch table
 # ---------------------------------------------------------------------------
@@ -191,6 +200,12 @@ _CREATE_NEW_SR_INTENTS: frozenset[str] = frozenset(
         "REVIEW_SALES_DATA",
         "APPROVE_SALES_DATA",
     }
+)
+
+# Fitout agents share one OPTIONAL_FIELDS schema and one confirmation path.
+# Module-level constant (was rebuilt on every _route_after_validation call).
+_FITOUT_AGENTS: frozenset[str] = frozenset(
+    {"rdd_fitout_start_agent", "rdd_fitout_end_agent", "rdd_trading_confirmation_agent"}
 )
 
 
@@ -236,7 +251,20 @@ _FREE_TEXT_ANSWER_FIELDS: frozenset[str] = frozenset(
 
 
 def _route_after_load(state: dict[str, Any]) -> str:
-    """Route to sr_status_sync when an SR ID exists; otherwise to agent/supervisor."""
+    """Route after document_upload — determines the first live node of a turn.
+
+    Priority order:
+    1. form_action_sync  — inline SR-form action
+    2. supervisor        — user wants to preview / switch
+    3. open_notification — UI tapped Open on a notification
+    4. list_notifications / notification — notification context bypass
+    5. cancel bypass     — cancel_sr family routes to the active agent entry
+    6. new_request       — explicit new-SR request drops the open SR
+    7. sr_status_sync    — sr_id present and workflow_stage not terminal
+    8. supervisor        — terminal stage or no active agent
+    9. faq_node          — help interrupt mid-collection
+    10. agent entry node — resume the active agent
+    """
     # The step was done on the SR form. The chat reports it and ends the flow;
     # it never repeats it — the create went through the form already, and a
     # second one from the chat was the duplicate.
@@ -314,8 +342,6 @@ def _route_after_load(state: dict[str, Any]) -> str:
         # matching that information", and the session could only be recovered by
         # deleting it. faq_node writes only response_message/status, so the
         # draft survives and collection resumes on the next turn.
-        from app.agents.services.help_interrupt_service import detect_help_interrupt
-
         if detect_help_interrupt(
             user_message,
             active_agent=agent,
@@ -485,15 +511,13 @@ def _route_after_validation(state: dict[str, Any]) -> str:
     requires only a registry entry plus a get_missing_fields dispatch below.
     """
     active_agent_for_optional = state.get("active_agent") or ""
-    _FITOUT_AGENTS: frozenset[str] = frozenset(
-        {"rdd_fitout_start_agent", "rdd_fitout_end_agent", "rdd_trading_confirmation_agent"}
+    OPTIONAL_FIELDS = (
+        FITOUT_OPTIONAL_FIELDS
+        if active_agent_for_optional in _FITOUT_AGENTS
+        else WP_OPTIONAL_FIELDS
+        if active_agent_for_optional == "work_permit_agent"
+        else HANDOVER_OPTIONAL_FIELDS
     )
-    if active_agent_for_optional in _FITOUT_AGENTS:
-        from app.agents.schemas.fitout_confirm_schema import OPTIONAL_FIELDS
-    elif active_agent_for_optional == "work_permit_agent":
-        from app.agents.schemas.work_permit_schema import OPTIONAL_FIELDS
-    else:
-        from app.agents.schemas.handover_schema import OPTIONAL_FIELDS
 
     # A pending "change field X" redirect must reach missing_field_node, which
     # owns the re-ask. Without this the routing below sends a fully-collected
@@ -889,19 +913,21 @@ def _route_after_sales_data_entry(state: dict[str, Any]) -> str:
         "DOC_UPLOADING": "supporting_doc_upload",
         "AWAITING_DOC_CONFIRM": "supporting_doc_confirmation",
         "DOC_SUBMITTING": "supporting_doc_submission",
+        # Defensive: normally reached via lease_validation → stale_notification,
+        # but a reconnect with this workflow_stage persisted must not get stuck
+        # in response_generation on re-entry through sales_data_entry.
+        "STALE_NOTIFICATION": "stale_notification",
     }
     return route_map.get(workflow_stage, "response_generation")
 
 
 def _route_after_csv_validation(state: dict[str, Any]) -> str:
+    # CSV_CORRECTION is a WAITING_FOR_USER state — the correction happens on the
+    # next turn via csv_field_correction, reached through sales_data_entry's
+    # route map, not from here.
     if state.get("status") == "WAITING_FOR_USER":
-        # CSV_CORRECTION is a WAITING_FOR_USER state that needs a special node on next turn
-        workflow_stage = state.get("workflow_stage") or ""
-        if workflow_stage == "CSV_CORRECTION":
-            return "response_generation"  # just show the message, correction happens on next turn
         return "response_generation"
-    workflow_stage = state.get("workflow_stage") or ""
-    if workflow_stage == "CSV_LAYER2_VALIDATION":
+    if (state.get("workflow_stage") or "") == "CSV_LAYER2_VALIDATION":
         return "lease_validation"
     return "response_generation"
 
@@ -998,14 +1024,11 @@ def _route_after_manual_entry_submission(state: dict[str, Any]) -> str:
 
 def _route_after_admin_review(state: dict[str, Any]) -> str:
     workflow_stage = state.get("workflow_stage") or ""
-    status = state.get("status") or ""
     confirmation_status = state.get("confirmation_status") or ""
 
     if confirmation_status == "CONFIRMED" or workflow_stage == "ADMIN_SUBMITTING":
         return "admin_status_update"
-    if status == "WAITING_FOR_USER":
-        return "response_generation"
-    return "response_generation"
+    return "response_generation"  # covers WAITING_FOR_USER and all other cases
 
 
 # ---------------------------------------------------------------------------
@@ -1016,11 +1039,13 @@ def _route_after_admin_review(state: dict[str, Any]) -> str:
 def build_help_agent_graph():
     """Build and compile the full Help Agent LangGraph.
 
-    The Help Agent owns four concerns:
+    The Help Agent owns five concerns:
     - FAQ / Q&A path (``faq_node``) for ASK_HELP / UNKNOWN intents
     - RDD handover lifecycle routing (``rdd_handover_agent``) for handover SR action intents
     - Work Permit routing (``work_permit_agent``) for work permit SR creation
     - Fitout confirmation routing (``rdd_fitout_start/end_agent``, ``rdd_trading_confirmation_agent``)
+    - Sales Data Agent routing (``sales_data_agent``) for tenant CSV/manual sales
+      data upload and admin review/approve
     """
     graph = StateGraph(ServiceRequestGraphState)
 
@@ -1331,6 +1356,7 @@ def build_help_agent_graph():
             "supporting_doc_confirmation": "supporting_doc_confirmation",
             "supporting_doc_submission": "supporting_doc_submission",
             "pending_months_gate": "pending_months_gate",
+            "stale_notification": "stale_notification",
             "response_generation": "response_generation",
         },
     )
