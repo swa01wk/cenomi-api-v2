@@ -14,6 +14,7 @@ Both paths route back to UPLOAD_INTENT so the user can re-upload.
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 import structlog
@@ -42,11 +43,20 @@ async def submission_error_node(state: ServiceRequestState) -> dict[str, Any]:
         error_count=len(errors),
     )
 
+    # Non-prod: append the real exception/status text already captured by the
+    # submission node instead of leaving the user with only a generic message.
+    is_dev = os.getenv("ENVIRONMENT", "development") == "development"
+    real_detail = errors[0].get("message") if errors else None
+    dev_detail = (
+        f"\n\n_(Dev detail: {real_detail})_" if is_dev and real_detail else ""
+    )
+
     if error_type == "network":
         message = (
             "⚠️ **Submission failed** — A connectivity issue prevented the data "
             "from being saved. Please try again in a moment.\n\n"
             "Your CSV has been retained — click Submit again when you're ready."
+            + dev_detail
         )
     elif error_type == "server_error":
         # A clean 5xx from cenomi-api itself (request reached the server,
@@ -57,6 +67,7 @@ async def submission_error_node(state: ServiceRequestState) -> dict[str, Any]:
             "while saving your data. Please try again in a moment, or contact "
             "support if this keeps happening.\n\n"
             "Your CSV has been retained — click Submit again when you're ready."
+            + dev_detail
         )
     elif error_type == "stale_state" or _is_stale_state_error(errors):
         message = (
