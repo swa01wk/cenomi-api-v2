@@ -47,15 +47,15 @@ async def manual_entry_lease_validation_node(state: ServiceRequestState) -> dict
         import os
         api_url = os.getenv("SALES_DATA_API_BASE_URL", "http://localhost:8001")
         is_dev = os.getenv("ENVIRONMENT", "development") == "development"
-        dev_hint = (
-            f" _(Dev: start mock backend on `{api_url}`)_" if is_dev else ""
-        )
+        # Non-prod: surface the real exception so a connectivity/timeout/4xx/5xx
+        # failure doesn't all collapse into the same unhelpful generic message.
+        detail = f" _(Dev detail: {type(exc).__name__}: {exc})_" if is_dev else ""
         log.error("manual_entry_lease_validation.get_failed", api_url=api_url, error=str(exc))
         return {
             "status": "WAITING_FOR_USER",
             "response_message": (
                 "⚠️ I couldn't reach the sales data service right now. "
-                "Please try again in a moment." + dev_hint
+                "Please try again in a moment." + detail
             ),
         }
 
