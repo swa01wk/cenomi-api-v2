@@ -61,16 +61,19 @@ async def _list_response(state: ServiceRequestState) -> dict[str, Any]:
     if isinstance(list_more, dict) and list_more.get("sub_category"):
         sub = str(list_more["sub_category"]).strip().upper()
         if sub not in NOTIFICATION_SUB_CATEGORIES:
-            sub = "HANDOVER"
-        try:
-            page = max(int(list_more.get("page") or 1), 1)
-        except (TypeError, ValueError):
-            page = 1
-        unread = list_more.get("unread")
-        filters = NotificationListFilters(
-            sub_categories=(sub,),
-            unread=unread if isinstance(unread, bool) else None,
-        )
+            # Invalid page target — fall back to the full allowlist rather than
+            # forcing HANDOVER (which would hide WP / fit-out groups).
+            filters = parse_notification_list_filters(state.get("user_message") or "")
+        else:
+            try:
+                page = max(int(list_more.get("page") or 1), 1)
+            except (TypeError, ValueError):
+                page = 1
+            unread = list_more.get("unread")
+            filters = NotificationListFilters(
+                sub_categories=(sub,),
+                unread=unread if isinstance(unread, bool) else None,
+            )
     else:
         filters = parse_notification_list_filters(state.get("user_message") or "")
     service = get_notification_inbox_service()

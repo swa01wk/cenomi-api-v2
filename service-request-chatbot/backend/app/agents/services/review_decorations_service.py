@@ -18,6 +18,7 @@ from app.agents.schemas.handover_schema import (
     STAGE_REGISTRY,
     get_missing_fields,
 )
+from app.agents.schemas.work_permit_schema import WP_REVIEW_ROLES, WP_REVIEW_STAGES
 from app.agents.services.permission_service import ROLE_PERMISSION_MAP
 from app.agents.services.resource_picker_decorations import build_handover_inbox_picker
 from app.types.chat import AuthContext
@@ -64,6 +65,8 @@ _RDD_DOC_TYPES: frozenset[str] = frozenset({
 _STAGE_ACTOR_ROLES: dict[str, frozenset[str]] = {
     "FM_REVIEW": frozenset({"FM_MANAGER", "OPERATIONS"}),
     "RDD_REVIEW": frozenset({"DD_ENGINEER"}),
+    # Work Permit review hops — same roles as WP_REVIEW_ROLES (approve hop gate).
+    **{stage: frozenset(roles) for stage, roles in WP_REVIEW_ROLES.items()},
 }
 
 
@@ -744,6 +747,16 @@ def build_review_decorations(state: dict[str, Any]) -> dict[str, Any]:
         return {}
 
     stage: str = state.get("workflow_stage") or ""
+
+    # Work Permit review: no FM/RDD upload chips — only View SR for non-actors.
+    if stage in WP_REVIEW_STAGES:
+        auth: AuthContext | None = state.get("auth_context")  # type: ignore[assignment]
+        user_role = backend_refs.get("user_role") or derive_user_role(auth)
+        decorations: dict[str, Any] = {"promote_preview": True}
+        if not can_act_in_stage(stage, user_role):
+            decorations["suggestions"] = build_view_sr_suggestions(sr_id)
+        return decorations
+
     if stage not in ("FM_REVIEW", "RDD_REVIEW"):
         return {}
 
@@ -757,7 +770,7 @@ def build_review_decorations(state: dict[str, Any]) -> dict[str, Any]:
     rdd_status: str | None = backend_refs.get("rdd_status")
     collected: dict[str, Any] = dict(state.get("collected_data") or {})
 
-    decorations: dict[str, Any] = {"promote_preview": True}
+    decorations = {"promote_preview": True}
 
     suggestions = _action_suggestions(
         stage=stage,

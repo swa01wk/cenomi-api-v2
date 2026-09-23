@@ -165,6 +165,21 @@ from app.agents.services.notification_intent import parse_notification_list_filt
         ),
         ("show sales data notifications", ("SALES_DATA",), None),
         ("unread sales-data alerts", ("SALES_DATA",), True),
+        (
+            "show work permit notifications",
+            (
+                "CONSTRUCTION_HOT",
+                "CONSTRUCTION_COLD",
+                "CONSTRUCTION_ROOF_ACCESS",
+                "MAINTENANCE_HOT",
+                "MAINTENANCE_COLD",
+                "MAINTENANCE_ROOF_ACCESS",
+                "OPERATIONS",
+            ),
+            None,
+        ),
+        ("show construction hot work notifications", ("CONSTRUCTION_HOT",), None),
+        ("list maintenance cold notifications", ("MAINTENANCE_COLD",), None),
     ],
 )
 def test_parse_notification_list_filters(message, subs, unread) -> None:
@@ -215,6 +230,18 @@ def test_legacy_open_action_without_seed_still_detail() -> None:
             ("FIT_OUT_CONFIRM_FOS", "FIT_OUT_CONFIRM_END"),
         ),
         ("Show my trading notifications", ("FIT_OUT_CONFIRM_TRADING",)),
+        (
+            "Show my work permit notifications",
+            (
+                "CONSTRUCTION_HOT",
+                "CONSTRUCTION_COLD",
+                "CONSTRUCTION_ROOF_ACCESS",
+                "MAINTENANCE_HOT",
+                "MAINTENANCE_COLD",
+                "MAINTENANCE_ROOF_ACCESS",
+                "OPERATIONS",
+            ),
+        ),
         # A stage keyword still narrows to that one flow.
         ("fit-out start notifications", ("FIT_OUT_CONFIRM_FOS",)),
         ("fit out end notifications", ("FIT_OUT_CONFIRM_END",)),

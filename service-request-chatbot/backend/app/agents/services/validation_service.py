@@ -763,7 +763,14 @@ class ValidationService:
                     required = tuple(
                         f for f in required if f not in RDD_REJECTED_UNASKED_FIELDS
                     )
-            for r in validate_required_fields(data, required):
+            optional: frozenset[str] | None = None
+            if workflow_stage in WP_STAGE_REGISTRY:
+                from app.agents.schemas.work_permit_schema import (
+                    OPTIONAL_FIELDS as _WP_OPTIONAL_FIELDS,
+                )
+
+                optional = _WP_OPTIONAL_FIELDS
+            for r in validate_required_fields(data, required, optional_fields=optional):
                 if r["status"] == "FAILED":
                     errors.append(r)
 

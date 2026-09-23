@@ -434,6 +434,69 @@ class TestWpReviewSubmission:
 
         assert result["workflow_stage"] == WP_FM_REVIEW
         assert "permission" not in (result.get("response_message") or "").lower()
+        assert result.get("active_agent") == "work_permit_agent"
+        ui = result.get("response_ui") or {}
+        assert ui.get("type") == "message"
+        assert ui.get("stage_complete") is True
+        assert ui.get("action") == "wp_hop_approved"
+        assert ui.get("workflow_stage") == WP_FM_REVIEW
+        assert result.get("confirmation_status") is None
+        assert result.get("confirmation_required") is False
+
+    async def test_fm_patch_approve_advances_to_mm_ops_with_stage_complete(self) -> None:
+        """FM after approve must not leave a confirmation_card — message + stage_complete."""
+        mock_patch = AsyncMock()
+        mock_patch.sr_id = "341510"
+        mock_patch.error = None
+        mock_patch.correlation_id = None
+        mock_patch.status_code = 200
+
+        mock_get = ServiceRequestGetResult(
+            success=True,
+            sr_id="341510",
+            status="IN_PROCESS",
+            service_request_operations=_ops(
+                ("FM_MANAGER", "FINISHED"),
+                ("MALL_MANAGER", "IN_PROGRESS"),
+                ("OPERATIONS", "IN_PROGRESS"),
+            ),
+        )
+
+        state = {
+            "workflow_stage": WP_FM_REVIEW,
+            "confirmation_status": "CONFIRMED",
+            "validation_errors": [],
+            "sub_category": "CONSTRUCTION_COLD",
+            "backend_refs": {
+                "sr_id": "341510",
+                "wp_action": "approve",
+                "sr_operations": _ops(("FM_MANAGER", "IN_PROGRESS")),
+                "create_payload": {
+                    "status": "APPROVED",
+                    "sub_category": "CONSTRUCTION_COLD",
+                    "payload": {},
+                },
+            },
+            "auth_context": _auth("FM_MANAGER"),
+        }
+
+        with patch(
+            "app.agents.graph.nodes.work_permit.work_permit_api_submission_node.get_service_request_api_service"
+        ) as factory:
+            svc = AsyncMock()
+            svc.patch_service_request.return_value = mock_patch
+            svc.get_service_request.return_value = mock_get
+            factory.return_value = svc
+            result = await work_permit_api_submission_node(state)
+
+        assert result["workflow_stage"] == WP_MM_OPS_REVIEW
+        assert result.get("active_agent") == "work_permit_agent"
+        ui = result.get("response_ui") or {}
+        assert ui.get("type") == "message"
+        assert ui.get("stage_complete") is True
+        assert ui.get("action") == "wp_hop_approved"
+        assert "confirmAction" not in ui
+        assert "Mall Manager" in (result.get("response_message") or "")
 
     async def test_fm_denied_on_dd_hop(self) -> None:
         state = {
@@ -617,6 +680,139 @@ class TestWpMockApiHops:
         await svc.patch_service_request(created.sr_id or "", {"status": "REJECTED"})
         got = await svc.get_service_request(created.sr_id or "")
         assert got.status == "REJECTED"
+
+
+# ---------------------------------------------------------------------------
+# Confirmation / entry role gates (Handover parity)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+class TestWpConfirmationRoleGate:
+    async def test_fm_on_mm_ops_gets_status_message_not_card(self) -> None:
+        from app.agents.graph.nodes.work_permit.work_permit_confirmation_node import (
+            work_permit_confirmation_node,
+        )
+
+        state = {
+            "workflow_stage": WP_MM_OPS_REVIEW,
+            "collected_data": {"lease_code": "t1", "description": "x"},
+            "backend_refs": {
+                "sr_id": "341510",
+                "sr_operations": _ops(
+                    ("FM_MANAGER", "FINISHED"),
+                    ("MALL_MANAGER", "IN_PROGRESS"),
+                    ("OPERATIONS", "IN_PROGRESS"),
+                ),
+            },
+            "auth_context": _auth("FM_MANAGER"),
+        }
+        result = await work_permit_confirmation_node(state)
+        ui = result.get("response_ui") or {}
+        assert ui.get("type") == "message"
+        assert "confirmAction" not in ui
+        assert "rejectAction" not in ui
+        assert result.get("confirmation_status") is None
+        assert result.get("confirmation_required") is False
+        assert "Mall Manager" in (result.get("response_message") or "")
+
+    async def test_mall_manager_on_mm_ops_gets_approve_card(self) -> None:
+        from app.agents.graph.nodes.work_permit.work_permit_confirmation_node import (
+            work_permit_confirmation_node,
+        )
+
+        state = {
+            "workflow_stage": WP_MM_OPS_REVIEW,
+            "collected_data": {"lease_code": "t1", "description": "x"},
+            "backend_refs": {
+                "sr_id": "341510",
+                "sr_operations": _ops(("MALL_MANAGER", "IN_PROGRESS")),
+            },
+            "auth_context": _auth("MALL_MANAGER"),
+        }
+        result = await work_permit_confirmation_node(state)
+        ui = result.get("response_ui") or {}
+        assert ui.get("type") == "confirmation_card"
+        assert ui.get("confirmAction") == "confirm_approve_wp"
+        assert ui.get("rejectAction") == "reject_wp"
+        assert result.get("confirmation_status") == "PENDING"
+
+    async def test_operations_on_mm_ops_gets_approve_card(self) -> None:
+        from app.agents.graph.nodes.work_permit.work_permit_confirmation_node import (
+            work_permit_confirmation_node,
+        )
+
+        state = {
+            "workflow_stage": WP_MM_OPS_REVIEW,
+            "collected_data": {"lease_code": "t1"},
+            "backend_refs": {
+                "sr_id": "1",
+                "sr_operations": _ops(("OPERATIONS", "IN_PROGRESS")),
+            },
+            "auth_context": _auth("OPERATIONS"),
+        }
+        result = await work_permit_confirmation_node(state)
+        assert result["response_ui"]["confirmAction"] == "confirm_approve_wp"
+
+
+@pytest.mark.asyncio
+class TestWpEntryRoleGate:
+    async def test_fm_denied_confirm_approve_on_mm_ops(self) -> None:
+        state = {
+            "workflow_stage": WP_MM_OPS_REVIEW,
+            "action_override": "confirm_approve_wp",
+            "backend_refs": {
+                "sr_operations": _ops(("MALL_MANAGER", "IN_PROGRESS")),
+            },
+            "auth_context": _auth("FM_MANAGER"),
+        }
+        result = await work_permit_entry_node(state)
+        assert result.get("confirmation_status") != "CONFIRMED"
+        assert result.get("status") == "WAITING_FOR_USER"
+        assert "permission" in (result.get("response_message") or "").lower()
+
+    async def test_mall_manager_confirm_approve_allowed(self) -> None:
+        state = {
+            "workflow_stage": WP_MM_OPS_REVIEW,
+            "action_override": "confirm_approve_wp",
+            "backend_refs": {
+                "sr_operations": _ops(("MALL_MANAGER", "IN_PROGRESS")),
+            },
+            "auth_context": _auth("MALL_MANAGER"),
+        }
+        result = await work_permit_entry_node(state)
+        assert result["confirmation_status"] == "CONFIRMED"
+        assert result["backend_refs"]["wp_action"] == "approve"
+
+
+class TestWpReviewDecorationsNonActor:
+    def test_view_sr_suggestion_for_fm_on_mm_ops(self) -> None:
+        from app.agents.services.review_decorations_service import build_review_decorations
+
+        deco = build_review_decorations(
+            {
+                "workflow_stage": WP_MM_OPS_REVIEW,
+                "backend_refs": {"sr_id": "341510", "user_role": "FM_MANAGER"},
+                "auth_context": _auth("FM_MANAGER"),
+            }
+        )
+        assert deco.get("promote_preview") is True
+        suggestions = deco.get("suggestions") or {}
+        options = suggestions.get("options") or []
+        assert any(o.get("action") == "view_service_request" for o in options)
+
+    def test_actor_gets_no_view_sr_forced(self) -> None:
+        from app.agents.services.review_decorations_service import build_review_decorations
+
+        deco = build_review_decorations(
+            {
+                "workflow_stage": WP_MM_OPS_REVIEW,
+                "backend_refs": {"sr_id": "341510", "user_role": "MALL_MANAGER"},
+                "auth_context": _auth("MALL_MANAGER"),
+            }
+        )
+        assert deco.get("promote_preview") is True
+        assert "suggestions" not in deco
 
 
 def test_eval_tier9_scenario_ids_registered() -> None:

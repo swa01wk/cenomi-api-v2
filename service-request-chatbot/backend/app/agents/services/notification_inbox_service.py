@@ -1,9 +1,10 @@
 """Notification inbox — fetch action-required notifications from the platform.
 
 Platform contract (cenomi-api-2, TC-3520, ``docs/NOTIFICATION_AGENT_TOOLS_SPEC.md``):
-five sub-category-scoped GET endpoints under ``/notifications/agent/...``,
-authenticated with the ``x-internal-api-token`` header ONLY (no user Bearer, no
-S2S login).  The platform:
+sub-category-scoped GET endpoints under ``/notifications/agent/...`` (Handover,
+Fit-out Confirm, Sales Data, and seven Work Permit subtypes), authenticated
+with the ``x-internal-api-token`` header ONLY (no user Bearer, no S2S login).
+The platform:
 
 - always filters to ``action_required = TRUE`` rows,
 - intersects the caller's roles (loaded server-side from ``tenant_contacts``)
@@ -43,12 +44,20 @@ _MAX_RESPONSE_BYTES = 4096
 # Fixed display order — groups render in this sequence.
 # FIT_OUT_CONFIRM_HO is decommissioned (product decision, Aug 2026) — the
 # platform tool still exists but this service no longer calls it.
+# Work Permit: seven subtype-scoped agent tools (TC-3520 style).
 NOTIFICATION_SUB_CATEGORIES: tuple[str, ...] = (
     "HANDOVER",
     "FIT_OUT_CONFIRM_FOS",
     "FIT_OUT_CONFIRM_END",
     "FIT_OUT_CONFIRM_TRADING",
     "SALES_DATA",
+    "CONSTRUCTION_HOT",
+    "CONSTRUCTION_COLD",
+    "CONSTRUCTION_ROOF_ACCESS",
+    "MAINTENANCE_HOT",
+    "MAINTENANCE_COLD",
+    "MAINTENANCE_ROOF_ACCESS",
+    "OPERATIONS",
 )
 
 _SUB_CATEGORY_PATHS: dict[str, str] = {
@@ -57,11 +66,26 @@ _SUB_CATEGORY_PATHS: dict[str, str] = {
     "FIT_OUT_CONFIRM_END": "/notifications/agent/fit-out-confirm-end",
     "FIT_OUT_CONFIRM_TRADING": "/notifications/agent/fit-out-confirm-trading",
     "SALES_DATA": "/notifications/agent/sales-data",
+    "CONSTRUCTION_HOT": "/notifications/agent/construction-hot",
+    "CONSTRUCTION_COLD": "/notifications/agent/construction-cold",
+    "CONSTRUCTION_ROOF_ACCESS": "/notifications/agent/construction-roof-access",
+    "MAINTENANCE_HOT": "/notifications/agent/maintenance-hot",
+    "MAINTENANCE_COLD": "/notifications/agent/maintenance-cold",
+    "MAINTENANCE_ROOF_ACCESS": "/notifications/agent/maintenance-roof-access",
+    "OPERATIONS": "/notifications/agent/operations",
 }
 
 # Tool audiences per the platform spec.  Used only to SKIP endpoints the user
 # cannot have rows on (latency optimisation) — the platform re-intersects
 # server-side, so calling everything is always safe.
+_WP_HOT_ROOF_AUDIENCE: frozenset[str] = frozenset(
+    {"DD_ENGINEER", "FM_MANAGER", "MALL_MANAGER"}
+)
+_WP_COLD_AUDIENCE: frozenset[str] = frozenset(
+    {"DD_ENGINEER", "MALL_MANAGER", "OPERATIONS", "OPERATION_EXECUTIVES"}
+)
+_WP_MAINTENANCE_AUDIENCE: frozenset[str] = frozenset({"FM_MANAGER", "MALL_MANAGER"})
+
 _SUB_CATEGORY_AUDIENCE: dict[str, frozenset[str]] = {
     "HANDOVER": frozenset({"MALL_MANAGER", "FM_MANAGER", "OPERATIONS", "DD_ENGINEER"}),
     "FIT_OUT_CONFIRM_FOS": frozenset({"DD_ENGINEER"}),
@@ -74,6 +98,13 @@ _SUB_CATEGORY_AUDIENCE: dict[str, frozenset[str]] = {
     )
     | SALES_DATA_TENANT_PLATFORM_ROLES
     | SALES_DATA_APPROVER_PLATFORM_ROLES,
+    "CONSTRUCTION_HOT": _WP_HOT_ROOF_AUDIENCE,
+    "CONSTRUCTION_COLD": _WP_COLD_AUDIENCE,
+    "CONSTRUCTION_ROOF_ACCESS": _WP_HOT_ROOF_AUDIENCE,
+    "MAINTENANCE_HOT": _WP_MAINTENANCE_AUDIENCE,
+    "MAINTENANCE_COLD": _WP_MAINTENANCE_AUDIENCE,
+    "MAINTENANCE_ROOF_ACCESS": _WP_HOT_ROOF_AUDIENCE,
+    "OPERATIONS": frozenset({"MALL_MANAGER"}),
 }
 
 SUB_CATEGORY_LABELS: dict[str, str] = {
@@ -82,6 +113,13 @@ SUB_CATEGORY_LABELS: dict[str, str] = {
     "FIT_OUT_CONFIRM_END": "Fit-out End Confirmation",
     "FIT_OUT_CONFIRM_TRADING": "Trading Confirmation",
     "SALES_DATA": "Sales Data",
+    "CONSTRUCTION_HOT": "Construction – Hot Work",
+    "CONSTRUCTION_COLD": "Construction – Cold Work",
+    "CONSTRUCTION_ROOF_ACCESS": "Construction – Roof Access",
+    "MAINTENANCE_HOT": "Maintenance – Hot Work",
+    "MAINTENANCE_COLD": "Maintenance – Cold Work",
+    "MAINTENANCE_ROOF_ACCESS": "Maintenance – Roof Access",
+    "OPERATIONS": "Operations",
 }
 
 
@@ -476,6 +514,104 @@ _MOCK_FIXTURES: dict[str, list[dict[str, Any]]] = {
             "action_required": True,
             "notification_type": "SALES_DATA",
             "lease_id": 1,
+        },
+    ],
+    "CONSTRUCTION_HOT": [
+        {
+            "id": "ntf-wp-hot-001",
+            "text_content": {
+                "message": "Work Permit (Construction Hot) SR 12801 requires your review.",
+                "type": "SERVICE_REQUEST",
+                "id": "12801",
+            },
+            "created_at": "2026-09-01T09:00:00Z",
+            "read_at": None,
+            "action_required": True,
+            "notification_type": "SERVICE_REQUEST",
+        },
+    ],
+    "CONSTRUCTION_COLD": [
+        {
+            "id": "ntf-wp-cold-001",
+            "text_content": {
+                "message": "Work Permit (Construction Cold) SR 12802 requires your review.",
+                "type": "SERVICE_REQUEST",
+                "id": "12802",
+            },
+            "created_at": "2026-09-01T09:05:00Z",
+            "read_at": None,
+            "action_required": True,
+            "notification_type": "SERVICE_REQUEST",
+        },
+    ],
+    "CONSTRUCTION_ROOF_ACCESS": [
+        {
+            "id": "ntf-wp-roof-001",
+            "text_content": {
+                "message": "Work Permit (Roof Access) SR 12803 requires your review.",
+                "type": "SERVICE_REQUEST",
+                "id": "12803",
+            },
+            "created_at": "2026-09-01T09:10:00Z",
+            "read_at": None,
+            "action_required": True,
+            "notification_type": "SERVICE_REQUEST",
+        },
+    ],
+    "MAINTENANCE_HOT": [
+        {
+            "id": "ntf-wp-mh-001",
+            "text_content": {
+                "message": "Work Permit (Maintenance Hot) SR 12804 requires your review.",
+                "type": "SERVICE_REQUEST",
+                "id": "12804",
+            },
+            "created_at": "2026-09-01T09:15:00Z",
+            "read_at": None,
+            "action_required": True,
+            "notification_type": "SERVICE_REQUEST",
+        },
+    ],
+    "MAINTENANCE_COLD": [
+        {
+            "id": "ntf-wp-mc-001",
+            "text_content": {
+                "message": "Work Permit (Maintenance Cold) SR 12805 requires your review.",
+                "type": "SERVICE_REQUEST",
+                "id": "12805",
+            },
+            "created_at": "2026-09-01T09:20:00Z",
+            "read_at": None,
+            "action_required": True,
+            "notification_type": "SERVICE_REQUEST",
+        },
+    ],
+    "MAINTENANCE_ROOF_ACCESS": [
+        {
+            "id": "ntf-wp-mr-001",
+            "text_content": {
+                "message": "Work Permit (Maintenance Roof) SR 12806 requires your review.",
+                "type": "SERVICE_REQUEST",
+                "id": "12806",
+            },
+            "created_at": "2026-09-01T09:25:00Z",
+            "read_at": None,
+            "action_required": True,
+            "notification_type": "SERVICE_REQUEST",
+        },
+    ],
+    "OPERATIONS": [
+        {
+            "id": "ntf-wp-ops-001",
+            "text_content": {
+                "message": "Work Permit (Operations) SR 12807 requires your review.",
+                "type": "SERVICE_REQUEST",
+                "id": "12807",
+            },
+            "created_at": "2026-09-01T09:30:00Z",
+            "read_at": None,
+            "action_required": True,
+            "notification_type": "SERVICE_REQUEST",
         },
     ],
 }

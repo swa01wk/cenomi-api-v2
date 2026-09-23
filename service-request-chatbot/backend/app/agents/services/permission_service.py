@@ -261,6 +261,24 @@ class PermissionService:
         """Assert the caller may raise a new Work Permit Service Request."""
         self.check("CREATE_WORK_PERMIT_SR", auth)
 
+    def can_approve_work_permit(
+        self,
+        auth: AuthContext,
+        *,
+        workflow_stage: str | None = None,
+        in_progress_roles: set[str] | frozenset[str] | None = None,
+    ) -> bool:
+        """True when the caller may PATCH approve/reject the current WP hop."""
+        try:
+            self.ensure_can_approve_work_permit(
+                auth,
+                workflow_stage=workflow_stage,
+                in_progress_roles=in_progress_roles,
+            )
+        except PermissionDeniedError:
+            return False
+        return True
+
     def ensure_can_approve_work_permit(
         self,
         auth: AuthContext,

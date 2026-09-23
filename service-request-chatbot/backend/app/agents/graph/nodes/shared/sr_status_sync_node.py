@@ -37,6 +37,7 @@ from app.agents.services.deleted_documents import (
 )
 from app.agents.services.review_decorations_service import (
     build_review_decorations,
+    can_act_in_stage,
     derive_user_role,
     merge_decorations,
     payload_to_collected_data,
@@ -484,10 +485,19 @@ async def sr_status_sync_node(state: ServiceRequestState) -> dict[str, Any]:
     ):
         if effective_stage in WP_REVIEW_STAGES:
             label = STAGE_LABELS.get(effective_stage or "", "Work Permit Review")
-            updates["response_message"] = (
-                f"Opening Work Permit SR **{sr_id}** ({label}). "
-                "Review the details below, then approve or reject this hop."
-            )
+            user_role = backend_refs.get("user_role") or derive_user_role(auth)
+
+            if user_role and not can_act_in_stage(effective_stage or "", user_role):
+                updates["response_message"] = (
+                    f"Opening Work Permit SR **{sr_id}** ({label}). "
+                    "This hop is awaiting another reviewer — you can view the Service Request "
+                    "status below."
+                )
+            else:
+                updates["response_message"] = (
+                    f"Opening Work Permit SR **{sr_id}** ({label}). "
+                    "Review the details below, then approve or reject this hop."
+                )
         elif effective_stage == "APPROVE_SR" and sr_sub_category in _FITOUT_CONFIRM_SUB_CATEGORIES:
             _FITOUT_OPEN_LABELS = {
                 "FIT_OUT_CONFIRM_FOS": "Fitout Start Confirmation",

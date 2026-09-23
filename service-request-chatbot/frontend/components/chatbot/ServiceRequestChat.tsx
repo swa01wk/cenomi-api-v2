@@ -62,6 +62,10 @@ const ACTION_LABELS: Record<string, string> = {
   reject_fm_review: "Rejecting FM review…",
   submit_rdd_report: "Submitting RDD report…",
   approve_rdd_final: "Final approval…",
+  confirm_create_wp: "Confirming Work Permit…",
+  cancel_create_wp: "Changing Work Permit details…",
+  confirm_approve_wp: "Approving Work Permit…",
+  reject_wp: "Rejecting Work Permit…",
 };
 
 // ─── Component ───────────────────────────────────────────────────────────────
@@ -262,19 +266,38 @@ export function ServiceRequestChat() {
 
   const handleConfirm = useCallback(
     (fields: Record<string, unknown>, confirmAction?: string) => {
-      sendTurn("Confirmed. Please submit.", {
+      const action = (confirmAction ?? "confirm") as ChatAction;
+      const label =
+        ACTION_LABELS[action] ??
+        (action === "confirm_approve_wp" || action === "approve_wp"
+          ? "Approved."
+          : "Confirmed. Please submit.");
+      sendTurn(label, {
         correctedFields: fields,
         // Use the stage-specific confirm action embedded in the card; fall back
         // to the generic "confirm" for CREATE_SR where no confirmAction is set.
-        action: (confirmAction ?? "confirm") as ChatAction,
+        action,
       });
     },
     [sendTurn],
   );
 
-  const handleCancel = useCallback(() => {
-    sendTurn("Cancel this request", { action: "cancel_sr" });
-  }, [sendTurn]);
+  const handleCancel = useCallback(
+    (cancelAction?: string) => {
+      const action = (cancelAction ?? "cancel_sr") as ChatAction;
+      sendTurn(ACTION_LABELS[action] ?? "Cancel this request", { action });
+    },
+    [sendTurn],
+  );
+
+  const handleReject = useCallback(
+    (rejectAction: string) => {
+      sendTurn(ACTION_LABELS[rejectAction] ?? "Reject this request", {
+        action: rejectAction as ChatAction,
+      });
+    },
+    [sendTurn],
+  );
 
   const handleCorrections = useCallback(
     (corrections: Record<string, unknown>) => {
@@ -411,6 +434,7 @@ export function ServiceRequestChat() {
                           data={m.responseUI as ResponseUIConfirmationCard}
                           onConfirm={handleConfirm}
                           onCancel={handleCancel}
+                          onReject={handleReject}
                           readOnly={!isLastMsg}
                         />
                       </div>
@@ -555,6 +579,7 @@ export function ServiceRequestChat() {
             data={sidebarUI}
             onConfirm={handleConfirm}
             onCancel={handleCancel}
+            onReject={handleReject}
           />
         )}
 

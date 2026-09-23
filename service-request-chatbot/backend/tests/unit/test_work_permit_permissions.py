@@ -267,6 +267,15 @@ class TestWorkPermitValidation:
         desc_errors = [e for e in errors if e["field"] == "description"]
         assert len(desc_errors) == 0
 
+    def test_empty_string_contractor_name_is_acceptable(self) -> None:
+        """Empty contractor_name is an explicit skip (WP OPTIONAL_FIELDS)."""
+        svc = ValidationService()
+        data = self._complete_wp_data()
+        data["contractor_name"] = ""
+        errors = svc.validate_draft(data, workflow_stage="CREATE_WORK_PERMIT")
+        name_errors = [e for e in errors if e["field"] == "contractor_name"]
+        assert len(name_errors) == 0
+
     def test_create_wp_no_document_count_requirement(self) -> None:
         svc = ValidationService()
         data = self._complete_wp_data()

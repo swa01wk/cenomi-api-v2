@@ -27,6 +27,12 @@ const ROLES: {
     icon: "⚙️",
   },
   {
+    id: "OPERATION_EXECUTIVES",
+    label: "Operation Executives",
+    description: "Approve Work Permit Construction Cold L2 review with Mall Manager",
+    icon: "🛠️",
+  },
+  {
     id: "DD_ENGINEER",
     label: "RDD Project Manager",
     description: "Chair handover meeting, submit report, enter contractual dates",

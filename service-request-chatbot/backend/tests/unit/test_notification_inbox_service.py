@@ -24,14 +24,28 @@ from app.agents.services.notification_inbox_service import (
 
 
 class TestAudienceSelection:
-    def test_mall_manager_handover_and_trading(self) -> None:
+    def test_mall_manager_handover_trading_and_wp(self) -> None:
         assert _select_sub_categories(frozenset({"MALL_MANAGER"}), None) == (
             "HANDOVER",
             "FIT_OUT_CONFIRM_TRADING",
+            "CONSTRUCTION_HOT",
+            "CONSTRUCTION_COLD",
+            "CONSTRUCTION_ROOF_ACCESS",
+            "MAINTENANCE_HOT",
+            "MAINTENANCE_COLD",
+            "MAINTENANCE_ROOF_ACCESS",
+            "OPERATIONS",
         )
 
-    def test_fm_manager_only_handover(self) -> None:
-        assert _select_sub_categories(frozenset({"FM_MANAGER"}), None) == ("HANDOVER",)
+    def test_fm_manager_handover_and_wp_fm_hops(self) -> None:
+        assert _select_sub_categories(frozenset({"FM_MANAGER"}), None) == (
+            "HANDOVER",
+            "CONSTRUCTION_HOT",
+            "CONSTRUCTION_ROOF_ACCESS",
+            "MAINTENANCE_HOT",
+            "MAINTENANCE_COLD",
+            "MAINTENANCE_ROOF_ACCESS",
+        )
 
     def test_tenant_sales_data_only(self) -> None:
         assert _select_sub_categories(
@@ -48,17 +62,22 @@ class TestAudienceSelection:
             frozenset({"SALES_DATA_APPROVER"}), None
         ) == ("SALES_DATA",)
 
-    def test_operations_handover_and_trading(self) -> None:
+    def test_operations_handover_trading_and_cold(self) -> None:
         assert _select_sub_categories(frozenset({"OPERATIONS"}), None) == (
             "HANDOVER",
             "FIT_OUT_CONFIRM_TRADING",
+            "CONSTRUCTION_COLD",
         )
 
-    def test_dd_engineer_all_but_trading(self) -> None:
+    def test_dd_engineer_handover_fitout_and_wp_dd_hops(self) -> None:
         assert _select_sub_categories(frozenset({"DD_ENGINEER"}), None) == (
             "HANDOVER",
             "FIT_OUT_CONFIRM_FOS",
             "FIT_OUT_CONFIRM_END",
+            "CONSTRUCTION_HOT",
+            "CONSTRUCTION_COLD",
+            "CONSTRUCTION_ROOF_ACCESS",
+            "MAINTENANCE_ROOF_ACCESS",
         )
 
     def test_empty_roles_call_all(self) -> None:
@@ -91,6 +110,15 @@ class TestAudienceSelection:
     def test_unknown_sub_category_dropped(self) -> None:
         filters = NotificationListFilters(sub_categories=("BOGUS", "HANDOVER"))
         assert _select_sub_categories(frozenset(), filters) == ("HANDOVER",)
+
+    def test_wp_filter_for_mall_manager(self) -> None:
+        filters = NotificationListFilters(
+            sub_categories=("CONSTRUCTION_HOT", "OPERATIONS")
+        )
+        assert _select_sub_categories(frozenset({"MALL_MANAGER"}), filters) == (
+            "CONSTRUCTION_HOT",
+            "OPERATIONS",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -168,7 +196,9 @@ class TestHttpFetch:
             get = AsyncMock(return_value=_mock_response(200, _platform_body("HANDOVER", [item])))
             mock_httpx.return_value.__aenter__.return_value.get = get
             result = await _http_service().fetch_inbox(
-                user_id="123", roles=frozenset({"FM_MANAGER"})
+                user_id="123",
+                roles=frozenset({"FM_MANAGER"}),
+                filters=NotificationListFilters(sub_categories=("HANDOVER",)),
             )
         assert result.success
         assert len(result.groups) == 1
@@ -196,7 +226,9 @@ class TestHttpFetch:
                 return_value=_mock_response(200, _platform_body("HANDOVER", [item]))
             )
             result = await _http_service().fetch_inbox(
-                user_id="123", roles=frozenset({"FM_MANAGER"})
+                user_id="123",
+                roles=frozenset({"FM_MANAGER"}),
+                filters=NotificationListFilters(sub_categories=("HANDOVER",)),
             )
         assert result.groups[0].items[0].sr_id == "11712"
 
@@ -208,7 +240,9 @@ class TestHttpFetch:
             await _http_service().fetch_inbox(
                 user_id="123",
                 roles=frozenset({"FM_MANAGER"}),
-                filters=NotificationListFilters(unread=True),
+                filters=NotificationListFilters(
+                    sub_categories=("HANDOVER",), unread=True
+                ),
             )
         _, kwargs = get.call_args
         assert kwargs["params"]["unread"] == "true"
@@ -231,7 +265,15 @@ class TestHttpFetch:
                 side_effect=get_side_effect
             )
             result = await _http_service().fetch_inbox(
-                user_id="123", roles=frozenset({"DD_ENGINEER"})
+                user_id="123",
+                roles=frozenset({"DD_ENGINEER"}),
+                filters=NotificationListFilters(
+                    sub_categories=(
+                        "HANDOVER",
+                        "FIT_OUT_CONFIRM_FOS",
+                        "FIT_OUT_CONFIRM_END",
+                    )
+                ),
             )
         assert result.success
         assert [g.sub_category for g in result.groups] == ["HANDOVER"]
@@ -270,7 +312,14 @@ class TestMockAndFactory:
             roles=frozenset({"FM_MANAGER"}),
             filters=NotificationListFilters(unread=True),
         )
-        assert [i.sr_id for g in unread.groups for i in g.items] == ["11711"]
+        assert [i.sr_id for g in unread.groups for i in g.items] == [
+            "11711",
+            "12801",
+            "12803",
+            "12804",
+            "12805",
+            "12806",
+        ]
 
     def test_factory_prefers_mock_when_forced(self) -> None:
         with patch(

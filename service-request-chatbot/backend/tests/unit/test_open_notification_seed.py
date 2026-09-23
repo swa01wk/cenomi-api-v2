@@ -38,6 +38,28 @@ def test_fitout_sub_categories_map_to_fitout_agents() -> None:
         assert seed["sub_category"] == sub
 
 
+def test_work_permit_sub_categories_map_to_work_permit_agent() -> None:
+    wp_subs = (
+        "CONSTRUCTION_HOT",
+        "CONSTRUCTION_COLD",
+        "CONSTRUCTION_ROOF_ACCESS",
+        "MAINTENANCE_HOT",
+        "MAINTENANCE_COLD",
+        "MAINTENANCE_ROOF_ACCESS",
+        "OPERATIONS",
+    )
+    for sub in wp_subs:
+        seed = build_open_notification_seed(
+            {"id": "12801", "sub_category": sub}, session_active_agent=None
+        )
+        assert seed == {
+            "intent": "OPEN_NOTIFICATION",
+            "active_agent": "work_permit_agent",
+            "service_category": "WORK_PERMIT",
+            "sub_category": sub,
+        }
+
+
 def test_sub_category_case_insensitive() -> None:
     seed = build_open_notification_seed(
         {"id": "1", "sub_category": "handover"}, session_active_agent=None
@@ -92,6 +114,8 @@ def test_sub_category_to_agent_registry_backed() -> None:
     assert SUB_CATEGORY_TO_AGENT["FIT_OUT_CONFIRM_END"] == "rdd_fitout_end_agent"
     assert SUB_CATEGORY_TO_AGENT["FIT_OUT_CONFIRM_TRADING"] == "rdd_trading_confirmation_agent"
     assert SUB_CATEGORY_TO_AGENT["SALES_DATA"] == "sales_data_agent"
+    assert SUB_CATEGORY_TO_AGENT["CONSTRUCTION_HOT"] == "work_permit_agent"
+    assert SUB_CATEGORY_TO_AGENT["OPERATIONS"] == "work_permit_agent"
     assert "FIT_OUT_CONFIRM_HO" not in SUB_CATEGORY_TO_AGENT
 
 

@@ -6,7 +6,8 @@ import type { ConfirmationField, ResponseUIConfirmationCard } from "@/lib/types/
 type Props = {
   data: ResponseUIConfirmationCard;
   onConfirm: (fields: Record<string, unknown>, confirmAction?: string) => void;
-  onCancel: () => void;
+  onCancel: (cancelAction?: string) => void;
+  onReject?: (rejectAction: string) => void;
   /** When true, field inputs and action buttons are hidden (past-turn view). */
   readOnly?: boolean;
 };
@@ -72,8 +73,16 @@ function FieldRow({
   );
 }
 
-export function ServiceRequestSummaryCard({ data, onConfirm, onCancel, readOnly = false }: Props) {
+export function ServiceRequestSummaryCard({
+  data,
+  onConfirm,
+  onCancel,
+  onReject,
+  readOnly = false,
+}: Props) {
   const [editedFields, setEditedFields] = useState<Record<string, string>>({});
+  const isReview = Boolean(data.rejectAction);
+  const hasEditableFields = data.fields.some((f) => f.editable);
 
   // Reset editable-field values whenever the backing data changes (e.g. after
   // the backend returns an updated confirmation_card with corrected values).
@@ -97,11 +106,14 @@ export function ServiceRequestSummaryCard({ data, onConfirm, onCancel, readOnly 
     onConfirm(merged, data.confirmAction);
   }
 
+  const confirmLabel = isReview ? "Approve" : "Confirm & Submit";
+  const secondaryLabel = hasEditableFields ? "Make Changes" : "Cancel";
+
   return (
     <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
       <div className="mb-2 flex items-center justify-between gap-2">
         <h2 className="text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
-          Review & Confirm
+          {isReview ? "Review & Approve" : "Review & Confirm"}
         </h2>
         {data.requestType && (
           <span className="rounded-full bg-blue-100 px-2 py-0.5 text-[11px] font-medium text-blue-700 dark:bg-blue-900/40 dark:text-blue-300">
@@ -122,21 +134,32 @@ export function ServiceRequestSummaryCard({ data, onConfirm, onCancel, readOnly 
         ))}
       </div>
       {!readOnly && (
-        <div className="mt-4 flex gap-2">
+        <div className="mt-4 flex flex-wrap gap-2">
           <button
             type="button"
             onClick={handleConfirm}
-            className="flex-1 rounded-md bg-blue-600 py-2 text-sm font-medium text-white transition hover:bg-blue-700"
+            className="min-w-[8rem] flex-1 rounded-md bg-blue-600 py-2 text-sm font-medium text-white transition hover:bg-blue-700"
           >
-            Confirm & Submit
+            {confirmLabel}
           </button>
-          <button
-            type="button"
-            onClick={onCancel}
-            className="flex-1 rounded-md border border-zinc-300 py-2 text-sm font-medium text-zinc-600 transition hover:bg-zinc-50 dark:border-zinc-700 dark:text-zinc-400 dark:hover:bg-zinc-800"
-          >
-            Make Changes
-          </button>
+          {data.rejectAction && onReject && (
+            <button
+              type="button"
+              onClick={() => onReject(data.rejectAction!)}
+              className="min-w-[8rem] flex-1 rounded-md bg-red-600 py-2 text-sm font-medium text-white transition hover:bg-red-700"
+            >
+              Reject
+            </button>
+          )}
+          {!isReview && (
+            <button
+              type="button"
+              onClick={() => onCancel(data.cancelAction)}
+              className="min-w-[8rem] flex-1 rounded-md border border-zinc-300 py-2 text-sm font-medium text-zinc-600 transition hover:bg-zinc-50 dark:border-zinc-700 dark:text-zinc-400 dark:hover:bg-zinc-800"
+            >
+              {secondaryLabel}
+            </button>
+          )}
         </div>
       )}
     </div>

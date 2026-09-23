@@ -177,6 +177,43 @@ _SUB_CATEGORY_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ),
     ("FIT_OUT_CONFIRM_TRADING", re.compile(r"\btrading\b", re.IGNORECASE)),
     ("SALES_DATA", re.compile(r"\bsales[\s-]?data\b", re.IGNORECASE)),
+    (
+        "CONSTRUCTION_HOT",
+        re.compile(
+            r"\bconstruction\s+hot\b|\bhot\s+work\b(?!\s+maintenance)",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "CONSTRUCTION_COLD",
+        re.compile(
+            r"\bconstruction\s+cold\b|\bcold\s+work\b(?!\s+maintenance)",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "CONSTRUCTION_ROOF_ACCESS",
+        re.compile(
+            r"\bconstruction\s+roof\b|\broof\s+access\b(?!\s+maintenance)",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "MAINTENANCE_HOT",
+        re.compile(r"\bmaintenance\s+hot\b", re.IGNORECASE),
+    ),
+    (
+        "MAINTENANCE_COLD",
+        re.compile(r"\bmaintenance\s+cold\b", re.IGNORECASE),
+    ),
+    (
+        "MAINTENANCE_ROOF_ACCESS",
+        re.compile(r"\bmaintenance\s+roof\b", re.IGNORECASE),
+    ),
+    (
+        "OPERATIONS",
+        re.compile(r"\boperations?\s+(work\s+)?permit\b|\bpermit\s+operations?\b", re.IGNORECASE),
+    ),
 )
 
 
@@ -185,6 +222,18 @@ _GENERIC_FITOUT_PATTERN = re.compile(r"\bfit[\s-]?out\b", re.IGNORECASE)
 _FITOUT_CONFIRM_SUBS = (
     "FIT_OUT_CONFIRM_FOS",
     "FIT_OUT_CONFIRM_END",
+)
+
+# Bare "work permit notifications" expands to all seven WP subtypes.
+_GENERIC_WORK_PERMIT_PATTERN = re.compile(r"\bwork[\s-]?permits?\b", re.IGNORECASE)
+_WORK_PERMIT_SUBS = (
+    "CONSTRUCTION_HOT",
+    "CONSTRUCTION_COLD",
+    "CONSTRUCTION_ROOF_ACCESS",
+    "MAINTENANCE_HOT",
+    "MAINTENANCE_COLD",
+    "MAINTENANCE_ROOF_ACCESS",
+    "OPERATIONS",
 )
 
 
@@ -210,6 +259,12 @@ def parse_notification_list_filters(message: str) -> NotificationListFilters:
         sub in matched for sub in _FITOUT_CONFIRM_SUBS
     ):
         matched.extend(_FITOUT_CONFIRM_SUBS)
+    # Generic "work permit notifications" expands to all WP subtypes when no
+    # more specific WP keyword already matched.
+    if _GENERIC_WORK_PERMIT_PATTERN.search(text) and not any(
+        sub in matched for sub in _WORK_PERMIT_SUBS
+    ):
+        matched.extend(_WORK_PERMIT_SUBS)
 
     return NotificationListFilters(
         sub_categories=tuple(matched) or None,
