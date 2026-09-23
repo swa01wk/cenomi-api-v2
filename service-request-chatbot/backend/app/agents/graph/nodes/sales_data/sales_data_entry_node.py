@@ -94,11 +94,15 @@ _PENDING_GATE_STAGES = frozenset({
     "AWAITING_OTHER_MONTHS_REMINDER",
 })
 _AMOUNT_RE = re.compile(
-    r"(?:sar\s*[\d,]+|amount\s*(?:is|:)?\s*[\d,]+|(?:is|:)\s*(?:sar\s*)?[\d,]{3,})",
+    # Bare numbers need 5+ digits (not 4) so a plain year mention ("August
+    # 2026") doesn't get misread as a typed sales amount.
+    r"(?:sar\s*[\d,]+|amount\s*(?:is|:)?\s*[\d,]+|(?:is|:)\s*(?:sar\s*)?[\d,]{3,}"
+    r"|(?<![a-zA-Z0-9-])\d{5,}(?:\.\d+)?\b)",
     re.I,
 )
 _LEASE_CODE_RE = re.compile(
-    r"\b(?:lc[-\s]?\d{3,}|t\d{6,}|(?:lease)\s+[a-z0-9-]{3,})\b",
+    r"\b(?:lc[-\s]?\d{3,}|t\d{6,}|[a-z]{2,10}(?:[_-][a-z0-9]{2,10}){1,3}"
+    r"|(?:lease)\s+[a-z0-9_-]{3,})\b",
     re.I,
 )
 _EXPLICIT_CSV_PHRASES = ("upload", "csv", "attach")
