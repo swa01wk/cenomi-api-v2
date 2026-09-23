@@ -2,8 +2,9 @@
 
 A routing shim with no business logic (spec §2.1):
 
-- **FIT_OUT_AND_HANDOVER** — turns ``active_notification_id`` into an open-SR
-  seed and hands off to ``sr_status_sync`` (fm / rdd / fitout entry).
+- **FIT_OUT_AND_HANDOVER / WORK_PERMIT** — turns ``active_notification_id``
+  into an open-SR seed and hands off to ``sr_status_sync`` (fm / rdd /
+  fitout / work_permit entry).
 - **SALES_DATA** — ``text_content.id`` is a **lease code**, not an SR id.
   Seeds ``backend_refs.notification_context`` and hands off to
   ``sales_data_entry`` (no ``sr_status_sync``).
@@ -41,12 +42,27 @@ log = structlog.get_logger(__name__)
 
 # Spec §2.1 export — derived from the agent registry so there is exactly one
 # source of truth for sub-category routing. FIT_OUT_CONFIRM_HO is absent
-# (decommissioned).
+# (decommissioned). Includes Work Permit subtypes → work_permit_agent.
+_OPEN_SEED_CATEGORIES: tuple[str, ...] = ("FIT_OUT_AND_HANDOVER", "WORK_PERMIT")
+
 SUB_CATEGORY_TO_AGENT: dict[str, str] = {
     sub: cfg["agent_name"]
-    for sub, cfg in SERVICE_REQUEST_AGENT_REGISTRY.get("FIT_OUT_AND_HANDOVER", {}).items()
+    for category in _OPEN_SEED_CATEGORIES
+    for sub, cfg in SERVICE_REQUEST_AGENT_REGISTRY.get(category, {}).items()
 }
 SUB_CATEGORY_TO_AGENT[SALES_DATA_SUB_CATEGORY] = "sales_data_agent"
+
+
+def _lookup_open_agent(sub: str) -> tuple[str, str, str] | None:
+    """Return ``(service_category, sub_category, agent_name)`` or None."""
+    token = sub.strip().upper()
+    if not token:
+        return None
+    for category in _OPEN_SEED_CATEGORIES:
+        cfg = lookup_agent(category, token)
+        if cfg:
+            return category, token, cfg["agent_name"]
+    return None
 
 
 def _normalise_ref(raw: Any) -> dict[str, Any] | None:
@@ -90,11 +106,12 @@ def build_open_notification_seed(
 
     updates: dict[str, Any] = {"intent": "OPEN_NOTIFICATION"}
     sub = str(notification_ref.get("sub_category") or "").strip().upper()
-    agent_cfg = lookup_agent("FIT_OUT_AND_HANDOVER", sub) if sub else None
-    if agent_cfg and not session_active_agent:
-        updates["active_agent"] = agent_cfg["agent_name"]
-        updates["service_category"] = "FIT_OUT_AND_HANDOVER"
-        updates["sub_category"] = sub
+    resolved = _lookup_open_agent(sub) if sub else None
+    if resolved and not session_active_agent:
+        category, canonical_sub, agent_name = resolved
+        updates["active_agent"] = agent_name
+        updates["service_category"] = category
+        updates["sub_category"] = canonical_sub
     return updates
 
 

@@ -263,8 +263,17 @@ async def _review_result(
             "workflow_stage": next_stage,
             "confirmation_status": None,
             "confirmation_required": False,
-            "active_agent": None,
+            # Keep agent so reopen/sync stays on WP; clear confirmation so the
+            # next hop card is only built for roles that can act (see confirmation).
+            "active_agent": "work_permit_agent",
             "response_message": msg,
+            "response_ui": {
+                "type": "message",
+                "message": msg,
+                "stage_complete": True,
+                "action": "wp_hop_approved",
+                "workflow_stage": next_stage,
+            },
         }
 
     msg = f"Work Permit SR **{sr_id}** has been fully approved."

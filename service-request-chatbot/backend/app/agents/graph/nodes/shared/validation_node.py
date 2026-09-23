@@ -178,6 +178,10 @@ async def validation_node(state: ServiceRequestState) -> dict[str, Any]:
             from app.agents.schemas.fitout_confirm_schema import (
                 OPTIONAL_FIELDS as _OPTIONAL,
             )
+        elif active_agent == "work_permit_agent":
+            from app.agents.schemas.work_permit_schema import (
+                OPTIONAL_FIELDS as _OPTIONAL,
+            )
         else:
             from app.agents.schemas.handover_schema import (
                 OPTIONAL_FIELDS as _OPTIONAL,

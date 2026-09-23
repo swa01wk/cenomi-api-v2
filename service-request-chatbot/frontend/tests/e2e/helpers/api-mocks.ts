@@ -35,6 +35,7 @@ export type UserRole =
   | "MALL_MANAGER"
   | "FM_MANAGER"
   | "OPERATIONS"
+  | "OPERATION_EXECUTIVES"
   | "DD_ENGINEER"
   | "ADMIN";
 

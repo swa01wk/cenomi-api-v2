@@ -54,6 +54,9 @@ export async function postServiceRequestChat(
 
   // `state` carries workflow lifecycle metadata — workflow_stage, sr_id, etc.
   const state: Record<string, unknown> = data.state ?? {};
+  const uiMeta = data.ui as
+    | { workflow_complete?: boolean; stage_complete?: boolean }
+    | undefined;
 
   return {
     sessionId: data.session_id,
@@ -69,7 +72,8 @@ export async function postServiceRequestChat(
     rddStatus: (state.rdd_status as string | null) ?? null,
     fmStatus: (state.fm_status as string | null) ?? null,
     actionResult: (state.action_result as "success" | "failed" | null) ?? null,
-    workflowComplete: Boolean((data.ui as { workflow_complete?: boolean } | undefined)?.workflow_complete),
+    workflowComplete: Boolean(uiMeta?.workflow_complete),
+    stageComplete: Boolean(uiMeta?.stage_complete),
   };
 }
 

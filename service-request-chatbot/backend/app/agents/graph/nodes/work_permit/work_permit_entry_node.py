@@ -22,10 +22,19 @@ from typing import Any
 import structlog
 
 from app.agents.graph.state import ServiceRequestState
-from app.agents.schemas.work_permit_schema import WP_REVIEW_STAGES, WP_TERMINAL_STAGES
+from app.agents.schemas.work_permit_schema import (
+    STAGE_LABELS,
+    WP_REVIEW_STAGES,
+    WP_TERMINAL_STAGES,
+    in_progress_roles,
+)
+from app.agents.services.permission_service import PermissionService
 from app.observability.decorators import trace_node
+from app.types.chat import AuthContext
 
 log = structlog.get_logger(__name__)
+
+_permission_service = PermissionService()
 
 _CONFIRM_PHRASES: frozenset[str] = frozenset(
     {
@@ -80,6 +89,39 @@ def _set_wp_action(state: ServiceRequestState, action: str) -> dict[str, Any]:
     }
 
 
+def _deny_review_action(state: ServiceRequestState, workflow_stage: str) -> dict[str, Any] | None:
+    """If caller cannot act on this hop, return a denial patch; else None.
+
+    No auth_context → allow (unit tests / shadow), matching confirmation + PATCH.
+    """
+    auth: AuthContext | None = state.get("auth_context")  # type: ignore[assignment]
+    if auth is None:
+        return None
+    backend_refs: dict[str, Any] = dict(state.get("backend_refs") or {})
+    if _permission_service.can_approve_work_permit(
+        auth,
+        workflow_stage=workflow_stage,
+        in_progress_roles=in_progress_roles(backend_refs.get("sr_operations")),
+    ):
+        return None
+    label = STAGE_LABELS.get(workflow_stage, "this review hop")
+    log.warning(
+        "work_permit_entry.role_denied",
+        workflow_stage=workflow_stage,
+        roles=sorted(auth.roles),
+    )
+    return {
+        "status": "WAITING_FOR_USER",
+        "confirmation_status": None,
+        "confirmation_required": False,
+        "response_message": (
+            f"You do not have permission to approve or reject this Work Permit hop "
+            f"({label}). This stage is assigned to another reviewer."
+        ),
+        "response_ui": {"type": "message"},
+    }
+
+
 @trace_node("work_permit_entry", "AGENT")
 async def work_permit_entry_node(state: ServiceRequestState) -> dict[str, Any]:
     """Parse confirmation / cancel / approve / reject at the WP workflow boundary."""
@@ -93,11 +135,17 @@ async def work_permit_entry_node(state: ServiceRequestState) -> dict[str, Any]:
     if action_override in _APPROVE_ACTIONS:
         log.info("work_permit_entry.action_override_confirm", review=is_review)
         if is_review:
+            denied = _deny_review_action(state, workflow_stage)
+            if denied is not None:
+                return denied
             return _set_wp_action(state, "approve")
         return {"confirmation_status": "CONFIRMED", "status": "IN_PROGRESS"}
 
     if action_override in _REJECT_SR_ACTIONS and is_review:
         log.info("work_permit_entry.action_override_reject_sr")
+        denied = _deny_review_action(state, workflow_stage)
+        if denied is not None:
+            return denied
         return _set_wp_action(state, "reject")
 
     if action_override in ("cancel", "cancel_create_wp"):
@@ -135,11 +183,17 @@ async def work_permit_entry_node(state: ServiceRequestState) -> dict[str, Any]:
     if confirmation_status == "PENDING":
         if is_review and _contains_phrase(user_message, _SR_REJECT_PHRASES):
             log.info("work_permit_entry.review_rejected")
+            denied = _deny_review_action(state, workflow_stage)
+            if denied is not None:
+                return denied
             return _set_wp_action(state, "reject")
 
         if _contains_phrase(user_message, _CONFIRM_PHRASES):
             log.info("work_permit_entry.confirmation_accepted", review=is_review)
             if is_review:
+                denied = _deny_review_action(state, workflow_stage)
+                if denied is not None:
+                    return denied
                 return _set_wp_action(state, "approve")
             return {"confirmation_status": "CONFIRMED", "status": "IN_PROGRESS"}
 

@@ -89,6 +89,44 @@ async def test_returns_serialized_groups() -> None:
 
 
 @pytest.mark.asyncio
+async def test_wp_group_service_category() -> None:
+    svc = AsyncMock()
+    svc.fetch_inbox = AsyncMock(
+        return_value=NotificationInboxResult(
+            success=True,
+            groups=[
+                NotificationGroup(
+                    "CONSTRUCTION_HOT",
+                    1,
+                    [
+                        NotificationItem(
+                            notification_id="ntf-wp-1",
+                            sr_id="12801",
+                            sub_category="CONSTRUCTION_HOT",
+                            message="WP review",
+                        )
+                    ],
+                )
+            ],
+        )
+    )
+    _override_auth()
+    try:
+        with patch(_SERVICE, return_value=svc):
+            status_code, body = await _get(
+                f"{_ENDPOINT}?sub_category=construction_hot&limit=5"
+            )
+    finally:
+        _clear_auth()
+
+    assert status_code == 200
+    group = body["groups"][0]
+    assert group["service_category"] == "WORK_PERMIT"
+    assert group["sub_category"] == "CONSTRUCTION_HOT"
+    assert group["label"] == "Construction – Hot Work"
+
+
+@pytest.mark.asyncio
 async def test_passes_filters_to_service() -> None:
     svc = AsyncMock()
     svc.fetch_inbox = AsyncMock(return_value=_result())

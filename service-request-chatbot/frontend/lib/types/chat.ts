@@ -6,6 +6,7 @@ export type UserRole =
   | "MALL_MANAGER"
   | "FM_MANAGER"
   | "OPERATIONS"
+  | "OPERATION_EXECUTIVES"
   | "DD_ENGINEER"
   | "ADMIN";
 
@@ -22,6 +23,15 @@ export type ChatAction =
   | "continue_milestone"
   | "cancel_milestone"
   | "create_handover_sr"
+  // CREATE_WORK_PERMIT
+  | "confirm_create_wp"
+  | "cancel_create_wp"
+  // WP review hops
+  | "confirm_approve_wp"
+  | "approve_wp"
+  | "approve"
+  | "reject_wp"
+  | "reject"
   // FM_REVIEW
   | "save_fm_progress"
   | "approve_fm_review"
@@ -96,6 +106,14 @@ export type DocumentItem = {
 export type ResponseUIMessage = {
   type: "message";
   message: string;
+  /** Mid-hop approve (Handover FM / Work Permit) — hop finished; next stage may follow */
+  stage_complete?: boolean;
+  /** Machine action id e.g. fm_approved, wp_hop_approved */
+  action?: string;
+  /** Next or current workflow stage after this turn */
+  workflow_stage?: string;
+  /** Terminal workflow flag (create/approve complete) */
+  workflow_complete?: boolean;
 };
 
 export type ResponseUILeaseSelection = {
@@ -123,6 +141,10 @@ export type ResponseUIConfirmationCard = {
    *  Frontend must send this instead of the generic "confirm" so the
    *  entry node can set fm_action/rdd_action AND CONFIRMED in one turn. */
   confirmAction?: string;
+  /** Work Permit review: reject current hop / SR. */
+  rejectAction?: string;
+  /** Create flows: make-changes / cancel without rejecting an SR. */
+  cancelAction?: string;
 };
 
 export type ResponseUIValidationError = {
@@ -222,6 +244,8 @@ export type ChatServiceResponse = {
   actionResult?: "success" | "failed" | null;
   /** True when the graph emitted workflow_complete on this turn */
   workflowComplete?: boolean;
+  /** True when the graph emitted stage_complete (mid-hop approve; next reviewer owns the hop) */
+  stageComplete?: boolean;
 };
 
 // ─── Local UI message ─────────────────────────────────────────────────────────

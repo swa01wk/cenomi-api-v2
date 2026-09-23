@@ -10,6 +10,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from app.agents.schemas.work_permit_schema import VALID_WORK_PERMIT_TYPES
 from app.agents.services.notification_inbox_service import (
     SUB_CATEGORY_LABELS,
     NotificationInboxResult,
@@ -77,17 +78,21 @@ def row_payload(item: Any) -> dict[str, Any]:
     return row
 
 
+def _service_category_for_sub(sub_category: str) -> str:
+    if sub_category == SALES_DATA_SUB_CATEGORY:
+        return "SALES_DATA"
+    if sub_category in VALID_WORK_PERMIT_TYPES:
+        return "WORK_PERMIT"
+    return "FIT_OUT_AND_HANDOVER"
+
+
 def serialize_groups(result: NotificationInboxResult) -> list[dict[str, Any]]:
     return [
         {
             # Reconciled spec: service_category + action_required_count are
             # group-level contract fields; the count is authoritative here —
             # the FE must not recompute it from the rows.
-            "service_category": (
-                "SALES_DATA"
-                if group.sub_category == SALES_DATA_SUB_CATEGORY
-                else "FIT_OUT_AND_HANDOVER"
-            ),
+            "service_category": _service_category_for_sub(group.sub_category),
             "sub_category": group.sub_category,
             "label": SUB_CATEGORY_LABELS.get(group.sub_category, group.sub_category),
             "total_count": group.total_count,
