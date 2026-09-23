@@ -11,6 +11,7 @@ from app.agents.graph.nodes.sales_data.pending_months import (
     extract_lease_code,
     format_other_months_reminder,
     format_pending_list_message,
+    format_pending_list_summary,
     other_pending_months,
     pending_period_items,
 )
@@ -77,6 +78,16 @@ def test_pending_list_copy_allows_multi_month_file() -> None:
     ])
     message = format_pending_list_message(items)
     assert "several PENDING months" in message
+    assert "July 2026" in message
+    assert "LC-1001" in message
+
+
+def test_pending_list_summary_omits_lease_and_month_enumeration() -> None:
+    message = format_pending_list_summary()
+    assert "PENDING" in message
+    assert "several PENDING months" in message
+    assert "July 2026" not in message
+    assert "LC-1001" not in message
 
 
 def _state(**overrides: Any) -> dict[str, Any]:
@@ -122,7 +133,16 @@ async def test_gate_lists_pending_when_no_month_named() -> None:
         )
     assert result["workflow_stage"] == "AWAITING_PENDING_MONTHS_CHOICE"
     assert result["response_ui"]["type"] == "pending_months_list"
-    assert "July 2026" in result["response_message"]
+    # The enumeration itself is shown once, as chips (response_ui.leases) —
+    # the bubble (response_message) only carries the intro/trailing prose,
+    # not a duplicate of the same list PendingMonthsListCard already shows.
+    assert "July 2026" not in result["response_message"]
+    lc1001_months = next(
+        lease["months"]
+        for lease in result["response_ui"]["leases"]
+        if lease["lease_code"] == "LC-1001"
+    )
+    assert "July 2026" in [month["label"] for month in lc1001_months]
     assert result["response_ui"]["show_file_upload"] is True
 
 
@@ -450,11 +470,13 @@ async def test_gate_notification_already_submitted_does_not_dump_other_leases() 
         )
     assert "LC-1001" in result["response_message"]
     assert "already been submitted" in result["response_message"]
-    # Other leases are still surfaced (useful), but clearly separated from
-    # the "already submitted" note rather than presented as if they were
-    # what the notification was about.
-    assert "LC-1002" in result["response_message"]
-    assert "LC-1003" in result["response_message"]
+    assert "PENDING" in result["response_message"]
+    # Other leases are still surfaced (useful) via the card's chips — the
+    # bubble no longer duplicates the same enumeration in prose.
+    assert "LC-1002" not in result["response_message"]
+    assert "LC-1003" not in result["response_message"]
+    other_leases = {lease["lease_code"] for lease in result["response_ui"]["leases"]}
+    assert other_leases == {"LC-1002", "LC-1003"}
 
 
 @pytest.mark.asyncio
@@ -489,6 +511,44 @@ async def test_gate_notification_already_submitted_no_other_pending() -> None:
     assert "already been submitted" in result["response_message"]
     assert "no other pending" in result["response_message"].lower()
     assert result["response_ui"]["type"] == "message"
+
+
+@pytest.mark.asyncio
+async def test_gate_asked_month_not_pending_uses_summary_not_enumeration() -> None:
+    from app.agents.graph.nodes.sales_data.pending_months_gate_node import (
+        pending_months_gate_node,
+    )
+
+    rows = [
+        _row("LC-1001", "2026-08-01", "2026-08-31"),
+        _row("LC-1001", "2026-07-01", "2026-07-31"),
+    ]
+    client = AsyncMock()
+    client.get_sales_data = AsyncMock(return_value=rows)
+    with (
+        patch(
+            "app.agents.graph.nodes.sales_data.pending_months_gate_node.get_current_bearer_token",
+            return_value="tok",
+        ),
+        patch(
+            "app.agents.graph.nodes.sales_data.pending_months_gate_node.SalesDataApiClient",
+            return_value=client,
+        ),
+    ):
+        result = await pending_months_gate_node(
+            _state(user_message="Upload June 2026 for LC-1001")
+        )
+    assert result["workflow_stage"] == "AWAITING_PENDING_MONTHS_CHOICE"
+    assert "June 2026" in result["response_message"]
+    assert "is not pending" in result["response_message"]
+    assert "listed below" in result["response_message"]
+    assert "July 2026" not in result["response_message"]
+    lc1001_months = next(
+        lease["months"]
+        for lease in result["response_ui"]["leases"]
+        if lease["lease_code"] == "LC-1001"
+    )
+    assert {month["label"] for month in lc1001_months} == {"July 2026", "August 2026"}
 
 
 @pytest.mark.asyncio

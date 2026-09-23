@@ -502,6 +502,16 @@ async def admin_review_entry_node(state: ServiceRequestState) -> dict[str, Any]:
                     all_my_companies=False,
                     lease_code=scoped_lease,
                 )
+                log.info(
+                    "admin_review_entry.scoped_lease_raw_rows",
+                    scoped_lease=scoped_lease,
+                    row_count=len(rows),
+                    statuses=[r.get("status") for r in rows],
+                    periods=[
+                        (r.get("sales_period_start"), r.get("sales_period_end"))
+                        for r in rows
+                    ],
+                )
                 if notification_period_date:
                     # startswith, not exact/length-equal comparison: the
                     # yearly-frequency case gives a bare 4-digit year, the

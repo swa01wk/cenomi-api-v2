@@ -173,6 +173,12 @@ async def manual_entry_extraction_node(state: ServiceRequestState) -> dict[str, 
         hint = fields["period_hint"].get("value", "")
         if hint:
             start, end = _resolve_period(hint)
+            log.info(
+                "manual_entry_extraction.period_hint_resolved",
+                hint=hint,
+                start=start,
+                end=end,
+            )
             if start:
                 collected["sales_period_start"] = start
                 collected["sales_period_end"] = end
@@ -182,6 +188,10 @@ async def manual_entry_extraction_node(state: ServiceRequestState) -> dict[str, 
         "manual_entry_extraction.result",
         extracted=list(fields.keys()),
         collected=list(collected.keys()),
+        sales_period_start=collected.get("sales_period_start"),
+        sales_period_end=collected.get("sales_period_end"),
+        lease_code=collected.get("lease_code"),
+        user_message=user_message,
     )
 
     return {

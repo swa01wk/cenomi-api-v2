@@ -36,11 +36,15 @@ async def submission_error_node(state: ServiceRequestState) -> dict[str, Any]:
     backend_refs: dict = state.get("backend_refs") or {}
     errors: list[dict] = backend_refs.get("submission_errors") or []
     error_type: str = backend_refs.get("submission_error_type", "data")
+    # Shared with the CSV path (sales_data_api_submission_node) — the wording
+    # must not assume "your CSV file" when this came from typed manual entry.
+    is_manual = backend_refs.get("submission_source") == "manual"
 
     log.warning(
         "submission_error.reported",
         error_type=error_type,
         error_count=len(errors),
+        submission_source=backend_refs.get("submission_source") or "csv",
     )
 
     # Non-prod: append the real exception/status text already captured by the
@@ -51,11 +55,23 @@ async def submission_error_node(state: ServiceRequestState) -> dict[str, Any]:
         f"\n\n_(Dev detail: {real_detail})_" if is_dev and real_detail else ""
     )
 
+    retry_line = (
+        "Please provide the details again when you're ready."
+        if is_manual
+        else "Your CSV has been retained — click Submit again when you're ready."
+    )
+    reupload_phrase = "re-enter the details" if is_manual else "re-upload your CSV file"
+    reupload_or_check_phrase = (
+        "try again or check the **Sales Data listing page** for the latest status"
+        if is_manual
+        else "re-upload your file or check the **Sales Data listing page** for the latest status"
+    )
+
     if error_type == "network":
         message = (
             "⚠️ **Submission failed** — A connectivity issue prevented the data "
             "from being saved. Please try again in a moment.\n\n"
-            "Your CSV has been retained — click Submit again when you're ready."
+            + retry_line
             + dev_detail
         )
     elif error_type == "server_error":
@@ -66,7 +82,7 @@ async def submission_error_node(state: ServiceRequestState) -> dict[str, Any]:
             "⚠️ **Submission failed** — The sales data service ran into an error "
             "while saving your data. Please try again in a moment, or contact "
             "support if this keeps happening.\n\n"
-            "Your CSV has been retained — click Submit again when you're ready."
+            + retry_line
             + dev_detail
         )
     elif error_type == "stale_state" or _is_stale_state_error(errors):
@@ -74,7 +90,7 @@ async def submission_error_node(state: ServiceRequestState) -> dict[str, Any]:
             "⚠️ **Submission rejected** — One or more leases in your file were updated "
             "by another channel while we were processing your submission.\n\n"
             "**None of your rows were saved** (the backend applies an all-or-nothing transaction).\n\n"
-            "Please re-upload your file or check the **Sales Data listing page** for the latest status."
+            f"Please {reupload_or_check_phrase}."
         )
     else:
         error_lines = []
@@ -99,7 +115,7 @@ async def submission_error_node(state: ServiceRequestState) -> dict[str, Any]:
             f"{error_text}\n\n"
             "**None of your rows were saved** because all rows must be valid for the "
             "submission to succeed.\n\n"
-            "Please correct the issues and re-upload your CSV file."
+            f"Please correct the issues and {reupload_phrase}."
         )
 
     return {

@@ -47,8 +47,11 @@ async def test_confirmation_card_includes_mapped_brand_and_property() -> None:
     assert ui["type"] == "manual_entry_confirm"
     assert ui["brand"] == "Noon Fashion"
     assert ui["property"] == "Riyadh Park"
-    assert "Noon Fashion" in result["response_message"]
-    assert "Riyadh Park" in result["response_message"]
+    # Brand/Property are rendered by the card from `ui["fields"]`, not
+    # duplicated into the plain-text chat bubble.
+    field_values = {f["key"]: f["value"] for f in ui["fields"]}
+    assert field_values["brand"] == "Noon Fashion"
+    assert field_values["property"] == "Riyadh Park"
 
 
 @pytest.mark.asyncio

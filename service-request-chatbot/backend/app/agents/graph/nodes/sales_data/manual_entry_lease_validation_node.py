@@ -90,6 +90,14 @@ async def manual_entry_lease_validation_node(state: ServiceRequestState) -> dict
 
     # Valid — enrich with lease_id from backend row
     enriched = valid[0]
+    matched_backend_row = next(
+        (
+            r for r in backend_rows
+            if r.get("lease_code") == enriched.get("lease_code")
+            and str(r.get("status") or "").upper() in ("PENDING", "NEED_REUPLOAD")
+        ),
+        None,
+    )
     collected["lease_id"] = enriched.get("lease_id")
     collected["sales_period_start"] = enriched["sales_period_start"]
     collected["sales_period_end"] = enriched["sales_period_end"]
@@ -102,6 +110,12 @@ async def manual_entry_lease_validation_node(state: ServiceRequestState) -> dict
         lease_code=lease_code,
         brand=collected["brand"],
         property=collected["property"],
+        typed_start=start,
+        typed_end=end,
+        enriched_start=collected["sales_period_start"],
+        enriched_end=collected["sales_period_end"],
+        raw_backend_start=(matched_backend_row or {}).get("sales_period_start"),
+        raw_backend_end=(matched_backend_row or {}).get("sales_period_end"),
     )
     return {
         "collected_data": collected,
