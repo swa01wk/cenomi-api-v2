@@ -120,6 +120,18 @@ def format_pending_list_message(items: list[dict[str, Any]]) -> str:
     return "\n".join(lines).strip()
 
 
+def format_pending_list_summary() -> str:
+    """Intro + trailing prose for the pending-months chat bubble, without the
+    per-lease/month enumeration — that part is shown once, as chips, by
+    PendingMonthsListCard (the accompanying response_ui.leases)."""
+    return (
+        "You have **PENDING** sales data that still needs to be uploaded.\n\n"
+        "Tell me which **month** (and lease, if you have more than one) to start with, "
+        "or drop a CSV. **One file can include several PENDING months** — "
+        "you do not have to name the month first."
+    )
+
+
 def format_other_months_reminder(
     lease_code: str,
     asked_label: str,

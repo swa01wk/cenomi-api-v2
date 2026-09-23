@@ -94,14 +94,40 @@ _PENDING_GATE_STAGES = frozenset({
     "AWAITING_OTHER_MONTHS_REMINDER",
 })
 _AMOUNT_RE = re.compile(
-    r"(?:sar\s*[\d,]+|amount\s*(?:is|:)?\s*[\d,]+|(?:is|:)\s*(?:sar\s*)?[\d,]{3,})",
+    # Bare numbers need 5+ digits (not 4) so a plain year mention ("August
+    # 2026") doesn't get misread as a typed sales amount.
+    # "[\d,]+\s*sar\b" (no \b before "sar") separately covers digits glued
+    # directly to the currency code ("12280SAR") — the trailing \b in the
+    # bare-number branch can't match there since a digit-to-letter run has
+    # no word boundary in between.
+    r"(?:sar\s*[\d,]+|[\d,]+\s*sar\b|amount\s*(?:is|:)?\s*[\d,]+"
+    r"|(?:is|:)\s*(?:sar\s*)?[\d,]{3,}"
+    r"|(?<![a-zA-Z0-9-])\d{5,}(?:\.\d+)?\b)",
     re.I,
 )
 _LEASE_CODE_RE = re.compile(
-    r"\b(?:lc[-\s]?\d{3,}|t\d{6,}|(?:lease)\s+[a-z0-9-]{3,})\b",
+    r"\b(?:lc[-\s]?\d{3,}|t\d{6,}|[a-z]{2,10}(?:[_-][a-z0-9]{2,10}){1,3}"
+    r"|(?:lease)\s+[a-z0-9_-]{3,})\b",
     re.I,
 )
 _EXPLICIT_CSV_PHRASES = ("upload", "csv", "attach")
+# "directly", "manually", "type it" answer the CSV-or-type choice with intent
+# to type — must win over _EXPLICIT_CSV_PHRASES even though "upload" often
+# appears in the same reply ("directly I want to upload", i.e. type it
+# directly rather than via file upload).
+_MANUAL_CHOICE_PHRASES = (
+    "directly",
+    "manually",
+    "type it",
+    "type them",
+    "enter it manually",
+    "not upload",
+    "no file",
+    "without a file",
+    "without csv",
+    "skip the file",
+    "skip the csv",
+)
 _YES_PHRASES = frozenset({
     "yes", "y", "ok", "okay", "proceed", "continue", "confirm", "sure",
 })
@@ -131,7 +157,14 @@ def _mentions_lease_code(message: str) -> bool:
 
 def _explicit_csv_request(message: str) -> bool:
     lowered = (message or "").lower()
+    if any(token in lowered for token in _MANUAL_CHOICE_PHRASES):
+        return False
     return any(token in lowered for token in _EXPLICIT_CSV_PHRASES)
+
+
+def _explicit_manual_choice(message: str) -> bool:
+    lowered = (message or "").lower()
+    return any(token in lowered for token in _MANUAL_CHOICE_PHRASES)
 
 
 def _notification_context(state: ServiceRequestState) -> dict[str, Any]:
@@ -466,6 +499,7 @@ async def sales_data_entry_node(state: ServiceRequestState) -> dict[str, Any]:
     # turn came from a notification deep-link (CSV dropzone) or the user
     # explicitly asked to upload a file.
     looks_typed = _looks_like_typed_amount(user_message)
+    wants_manual = _explicit_manual_choice(user_message)
     partial_lease_entry = (
         _mentions_lease_code(user_message)
         and not _notification_context(state)
@@ -478,7 +512,7 @@ async def sales_data_entry_node(state: ServiceRequestState) -> dict[str, Any]:
         or (
             intent == "UPLOAD_SALES_DATA"
             and action_override not in _CSV_UPLOAD_ACTIONS
-            and (looks_typed or partial_lease_entry)
+            and (looks_typed or partial_lease_entry or wants_manual)
         )
     ):
         log.info("sales_data_entry.manual_entry")

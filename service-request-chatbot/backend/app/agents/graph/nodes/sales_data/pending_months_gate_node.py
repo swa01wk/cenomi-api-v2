@@ -16,7 +16,7 @@ import structlog
 from app.agents.graph.nodes.sales_data.pending_months import (
     extract_lease_code,
     format_other_months_reminder,
-    format_pending_list_message,
+    format_pending_list_summary,
     leases_with_month,
     month_pending_on_lease,
     other_pending_months,
@@ -116,7 +116,10 @@ def _upload_prompt(state: ServiceRequestState, *, lease: str, asked: dict[str, s
 
 
 def _pending_list_payload(items: list[dict[str, Any]], collected: dict, refs: dict) -> dict[str, Any]:
-    message = format_pending_list_message(items)
+    # The chat bubble gets the intro/trailing prose only — the per-lease/month
+    # enumeration is shown once, as chips, by PendingMonthsListCard (below)
+    # rather than repeated in both the bubble and the card.
+    message = format_pending_list_summary()
     collected["_pending_items"] = items
     refs["pending_items"] = items
     grouped = {}
@@ -298,7 +301,7 @@ def _decide(
     if not month_pending_on_lease(items, lease, asked["year_month"]):
         message = (
             f"**{asked['label']}** is not pending for **{lease}**. "
-            "Here are the months that are still pending:"
+            "The months that are still pending are listed below."
         )
         payload = _pending_list_payload(items, collected, refs)
         payload["response_message"] = message + "\n\n" + payload["response_message"]
