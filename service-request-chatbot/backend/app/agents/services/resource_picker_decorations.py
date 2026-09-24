@@ -53,11 +53,15 @@ def build_handover_inbox_picker() -> dict[str, Any]:
 # only leases that already carry the one before it: the shop handed over before
 # fit-out can start, fit-out started before it can end, fit-out ended before
 # trading can begin. ``purpose`` is what tells GET /leases which rule to apply.
+# Work Permit uses ``work_permit`` (Activated, end_date not past).
 LEASE_PICKER_PURPOSE_BY_AGENT: dict[str, str] = {
     "rdd_fitout_start_agent": "fitout_confirm",
     "rdd_fitout_end_agent": "fitout_end",
     "rdd_trading_confirmation_agent": "trading_confirm",
+    "work_permit_agent": "work_permit",
 }
+
+_WORK_PERMIT_LEASE_PURPOSE = "work_permit"
 
 
 _GI_LEASE_AGENTS: frozenset[str] = frozenset({"general_inquiry_agent"})
@@ -87,8 +91,8 @@ def build_create_lease_picker(purpose: str | None = None) -> dict[str, Any]:
 
     Shows the 5 most recent, pages with read-more and narrows with the search
     box. Without *purpose* these are the handover-eligible leases (newest
-    activated first); with one they are the leases holding that workflow's
-    prerequisite milestone, newest milestone first.
+    activated first); with one they are the leases for that workflow's rule
+    (fitout milestone or Work Permit Activated list).
     """
     filters: dict[str, Any] = {
         "limit": 5,
@@ -111,16 +115,23 @@ _LEASE_BROWSE_STAGES: frozenset[str] = frozenset({"CREATE_SR", "CREATE_WORK_PERM
 
 def lease_picker_purpose(state: dict[str, Any]) -> str | None:
     """The ``purpose`` this state's lease picker must carry, if any."""
-    return LEASE_PICKER_PURPOSE_BY_AGENT.get(str(state.get("active_agent") or ""))
+    agent = str(state.get("active_agent") or "")
+    if agent in LEASE_PICKER_PURPOSE_BY_AGENT:
+        return LEASE_PICKER_PURPOSE_BY_AGENT[agent]
+    stage = state.get("workflow_stage") or ""
+    if stage == "CREATE_WORK_PERMIT":
+        return _WORK_PERMIT_LEASE_PURPOSE
+    return None
 
 
 def should_browse_leases(state: dict[str, Any]) -> bool:
     """True when a CREATE turn should offer lease browse chips.
 
     Handover, Work Permit create, General Inquiry, and the three fitout
-    confirmations each get a list. ``lease_picker_purpose`` carries the fitout
-    rule to the platform; handover and Work Permit use the eligible-lease list.
-    General Inquiry uses ``gi_leases`` (GET /general-inquiry/leases).
+    confirmations each get a list. ``lease_picker_purpose`` carries the
+    platform rule (handover has none; WP uses ``work_permit``; fitout uses
+    milestone purposes). General Inquiry uses ``gi_leases``
+    (GET /general-inquiry/leases).
     """
     from app.core.config import settings
 
@@ -139,7 +150,7 @@ def should_browse_leases(state: dict[str, Any]) -> bool:
     agent = str(state.get("active_agent") or "")
     stage = state.get("workflow_stage") or "CREATE_SR"
 
-    # Work Permit create shares Handover's eligible-lease picker.
+    # Work Permit create uses purpose=work_permit (Activated leases).
     if agent == "work_permit_agent" or stage == "CREATE_WORK_PERMIT":
         return stage in _LEASE_BROWSE_STAGES
 

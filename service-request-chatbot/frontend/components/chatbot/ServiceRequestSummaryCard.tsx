@@ -12,6 +12,17 @@ type Props = {
   readOnly?: boolean;
 };
 
+/** Prefer ``display``; never coerce objects to ``[object Object]``. */
+function fieldText(field: ConfirmationField): string {
+  if (field.display !== undefined && field.display !== null) {
+    return field.display === "" ? "—" : String(field.display);
+  }
+  const v = field.value;
+  if (v === null || v === undefined || v === "") return "—";
+  if (typeof v === "object") return "—";
+  return String(v);
+}
+
 function FieldRow({
   field,
   editedValue,
@@ -23,8 +34,7 @@ function FieldRow({
   onChange: (val: string) => void;
   readOnly?: boolean;
 }) {
-  const displayValue =
-    field.value === null || field.value === undefined ? "—" : String(field.value);
+  const displayValue = fieldText(field);
 
   // Human-readable labels for known enum values
   const ENUM_LABELS: Record<string, string> = {
@@ -90,7 +100,15 @@ export function ServiceRequestSummaryCard({
     const init: Record<string, string> = {};
     data.fields.forEach((f) => {
       if (f.editable) {
-        init[f.key] = f.value === null || f.value === undefined ? "" : String(f.value);
+        const text =
+          f.display !== undefined && f.display !== null
+            ? String(f.display)
+            : typeof f.value === "object" && f.value !== null
+              ? ""
+              : f.value === null || f.value === undefined
+                ? ""
+                : String(f.value);
+        init[f.key] = text;
       }
     });
     setEditedFields(init);

@@ -107,6 +107,12 @@ _DAY_MONTH_RANGE_RE = re.compile(
     r"(?P<month>[A-Za-z]+)(?:\s+(?P<year>\d{4}))?\b",
     re.IGNORECASE,
 )
+# "24 sep to 28 sep" / "24 september to 28 september 2026"
+_DAY_MONTH_EACH_SIDE_RANGE_RE = re.compile(
+    r"\b(?P<d1>\d{1,2})\s+(?P<m1>[A-Za-z]+)\s*(?:to|-)\s*"
+    r"(?P<d2>\d{1,2})\s+(?P<m2>[A-Za-z]+)(?:\s+(?P<year>\d{4}))?\b",
+    re.IGNORECASE,
+)
 # Single "23 september" / "23 september 2026"
 _DAY_MONTH_SINGLE_RE = re.compile(
     r"\b(?P<d1>\d{1,2})\s+(?P<month>[A-Za-z]+)(?:\s+(?P<year>\d{4}))?\b",
@@ -122,7 +128,7 @@ _SLASH_DATE_RANGE_RE = re.compile(
 _ORDINAL_DAY_RE = re.compile(r"\b(\d{1,2})(st|nd|rd|th)\b", re.IGNORECASE)
 
 _WP_SCHEDULE_FIELDS: frozenset[str] = frozenset(
-    {"effective_starting", "firstperiod", "secondperiod"}
+    {"effective_starting", "firstperiod", "secondperiod", "planned_second_period"}
 )
 
 
@@ -153,7 +159,7 @@ def _drop_incomplete_schedule_overwrites(
         if field_name not in extracted_fields:
             continue
         collected_val = collected.get(field_name)
-        optional = field_name == "secondperiod"
+        optional = field_name in {"secondperiod", "planned_second_period"}
         if is_tenant_field_missing(field_name, collected_val, optional=optional):
             continue
         new_val = _schedule_value_from_extracted(extracted_fields[field_name])
@@ -192,15 +198,32 @@ def _parse_time_to_hhmm(token: str, *, default_suffix: str | None = None) -> str
     return None
 
 
-def _extract_time_period(message: str) -> dict[str, str] | None:
+def _extract_time_period(
+    message: str,
+    *,
+    allow_bare_hours: bool = False,
+) -> dict[str, str] | None:
     """Return {from, to} if message contains a recognisable time range, else None."""
     # Prefer a match that has at least one am/pm (avoids "23 to 24" day ranges).
     best: re.Match[str] | None = None
+    bare: re.Match[str] | None = None
     for m in _TIME_RANGE_RE.finditer(message):
         blob = f"{m.group('from')} {m.group('to')}".lower()
         if "am" in blob or "pm" in blob or ":" in blob:
             best = m
             break
+        if allow_bare_hours and bare is None:
+            # Reject day-like pairs (e.g. 24 to 26) — hours stay 0–23 and
+            # typically the left hour is smaller in a same-day window.
+            try:
+                left_h = int(re.match(r"\d{1,2}", m.group("from").strip()).group(0))  # type: ignore[union-attr]
+                right_h = int(re.match(r"\d{1,2}", m.group("to").strip()).group(0))  # type: ignore[union-attr]
+            except (AttributeError, ValueError):
+                continue
+            if 0 <= left_h <= 23 and 0 <= right_h <= 23 and left_h != right_h:
+                bare = m
+    if best is None and allow_bare_hours:
+        best = bare
     if best is None:
         return None
     left, right = best.group("from").strip(), best.group("to").strip()
@@ -215,6 +238,15 @@ def _extract_time_period(message: str) -> dict[str, str] | None:
     to_hhmm = _parse_time_to_hhmm(right, default_suffix=shared)
     if from_hhmm and to_hhmm:
         return {"from": from_hhmm, "to": to_hhmm}
+    # Bare hours without am/pm — treat as 24h clock (9 → 09:00, 17 → 17:00).
+    if allow_bare_hours and best is bare:
+        left_m = re.fullmatch(r"(\d{1,2})(?::(\d{2}))?", left)
+        right_m = re.fullmatch(r"(\d{1,2})(?::(\d{2}))?", right)
+        if left_m and right_m:
+            lh, lm = int(left_m.group(1)), int(left_m.group(2) or 0)
+            rh, rm = int(right_m.group(1)), int(right_m.group(2) or 0)
+            if 0 <= lh <= 23 and 0 <= rh <= 23 and 0 <= lm <= 59 and 0 <= rm <= 59:
+                return {"from": f"{lh:02d}:{lm:02d}", "to": f"{rh:02d}:{rm:02d}"}
     return None
 
 
@@ -269,6 +301,17 @@ def _extract_effective_starting(
         if left and right:
             return {"datefrom": left, "dateto": right}
 
+    m = _DAY_MONTH_EACH_SIDE_RANGE_RE.search(message)
+    if m:
+        m1 = _MONTH_NAMES.get(m.group("m1").lower())
+        m2 = _MONTH_NAMES.get(m.group("m2").lower())
+        if m1 and m2:
+            year = _expand_year(m.group("year"), default_year)
+            left = _fmt_ddmmyyyy(int(m.group("d1")), m1, year)
+            right = _fmt_ddmmyyyy(int(m.group("d2")), m2, year)
+            if left and right:
+                return {"datefrom": left, "dateto": right}
+
     m = _DAY_MONTH_SINGLE_RE.search(message)
     if m:
         month = _MONTH_NAMES.get(m.group("month").lower())
@@ -307,13 +350,147 @@ _FREE_TEXT_FIELDS: frozenset[str] = frozenset(
         # Contact fields: LLM often omits bare digit phones / short unit labels.
         "phone",
         "unit_type",
+        "department",
     }
 )
+
+# Label aliases for multi-field group replies ("Type of work - …\nEquipments- …").
+_WP_LABELED_FIELD_ALIASES: dict[str, tuple[str, ...]] = {
+    "type_work": ("type of work", "work type", "typeofwork"),
+    "list_equipment": (
+        "list of equipment involved",
+        "list of equipment",
+        "equipments",
+        "equipment",
+    ),
+    "work_info": ("work information", "work info", "workinfo"),
+    "owner": ("owner",),
+    "trade_name": ("trade name", "tradename"),
+    "responsible_person": ("responsible person", "responsible"),
+    "phone": ("contact phone number", "phone number", "phone", "mobile"),
+    "department": ("department", "dept"),
+    "unit_type": ("unit type", "unittype"),
+    "contractor_name": ("contractor name", "contractor"),
+    "work_type": ("work type",),
+    "work_location": ("work location",),
+    "demand_appendices": ("demand appendices", "appendices"),
+    "special_conditions": ("special conditions",),
+    "notes": ("notes", "note"),
+    "description": ("description",),
+    "title": ("title",),
+}
+
+_LABELED_LINE_RE = re.compile(
+    r"^\s*(?P<label>[A-Za-z][A-Za-z0-9 /_-]{0,60}?)\s*[-:–—]\s*(?P<value>.+?)\s*$"
+)
+
+
+def _normalize_label_key(label: str) -> str:
+    return re.sub(r"[\s/_-]+", " ", label.strip().lower())
+
+
+def _label_to_field(label: str) -> str | None:
+    norm = _normalize_label_key(label)
+    for field, aliases in _WP_LABELED_FIELD_ALIASES.items():
+        for alias in aliases:
+            if norm == alias or norm.replace(" ", "") == alias.replace(" ", ""):
+                return field
+    return None
+
+
+def _parse_labeled_group_fields(
+    message: str,
+    open_fields: set[str],
+) -> dict[str, str]:
+    """Split labeled multi-line replies into free-text field values."""
+    if not message.strip() or not open_fields:
+        return {}
+    out: dict[str, str] = {}
+    for raw_line in message.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        match = _LABELED_LINE_RE.match(line)
+        if not match:
+            continue
+        field = _label_to_field(match.group("label"))
+        if field is None or field not in open_fields:
+            continue
+        value = match.group("value").strip()
+        if value and field not in out:
+            out[field] = value
+    return out
+
+
+def _count_labeled_lines(message: str) -> int:
+    return sum(1 for line in message.splitlines() if _LABELED_LINE_RE.match(line.strip()))
+
+
+def _extracted_scalar(entry: Any) -> Any:
+    if isinstance(entry, dict):
+        return entry.get("value")
+    return entry
+
+
+def _planneddate_has_dates(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    return bool(
+        str(value.get("worktimedate") or "").strip()
+        and str(value.get("completionworkdate") or "").strip()
+    )
+
+
+def _planneddate_has_first_times(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    return bool(
+        str(value.get("worktimefrom") or "").strip()
+        and str(value.get("worktimeto") or "").strip()
+    )
+
+
+def _normalize_day_month_glue(message: str) -> str:
+    """Turn ``24sep`` into ``24 sep`` so day-month regexes can match."""
+    return re.sub(
+        r"\b(\d{1,2})(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec|"
+        r"january|february|march|april|june|july|august|september|october|"
+        r"november|december)\b",
+        r"\1 \2",
+        message,
+        flags=re.IGNORECASE,
+    )
+
+
+def _merge_planneddate_base(
+    collected: dict[str, Any],
+    extracted_entry: Any,
+) -> dict[str, str]:
+    from app.agents.schemas.work_permit_form_fields import EMPTY_PLANNEDDATE
+
+    base = dict(EMPTY_PLANNEDDATE)
+    existing = collected.get("planneddate")
+    if isinstance(existing, dict):
+        for key, raw in existing.items():
+            if raw not in (None, ""):
+                base[key] = str(raw)
+    current = _schedule_value_from_extracted(extracted_entry) if extracted_entry else None
+    if isinstance(current, dict):
+        for key, raw in current.items():
+            if raw not in (None, ""):
+                base[key] = str(raw)
+    return base
+
 
 # Answers that genuinely mean "leave this blank".
 _SKIP_ANSWER_RE = re.compile(
     r"^\s*(none|no|nope|skip|n/?a|nothing|no\s+\w+|not\s+now|-{1,2})\s*[.!]?\s*$",
     re.IGNORECASE,
+)
+
+# Ops / WP optionals that accept "" or empty period as an explicit skip.
+_WP_OPTIONAL_SKIP_FIELDS: frozenset[str] = frozenset(
+    {"secondperiod", "planned_second_period", "entry_gate", "notes"}
 )
 
 
@@ -539,18 +716,69 @@ async def field_extraction_node(state: ServiceRequestState) -> dict[str, Any]:
         retry_count=meta.retry_count,
     )
 
+    # Deterministic skip for Ops optionals: LLM often omits the field on "none",
+    # leaving collected None so get_missing_fields keeps re-asking.
+    if (
+        active_field in _WP_OPTIONAL_SKIP_FIELDS
+        and _SKIP_ANSWER_RE.match(user_message)
+    ):
+        from app.agents.schemas.work_permit_form_fields import EMPTY_PERIOD
+
+        if active_field in {"secondperiod", "planned_second_period"}:
+            skip_value: Any = dict(EMPTY_PERIOD)
+        else:
+            skip_value = ""
+        log.info(
+            "field_extraction.optional_skip",
+            active_field=active_field,
+        )
+        extracted_fields[active_field] = {
+            "value": skip_value
+            if not isinstance(skip_value, dict)
+            else json.dumps(skip_value),
+            "confidence": 1.0,
+        }
+
     # Deterministic rescue for free-text answers the LLM read as field
     # references rather than content. Verified live: "Post description" came
     # back as {"description": {"value": ""}} and "Post notes" as {}, which
     # blanked the field (auto-generating a replacement) and re-asked forever.
     # The user typed the value, so use it verbatim.
     #
+    # Multi-field group asks (work details / identity): parse labeled lines
+    # BEFORE dumping the whole message into active_field.
+    _ui_fields_ft = set((state.get("response_ui") or {}).get("fields") or [])
+    _group_open = {
+        f
+        for f in (set(missing_fields or []) | _ui_fields_ft)
+        if f in _FREE_TEXT_FIELDS
+    }
+    if active_field in _FREE_TEXT_FIELDS:
+        _group_open.add(active_field)
+    _labeled = _parse_labeled_group_fields(user_message, _group_open)
+    _labeled_applied = False
+    for _lf, _lv in _labeled.items():
+        entry = extracted_fields.get(_lf)
+        current = _extracted_scalar(entry)
+        if current in (None, "", []):
+            log.info(
+                "field_extraction.labeled_group_field",
+                field=_lf,
+                value=_lv[:80],
+            )
+            extracted_fields[_lf] = {"value": _lv, "confidence": 1.0}
+            _labeled_applied = True
+
     # Do NOT bind a digits-only reply onto unit_type (group primary) — that is
     # a phone answer when phone is still open.
+    _skip_full_dump = _labeled_applied or (
+        len(_group_open) >= 2 and _count_labeled_lines(user_message) >= 2
+    )
     if (
         active_field in _FREE_TEXT_FIELDS
         and not _SKIP_ANSWER_RE.match(user_message)
         and user_message.strip()
+        and not _skip_full_dump
         and not (
             active_field == "unit_type"
             and _WP_BARE_PHONE_RE.match(user_message.strip())
@@ -627,11 +855,11 @@ async def field_extraction_node(state: ServiceRequestState) -> dict[str, Any]:
                 _sf,
                 _collected.get(_sf),
                 field_type=_ft.get(_sf),
-                optional=_sf == "secondperiod",
+                optional=_sf in {"secondperiod", "planned_second_period"},
             ):
                 _schedule_open.add(_sf)
 
-    for _period_field in ("firstperiod", "secondperiod"):
+    for _period_field in ("firstperiod", "secondperiod", "planned_second_period"):
         if _period_field not in _schedule_open:
             continue
         _period_entry = extracted_fields.get(_period_field)
@@ -697,9 +925,18 @@ async def field_extraction_node(state: ServiceRequestState) -> dict[str, Any]:
                 entry.setdefault("confidence", 1.0)
                 extracted_fields["effective_starting"] = entry
                 datefrom = dateto = datefrom
-        if not datefrom or not dateto:
-            parsed_dates = _extract_effective_starting(user_message)
-            if parsed_dates:
+        parsed_dates = _extract_effective_starting(user_message)
+        if parsed_dates:
+            parsed_from = str(parsed_dates.get("datefrom") or "").strip()
+            parsed_to = str(parsed_dates.get("dateto") or "").strip()
+            # Apply when LLM left a hole, or collapsed a real range to one day.
+            should_apply = (not datefrom or not dateto) or (
+                parsed_from
+                and parsed_to
+                and parsed_from != parsed_to
+                and datefrom == dateto
+            )
+            if should_apply:
                 log.info(
                     "field_extraction.effective_starting_fallback",
                     value=parsed_dates,
@@ -708,6 +945,59 @@ async def field_extraction_node(state: ServiceRequestState) -> dict[str, Any]:
                     "value": json.dumps(parsed_dates),
                     "confidence": 1.0,
                 }
+
+    # planneddate: accept date-only ("24 to 26 sep") then times ("9 to 5").
+    # Preserve already-collected dates/times when only one half arrives.
+    _planneddate_open = (
+        active_field == "planneddate"
+        or "planneddate" in (missing_fields or [])
+        or "planneddate" in set(_ui_fields)
+    )
+    if (
+        _planneddate_open
+        and not _SKIP_ANSWER_RE.match(user_message)
+        and user_message.strip()
+    ):
+        planned_base = _merge_planneddate_base(
+            _collected, extracted_fields.get("planneddate")
+        )
+        date_msg = _normalize_day_month_glue(_strip_ordinal_days(user_message))
+        parsed_dates = _extract_effective_starting(date_msg)
+        changed = False
+        if parsed_dates:
+            planned_base["worktimedate"] = str(parsed_dates["datefrom"])
+            planned_base["completionworkdate"] = str(parsed_dates["dateto"])
+            changed = True
+            log.info(
+                "field_extraction.planneddate_dates",
+                value=parsed_dates,
+            )
+        # Time-only (or dates+times) reply: fill first period when missing.
+        if not _planneddate_has_first_times(planned_base):
+            # Prefer am/pm or HH:MM; allow bare "9 to 5" once dates are known
+            # (avoids treating "24 to 26" as times).
+            parsed_period = _extract_time_period(user_message)
+            if (
+                not parsed_period
+                and _planneddate_has_dates(planned_base)
+                and not parsed_dates
+            ):
+                parsed_period = _extract_time_period(
+                    user_message, allow_bare_hours=True
+                )
+            if parsed_period:
+                planned_base["worktimefrom"] = parsed_period["from"]
+                planned_base["worktimeto"] = parsed_period["to"]
+                changed = True
+                log.info(
+                    "field_extraction.planneddate_times",
+                    value=parsed_period,
+                )
+        if changed:
+            extracted_fields["planneddate"] = {
+                "value": json.dumps(planned_base),
+                "confidence": 1.0,
+            }
 
     # Drop incomplete schedule stubs that would wipe a complete collected value.
     _drop_incomplete_schedule_overwrites(extracted_fields, _collected)

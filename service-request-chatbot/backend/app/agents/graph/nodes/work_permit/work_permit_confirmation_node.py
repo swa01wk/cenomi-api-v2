@@ -14,7 +14,11 @@ from typing import Any
 from app.agents.graph.state import ServiceRequestState
 from app.agents.schemas.work_permit_form_fields import (
     FIELD_LABELS as WP_FORM_FIELD_LABELS,
+    format_wp_field_display,
     form_spec_for,
+    summarize_effective_starting,
+    summarize_period,
+    summarize_typeofwork,
 )
 from app.agents.schemas.work_permit_schema import (
     STAGE_LABELS,
@@ -93,27 +97,6 @@ def _non_actor_review_message(stage: str, sr_id: str | None) -> str:
     )
 
 
-def _fmt_time(raw: Any) -> str:
-    text = str(raw or "").strip()
-    return text
-
-
-def _summarize_planneddate(value: dict[str, Any]) -> str:
-    start = str(value.get("worktimedate") or "").strip()
-    end = str(value.get("completionworkdate") or "").strip()
-    t_from = _fmt_time(value.get("worktimefrom") or value.get("worktimefromLT"))
-    t_to = _fmt_time(value.get("worktimeto") or value.get("worktimetoLT"))
-    left = start
-    if t_from:
-        left = f"{start} {t_from}".strip()
-    right = end
-    if t_to:
-        right = f"{end} {t_to}".strip()
-    if left and right:
-        return f"{left} → {right}"
-    return left or right or ""
-
-
 def _summarize_workers(value: Any) -> str:
     if isinstance(value, list):
         names = [
@@ -138,65 +121,21 @@ def _summarize_workers(value: Any) -> str:
     return ""
 
 
-def _summarize_measureofsafety(value: dict[str, Any]) -> str:
-    from app.agents.schemas.work_permit_form_fields import WP_MEASURE_OF_SAFETY_LABELS
-
-    on = [
-        WP_MEASURE_OF_SAFETY_LABELS.get(k, k)
-        for k, v in value.items()
-        if str(v or "").strip()
-    ]
-    return ", ".join(on) if on else ""
-
-
-def _summarize_typeofwork(value: Any) -> str:
-    if isinstance(value, dict):
-        raw = value.get("value")
-        if isinstance(raw, list):
-            primary = ", ".join(str(v).strip() for v in raw if str(v or "").strip())
-        else:
-            primary = str(raw or "").strip()
-        other = str(value.get("otheroption") or "").strip()
-        if primary and other:
-            return f"{primary} ({other})"
-        return primary or other
-    if isinstance(value, list):
-        return ", ".join(str(v).strip() for v in value if str(v or "").strip())
-    return str(value or "").strip()
-
-
-def _summarize_effective_starting(value: dict[str, Any]) -> str:
-    left = str(value.get("datefrom") or "").strip()
-    right = str(value.get("dateto") or "").strip()
-    if left and right:
-        return f"{left} → {right}"
-    return left or right
-
-
-def _summarize_period(value: dict[str, Any]) -> str:
-    left = str(value.get("from") or value.get("fromLT") or "").strip()
-    right = str(value.get("to") or value.get("toLT") or "").strip()
-    if left and right:
-        return f"{left} – {right}"
-    return left or right
-
-
 def _display_value(key: str, raw_val: Any) -> Any:
     if key == "work_permit_type":
         return WORK_PERMIT_TYPE_LABELS.get(raw_val, raw_val)
     if key == "planneddate" and isinstance(raw_val, dict):
-        return _summarize_planneddate(raw_val) or raw_val
+        return format_wp_field_display(key, raw_val)
     if key == "workers":
-        summary = _summarize_workers(raw_val)
-        return summary or raw_val
+        return format_wp_field_display(key, raw_val) or _summarize_workers(raw_val)
     if key == "measureofsafety" and isinstance(raw_val, dict):
-        return _summarize_measureofsafety(raw_val) or raw_val
+        return format_wp_field_display(key, raw_val)
     if key == "typeofwork":
-        return _summarize_typeofwork(raw_val) or raw_val
+        return summarize_typeofwork(raw_val)
     if key == "effective_starting" and isinstance(raw_val, dict):
-        return _summarize_effective_starting(raw_val) or raw_val
+        return summarize_effective_starting(raw_val)
     if key in {"firstperiod", "secondperiod"} and isinstance(raw_val, dict):
-        return _summarize_period(raw_val) or raw_val
+        return summarize_period(raw_val)
     if isinstance(raw_val, (dict, list)):
         try:
             return json.dumps(raw_val, ensure_ascii=False)
@@ -288,10 +227,15 @@ def _build_confirmation_card(
         raw_val = collected_data.get(key)
         if raw_val in (None, "", []):
             continue
+        shown = _display_value(key, raw_val)
+        # Empty nested widgets (e.g. skipped secondperiod) must not become
+        # "[object Object]" — omit the row when there is nothing to show.
+        if shown in (None, "", []) or isinstance(shown, (dict, list)):
+            continue
         row: dict[str, Any] = {
             "key": key,
             "label": _FIELD_LABELS.get(key, key),
-            "value": _display_value(key, raw_val),
+            "value": shown,
             "editable": (not review) and key in editable,
         }
         row.update(_provenance_for(key, raw_val, ai_meta))

@@ -3,19 +3,19 @@
 from __future__ import annotations
 
 import logging
-import re
 from typing import Any
 
 from app.agents.graph.state import ServiceRequestState
 from app.agents.schemas.work_permit_form_fields import (
     coerce_tenant_field_value,
     empty_value_for,
+    expand_period_for_api,
+    expand_planneddate_for_api,
     form_spec_for,
     is_nested_widget,
 )
 from app.agents.schemas.work_permit_schema import (
     WP_REVIEW_STAGES,
-    ddmmyyyy_to_iso,
     generate_wp_description,
     generate_wp_title,
     resolve_wp_sub_category,
@@ -45,77 +45,6 @@ _REVIEW_INNER_ENVELOPE_KEYS: frozenset[str] = frozenset(
     }
 )
 
-# Chat collects HH:MM; Go ``is_not_before_time`` requires ISO8601
-# ``2006-01-02T15:04:05.000Z`` (same layout as cenomi-api constants.ISO8601Format).
-_HHMM_RE = re.compile(r"^(\d{1,2}):(\d{2})$")
-_ISO_Z_RE = re.compile(
-    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$"
-)
-
-
-def _hhmm_to_lt(hhmm: str) -> str:
-    """Portal display ``3:04 PM`` (matches Go ``3:04 PM`` layout)."""
-    match = _HHMM_RE.match(hhmm.strip())
-    if not match:
-        return hhmm
-    hour = int(match.group(1))
-    minute = int(match.group(2))
-    if hour < 0 or hour > 23 or minute < 0 or minute > 59:
-        return hhmm
-    period = "AM" if hour < 12 else "PM"
-    hour12 = hour % 12 or 12
-    return f"{hour12}:{minute:02d} {period}"
-
-
-def _hhmm_to_iso_z(date_ddmmyyyy: str, hhmm: str) -> str | None:
-    """Combine DD/MM/YYYY + HH:MM into Go ISO8601 ``…T15:04:05.000Z``."""
-    ymd = ddmmyyyy_to_iso(date_ddmmyyyy)
-    match = _HHMM_RE.match(str(hhmm or "").strip())
-    if not ymd or len(ymd) != 10 or not match:
-        return None
-    hour = int(match.group(1))
-    minute = int(match.group(2))
-    if hour < 0 or hour > 23 or minute < 0 or minute > 59:
-        return None
-    return f"{ymd}T{hour:02d}:{minute:02d}:00.000Z"
-
-
-def _expand_period_for_api(
-    period: Any,
-    *,
-    date_ddmmyyyy: str,
-) -> dict[str, Any]:
-    """Expand chat HH:MM period times to ISO8601 + LT for platform create."""
-    if not isinstance(period, dict):
-        return {"from": "", "to": ""}
-
-    raw_from = str(period.get("from") or "").strip()
-    raw_to = str(period.get("to") or "").strip()
-    if not raw_from and not raw_to:
-        return {"from": "", "to": ""}
-
-    out: dict[str, Any] = dict(period)
-
-    def _expand_one(key: str, lt_key: str, raw: str) -> None:
-        if not raw:
-            out[key] = ""
-            return
-        if _ISO_Z_RE.match(raw) or "T" in raw:
-            # Already ISO / RFC3339 from the portal form — keep as-is.
-            out[key] = raw
-            return
-        iso = _hhmm_to_iso_z(date_ddmmyyyy, raw)
-        if iso:
-            out[key] = iso
-            if not str(out.get(lt_key) or "").strip():
-                out[lt_key] = _hhmm_to_lt(raw)
-        else:
-            out[key] = raw
-
-    _expand_one("from", "fromLT", raw_from)
-    _expand_one("to", "toLT", raw_to)
-    return out
-
 
 def _apply_ops_period_iso(inner: dict[str, Any]) -> None:
     """Mutate Ops ``firstperiod`` / ``secondperiod`` HH:MM → ISO for Go validators."""
@@ -135,7 +64,7 @@ def _apply_ops_period_iso(inner: dict[str, Any]) -> None:
             period.get("to") or ""
         ).strip():
             continue
-        inner[key] = _expand_period_for_api(period, date_ddmmyyyy=date_from)
+        inner[key] = expand_period_for_api(period, date_ddmmyyyy=date_from)
 
 
 def _inner_payload_from_collected(data: dict[str, Any]) -> dict[str, Any]:
@@ -204,6 +133,10 @@ def _inner_payload_from_collected(data: dict[str, Any]) -> dict[str, Any]:
 
     # Ops schedule: chat HH:MM → ISO8601 for Go is_not_before_time.
     _apply_ops_period_iso(inner)
+
+    # Cold/hot planneddate: ensure portal TimePicker LT aliases are present.
+    if isinstance(inner.get("planneddate"), dict):
+        inner["planneddate"] = expand_planneddate_for_api(inner["planneddate"])
 
     return inner
 

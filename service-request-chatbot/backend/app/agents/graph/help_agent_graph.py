@@ -644,7 +644,8 @@ def _route_after_validation(state: dict[str, Any]) -> str:
         # comments (and any other optional-only fields) are asked once before the
         # review card, matching the CREATE_SR (Path A) behavior.
         if (
-            original_stage in ("CREATE_SR", "CREATE_HANDED_OVER_SR")
+            original_stage
+            in ("CREATE_SR", "CREATE_HANDED_OVER_SR", "CREATE_WORK_PERMIT")
             and active_agent not in _FITOUT_AGENTS
             and not already_confirmed
         ):

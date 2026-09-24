@@ -238,6 +238,7 @@ EXTRACTABLE_FIELDS: frozenset[str] = frozenset(
         "effective_starting",
         "firstperiod",
         "secondperiod",
+        "planned_second_period",
         "entry_gate",
         "permission_given_to",
     }
@@ -253,7 +254,7 @@ OPTIONAL_FIELDS: frozenset[str] = frozenset().union(
 AUTO_GENERATED_FIELDS: frozenset[str] = frozenset()
 
 # Short-flow fills these instead of asking (same flag as Handover short flow).
-WP_AI_FILLED_FIELDS: frozenset[str] = frozenset({"title", "description"})
+WP_AI_FILLED_FIELDS: frozenset[str] = frozenset({"title", "description", "notes"})
 
 
 def wp_short_flow_enabled() -> bool:
@@ -348,6 +349,7 @@ def resolve_wp_sub_category(
 
 _WP_TITLE_MAX_LEN: Final[int] = 50  # Go WorkPermitOperations.Title max=50
 _WP_DESCRIPTION_MAX_LEN: Final[int] = 200  # Go WorkPermitOperations.Description max=200
+_WP_NOTES_MAX_LEN: Final[int] = 500  # Go WorkPermitOperations.Notes max=500
 
 # Compact subtype labels for the 50-char title budget (brand must still fit).
 _WP_TITLE_SUBTYPE_LABELS: Final[dict[str, str]] = {
@@ -376,6 +378,16 @@ def truncate_wp_description(
 ) -> str:
     """Clamp description to the platform max (ellipsis when truncated)."""
     text = str(description or "").strip()
+    if len(text) <= max_len:
+        return text
+    if max_len <= 1:
+        return text[:max_len]
+    return text[: max_len - 1].rstrip() + "…"
+
+
+def truncate_wp_notes(notes: str, *, max_len: int = _WP_NOTES_MAX_LEN) -> str:
+    """Clamp notes to the platform max (ellipsis when truncated)."""
+    text = str(notes or "").strip()
     if len(text) <= max_len:
         return text
     if max_len <= 1:
@@ -472,6 +484,15 @@ def generate_wp_description(collected: dict[str, Any] | None) -> str:
         return ""
     label = wp_subtype_label(collected)
     return truncate_wp_description(f"{label} work permit for {lease_code}.")
+
+
+def generate_wp_notes(collected: dict[str, Any] | None) -> str:
+    """Notes: ``{subtype} work permit for {lease_brand_mall or brand/mall}.`` (max 500)."""
+    location = wp_location_label(collected)
+    if not location:
+        return ""
+    label = wp_subtype_label(collected)
+    return truncate_wp_notes(f"{label} work permit for {location}.")
 
 
 def is_lease_code_only_wp_auto_text(
@@ -583,6 +604,25 @@ def get_create_required_fields(collected: dict[str, Any] | None = None) -> tuple
                 continue
             seen.add(name)
             ordered.append(name)
+            # Ask optional second period right after the required planneddate window.
+            if (
+                name == "planneddate"
+                and subtype in {"CONSTRUCTION_COLD", "MAINTENANCE_COLD"}
+                and "planned_second_period" not in seen
+            ):
+                seen.add("planned_second_period")
+                ordered.append("planned_second_period")
+        # Ops optional ask-or-skip (None = ask once; "" = explicit skip).
+        if subtype == "OPERATIONS":
+            for name in ("secondperiod", "entry_gate", "notes"):
+                if name not in seen:
+                    seen.add(name)
+                    ordered.append(name)
+        # Cold optional notes (second period already inserted after planneddate).
+        elif subtype in {"CONSTRUCTION_COLD", "MAINTENANCE_COLD"}:
+            if "notes" not in seen:
+                seen.add("notes")
+                ordered.append("notes")
     return tuple(ordered)
 
 

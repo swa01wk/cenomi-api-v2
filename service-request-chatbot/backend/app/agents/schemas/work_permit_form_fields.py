@@ -8,6 +8,7 @@ omitted). Checked in so the chatbot does not query the platform DB at runtime.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from typing import Any, Final
 
@@ -139,6 +140,7 @@ _COLD_TYPES: Final[dict[str, str]] = {
     "work_info": "textarea",
     "notes": "textarea",
     "planneddate": "planneddate",
+    "planned_second_period": "timepicker",
     "workers": "listWorker",
 }
 
@@ -235,13 +237,13 @@ TENANT_FORM_BY_SUBTYPE: Final[dict[str, WpTenantFormSpec]] = {
         common_keys=_COLD_COMMON,
         field_types=_COLD_TYPES,
         required_tenant_fields=_COLD_REQUIRED,
-        optional_tenant_fields=frozenset({"notes"}),
+        optional_tenant_fields=frozenset({"planned_second_period", "notes"}),
     ),
     "MAINTENANCE_COLD": WpTenantFormSpec(
         common_keys=_COLD_COMMON,
         field_types=_COLD_TYPES,
         required_tenant_fields=_COLD_REQUIRED,
-        optional_tenant_fields=frozenset({"notes"}),
+        optional_tenant_fields=frozenset({"planned_second_period", "notes"}),
     ),
     "CONSTRUCTION_HOT": WpTenantFormSpec(
         common_keys=_HOT_COMMON,
@@ -301,6 +303,7 @@ FIELD_LABELS: Final[dict[str, str]] = {
     "demand_appendices": "Demand Appendices",
     "special_conditions": "Special Conditions",
     "planneddate": "Planned Date and Time",
+    "planned_second_period": "Second Period",
     "workers": "Workers",
     "measureofsafety": "Measure of Safety",
     "typeofwork": "Type of Work",
@@ -320,19 +323,102 @@ def form_spec_for(subtype: str | None) -> WpTenantFormSpec | None:
 
 
 def _planneddate_incomplete(value: Any) -> bool:
+    """Cold/hot portal: dates + first-period times required; second period optional."""
     if not isinstance(value, dict):
         return True
-    return not str(value.get("worktimedate") or "").strip() or not str(
-        value.get("completionworkdate") or ""
-    ).strip()
+    for key in (
+        "worktimedate",
+        "completionworkdate",
+        "worktimefrom",
+        "worktimeto",
+    ):
+        if not str(value.get(key) or "").strip():
+            return True
+    return False
+
+
+def _list_worker_row_text_incomplete(row: dict[str, Any]) -> bool:
+    for key in ("full_name", "designation", "company_name", "iqama_number"):
+        if not str(row.get(key) or "").strip():
+            return True
+    return False
+
+
+def cold_workers_text_incomplete(value: Any) -> bool:
+    """True when cold ``listWorker`` still needs name / company / designation / iqama."""
+    if not isinstance(value, list) or not value:
+        return True
+    for row in value:
+        if not isinstance(row, dict) or _list_worker_row_text_incomplete(row):
+            return True
+    return False
+
+
+def cold_workers_missing_doc_indexes(value: Any) -> list[int]:
+    """Indexes of cold workers that still need an Iqama ``document_id``."""
+    if not isinstance(value, list):
+        return []
+    missing: list[int] = []
+    for idx, row in enumerate(value):
+        if not isinstance(row, dict):
+            missing.append(idx)
+            continue
+        if _list_worker_row_text_incomplete(row):
+            continue
+        if not str(row.get("document_id") or "").strip():
+            missing.append(idx)
+    return missing
+
+
+WP_COLD_WORKER_IQAMA_PREFIX: Final[str] = "WP_COLD_WORKER_IQAMA_"
+
+
+def cold_worker_iqama_doc_key(index: int) -> str:
+    return f"{WP_COLD_WORKER_IQAMA_PREFIX}{index}"
+
+
+def parse_cold_worker_iqama_doc_key(key: str) -> int | None:
+    raw = str(key or "").strip()
+    if not raw.startswith(WP_COLD_WORKER_IQAMA_PREFIX):
+        return None
+    suffix = raw[len(WP_COLD_WORKER_IQAMA_PREFIX) :]
+    if not suffix.isdigit():
+        return None
+    return int(suffix)
+
+
+def apply_cold_worker_iqama_documents(
+    workers: Any,
+    documents: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    """Copy uploaded Iqama ``document_id``s onto matching cold worker rows."""
+    if not isinstance(workers, list):
+        return [dict(EMPTY_LIST_WORKER[0])]
+    out = [dict(row) if isinstance(row, dict) else dict(EMPTY_LIST_WORKER[0]) for row in workers]
+    for doc in documents or []:
+        if not isinstance(doc, dict):
+            continue
+        type_id = str(
+            doc.get("document_type_id") or doc.get("document_type") or doc.get("key") or ""
+        ).strip()
+        idx = parse_cold_worker_iqama_doc_key(type_id)
+        if idx is None or idx < 0 or idx >= len(out):
+            continue
+        doc_id = str(doc.get("document_id") or doc.get("documentId") or "").strip()
+        status = str(doc.get("status") or "").strip().lower()
+        if status in {"missing", "rejected"}:
+            out[idx]["document_id"] = ""
+            continue
+        if doc_id:
+            out[idx]["document_id"] = doc_id
+    return out
 
 
 def _workers_incomplete(value: Any, widget: str) -> bool:
     if widget == "listWorker":
-        if not isinstance(value, list) or not value:
+        if cold_workers_text_incomplete(value):
             return True
-        row = value[0] if isinstance(value[0], dict) else {}
-        return not str(row.get("full_name") or "").strip()
+        return bool(cold_workers_missing_doc_indexes(value))
     # addworker
     if not isinstance(value, dict):
         return True
@@ -461,7 +547,7 @@ def is_tenant_field_missing(
         return _typeofwork_incomplete(value)
     if field_name == "effective_starting" or widget == "daterange_picker":
         return _effective_starting_incomplete(value)
-    if field_name in {"firstperiod", "secondperiod"} or widget == "timepicker":
+    if field_name in {"firstperiod", "secondperiod", "planned_second_period"} or widget == "timepicker":
         return _period_incomplete(value)
     return value is None or value == "" or value == []
 
@@ -495,6 +581,8 @@ EMPTY_LIST_WORKER: Final[list[dict[str, str]]] = [
         "designation": "",
         "company_name": "",
         "country_code": "966",
+        "iqama_number": "",
+        "document_id": "",
     }
 ]
 
@@ -512,6 +600,102 @@ EMPTY_MEASURE_OF_SAFETY: Final[dict[str, str]] = {
 EMPTY_TYPEOFWORK: Final[dict[str, Any]] = {"value": [], "otheroption": ""}
 EMPTY_EFFECTIVE_STARTING: Final[dict[str, str]] = {"dateto": "", "datefrom": ""}
 EMPTY_PERIOD: Final[dict[str, str]] = {"to": "", "from": ""}
+
+# Chat HH:MM → portal ISO + LT (shared by draft_preview and create payload).
+_HHMM_RE = re.compile(r"^(\d{1,2}):(\d{2})$")
+_ISO_Z_RE = re.compile(
+    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$"
+)
+
+
+def _hhmm_to_lt(hhmm: str) -> str:
+    """Portal display ``3:04 PM`` (matches Go ``3:04 PM`` layout)."""
+    match = _HHMM_RE.match(hhmm.strip())
+    if not match:
+        return hhmm
+    hour = int(match.group(1))
+    minute = int(match.group(2))
+    if hour < 0 or hour > 23 or minute < 0 or minute > 59:
+        return hhmm
+    period = "AM" if hour < 12 else "PM"
+    hour12 = hour % 12 or 12
+    return f"{hour12}:{minute:02d} {period}"
+
+
+def _hhmm_to_iso_z(date_ddmmyyyy: str, hhmm: str) -> str | None:
+    """Combine DD/MM/YYYY + HH:MM into Go ISO8601 ``…T15:04:05.000Z``."""
+    from app.agents.schemas.work_permit_schema import ddmmyyyy_to_iso
+
+    ymd = ddmmyyyy_to_iso(date_ddmmyyyy)
+    match = _HHMM_RE.match(str(hhmm or "").strip())
+    if not ymd or len(ymd) != 10 or not match:
+        return None
+    hour = int(match.group(1))
+    minute = int(match.group(2))
+    if hour < 0 or hour > 23 or minute < 0 or minute > 59:
+        return None
+    return f"{ymd}T{hour:02d}:{minute:02d}:00.000Z"
+
+
+def expand_period_for_api(
+    period: Any,
+    *,
+    date_ddmmyyyy: str,
+) -> dict[str, Any]:
+    """Expand chat HH:MM period times to ISO8601 + LT for portal/API."""
+    if not isinstance(period, dict):
+        return {"from": "", "to": ""}
+
+    raw_from = str(period.get("from") or "").strip()
+    raw_to = str(period.get("to") or "").strip()
+    if not raw_from and not raw_to:
+        return {"from": "", "to": ""}
+
+    out: dict[str, Any] = dict(period)
+
+    def _expand_one(key: str, lt_key: str, raw: str) -> None:
+        if not raw:
+            out[key] = ""
+            return
+        if _ISO_Z_RE.match(raw) or "T" in raw:
+            out[key] = raw
+            return
+        iso = _hhmm_to_iso_z(date_ddmmyyyy, raw)
+        if iso:
+            out[key] = iso
+            if not str(out.get(lt_key) or "").strip():
+                out[lt_key] = _hhmm_to_lt(raw)
+        else:
+            out[key] = raw
+
+    _expand_one("from", "fromLT", raw_from)
+    _expand_one("to", "toLT", raw_to)
+    return out
+
+
+def expand_planneddate_for_api(planned: Any) -> dict[str, Any]:
+    """Ensure portal TimePicker LT aliases exist for cold/hot ``planneddate``."""
+    base = dict(EMPTY_PLANNEDDATE)
+    if isinstance(planned, dict):
+        base.update({k: planned.get(k, base.get(k, "")) for k in base})
+        for lt_key in (
+            "worktimefromLT",
+            "worktimetoLT",
+            "completionfromLT",
+            "completiontoLT",
+        ):
+            if planned.get(lt_key) not in (None, ""):
+                base[lt_key] = str(planned[lt_key])
+    for hhmm_key, lt_key in (
+        ("worktimefrom", "worktimefromLT"),
+        ("worktimeto", "worktimetoLT"),
+        ("completionfrom", "completionfromLT"),
+        ("completionto", "completiontoLT"),
+    ):
+        raw = str(base.get(hhmm_key) or "").strip()
+        if raw and not str(base.get(lt_key) or "").strip() and _HHMM_RE.match(raw):
+            base[lt_key] = _hhmm_to_lt(raw)
+    return base
 
 # Portal TypeOfWork checkbox keys (must match typeOfWork.tsx option.value).
 _TYPEOFWORK_KEYS: Final[frozenset[str]] = frozenset(
@@ -614,7 +798,7 @@ def empty_value_for(field_name: str, field_type: str | None = None) -> Any:
         return dict(EMPTY_TYPEOFWORK)
     if field_name == "effective_starting" or widget == "daterange_picker":
         return dict(EMPTY_EFFECTIVE_STARTING)
-    if field_name in {"firstperiod", "secondperiod"} or widget == "timepicker":
+    if field_name in {"firstperiod", "secondperiod", "planned_second_period"} or widget == "timepicker":
         return dict(EMPTY_PERIOD)
     if field_name == "unit_codes":
         return []
@@ -671,7 +855,7 @@ def coerce_tenant_field_value(
             }
         return dict(EMPTY_EFFECTIVE_STARTING)
 
-    if field_name in {"firstperiod", "secondperiod"} or widget == "timepicker":
+    if field_name in {"firstperiod", "secondperiod", "planned_second_period"} or widget == "timepicker":
         if isinstance(parsed, dict):
             out = {
                 "from": str(parsed.get("from") or ""),
@@ -706,6 +890,7 @@ def is_nested_widget(field_name: str, field_type: str | None = None) -> bool:
         "effective_starting",
         "firstperiod",
         "secondperiod",
+        "planned_second_period",
     }:
         return True
     return (field_type or "") in _NESTED_WIDGETS
@@ -840,6 +1025,135 @@ _WP_DRAFT_EXTRA_KEYS: Final[tuple[str, ...]] = (
     "_wp_type_confirmed",
 )
 
+# Nested widget keys that stay as objects for Formik but need a human ``display``.
+_WP_NESTED_DISPLAY_KEYS: Final[frozenset[str]] = frozenset(
+    {
+        "typeofwork",
+        "effective_starting",
+        "firstperiod",
+        "secondperiod",
+        "planneddate",
+        "planned_second_period",
+        "measureofsafety",
+        "workers",
+    }
+)
+
+
+def summarize_typeofwork(value: Any) -> str:
+    """Human label for Ops ``typeofwork`` widget."""
+    if isinstance(value, dict):
+        raw = value.get("value")
+        if isinstance(raw, list):
+            primary = ", ".join(str(v).strip() for v in raw if str(v or "").strip())
+        else:
+            primary = str(raw or "").strip()
+        other = str(value.get("otheroption") or "").strip()
+        if primary and other:
+            return f"{primary} ({other})"
+        return primary or other
+    if isinstance(value, list):
+        return ", ".join(str(v).strip() for v in value if str(v or "").strip())
+    return str(value or "").strip()
+
+
+def summarize_effective_starting(value: dict[str, Any]) -> str:
+    """Human label for Ops date range: ``DD/MM/YYYY → DD/MM/YYYY``."""
+    left = str(value.get("datefrom") or "").strip()
+    right = str(value.get("dateto") or "").strip()
+    if left and right:
+        return f"{left} → {right}"
+    return left or right
+
+
+def summarize_period(value: dict[str, Any]) -> str:
+    """Human label for Ops time period; prefer portal LT when present."""
+    left = str(value.get("fromLT") or value.get("from") or "").strip()
+    right = str(value.get("toLT") or value.get("to") or "").strip()
+    # Expanded ISO ``from``/``to`` without LT is not user-friendly — hide it.
+    if _ISO_Z_RE.match(left):
+        left = ""
+    if _ISO_Z_RE.match(right):
+        right = ""
+    if left and right:
+        return f"{left} – {right}"
+    return left or right
+
+
+def summarize_planneddate(value: dict[str, Any]) -> str:
+    """Human label for cold/hot planned window including optional second period."""
+    start = str(value.get("worktimedate") or "").strip()
+    end = str(value.get("completionworkdate") or "").strip()
+    t_from = str(
+        value.get("worktimefromLT") or value.get("worktimefrom") or ""
+    ).strip()
+    t_to = str(value.get("worktimetoLT") or value.get("worktimeto") or "").strip()
+    left = f"{start} {t_from}".strip() if t_from else start
+    right = f"{end} {t_to}".strip() if t_to else end
+    primary = f"{left} → {right}" if left and right else (left or right)
+    c_from = str(
+        value.get("completionfromLT") or value.get("completionfrom") or ""
+    ).strip()
+    c_to = str(
+        value.get("completiontoLT") or value.get("completionto") or ""
+    ).strip()
+    if c_from and c_to:
+        second = f"{c_from} – {c_to}"
+        return f"{primary}; second {second}" if primary else second
+    return primary
+
+
+def summarize_list_workers(value: Any) -> str:
+    """Human label for cold ``listWorker`` rows."""
+    if not isinstance(value, list):
+        return ""
+    parts: list[str] = []
+    for row in value:
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get("full_name") or "").strip()
+        if not name:
+            continue
+        iqama = str(row.get("iqama_number") or "").strip()
+        parts.append(f"{name} (Iqama {iqama})" if iqama else name)
+    return ", ".join(parts)
+
+
+def format_wp_field_display(key: str, value: Any) -> str:
+    """Human-readable string for a WP collected field (empty when nothing to show)."""
+    if key == "typeofwork":
+        return summarize_typeofwork(value)
+    if key == "effective_starting" and isinstance(value, dict):
+        return summarize_effective_starting(value)
+    if key in {"firstperiod", "secondperiod", "planned_second_period"} and isinstance(
+        value, dict
+    ):
+        return summarize_period(value)
+    if key == "planneddate" and isinstance(value, dict):
+        return summarize_planneddate(value)
+    if key == "workers":
+        if isinstance(value, list):
+            return summarize_list_workers(value)
+        if isinstance(value, dict):
+            # Hot addworker shape — names only for the card.
+            workers = value.get("worker")
+            if isinstance(workers, list):
+                names = [
+                    str(row.get("name") or "").strip()
+                    for row in workers
+                    if isinstance(row, dict) and str(row.get("name") or "").strip()
+                ]
+                return ", ".join(names)
+        return ""
+    if key == "measureofsafety" and isinstance(value, dict):
+        on = [
+            WP_MEASURE_OF_SAFETY_LABELS.get(k, k)
+            for k, v in value.items()
+            if str(v or "").strip()
+        ]
+        return ", ".join(on) if on else ""
+    return ""
+
 
 def wp_draft_fields_from_collected(
     collected_data: dict[str, Any] | None,
@@ -856,25 +1170,45 @@ def wp_draft_fields_from_collected(
 
     rows: list[dict[str, Any]] = []
     for key in keys:
+        # Chat-only optional ask; times are merged into ``planneddate`` for Formik.
+        if key == "planned_second_period":
+            continue
         val = collected.get(key)
         if val is None or val == "" or val == []:
             continue
-        # Nested widget dicts (typeofwork, effective_starting, firstperiod, …)
+        # Nested widget dicts/arrays (typeofwork, planneddate, workers, …)
         # must be sent as objects so the frontend form can select/populate the
         # right control. JSON-encoding them to a string produces a raw JSON string
         # that the form cannot interpret (e.g. typeofwork checkboxes stay unchecked).
         # Non-widget lists (unit_codes) are still encoded to strings.
+        # Human text goes in ``display`` so review cards never String(object).
         if isinstance(val, dict):
-            display: Any = val
+            machine: Any = val
+            if key in {"firstperiod", "secondperiod"}:
+                effective = collected.get("effective_starting")
+                date_from = ""
+                if isinstance(effective, dict):
+                    date_from = str(effective.get("datefrom") or "").strip()
+                if date_from:
+                    machine = expand_period_for_api(val, date_ddmmyyyy=date_from)
+            elif key == "planneddate":
+                machine = expand_planneddate_for_api(val)
+        elif key == "workers" and isinstance(val, list):
+            machine = val
         elif isinstance(val, list):
-            display = json.dumps(val)
+            machine = json.dumps(val)
         else:
-            display = val
-        rows.append(
-            {
-                "key": key,
-                "label": FIELD_LABELS.get(key, key),
-                "value": display,
-            }
-        )
+            machine = val
+        row: dict[str, Any] = {
+            "key": key,
+            "label": FIELD_LABELS.get(key, key),
+            "value": machine,
+        }
+        if key in _WP_NESTED_DISPLAY_KEYS:
+            human = format_wp_field_display(
+                key,
+                machine if isinstance(machine, (dict, list)) else val,
+            )
+            row["display"] = human if human else ""
+        rows.append(row)
     return rows

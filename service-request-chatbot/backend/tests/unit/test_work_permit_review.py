@@ -348,6 +348,8 @@ class TestWpPayload:
                     "company_name": "ABC",
                     "phone": "501111111",
                     "country_code": "966",
+                    "iqama_number": "2345678901",
+                    "document_id": "doc-iqama-1",
                 }
             ],
         }

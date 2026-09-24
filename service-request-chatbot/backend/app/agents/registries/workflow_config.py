@@ -212,12 +212,17 @@ def _build_work_permit_config() -> WorkflowConfig:
         "demand_appendices": "Ask the user for any demand appendices details.",
         "special_conditions": "Ask the user for any special conditions.",
         "planneddate": (
-            "Ask the user for the planned work dates and times: start date, start time, "
-            "end date, and end time. Prefer DD/MM/YYYY for dates."
+            "Ask the user for planned work dates and the first period times: "
+            "from date, to date, time from, and time to (DD/MM/YYYY, HH:MM). "
+            "Second period times are asked separately and are optional."
+        ),
+        "planned_second_period": (
+            "Ask for an optional second time period (from and to, HH:MM), "
+            "or say 'none' to skip."
         ),
         "workers": (
-            "Ask the user for the worker(s) who will perform the work — at least full name "
-            "(and designation / company or iqama when they provide them)."
+            "Ask the user for each worker: full name, company name, designation, "
+            "phone, and Iqama number. They can add another performer in the same reply."
         ),
         "measureofsafety": (
             "Ask the user which measure-of-safety items apply "
@@ -229,7 +234,10 @@ def _build_work_permit_config() -> WorkflowConfig:
         ),
         "firstperiod": "Ask the user for the first time period (from and to, HH:MM).",
         "secondperiod": "Ask the user for an optional second time period (or say 'none' to skip).",
-        "entry_gate": "Ask the user which entry gate will be used (or say 'none' to skip).",
+        "entry_gate": (
+            "Ask if they want to specify which gate entry/exit is allowed through "
+            "(e.g. Gate 1, Loading bay), or say 'none' to skip."
+        ),
         "description": "Ask the user for an optional short description (or say 'none' to skip).",
         "title": "Ask the user for an optional title (or say 'none' to skip).",
     }
