@@ -295,6 +295,50 @@ class TestHttpFetch:
         assert result.error
         assert result.groups == []
 
+    @pytest.mark.asyncio
+    async def test_404_is_empty_success_not_hard_failure(self) -> None:
+        """Local platform missing sales-data agent route must not 502 tenants."""
+        with patch("httpx.AsyncClient") as mock_httpx:
+            mock_httpx.return_value.__aenter__.return_value.get = AsyncMock(
+                return_value=_mock_response(404, "404 page not found")
+            )
+            result = await _http_service().fetch_inbox(
+                user_id="123",
+                roles=frozenset({"COMPANY_ADMIN", "TENANT"}),
+            )
+        assert result.success
+        assert result.error is None
+        assert result.groups == []
+        assert result.partial_errors == {}
+
+    @pytest.mark.asyncio
+    async def test_404_on_one_sub_keeps_other_groups(self) -> None:
+        async def get_side_effect(url: str, **_: Any) -> MagicMock:
+            if "sales-data" in url:
+                return _mock_response(404, "404 page not found")
+            return _mock_response(
+                200,
+                _platform_body(
+                    "HANDOVER",
+                    [{"id": "n1", "text_content": {"message": "m", "id": "1"}}],
+                ),
+            )
+
+        with patch("httpx.AsyncClient") as mock_httpx:
+            mock_httpx.return_value.__aenter__.return_value.get = AsyncMock(
+                side_effect=get_side_effect
+            )
+            result = await _http_service().fetch_inbox(
+                user_id="123",
+                roles=frozenset(),  # call all
+                filters=NotificationListFilters(
+                    sub_categories=("HANDOVER", "SALES_DATA")
+                ),
+            )
+        assert result.success
+        assert [g.sub_category for g in result.groups] == ["HANDOVER"]
+        assert "SALES_DATA" not in result.partial_errors
+
 
 # ---------------------------------------------------------------------------
 # Mock adapter + factory

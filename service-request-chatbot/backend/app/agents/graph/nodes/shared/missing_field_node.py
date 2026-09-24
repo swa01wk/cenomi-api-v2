@@ -48,6 +48,7 @@ from app.agents.services.missing_field_service import (
     HANDOVER_FIELD_QUESTIONS,
     get_missing_fields,
 )
+from app.agents.services.work_permit_suggestions_service import build_wp_decorations
 from app.agents.services.review_decorations_service import (
     build_document_upload_ask_response,
     maybe_reset_rdd_upload_slot,
@@ -593,6 +594,142 @@ def _build_inspection_group_ask(
 
 
 # ---------------------------------------------------------------------------
+# Work Permit create groups (form-complete, fewer turns)
+# ---------------------------------------------------------------------------
+
+_WP_FIELD_EXPLAINERS: dict[str, str] = {
+    "department": "**Department** — Leasing, Finance, or Operations.",
+    "unit_type": "**Unit type** — e.g. Retail / F&B (from the lease when known).",
+    "owner": "**Owner** — owner name on the permit.",
+    "trade_name": "**Trade name** — shop / brand trade name.",
+    "responsible_person": "**Responsible person** — who owns the work on site.",
+    "phone": "**Phone** — contact number.",
+    "type_work": "**Type of work** — what will be done.",
+    "list_equipment": "**Equipment** — tools / machines used.",
+    "work_info": "**Work info** — extra details for the crew.",
+    "contractor_name": "**Contractor** — company performing the work.",
+    "work_type": "**Work type** — short description of the hot/roof work.",
+    "work_location": "**Work location** — where on the unit / roof.",
+    "demand_appendices": "**Demand appendices** — any appendix demands.",
+    "special_conditions": "**Special conditions** — site constraints.",
+    "effective_starting": "**Effective dates** — from and to (DD/MM/YYYY).",
+    "firstperiod": "**First period** — from and to times (HH:MM).",
+    "secondperiod": "**Second period** (optional) — or say 'none'.",
+    "planneddate": (
+        "**Planned dates** — start date/time and end date/time "
+        "(DD/MM/YYYY, HH:MM)."
+    ),
+    "workers": "**Workers** — at least one full name (and role if you have it).",
+    "measureofsafety": "**Measure of safety** — which safety items apply.",
+    "typeofwork": "**Type of work** — operations work category.",
+    "permission_given_to": (
+        "**Permission given to** — who the work permission is issued to."
+    ),
+    "work_permit_type": "**Work permit type** — pick a chip or name the subtype.",
+}
+
+
+def _should_ask_wp_group(
+    active_agent: str | None,
+    workflow_stage: str,
+    user_missing: list[str],
+    collected: dict[str, Any],
+) -> bool:
+    if (active_agent or "") != "work_permit_agent":
+        return False
+    if workflow_stage not in {"CREATE_WORK_PERMIT", "CREATE_SR"}:
+        return False
+    if not user_missing:
+        return False
+    from app.agents.schemas.work_permit_form_fields import resolve_wp_group
+    from app.agents.schemas.work_permit_schema import resolve_wp_sub_category
+
+    subtype = resolve_wp_sub_category(None, collected)
+    group = resolve_wp_group(subtype, user_missing)
+    return group is not None and len(group) >= 2
+
+
+def _build_wp_group_question(
+    group_missing: list[str],
+    collected: dict[str, Any],
+) -> str:
+    known = [f for f in group_missing if collected.get(f) not in (None, "", [])]
+    # group_missing is already the open set; "known" inside it is rare.
+    _ = known
+    labels = [
+        _WP_FIELD_EXPLAINERS.get(f, f"**{f}**") for f in group_missing
+    ]
+    bullets = "\n".join(f"- {line}" for line in labels)
+    return (
+        "Please share these details in one reply (one line or a short list is fine):\n\n"
+        f"{bullets}"
+    )
+
+
+def _build_wp_group_ask(
+    collected: dict[str, Any],
+    group_missing: list[str],
+    all_missing: list[str],
+) -> dict[str, Any]:
+    question = _build_wp_group_question(group_missing, collected)
+    primary = group_missing[0]
+    updates: dict[str, Any] = {
+        "missing_fields": list(all_missing),
+        "response_message": question,
+        "response_ui": {
+            "type": "text_question",
+            "field": primary,
+            "fields": list(group_missing),
+            "message": question,
+            "verbatim": True,
+        },
+        "status": "WAITING_FOR_USER",
+        "active_field": primary,
+    }
+    decorations = build_wp_decorations(fields=group_missing, collected=collected)
+    if decorations:
+        updates["response_decorations"] = decorations
+    return updates
+
+
+def _build_wp_singleton_ask(
+    next_field: str,
+    question: str,
+    all_missing: list[str],
+    collected: dict[str, Any],
+    *,
+    verbatim: bool = False,
+) -> dict[str, Any]:
+    """Single-field WP ask with suggestion chips when available."""
+    explainer = _WP_FIELD_EXPLAINERS.get(next_field)
+    if explainer and next_field in {
+        "planneddate",
+        "workers",
+        "measureofsafety",
+        "work_permit_type",
+        "typeofwork",
+    }:
+        question = explainer
+        verbatim = True
+    updates: dict[str, Any] = {
+        "missing_fields": list(all_missing),
+        "response_message": question,
+        "response_ui": {
+            "type": "text_question",
+            "field": next_field,
+            "message": question,
+            **({"verbatim": True} if verbatim else {}),
+        },
+        "status": "WAITING_FOR_USER",
+        "active_field": next_field,
+    }
+    decorations = build_wp_decorations(fields=[next_field], collected=collected)
+    if decorations:
+        updates["response_decorations"] = decorations
+    return updates
+
+
+# ---------------------------------------------------------------------------
 # Combined Already Trading question (Path B)
 # ---------------------------------------------------------------------------
 
@@ -1055,6 +1192,32 @@ async def _ask_next_missing_field(state: ServiceRequestState) -> dict[str, Any]:
     if handoff is not None:
         return handoff
 
+    # ── Priority -0.25: Work Permit subtype before lease ───────────────────
+    # Require an explicit confirmation (chip or portal Create-with-AI seed).
+    # A weakly LLM-inferred type must not skip the subtype chips.
+    # Must run before the lease-trigger branch.
+    if (
+        (active_agent or "") == "work_permit_agent"
+        and workflow_stage in {"CREATE_WORK_PERMIT", "CREATE_SR"}
+        and not collected.get("_wp_type_confirmed")
+    ):
+        type_question = field_questions.get(
+            "work_permit_type",
+            "What type of work permit do you need?",
+        )
+        # Drop an unconfirmed guess so missing_fields / form draft stay honest.
+        ask = _build_wp_singleton_ask(
+            "work_permit_type",
+            type_question,
+            all_missing,
+            collected,
+        )
+        if str(collected.get("work_permit_type") or "").strip():
+            cleared = dict(collected)
+            cleared.pop("work_permit_type", None)
+            ask["collected_data"] = cleared
+        return ask
+
     # ── Priority 0: non-required blocking validation errors ───────────────
     # "required" failures mean a field is simply absent — those are handled by
     # the backend_missing / user_missing branches below which know how to ask
@@ -1194,6 +1357,14 @@ async def _ask_next_missing_field(state: ServiceRequestState) -> dict[str, Any]:
         group_missing = [f for f in INSPECTION_FIELD_GROUP if f in user_missing]
         return _build_inspection_group_ask(collected, group_missing, all_missing)
 
+    elif _should_ask_wp_group(active_agent, workflow_stage, user_missing, collected):
+        from app.agents.schemas.work_permit_form_fields import resolve_wp_group
+        from app.agents.schemas.work_permit_schema import resolve_wp_sub_category
+
+        subtype = resolve_wp_sub_category(None, collected)
+        group = resolve_wp_group(subtype, user_missing) or ()
+        return _build_wp_group_ask(collected, list(group), all_missing)
+
     elif user_missing:
         # All backend fields are resolved; ask for the first user-supplied gap.
         next_field = user_missing[0]
@@ -1201,6 +1372,12 @@ async def _ask_next_missing_field(state: ServiceRequestState) -> dict[str, Any]:
             next_field,
             f"Please provide: {next_field}",
         )
+
+        # Work Permit singletons (type, planneddate, workers, MoS, …) get chips.
+        if (active_agent or "") == "work_permit_agent":
+            return _build_wp_singleton_ask(
+                next_field, next_question, all_missing, collected
+            )
 
         # CREATE/APPROVE: form may pre-fill yes/no — still ask the user to
         # confirm in chat before collecting planned/actual dates.

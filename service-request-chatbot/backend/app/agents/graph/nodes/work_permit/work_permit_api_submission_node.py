@@ -132,14 +132,31 @@ async def work_permit_api_submission_node(state: ServiceRequestState) -> dict[st
     )
 
     if result.error or not result.sr_id:
+        logger.warning(
+            "work_permit_api_submission_node: platform failure response=%s request_keys=%s",
+            getattr(result, "response_payload", None),
+            sorted(payload.keys()) if isinstance(payload, dict) else None,
+        )
         backend_refs["service_request_status"] = "FAILED"
+        detail = f" Detail: {result.error}" if result.error else ""
+        if is_review and (
+            result.status_code == 500 or "HTTP 500" in str(result.error or "")
+        ):
+            msg = (
+                "Unable to complete Work Permit approval due to a platform error "
+                "(final approval generates the permit PDF). "
+                "Please try again later or approve from the Service Request page."
+                f"{detail}"
+            )
+        else:
+            msg = (
+                "Unable to submit the work permit request due to an API error. "
+                f"Please try again later.{detail}"
+            )
         return {
             "backend_refs": backend_refs,
             "status": "FAILED",
-            "response_message": (
-                "Unable to submit the work permit request due to an API error. "
-                f"Please try again later.{' Detail: ' + result.error if result.error else ''}"
-            ),
+            "response_message": msg,
         }
 
     backend_refs["sr_id"] = result.sr_id
@@ -204,6 +221,12 @@ async def _create_result(
         "confirmation_status": None,
         "confirmation_required": False,
         "response_message": msg,
+        "response_ui": {
+            "type": "message",
+            "message": msg,
+            "workflow_complete": True,
+            "workflow_stage": stage,
+        },
     }
 
 

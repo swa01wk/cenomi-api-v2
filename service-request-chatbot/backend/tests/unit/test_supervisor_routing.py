@@ -1091,3 +1091,99 @@ class TestSalesDataRbac:
         assert result["intent"] == "PREVIEW_SERVICE_REQUEST"
         assert result["status"] == "IN_PROGRESS"
         assert "couldn't match that" not in (result.get("response_message") or "")
+
+
+# ---------------------------------------------------------------------------
+# Tenant Work Permit create RBAC
+# ---------------------------------------------------------------------------
+
+
+class TestTenantWorkPermitCreateRbac:
+    """COMPANY_ADMIN* / AUTHORIZED_SIGNATORY may CREATE_WORK_PERMIT_SR;
+    BILLING_CONTACT stays sales-data-only.
+    """
+
+    @pytest.mark.asyncio
+    async def test_company_admin_central_can_create_work_permit(self) -> None:
+        from app.agents.graph.nodes.supervisor_node import supervisor_node
+        from app.types.chat import AuthContext
+
+        decision = _make_decision(
+            intent="CREATE_WORK_PERMIT_SR",
+            confidence=0.95,
+            service_category="WORK_PERMIT",
+            sub_category="WORK_PERMIT",
+            target_agent="work_permit_agent",
+            reasoning="User wants to create a work permit",
+        )
+        state = _base_state(
+            user_message="I need a work permit for unit FF050",
+            auth_context=AuthContext(
+                subject_id="cac-1",
+                roles=frozenset({"COMPANY_ADMIN_CENTRAL"}),
+            ),
+        )
+        with patch(
+            "app.agents.graph.nodes.supervisor_node._call_supervisor_llm",
+            new_callable=AsyncMock,
+            return_value=(decision, 50, 30, 100),
+        ), patch(
+            "app.agents.graph.nodes.supervisor_node.get_default_gateway",
+            return_value=MagicMock(),
+        ):
+            result = await supervisor_node(state)
+
+        assert result["intent"] == "CREATE_WORK_PERMIT_SR"
+        assert result["active_agent"] == "work_permit_agent"
+        assert result.get("status") != "WAITING_FOR_USER"
+        assert "couldn't match that to a sales data action" not in (
+            result.get("response_message") or ""
+        )
+        assert "does not permit" not in (result.get("response_message") or "")
+
+    @pytest.mark.asyncio
+    async def test_billing_contact_cannot_create_work_permit(self) -> None:
+        from app.agents.graph.nodes.supervisor_node import supervisor_node
+        from app.types.chat import AuthContext
+
+        decision = _make_decision(
+            intent="CREATE_WORK_PERMIT_SR",
+            confidence=0.95,
+            service_category="WORK_PERMIT",
+            sub_category="WORK_PERMIT",
+            target_agent="work_permit_agent",
+            reasoning="User wants to create a work permit",
+        )
+        state = _base_state(
+            user_message="I need a work permit for unit FF050",
+            auth_context=AuthContext(
+                subject_id="bc-1",
+                roles=frozenset({"BILLING_CONTACT"}),
+            ),
+        )
+        with patch(
+            "app.agents.graph.nodes.supervisor_node._call_supervisor_llm",
+            new_callable=AsyncMock,
+            return_value=(decision, 50, 30, 100),
+        ), patch(
+            "app.agents.graph.nodes.supervisor_node.get_default_gateway",
+            return_value=MagicMock(),
+        ):
+            result = await supervisor_node(state)
+
+        assert result["status"] == "WAITING_FOR_USER"
+        assert result["intent"] == "CREATE_WORK_PERMIT_SR"
+        assert "couldn't match that to a sales data action" in result["response_message"]
+        assert result.get("active_agent") is None
+
+    def test_is_sales_data_only_false_for_company_admin_central(self) -> None:
+        from app.agents.graph.nodes.supervisor_node import _is_sales_data_only_user
+
+        assert _is_sales_data_only_user(["COMPANY_ADMIN_CENTRAL"]) is False
+        assert _is_sales_data_only_user(["COMPANY_ADMIN"]) is False
+        assert _is_sales_data_only_user(["AUTHORIZED_SIGNATORY"]) is False
+
+    def test_is_sales_data_only_true_for_billing_contact(self) -> None:
+        from app.agents.graph.nodes.supervisor_node import _is_sales_data_only_user
+
+        assert _is_sales_data_only_user(["BILLING_CONTACT"]) is True

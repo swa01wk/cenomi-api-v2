@@ -136,3 +136,73 @@ class TestTheGuardFallsBackToTheNodesQuestion:
             "Thanks — that's been updated. "
             "Please provide the fitout completed (yes or no)."
         )
+
+
+class TestTerminalSuccessKeptVerbatim:
+    """SUBMITTED success must not become the processing FALLBACK."""
+
+    @pytest.mark.asyncio
+    async def test_submitted_skips_llm_and_keeps_success_message(self) -> None:
+        success = (
+            "Your Work Permit Service Request has been successfully submitted. "
+            "Your reference number is **341517**. "
+            "It will be routed to the next reviewer when required."
+        )
+        gateway = _gateway(
+            # Near-duplicate of a prior turn — would trip the repeat guard.
+            "Your Work Permit Service Request has been successfully submitted. "
+            "Your reference number is 341517, and it will be routed"
+        )
+        with patch(
+            "app.agents.graph.nodes.shared.response_generation_node.get_default_gateway",
+            return_value=gateway,
+        ):
+            result = await response_generation_node(  # type: ignore[arg-type]
+                {
+                    "status": "SUBMITTED",
+                    "response_message": success,
+                    "response_ui": {
+                        "type": "message",
+                        "message": success,
+                        "workflow_complete": True,
+                    },
+                    "collected_data": {},
+                    "conversation_history": [
+                        {
+                            "role": "assistant",
+                            "content": (
+                                "Your Work Permit Service Request has been "
+                                "successfully submitted. Your reference number "
+                                "is 341517, and it will be routed"
+                            ),
+                        },
+                        {"role": "user", "content": "confirm"},
+                    ],
+                }
+            )
+
+        assert result["response_message"] == success
+        assert result["response_ui"]["message"] == success
+        assert "processing your request" not in result["response_message"].lower()
+        gateway.complete_json.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_submitted_without_ui_still_keeps_message(self) -> None:
+        success = "Work Permit SR **10099** has been fully approved."
+        gateway = _gateway("I'm processing your request. Please wait.")
+        with patch(
+            "app.agents.graph.nodes.shared.response_generation_node.get_default_gateway",
+            return_value=gateway,
+        ):
+            result = await response_generation_node(  # type: ignore[arg-type]
+                {
+                    "status": "SUBMITTED",
+                    "response_message": success,
+                    "collected_data": {},
+                    "conversation_history": [],
+                }
+            )
+
+        assert result["response_message"] == success
+        assert result["response_ui"]["message"] == success
+        gateway.complete_json.assert_not_called()

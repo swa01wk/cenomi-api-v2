@@ -288,8 +288,20 @@ def _sales_data_shortcut(
 # Roles that only use the sales-data agent (no handover / work-permit actions).
 # SR preview / create / status replies are the wrong product surface for them.
 _SALES_DATA_ONLY_ROLES = _ADMIN_SALES_ROLES | _TENANT_SALES_ROLES
+# Includes tenant company admins / authorized signatories so they are not
+# treated as sales-data-only when attempting CREATE_WORK_PERMIT_SR (and other
+# permitted SR intents). BILLING_CONTACT etc. stay sales-only.
 _PLATFORM_SR_ROLES = frozenset(
-    {"MALL_MANAGER", "FM_MANAGER", "OPERATIONS", "DD_ENGINEER", "ADMIN"}
+    {
+        "MALL_MANAGER",
+        "FM_MANAGER",
+        "OPERATIONS",
+        "DD_ENGINEER",
+        "ADMIN",
+        "COMPANY_ADMIN_CENTRAL",
+        "COMPANY_ADMIN",
+        "AUTHORIZED_SIGNATORY",
+    }
 )
 _SR_INTENTS_SALES_DATA_FALLBACK = frozenset(
     {

@@ -61,6 +61,15 @@ service request record.
 # ---------------------------------------------------------------------------
 
 
+def was_skipped(value: object) -> bool:
+    """True when the user explicitly declined a field (answered "none"/"skip").
+
+    ``merge_state`` normalises those answers to ``""``. ``None`` means the field
+    has not been asked yet, so it must be left alone for ``missing_field_node``.
+    """
+    return isinstance(value, str) and value.strip() == ""
+
+
 def generate_description(
     lease_code: str,
     brand: str = "",
@@ -213,6 +222,8 @@ def _window_label(collected: dict[str, Any]) -> str:
 
 def target_fields(collected: dict[str, Any], workflow_stage: str) -> list[str]:
     """Which AI-filled fields this stage needs and the user has not supplied."""
+    if workflow_stage == "CREATE_WORK_PERMIT":
+        return _wp_target_fields(collected)
     if workflow_stage not in AI_FILLED_STAGES:
         return []
     stage = STAGE_REGISTRY.get(workflow_stage)
@@ -225,12 +236,39 @@ def target_fields(collected: dict[str, Any], workflow_stage: str) -> list[str]:
     ]
 
 
+def _wp_target_fields(collected: dict[str, Any]) -> list[str]:
+    """WP short-flow text fields once subtype + lease location are known."""
+    from app.agents.schemas.work_permit_schema import (
+        WP_AI_FILLED_FIELDS,
+        wp_location_label,
+        wp_short_flow_enabled,
+        wp_text_should_autofill,
+    )
+
+    if not wp_short_flow_enabled():
+        return []
+    if not collected.get("_wp_type_confirmed") and not collected.get("work_permit_type"):
+        return []
+    if not wp_location_label(collected):
+        return []
+    out: list[str] = []
+    for field in ("description", "title"):
+        if field not in WP_AI_FILLED_FIELDS:
+            continue
+        if wp_text_should_autofill(collected.get(field), collected, kind=field):
+            out.append(field)
+    return out
+
+
 def build_template_values(
     collected: dict[str, Any],
     workflow_stage: str,
     fields: list[str] | None = None,
 ) -> dict[str, str]:
     """Deterministic values for *fields* (defaults to every outstanding one)."""
+    if workflow_stage == "CREATE_WORK_PERMIT":
+        return _build_wp_template_values(collected, fields)
+
     lease_code = str(collected.get("lease_code") or "").strip()
     if not lease_code:
         # Every template is anchored on the lease; without it there is nothing
@@ -278,6 +316,30 @@ def build_template_values(
     return values
 
 
+def _build_wp_template_values(
+    collected: dict[str, Any],
+    fields: list[str] | None,
+) -> dict[str, str]:
+    from app.agents.schemas.work_permit_schema import (
+        generate_wp_description,
+        generate_wp_title,
+    )
+
+    wanted = fields if fields is not None else _wp_target_fields(collected)
+    if not wanted:
+        return {}
+    values: dict[str, str] = {}
+    if "description" in wanted:
+        text = generate_wp_description(collected)
+        if text:
+            values["description"] = text
+    if "title" in wanted:
+        text = generate_wp_title(collected)
+        if text:
+            values["title"] = text
+    return values
+
+
 # ---------------------------------------------------------------------------
 # LLM polish
 # ---------------------------------------------------------------------------
@@ -293,6 +355,13 @@ def _polish_facts(collected: dict[str, Any]) -> str:
         f"Inspection window: {_window_label(collected) or '-'}",
         f"Inspection done by: {_inspector_label(collected) or '-'}",
     ]
+    # Work Permit polish also gets subtype + location label when present.
+    wp_type = collected.get("work_permit_type") or collected.get("sub_category")
+    if wp_type:
+        lines.append(f"Work permit type: {wp_type}")
+    lease_brand_mall = collected.get("lease_brand_mall")
+    if lease_brand_mall:
+        lines.append(f"Lease / brand / mall: {lease_brand_mall}")
     return "\n".join(lines)
 
 
@@ -371,9 +440,13 @@ async def autofill_text_fields(
             if field in values:
                 values[field] = text
                 provenance[field] = {"source": "ai", "confidence": 0.8}
-        # The title slugs the description, so regenerate it from the polished
-        # text rather than leaving a slug of a sentence the user never sees.
-        if "title" in values and "description" in polished:
+        # Handover title slugs the description — regenerate from polished text.
+        # WP title is human prose from subtype + location; leave it deterministic.
+        if (
+            workflow_stage != "CREATE_WORK_PERMIT"
+            and "title" in values
+            and "description" in polished
+        ):
             values["title"] = generate_title(
                 str(collected.get("lease_code") or ""), polished["description"]
             )

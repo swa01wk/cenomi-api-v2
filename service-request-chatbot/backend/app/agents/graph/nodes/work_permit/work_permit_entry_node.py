@@ -73,6 +73,25 @@ _APPROVE_ACTIONS: frozenset[str] = frozenset(
 )
 _REJECT_SR_ACTIONS: frozenset[str] = frozenset({"reject_wp", "reject"})
 
+# Chip actions that write directly into collected_data (skip field_extraction).
+_WP_TYPE_ACTIONS: dict[str, str] = {
+    "select_wp_type_construction_hot": "CONSTRUCTION_HOT",
+    "select_wp_type_construction_cold": "CONSTRUCTION_COLD",
+    "select_wp_type_construction_roof_access": "CONSTRUCTION_ROOF_ACCESS",
+    "select_wp_type_maintenance_hot": "MAINTENANCE_HOT",
+    "select_wp_type_maintenance_cold": "MAINTENANCE_COLD",
+    "select_wp_type_maintenance_roof_access": "MAINTENANCE_ROOF_ACCESS",
+    "select_wp_type_operations": "OPERATIONS",
+}
+_WP_DEPARTMENT_ACTIONS: dict[str, str] = {
+    "select_wp_department_leasing": "leasing",
+    "select_wp_department_finance": "finance",
+    "select_wp_department_operations": "operations",
+}
+WP_DIRECT_SET_CHIP_ACTIONS: frozenset[str] = frozenset(
+    set(_WP_TYPE_ACTIONS) | set(_WP_DEPARTMENT_ACTIONS)
+)
+
 
 def _contains_phrase(message: str, phrases: frozenset[str]) -> bool:
     lowered = message.lower()
@@ -132,6 +151,25 @@ async def work_permit_entry_node(state: ServiceRequestState) -> dict[str, Any]:
     is_review = workflow_stage in WP_REVIEW_STAGES
 
     # ── 0. Explicit UI action ──────────────────────────────────────────────
+    if action_override in _WP_TYPE_ACTIONS:
+        value = _WP_TYPE_ACTIONS[action_override]
+        log.info("work_permit_entry.action_select_wp_type", value=value)
+        collected = dict(state.get("collected_data") or {})
+        collected["work_permit_type"] = value
+        collected["_wp_type_confirmed"] = True
+        return {
+            "collected_data": collected,
+            "sub_category": value,
+            "status": "IN_PROGRESS",
+        }
+
+    if action_override in _WP_DEPARTMENT_ACTIONS:
+        value = _WP_DEPARTMENT_ACTIONS[action_override]
+        log.info("work_permit_entry.action_select_wp_department", value=value)
+        collected = dict(state.get("collected_data") or {})
+        collected["department"] = value
+        return {"collected_data": collected, "status": "IN_PROGRESS"}
+
     if action_override in _APPROVE_ACTIONS:
         log.info("work_permit_entry.action_override_confirm", review=is_review)
         if is_review:
