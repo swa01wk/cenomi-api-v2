@@ -397,6 +397,11 @@ class HttpNotificationInboxService(AbstractNotificationInboxService):
                 status_code=response.status_code,
                 latency_ms=latency_ms,
             )
+            # Missing agent route (local platform / not yet shipped): treat as
+            # empty rather than failing the whole inbox. Tenants only call
+            # SALES_DATA — a 404 there previously became a hard 502.
+            if response.status_code == 404:
+                return NotificationGroup(sub_category, 0, page=page, limit=limit), None
             return NotificationGroup(sub_category, 0), f"HTTP {response.status_code}"
 
         entries, total = _unwrap_list(body)

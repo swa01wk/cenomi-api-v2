@@ -3,49 +3,234 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 from app.agents.graph.state import ServiceRequestState
+from app.agents.schemas.work_permit_form_fields import (
+    coerce_tenant_field_value,
+    empty_value_for,
+    form_spec_for,
+    is_nested_widget,
+)
 from app.agents.schemas.work_permit_schema import (
     WP_REVIEW_STAGES,
-    iso_to_ddmmyyyy,
+    ddmmyyyy_to_iso,
+    generate_wp_description,
+    generate_wp_title,
     resolve_wp_sub_category,
+    truncate_wp_title,
 )
 from app.observability.decorators import trace_node
 
 logger = logging.getLogger(__name__)
 
 _REQUIRED_CREATE_KEYS: frozenset[str] = frozenset(
-    {"lease_code", "lease_id", "work_permit_type", "start_date", "end_date"}
+    {"lease_code", "lease_id", "work_permit_type"}
+)
+
+# Envelope / GET snapshot keys that must not be nested inside PATCH payload —
+# portal form values omit these; Go ignores them, but stripping keeps parity.
+_REVIEW_INNER_ENVELOPE_KEYS: frozenset[str] = frozenset(
+    {
+        "category",
+        "service_category",
+        "lease_id",
+        "lease_code",
+        "tenant_profile_id",
+        "property_id",
+        "sub_category",
+        "workflow_version",
+        "contract_id",
+    }
+)
+
+# Chat collects HH:MM; Go ``is_not_before_time`` requires ISO8601
+# ``2006-01-02T15:04:05.000Z`` (same layout as cenomi-api constants.ISO8601Format).
+_HHMM_RE = re.compile(r"^(\d{1,2}):(\d{2})$")
+_ISO_Z_RE = re.compile(
+    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$"
 )
 
 
+def _hhmm_to_lt(hhmm: str) -> str:
+    """Portal display ``3:04 PM`` (matches Go ``3:04 PM`` layout)."""
+    match = _HHMM_RE.match(hhmm.strip())
+    if not match:
+        return hhmm
+    hour = int(match.group(1))
+    minute = int(match.group(2))
+    if hour < 0 or hour > 23 or minute < 0 or minute > 59:
+        return hhmm
+    period = "AM" if hour < 12 else "PM"
+    hour12 = hour % 12 or 12
+    return f"{hour12}:{minute:02d} {period}"
+
+
+def _hhmm_to_iso_z(date_ddmmyyyy: str, hhmm: str) -> str | None:
+    """Combine DD/MM/YYYY + HH:MM into Go ISO8601 ``…T15:04:05.000Z``."""
+    ymd = ddmmyyyy_to_iso(date_ddmmyyyy)
+    match = _HHMM_RE.match(str(hhmm or "").strip())
+    if not ymd or len(ymd) != 10 or not match:
+        return None
+    hour = int(match.group(1))
+    minute = int(match.group(2))
+    if hour < 0 or hour > 23 or minute < 0 or minute > 59:
+        return None
+    return f"{ymd}T{hour:02d}:{minute:02d}:00.000Z"
+
+
+def _expand_period_for_api(
+    period: Any,
+    *,
+    date_ddmmyyyy: str,
+) -> dict[str, Any]:
+    """Expand chat HH:MM period times to ISO8601 + LT for platform create."""
+    if not isinstance(period, dict):
+        return {"from": "", "to": ""}
+
+    raw_from = str(period.get("from") or "").strip()
+    raw_to = str(period.get("to") or "").strip()
+    if not raw_from and not raw_to:
+        return {"from": "", "to": ""}
+
+    out: dict[str, Any] = dict(period)
+
+    def _expand_one(key: str, lt_key: str, raw: str) -> None:
+        if not raw:
+            out[key] = ""
+            return
+        if _ISO_Z_RE.match(raw) or "T" in raw:
+            # Already ISO / RFC3339 from the portal form — keep as-is.
+            out[key] = raw
+            return
+        iso = _hhmm_to_iso_z(date_ddmmyyyy, raw)
+        if iso:
+            out[key] = iso
+            if not str(out.get(lt_key) or "").strip():
+                out[lt_key] = _hhmm_to_lt(raw)
+        else:
+            out[key] = raw
+
+    _expand_one("from", "fromLT", raw_from)
+    _expand_one("to", "toLT", raw_to)
+    return out
+
+
+def _apply_ops_period_iso(inner: dict[str, Any]) -> None:
+    """Mutate Ops ``firstperiod`` / ``secondperiod`` HH:MM → ISO for Go validators."""
+    effective = inner.get("effective_starting")
+    if not isinstance(effective, dict):
+        return
+    date_from = str(effective.get("datefrom") or "").strip()
+    if not date_from:
+        return
+    for key in ("firstperiod", "secondperiod"):
+        if key not in inner:
+            continue
+        period = inner.get(key)
+        if not isinstance(period, dict):
+            continue
+        if not str(period.get("from") or "").strip() and not str(
+            period.get("to") or ""
+        ).strip():
+            continue
+        inner[key] = _expand_period_for_api(period, date_ddmmyyyy=date_from)
+
+
 def _inner_payload_from_collected(data: dict[str, Any]) -> dict[str, Any]:
-    """Best-effort nested payload from chatbot collected_data."""
-    inner: dict[str, Any] = {
-        "mall": data.get("mall", ""),
-        "brand": data.get("brand", ""),
-        "lease": data.get("lease_code") or data.get("lease") or "",
-        "lease_code": data.get("lease_code") or "",
-        "lease_brand_mall": data.get("lease_brand_mall") or "",
-        "contractor_name": data.get("contractor_name") or "",
-        "comments": data.get("comments") or "",
-        "description": data.get("description") or "",
-        "phone": data.get("phone") or "",
-        "work_type": data.get("work_type") or "",
-        "work_location": data.get("work_location") or "",
-        "unit_codes": data.get("unit_codes") or [],
-        "planneddate": {
-            "worktimedate": iso_to_ddmmyyyy(data.get("start_date")),
-            "completionworkdate": iso_to_ddmmyyyy(data.get("end_date")),
-            "worktimefromLT": data.get("worktimefromLT") or "",
-            "worktimetoLT": data.get("worktimetoLT") or "",
-        },
-    }
-    workers = data.get("workers")
-    if workers:
-        inner["workers"] = workers
+    """Copy this subtype's ``intialState.common`` keys into the nested payload."""
+    subtype = resolve_wp_sub_category(None, data)
+    spec = form_spec_for(subtype)
+
+    if spec is None:
+        # Subtype unknown — minimal lease-shaped shell.
+        return {
+            "mall": data.get("mall", ""),
+            "brand": data.get("brand", ""),
+            "lease": data.get("lease_code") or data.get("lease") or "",
+            "unit_codes": data.get("unit_codes") or [],
+            "lease_brand_mall": data.get("lease_brand_mall") or "",
+        }
+
+    inner: dict[str, Any] = {}
+    for key in spec.common_keys:
+        field_type = spec.field_types.get(key)
+        raw = data.get(key)
+        if raw is None or raw == "":
+            # Lease identifiers always prefer collected lease_code.
+            if key == "lease":
+                inner[key] = data.get("lease_code") or data.get("lease") or ""
+            elif key in {"mall", "brand", "unit_codes", "unit_type", "lease_brand_mall"}:
+                inner[key] = data.get(key) if data.get(key) is not None else (
+                    [] if key == "unit_codes" else ""
+                )
+            elif is_nested_widget(key, field_type):
+                inner[key] = empty_value_for(key, field_type)
+            else:
+                inner[key] = ""
+            continue
+        if is_nested_widget(key, field_type) or key in spec.field_types:
+            inner[key] = coerce_tenant_field_value(key, raw, field_type=field_type)
+        else:
+            inner[key] = raw
+
+    # Prefer authoritative lease_code for the lease slot.
+    if data.get("lease_code"):
+        inner["lease"] = data["lease_code"]
+    if data.get("unit_codes") is not None:
+        inner["unit_codes"] = data["unit_codes"]
+    for lease_key in ("mall", "brand", "unit_type", "lease_brand_mall"):
+        if data.get(lease_key) not in (None, ""):
+            inner[lease_key] = data[lease_key]
+
+    # Safety net: portal may require title/description even if chat left them blank.
+    if not str(inner.get("description") or "").strip():
+        fallback_desc = generate_wp_description(data)
+        if fallback_desc:
+            inner["description"] = fallback_desc
+    if not str(inner.get("title") or "").strip():
+        fallback_title = generate_wp_title(data)
+        if fallback_title:
+            inner["title"] = fallback_title
+
+    # Platform Title max=50 (WorkPermitOperations / Hot / Cold share the limit).
+    if "title" in inner:
+        inner["title"] = truncate_wp_title(str(inner.get("title") or ""))
+
+    # Portal binds ``company_name`` to tenant_profile_id (numeric). Go structs
+    # (e.g. WorkPermitOperations) expect int — never send "" or a display name.
+    _apply_company_name_from_tenant_profile(inner, data)
+
+    # Ops schedule: chat HH:MM → ISO8601 for Go is_not_before_time.
+    _apply_ops_period_iso(inner)
+
     return inner
+
+
+def _apply_company_name_from_tenant_profile(
+    inner: dict[str, Any],
+    data: dict[str, Any],
+) -> None:
+    """Set ``company_name`` to int(tenant_profile_id), or omit if unavailable."""
+    if "company_name" not in inner and data.get("tenant_profile_id") is None:
+        return
+    tp = data.get("tenant_profile_id")
+    if tp is not None and str(tp).strip() != "":
+        try:
+            inner["company_name"] = int(tp)
+            return
+        except (TypeError, ValueError):
+            pass
+    existing = inner.get("company_name")
+    if existing in (None, ""):
+        inner.pop("company_name", None)
+        return
+    try:
+        inner["company_name"] = int(existing)
+    except (TypeError, ValueError):
+        # Non-numeric leftover (e.g. display name) — omit rather than break API.
+        inner.pop("company_name", None)
 
 
 def build_create_work_permit_payload(data: dict[str, Any]) -> dict[str, Any]:
@@ -58,7 +243,11 @@ def build_create_work_permit_payload(data: dict[str, Any]) -> dict[str, Any]:
         raise ValueError(f"Work permit payload missing required keys: {missing}")
 
     sub_category = resolve_wp_sub_category(None, data)
-    title = data.get("title") or f"Work Permit - {sub_category}"
+    title = truncate_wp_title(
+        str(data.get("title") or "").strip()
+        or generate_wp_title(data)
+        or f"Work Permit - {sub_category}"
+    )
     return {
         "payload": _inner_payload_from_collected(data),
         "title": title,
@@ -70,6 +259,11 @@ def build_create_work_permit_payload(data: dict[str, Any]) -> dict[str, Any]:
         "lease_id": data.get("lease_id"),
         "service_request_id": "",
     }
+
+
+def _strip_review_inner_envelope(inner: dict[str, Any]) -> dict[str, Any]:
+    """Drop non-form envelope keys from a WP review PATCH nested payload."""
+    return {k: v for k, v in inner.items() if k not in _REVIEW_INNER_ENVELOPE_KEYS}
 
 
 def build_review_work_permit_payload(
@@ -88,11 +282,12 @@ def build_review_work_permit_payload(
         if comment:
             body["comment"] = comment
         return body
+    cleaned = _strip_review_inner_envelope(dict(inner_payload or {}))
     return {
         "status": "APPROVED",
         "sub_category": sub_category,
         "comment": comment,
-        "payload": inner_payload,
+        "payload": cleaned,
     }
 
 
@@ -113,7 +308,7 @@ async def work_permit_payload_builder_node(state: ServiceRequestState) -> dict[s
             collected_data,
         )
         approve = backend_refs.get("wp_action") != "reject"
-        comment = str(collected_data.get("comments") or "")
+        comment = str(collected_data.get("comments") or collected_data.get("notes") or "")
         payload = build_review_work_permit_payload(
             sub_category=sub_category,
             inner_payload=inner,

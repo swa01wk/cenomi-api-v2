@@ -58,6 +58,12 @@ ACTION_PERMISSION_MAP: dict[str, str] = {
 
 # ---------------------------------------------------------------------------
 # Role permission map — role → frozenset of permission strings
+#
+# Work Permit CREATE via chatbot (`CAN_RAISE_WORK_PERMIT_SR`) is Mall Manager /
+# Admin plus tenant COMPANY_ADMIN_CENTRAL / COMPANY_ADMIN / AUTHORIZED_SIGNATORY.
+# Other tenants (e.g. BILLING_CONTACT, PRIMARY_TENANT_CONTACT) stay sales-data
+# only here; contractors create WP via the portal form when granted platform
+# CAN_RAISE. See 3638.
 # ---------------------------------------------------------------------------
 
 ROLE_PERMISSION_MAP: dict[str, frozenset[str]] = {
@@ -146,6 +152,21 @@ for _role in _SALES_DATA_DOC_ROLES:
 for _role in _SALES_DATA_APPROVE_ROLES:
     ROLE_PERMISSION_MAP[_role] = (
         ROLE_PERMISSION_MAP.get(_role, frozenset()) | _SALES_APPROVE_PERMS
+    )
+
+# Tenant company admins / authorized signatories: WP create + view (merge with
+# sales-data perms already assigned above).
+_TENANT_WORK_PERMIT_CREATE_ROLES: frozenset[str] = frozenset(
+    {
+        "COMPANY_ADMIN_CENTRAL",
+        "COMPANY_ADMIN",
+        "AUTHORIZED_SIGNATORY",
+    }
+)
+_TENANT_WP_CREATE_PERMS = frozenset({"CAN_RAISE_WORK_PERMIT_SR", "VIEW_WORK_PERMIT"})
+for _role in _TENANT_WORK_PERMIT_CREATE_ROLES:
+    ROLE_PERMISSION_MAP[_role] = (
+        ROLE_PERMISSION_MAP.get(_role, frozenset()) | _TENANT_WP_CREATE_PERMS
     )
 
 

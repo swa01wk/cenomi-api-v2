@@ -47,6 +47,23 @@ log = structlog.get_logger(__name__)
 logger = logging.getLogger(__name__)
 
 _MAX_RESPONSE_BYTES = 32_768  # cap raw body stored in trace payload
+_MAX_LOG_JSON_CHARS = 4_000
+
+
+def _truncate_for_log(value: Any) -> Any:
+    """Compact JSON-serialisable value for non-2xx structlog fields."""
+    if value is None:
+        return None
+    try:
+        text = json.dumps(value, ensure_ascii=False, default=str)
+    except (TypeError, ValueError):
+        text = str(value)
+    if len(text) <= _MAX_LOG_JSON_CHARS:
+        try:
+            return json.loads(text)
+        except (json.JSONDecodeError, TypeError):
+            return text
+    return text[:_MAX_LOG_JSON_CHARS] + "…"
 
 # Top-level SR DTO fields needed for PUT /files and collected_data hydration.
 # Platform keeps these outside nested ``payload`` (see ServiceRequestDTO).
@@ -687,6 +704,8 @@ class ServiceRequestPlatformClient:
                     "platform_client.post.non_2xx",
                     status_code=response.status_code,
                     endpoint=endpoint,
+                    request_payload=_truncate_for_log(payload),
+                    response_payload=_truncate_for_log(body),
                 )
             sr_id = self._extract_sr_id(body) if success else None
             return PlatformCallResult(
@@ -735,6 +754,8 @@ class ServiceRequestPlatformClient:
                     "platform_client.patch.non_2xx",
                     status_code=response.status_code,
                     endpoint=endpoint,
+                    request_payload=_truncate_for_log(payload),
+                    response_payload=_truncate_for_log(body),
                 )
             sr_id = self._extract_sr_id(body) if success else None
             return PlatformCallResult(

@@ -208,15 +208,49 @@ def payload_to_collected_data(payload: dict[str, Any]) -> dict[str, Any]:
         if derived:
             mapped["already_handovered"] = derived
 
-    # Work Permit inner payload (planneddate, contractor, subtype).
+    # Work Permit inner payload — copy portal form keys into collected_data.
     from app.agents.schemas.work_permit_schema import (
         VALID_WORK_PERMIT_TYPES,
         ddmmyyyy_to_iso,
     )
 
-    for wp_key in ("contractor_name", "phone", "work_type", "work_location", "comments"):
+    for wp_key in (
+        "contractor_name",
+        "phone",
+        "work_type",
+        "work_location",
+        "comments",
+        "notes",
+        "department",
+        "unit_type",
+        "owner",
+        "trade_name",
+        "responsible_person",
+        "type_work",
+        "list_equipment",
+        "work_info",
+        "demand_appendices",
+        "special_conditions",
+        "description",
+        "title",
+        "entry_gate",
+        "permission_given_to",
+    ):
         if wp_key in payload and payload[wp_key] not in (None, "") and not mapped.get(wp_key):
             mapped[wp_key] = payload[wp_key]
+    for nested_key in (
+        "planneddate",
+        "workers",
+        "measureofsafety",
+        "typeofwork",
+        "effective_starting",
+        "firstperiod",
+        "secondperiod",
+    ):
+        if nested_key in payload and payload[nested_key] not in (None, "", []) and not mapped.get(
+            nested_key
+        ):
+            mapped[nested_key] = payload[nested_key]
     planned = payload.get("planneddate")
     if isinstance(planned, dict):
         if planned.get("worktimedate") and not mapped.get("start_date"):

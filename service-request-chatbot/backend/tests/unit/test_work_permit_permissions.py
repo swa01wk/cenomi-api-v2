@@ -4,7 +4,8 @@ Test groups
 -----------
 TestWorkPermitActionMap        — CREATE_WORK_PERMIT_SR and VIEW_WORK_PERMIT_SR
                                  are present in ACTION_PERMISSION_MAP.
-TestWorkPermitRoleMap          — MALL_MANAGER has CAN_RAISE_WORK_PERMIT_SR;
+TestWorkPermitRoleMap          — MALL_MANAGER and tenant company admins have
+                                 CAN_RAISE_WORK_PERMIT_SR; BILLING_CONTACT does not;
                                  other roles have VIEW_WORK_PERMIT but not CREATE.
 TestPermissionServiceWP        — PermissionService.check() enforces WP actions.
 TestWorkPermitValidation       — ValidationService handles CREATE_WORK_PERMIT stage.
@@ -103,6 +104,19 @@ class TestWorkPermitRoleMap:
             "OPERATION_EXECUTIVES", frozenset()
         )
 
+    def test_tenant_company_admin_roles_can_raise_and_view_wp(self) -> None:
+        for role in ("COMPANY_ADMIN_CENTRAL", "COMPANY_ADMIN", "AUTHORIZED_SIGNATORY"):
+            perms = ROLE_PERMISSION_MAP.get(role, frozenset())
+            assert "CAN_RAISE_WORK_PERMIT_SR" in perms, role
+            assert "VIEW_WORK_PERMIT" in perms, role
+            # Sales-data perms must remain (union, not replace).
+            assert "SALES_DATA_UPDATE" in perms, role
+
+    def test_billing_contact_cannot_raise_wp(self) -> None:
+        assert "CAN_RAISE_WORK_PERMIT_SR" not in ROLE_PERMISSION_MAP.get(
+            "BILLING_CONTACT", frozenset()
+        )
+
     def test_approve_work_permit_not_in_action_map(self) -> None:
         """Platform has no APPROVE_SR_WORK_PERMIT — hop gate is assigned_role."""
         assert "APPROVE_WORK_PERMIT_SR" not in ACTION_PERMISSION_MAP
@@ -149,6 +163,30 @@ class TestPermissionServiceWP:
         with pytest.raises(PermissionDeniedError):
             svc.ensure_can_create_work_permit(_auth("FM_MANAGER"))
 
+    def test_ensure_can_create_work_permit_for_tenant_company_admins(self) -> None:
+        """Company Admin / Authorized Signatory may create WP via chatbot."""
+        svc = PermissionService()
+        for role in (
+            "COMPANY_ADMIN",
+            "COMPANY_ADMIN_CENTRAL",
+            "AUTHORIZED_SIGNATORY",
+        ):
+            svc.ensure_can_create_work_permit(_auth(role))
+
+    def test_ensure_can_create_work_permit_denied_for_billing_and_other_tenants(
+        self,
+    ) -> None:
+        """Sales-only / other tenants cannot create WP via chatbot."""
+        svc = PermissionService()
+        for role in (
+            "BILLING_CONTACT",
+            "PRIMARY_TENANT_CONTACT",
+            "CONTRACTOR",
+            "SUB_CONTRACTOR",
+        ):
+            with pytest.raises(PermissionDeniedError):
+                svc.ensure_can_create_work_permit(_auth(role))
+
     def test_permission_denied_error_is_fail_closed(self) -> None:
         """Unknown WP action must raise PermissionDeniedError — fail-closed."""
         svc = PermissionService()
@@ -186,7 +224,7 @@ class TestPermissionServiceWP:
 class TestWorkPermitValidation:
     """ValidationService handles CREATE_WORK_PERMIT stage correctly."""
 
-    def _complete_wp_data(self) -> dict[str, Any]:
+    def _complete_cold_data(self) -> dict[str, Any]:
         return {
             "lease_code": "t0105712",
             "lease_id": 456,
@@ -194,17 +232,90 @@ class TestWorkPermitValidation:
             "unit_codes": ["FF050"],
             "mall": "Jawharat Jeddah",
             "brand": "Brand Under Armour",
+            "unit_type": "Retail",
             "work_permit_type": "CONSTRUCTION_COLD",
-            "description": "Cold work construction permit",
-            "start_date": "2026-08-01",
-            "end_date": "2026-08-05",
-            "contractor_name": "ABC Contractors",
-            "comments": "",
+            "department": "Fit-out",
+            "owner": "Owner Co",
+            "trade_name": "UA Trade",
+            "responsible_person": "Sara",
+            "phone": "501234567",
+            "type_work": "Partition install",
+            "list_equipment": "Drill, ladder",
+            "work_info": "Night work",
+            "notes": "",
+            "description": "",
+            "title": "",
+            "planneddate": {
+                "worktimedate": "01/08/2026",
+                "completionworkdate": "05/08/2026",
+                "worktimefrom": "08:00",
+                "worktimeto": "16:00",
+                "completionfrom": "",
+                "completionto": "",
+            },
+            "workers": [
+                {
+                    "full_name": "Omar",
+                    "designation": "Tech",
+                    "company_name": "ABC",
+                    "phone": "501111111",
+                    "country_code": "966",
+                }
+            ],
         }
+
+    def _complete_hot_data(self) -> dict[str, Any]:
+        return {
+            "lease_code": "t0105712",
+            "lease_id": 456,
+            "property_id": 789,
+            "unit_codes": ["FF050"],
+            "mall": "Jawharat Jeddah",
+            "brand": "Brand Under Armour",
+            "unit_type": "Retail",
+            "work_permit_type": "CONSTRUCTION_HOT",
+            "contractor_name": "ABC Contractors",
+            "phone": "501234567",
+            "planneddate": {
+                "worktimedate": "20/08/2026",
+                "completionworkdate": "20/08/2026",
+                "worktimefrom": "09:00",
+                "worktimeto": "17:00",
+                "completionfrom": "",
+                "completionto": "",
+            },
+            "workers": {
+                "instructor_name": "Ali",
+                "worker": [
+                    {
+                        "name": "Omar",
+                        "designation": "Welder",
+                        "iqama_number": "123",
+                        "document_id": "",
+                        "worker_qualification": "",
+                    }
+                ],
+            },
+            "measureofsafety": {"fire_extinguisher": "yes"},
+            "work_type": "",
+            "work_location": "",
+            "demand_appendices": "",
+            "special_conditions": "",
+            "description": "",
+            "title": "",
+        }
+
+    def _complete_wp_data(self) -> dict[str, Any]:
+        return self._complete_cold_data()
 
     def test_complete_wp_data_no_errors(self) -> None:
         svc = ValidationService()
         errors = svc.validate_draft(self._complete_wp_data(), workflow_stage="CREATE_WORK_PERMIT")
+        assert len(errors) == 0
+
+    def test_complete_hot_data_no_errors(self) -> None:
+        svc = ValidationService()
+        errors = svc.validate_draft(self._complete_hot_data(), workflow_stage="CREATE_WORK_PERMIT")
         assert len(errors) == 0
 
     def test_missing_work_permit_type_is_error(self) -> None:
@@ -249,32 +360,31 @@ class TestWorkPermitValidation:
         lc_errors = [e for e in errors if e["field"] == "lease_code"]
         assert len(lc_errors) >= 1
 
-    def test_missing_description_is_error(self) -> None:
+    def test_missing_type_work_is_error_for_cold(self) -> None:
         svc = ValidationService()
-        data = self._complete_wp_data()
-        del data["description"]
+        data = self._complete_cold_data()
+        del data["type_work"]
         errors = svc.validate_draft(data, workflow_stage="CREATE_WORK_PERMIT")
-        # description is in OPTIONAL_FIELDS for WP — None is missing, empty string is not
-        desc_errors = [e for e in errors if e["field"] == "description"]
-        assert len(desc_errors) >= 1
+        tw_errors = [e for e in errors if e["field"] == "type_work"]
+        assert len(tw_errors) >= 1
 
-    def test_empty_string_description_is_acceptable(self) -> None:
-        """Empty string description is valid for WP (OPTIONAL_FIELDS)."""
+    def test_empty_string_notes_is_acceptable(self) -> None:
+        """Empty string notes is valid for cold (optional tenant field)."""
         svc = ValidationService()
-        data = self._complete_wp_data()
-        data["description"] = ""
+        data = self._complete_cold_data()
+        data["notes"] = ""
         errors = svc.validate_draft(data, workflow_stage="CREATE_WORK_PERMIT")
-        desc_errors = [e for e in errors if e["field"] == "description"]
-        assert len(desc_errors) == 0
+        notes_errors = [e for e in errors if e["field"] == "notes"]
+        assert len(notes_errors) == 0
 
-    def test_empty_string_contractor_name_is_acceptable(self) -> None:
-        """Empty contractor_name is an explicit skip (WP OPTIONAL_FIELDS)."""
+    def test_empty_string_contractor_name_is_error_for_hot(self) -> None:
+        """Empty contractor_name fails for CONSTRUCTION_HOT (required)."""
         svc = ValidationService()
-        data = self._complete_wp_data()
+        data = self._complete_hot_data()
         data["contractor_name"] = ""
         errors = svc.validate_draft(data, workflow_stage="CREATE_WORK_PERMIT")
         name_errors = [e for e in errors if e["field"] == "contractor_name"]
-        assert len(name_errors) == 0
+        assert len(name_errors) >= 1
 
     def test_create_wp_no_document_count_requirement(self) -> None:
         svc = ValidationService()
@@ -283,36 +393,28 @@ class TestWorkPermitValidation:
         count_errors = [e for e in errors if e["validation_type"] == "document_count"]
         assert len(count_errors) == 0
 
-    def test_invalid_start_date_format_is_date_format_error(self) -> None:
+    def test_planneddate_end_before_start_is_date_range_error(self) -> None:
         svc = ValidationService()
-        data = self._complete_wp_data()
-        data["start_date"] = "t0105712"
-        errors = svc.validate_draft(data, workflow_stage="CREATE_WORK_PERMIT")
-        fmt_errors = [
-            e
-            for e in errors
-            if e["validation_type"] == "date_format" and e["field"] == "start_date"
-        ]
-        assert len(fmt_errors) == 1
-
-    def test_end_date_before_start_date_is_date_range_error(self) -> None:
-        svc = ValidationService()
-        data = self._complete_wp_data()
-        data["start_date"] = "2026-08-20"
-        data["end_date"] = "2026-08-10"
+        data = self._complete_cold_data()
+        data["planneddate"] = {
+            "worktimedate": "20/08/2026",
+            "completionworkdate": "10/08/2026",
+            "worktimefrom": "",
+            "worktimeto": "",
+            "completionfrom": "",
+            "completionto": "",
+        }
         errors = svc.validate_draft(data, workflow_stage="CREATE_WORK_PERMIT")
         range_errors = [
             e
             for e in errors
-            if e["validation_type"] == "date_range" and e["field"] == "end_date"
+            if e["validation_type"] == "date_range" and e["field"] == "planneddate"
         ]
         assert len(range_errors) == 1
 
-    def test_same_day_start_and_end_is_valid(self) -> None:
+    def test_same_day_planneddate_is_valid(self) -> None:
         svc = ValidationService()
-        data = self._complete_wp_data()
-        data["start_date"] = "2026-08-20"
-        data["end_date"] = "2026-08-20"
+        data = self._complete_hot_data()
         errors = svc.validate_draft(data, workflow_stage="CREATE_WORK_PERMIT")
         date_errors = [
             e for e in errors if e["validation_type"] in {"date_format", "date_range"}

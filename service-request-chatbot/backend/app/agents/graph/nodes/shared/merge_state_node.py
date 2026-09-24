@@ -340,6 +340,12 @@ _REQUIRED_NON_OPTIONAL_FIELDS: frozenset[str] = frozenset(
         "actual_trading_date",
         "guideLineLink",
         "lease_code",
+        # Work Permit contact fields — soft-nav opens an empty phoneinput on the
+        # form; Formik force-syncs "" every silent turn and must not wipe a value
+        # the user just gave in chat.
+        "phone",
+        "unit_type",
+        "work_permit_type",
     }
 )
 
@@ -418,6 +424,14 @@ def _remap_extracted_to_active_field(
         and active_field.startswith("actual_")
         and wrong_key != active_field
     ):
+        return extracted
+    # Ops schedule widgets are independent nested shapes. Remapping a lone
+    # firstperiod onto active_field=effective_starting (group primary) coerces
+    # the period dict into empty datefrom/dateto and loses the time entirely.
+    _WP_SCHEDULE_FIELDS = frozenset(
+        {"effective_starting", "firstperiod", "secondperiod"}
+    )
+    if wrong_key in _WP_SCHEDULE_FIELDS and wrong_key != active_field:
         return extracted
     remapped = dict(extracted)
     remapped[active_field] = remapped.pop(wrong_key)
@@ -656,6 +670,29 @@ async def merge_state_node(state: ServiceRequestState) -> dict[str, Any]:
                 _salvage_inspection_time(collected, extracted, new_value, field_name)
             new_value = _to_iso_date(new_value)
 
+        # Work Permit nested widgets may arrive as JSON strings from extraction.
+        if (state.get("active_agent") or "") == "work_permit_agent":
+            from app.agents.schemas.work_permit_form_fields import (
+                coerce_tenant_field_value,
+                form_spec_for,
+                is_nested_widget,
+            )
+            from app.agents.schemas.work_permit_schema import resolve_wp_sub_category
+
+            subtype = resolve_wp_sub_category(
+                state.get("sub_category"),
+                {**collected, "work_permit_type": collected.get("work_permit_type")},
+            )
+            # Prefer newly extracted type when present.
+            if field_name == "work_permit_type" and new_value:
+                subtype = resolve_wp_sub_category(None, {"work_permit_type": new_value})
+            spec = form_spec_for(subtype)
+            field_type = spec.field_types.get(field_name) if spec else None
+            if is_nested_widget(field_name, field_type):
+                new_value = coerce_tenant_field_value(
+                    field_name, new_value, field_type=field_type
+                )
+
         current_value = collected.get(field_name)
 
         # Record correction when user changes a previously known value.
@@ -692,6 +729,7 @@ async def merge_state_node(state: ServiceRequestState) -> dict[str, Any]:
     _CONFIRMED_OPTIONAL_DEFAULTS: dict[str, tuple[str, ...]] = {
         "CREATE_SR": ("description", "notes", "comments"),
         "CREATE_HANDED_OVER_SR": ("comments",),
+        "CREATE_WORK_PERMIT": ("description", "title"),
     }
     if state.get("confirmation_status") == "CONFIRMED":
         # Mark still-unanswered optionals as skipped ("") rather than leaving
@@ -739,6 +777,32 @@ async def merge_state_node(state: ServiceRequestState) -> dict[str, Any]:
             if _was_skipped(collected.get("comments")):
                 collected["comments"] = _generate_comments(_lease_for_text)
 
+    # Work Permit: skip-fill empty title & description (lease-code-only templates).
+    if workflow_stage == "CREATE_WORK_PERMIT":
+        from app.agents.schemas.work_permit_schema import (
+            generate_wp_description,
+            generate_wp_title,
+            wp_location_label,
+            wp_text_should_skip_or_refresh,
+        )
+
+        if wp_location_label(collected) and (
+            collected.get("_wp_type_confirmed") or collected.get("work_permit_type")
+        ):
+            if wp_text_should_skip_or_refresh(
+                collected.get("description"), collected, kind="description"
+            ):
+                text = generate_wp_description(collected)
+                if text:
+                    collected["description"] = text
+                    _description_was_generated = True
+            if wp_text_should_skip_or_refresh(
+                collected.get("title"), collected, kind="title"
+            ):
+                text = generate_wp_title(collected)
+                if text:
+                    collected["title"] = text
+
     # ── Auto-generate title ────────────────────────────────────────────────────
     # Title generation is branched by workflow stage:
     #   CREATE_HANDED_OVER_SR → "Already Trading - {lease_code}"
@@ -748,9 +812,10 @@ async def merge_state_node(state: ServiceRequestState) -> dict[str, Any]:
     # user has EXPLICITLY skipped (title == "") — never when title is `None`
     # (untouched), because merge_state runs BEFORE missing_field_node and
     # filling `None` here would silently rob the bot of its chance to prompt.
+    # CREATE_WORK_PERMIT title is handled above via generate_wp_title.
 
     def _title_was_skipped(value: object) -> bool:
-        return isinstance(value, str) and value.strip() == ""
+        return _was_skipped(value)
 
     title_value = collected.get("title")
     title_needs_default = title_value is None or _title_was_skipped(title_value)
@@ -759,6 +824,8 @@ async def merge_state_node(state: ServiceRequestState) -> dict[str, Any]:
         # Path B does not ask for title (auto-generated); safe to fill on None too.
         if not collected.get("title") and collected.get("lease_code"):
             collected["title"] = f"Already Trading - {collected['lease_code']}"
+    elif workflow_stage == "CREATE_WORK_PERMIT":
+        pass  # WP title skip-fill already applied above
     else:
         # Path A: only auto-generate when the user explicitly skipped it,
         # so missing_field_node still gets to ask when title is None.
@@ -777,22 +844,23 @@ async def merge_state_node(state: ServiceRequestState) -> dict[str, Any]:
     _ = title_needs_default
 
     # ── Short flow: fill the fields the bot no longer asks for ────────────────
-    # Runs only once everything the user *is* asked for has landed, so the
-    # generated description / notes can name the real inspection window. Never
-    # overwrites a value the user typed or edited on the review card — see
-    # ``autofill_text_fields``.
+    # Handover: once inspection window (or Path B dates) land.
+    # Work Permit: once subtype + lease location are known.
+    # Never overwrites a value the user typed — see ``autofill_text_fields``.
     from app.agents.schemas.handover_schema import short_flow_enabled
+    from app.agents.schemas.work_permit_schema import wp_short_flow_enabled
 
-    if short_flow_enabled() and _short_flow_autofill_ready(collected, workflow_stage):
+    _run_short_flow = (
+        (short_flow_enabled() and workflow_stage != "CREATE_WORK_PERMIT")
+        or (wp_short_flow_enabled() and workflow_stage == "CREATE_WORK_PERMIT")
+    )
+    if _run_short_flow and _short_flow_autofill_ready(collected, workflow_stage):
         from app.agents.services.sr_autofill_service import autofill_text_fields
-
         from app.agents.services.sr_autofill_service import default_inspection_times
 
-        # The clocks are never asked for, so store the default the payload
-        # would use. Left unset they read as a missing required field and
-        # block submission — the user edits the window on the card, hits
-        # Confirm, and is asked for a time instead.
-        collected.update(default_inspection_times(collected))
+        # Handover clocks are never asked for — store payload defaults.
+        if workflow_stage != "CREATE_WORK_PERMIT":
+            collected.update(default_inspection_times(collected))
 
         filled, provenance = await autofill_text_fields(collected, workflow_stage)
         if filled:
@@ -801,7 +869,6 @@ async def merge_state_node(state: ServiceRequestState) -> dict[str, Any]:
             for field_name, entry in provenance.items():
                 meta[field_name] = {**entry, "value": filled[field_name]}
             collected[_AI_FIELD_META_KEY] = meta
-
     # ── Auto-compute expected_handover_date from unit_readiness_date ──────────
     # FM_REVIEW: expected_handover_date = unit_readiness_date + 7 days.
     # Skipped for CREATE_HANDED_OVER_SR — expected_handover_date is not used
@@ -1011,7 +1078,69 @@ async def merge_state_node(state: ServiceRequestState) -> dict[str, Any]:
     ):
         patch["workflow_stage"] = "CREATE_HANDED_OVER_SR"
         patch["sub_category"] = "HANDED_OVER"
+
+    # Work Permit subtype confirmation: chips set the flag in entry; Create-with-AI
+    # seed messages include an explicit subtype label; answering the type ask
+    # (active_field) also confirms. Bare LLM guesses do not.
+    if active_agent == "work_permit_agent" and not collected.get("_wp_type_confirmed"):
+        wp_type = str(collected.get("work_permit_type") or "").strip()
+        if wp_type:
+            asked_type = str(state.get("active_field") or "") == "work_permit_type"
+            if asked_type or _wp_seed_message_confirms_type(user_message, wp_type):
+                collected["_wp_type_confirmed"] = True
+                patch["collected_data"] = collected
+                if wp_type.upper() in {
+                    "CONSTRUCTION_HOT",
+                    "CONSTRUCTION_COLD",
+                    "CONSTRUCTION_ROOF_ACCESS",
+                    "MAINTENANCE_HOT",
+                    "MAINTENANCE_COLD",
+                    "MAINTENANCE_ROOF_ACCESS",
+                    "OPERATIONS",
+                }:
+                    patch["sub_category"] = wp_type.upper()
+
+    # Title/description fill for WP is Handover-style: skip-fill + short-flow
+    # via the blocks above / ``autofill_text_fields`` — not ASAP ``wp_auto``.
+
     return patch
+
+
+# Portal Create-with-AI seed labels (FE buildCreateSrSeedMessage) + chip labels.
+_WP_SEED_TYPE_LABELS: dict[str, tuple[str, ...]] = {
+    "CONSTRUCTION_HOT": ("construction - hot", "construction – hot"),
+    "CONSTRUCTION_COLD": ("construction - cold", "construction – cold"),
+    "CONSTRUCTION_ROOF_ACCESS": (
+        "construction - roof access",
+        "construction – roof access",
+    ),
+    "MAINTENANCE_HOT": ("maintenance - hot", "maintenance – hot"),
+    "MAINTENANCE_COLD": ("maintenance - cold", "maintenance – cold"),
+    "MAINTENANCE_ROOF_ACCESS": (
+        "maintenance - roof access",
+        "maintenance – roof access",
+    ),
+    "OPERATIONS": ("operations",),
+}
+
+
+def _wp_seed_message_confirms_type(user_message: str, wp_type: str) -> bool:
+    """True when the user message is a Create-with-AI seed with that subtype."""
+    msg = (user_message or "").strip().lower()
+    if "work permit service request" not in msg:
+        return False
+    # Prefer parenthetical label: "... request (Construction - Hot)"
+    paren = re.search(r"\(([^)]+)\)\s*$", msg)
+    label_blob = (paren.group(1) if paren else msg).strip().lower()
+    # Normalise en/em dashes to ASCII hyphen for matching.
+    label_blob = label_blob.replace("–", "-").replace("—", "-")
+    code = str(wp_type or "").strip().upper()
+    for candidate in _WP_SEED_TYPE_LABELS.get(code, ()):
+        needle = candidate.replace("–", "-").replace("—", "-")
+        if needle in label_blob or label_blob in needle:
+            return True
+    # Also accept the raw enum in the seed (rare).
+    return code.lower().replace("_", " ") in label_blob or code.lower() in label_blob
 
 
 def _short_flow_autofill_ready(collected: dict[str, Any], workflow_stage: str) -> bool:
@@ -1020,7 +1149,18 @@ def _short_flow_autofill_ready(collected: dict[str, Any], workflow_stage: str) -
     Generating earlier would describe an inspection whose window is not known
     yet, and the text would then have to be regenerated (or, worse, kept) once
     the dates arrive.
+
+    Work Permit short-flow is ready once subtype + lease location are known.
     """
+    if workflow_stage == "CREATE_WORK_PERMIT":
+        from app.agents.schemas.work_permit_schema import wp_location_label
+
+        if not collected.get("_wp_type_confirmed") and not collected.get(
+            "work_permit_type"
+        ):
+            return False
+        return bool(wp_location_label(collected))
+
     # Local import: handover_schema imports BACKEND_COMPUTED_FIELDS from this
     # module, so a module-level import here would close the cycle.
     from app.agents.schemas.handover_schema import AI_FILLED_STAGES, INSPECTION_FIELD_GROUP
@@ -1042,12 +1182,10 @@ def _short_flow_autofill_ready(collected: dict[str, Any], workflow_stage: str) -
 
 
 def _was_skipped(value: object) -> bool:
-    """True when the user explicitly declined a field (answered "none"/"skip").
+    """True when the user explicitly declined a field (answered "none"/"skip")."""
+    from app.agents.services.sr_autofill_service import was_skipped
 
-    ``merge_state`` normalises those answers to ``""``. ``None`` means the field
-    has not been asked yet, so it must be left alone for ``missing_field_node``.
-    """
-    return isinstance(value, str) and value.strip() == ""
+    return was_skipped(value)
 
 
 def _generate_description(
@@ -1057,38 +1195,29 @@ def _generate_description(
     already_trading: bool = False,
 ) -> str:
     """Human-readable default description when the Mall Manager skips it."""
-    kind = "Already Trading handover" if already_trading else "Handover inspection"
-    where = " at ".join(p for p in (brand.strip(), mall.strip()) if p.strip())
-    if where:
-        return f"{kind} for lease {lease_code} - {where}."
-    return f"{kind} for lease {lease_code}."
+    from app.agents.services.sr_autofill_service import generate_description
+
+    return generate_description(
+        lease_code, brand, mall, already_trading=already_trading
+    )
 
 
 def _generate_notes(lease_code: str) -> str:
     """Default notes when the Mall Manager skips the notes question."""
-    return f"No additional notes provided for lease {lease_code}."
+    from app.agents.services.sr_autofill_service import generate_notes
+
+    return generate_notes(lease_code)
 
 
 def _generate_comments(lease_code: str) -> str:
-    """Default comments when the Mall Manager skips the comments question.
+    """Default comments when the Mall Manager skips the comments question."""
+    from app.agents.services.sr_autofill_service import generate_comments
 
-    ``comments`` is ``required: true`` on the platform HANDOVER form skeleton,
-    so an empty string here shows as a blank mandatory field on the SR detail
-    page. A deterministic sentence keeps the record readable.
-    """
-    return f"No additional comments provided for lease {lease_code}."
+    return generate_comments(lease_code)
 
 
 def _generate_title(lease_code: str, description: str) -> str:
-    """Build 'handover-{lease_code}-{slug}' from lease_code and description.
+    """Build 'handover-{lease_code}-{slug}' from lease_code and description."""
+    from app.agents.services.sr_autofill_service import generate_title
 
-    The slug is the first five significant words of the description,
-    lowercased and joined with hyphens.  Non-alphanumeric characters are
-    stripped so the title is URL-safe and consistent.
-
-    When *description* is empty the trailing separator is omitted, producing
-    'handover-{lease_code}' rather than 'handover-{lease_code}-'.
-    """
-    slug_words = re.sub(r"[^a-zA-Z0-9\s]", "", description.lower()).split()
-    slug = "-".join(slug_words[:5])
-    return f"handover-{lease_code}-{slug}" if slug else f"handover-{lease_code}"
+    return generate_title(lease_code, description)

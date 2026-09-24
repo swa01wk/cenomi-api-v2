@@ -711,6 +711,7 @@ class ChatOrchestrationService:
         # card labelled "Handover Service Request", because this block used
         # to build one unconditionally whenever collected_data was non-empty.
         is_handover_agent = result_state.get("active_agent") == "rdd_handover_agent"
+        is_work_permit_agent = result_state.get("active_agent") == "work_permit_agent"
         draft_preview: dict[str, Any] | None = None
         if is_handover_agent and (collected or cleared_fields):
             from app.agents.graph.nodes.handover.preview_node import _fields_from_collected
@@ -721,6 +722,21 @@ class ChatOrchestrationService:
                 "status": "SUBMITTED" if sr_id else "DRAFT",
                 "isSubmitted": bool(sr_id),
                 "fields": _fields_from_collected(collected),
+            }
+            if cleared_fields:
+                draft_preview["cleared_fields"] = cleared_fields
+        elif is_work_permit_agent and (collected or cleared_fields):
+            from app.agents.schemas.work_permit_form_fields import (
+                wp_draft_fields_from_collected,
+            )
+
+            draft_preview = {
+                "type": "sr_preview_card",
+                "requestType": "Work Permit Service Request",
+                "srId": sr_id,
+                "status": "SUBMITTED" if sr_id else "DRAFT",
+                "isSubmitted": bool(sr_id),
+                "fields": wp_draft_fields_from_collected(collected),
             }
             if cleared_fields:
                 draft_preview["cleared_fields"] = cleared_fields

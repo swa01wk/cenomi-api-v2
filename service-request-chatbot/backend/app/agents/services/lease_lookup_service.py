@@ -57,6 +57,9 @@ class LeaseRecord(BaseModel):
     lease_brand_mall: str
     # Optional — present when platform returns tenant company name
     company_name: str = ""
+    # Optional — unit type label when the lease/contracts row includes it.
+    # Empty when absent; callers must not invent a default.
+    unit_type: str = ""
     # Base milestone dates from the lease contract (YYYY-MM-DD ISO strings,
     # empty when the platform returns null).  Used by FOS/FOE/Trading agents
     # to offer a pre-filled "original date" so the user can confirm or correct it.

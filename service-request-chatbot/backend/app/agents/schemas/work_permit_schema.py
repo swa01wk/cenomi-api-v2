@@ -19,6 +19,15 @@ from __future__ import annotations
 from dataclasses import dataclass, field as dc_field
 from typing import Any, Final, Literal
 
+from app.agents.schemas.work_permit_form_fields import (
+    FIELD_LABELS as WP_FORM_FIELD_LABELS,
+    TENANT_FORM_BY_SUBTYPE,
+    form_spec_for,
+    is_tenant_field_missing,
+)
+
+# Re-export for confirmation / missing-field callers.
+FIELD_LABELS = WP_FORM_FIELD_LABELS
 # ── Constants ─────────────────────────────────────────────────────────────────
 
 SERVICE_CATEGORY: Final[str] = "WORK_PERMIT"
@@ -131,25 +140,24 @@ class WorkPermitStageDefinition:
 
 # ── Stage instances ───────────────────────────────────────────────────────────
 
-_CREATE_REQUIRED: tuple[str, ...] = (
+# Base create requirements before subtype is known. Once work_permit_type is set,
+# get_create_required_fields() unions the tenant form required set for that subtype.
+# ``work_permit_type`` is first so create asks subtype before lease when empty
+# (seeded Create-with-AI subtypes skip that turn).
+_CREATE_REQUIRED_BASE: tuple[str, ...] = (
+    "work_permit_type",
     "lease_code",
     "lease_id",
     "property_id",
     "unit_codes",
     "mall",
     "brand",
-    "work_permit_type",
-    "description",
-    "start_date",
-    "end_date",
-    "contractor_name",
-    "comments",
 )
 
 CREATE_WORK_PERMIT_STAGE = WorkPermitStageDefinition(
     stage="CREATE_WORK_PERMIT",
     role="MALL_MANAGER",
-    required_fields=_CREATE_REQUIRED,
+    required_fields=_CREATE_REQUIRED_BASE,
 )
 
 # Review hops: no extra DTO. Approver resubmits the GET payload.
@@ -186,41 +194,73 @@ BACKEND_DERIVED_FIELDS: frozenset[str] = frozenset(
         "tenant_profile_id",
         "city",
         "contracted_area",
+        "lease_brand_mall",
+        "lease",
+        "company_name",
+        "country_code",
+        "tenant_contact",
     }
 )
 
-USER_SUPPLIED_FIELDS: frozenset[str] = frozenset(
-    {
-        "lease_code",
-        "work_permit_type",
-        "description",
-        "start_date",
-        "end_date",
-        "contractor_name",
-        "comments",
-    }
+_ALL_TENANT_USER_FIELDS: frozenset[str] = frozenset().union(
+    *(frozenset(spec.field_types.keys()) for spec in TENANT_FORM_BY_SUBTYPE.values())
 )
+
+USER_SUPPLIED_FIELDS: frozenset[str] = frozenset(
+    {"lease_code", "work_permit_type"}
+) | _ALL_TENANT_USER_FIELDS
 
 EXTRACTABLE_FIELDS: frozenset[str] = frozenset(
     {
         "lease_code",
         "work_permit_type",
-        "description",
-        "start_date",
-        "end_date",
-        "contractor_name",
-        "comments",
+        "department",
+        "unit_type",
+        "owner",
+        "trade_name",
+        "responsible_person",
+        "phone",
+        "type_work",
+        "list_equipment",
+        "work_info",
         "notes",
+        "contractor_name",
+        "work_type",
+        "work_location",
+        "demand_appendices",
+        "special_conditions",
+        "description",
+        "title",
+        "planneddate",
+        "workers",
+        "measureofsafety",
+        "typeofwork",
+        "effective_starting",
+        "firstperiod",
+        "secondperiod",
+        "entry_gate",
+        "permission_given_to",
     }
 )
 
 BACKEND_ONLY_FIELDS: frozenset[str] = BACKEND_DERIVED_FIELDS
 
-OPTIONAL_FIELDS: frozenset[str] = frozenset(
-    {"contractor_name", "comments", "notes", "description"}
-)
+OPTIONAL_FIELDS: frozenset[str] = frozenset().union(
+    *(spec.optional_tenant_fields for spec in TENANT_FORM_BY_SUBTYPE.values())
+) | frozenset({"comments", "description", "title", "notes"})
 
+# No longer auto-filled ASAP — Handover-style optional ask / skip / short-flow.
 AUTO_GENERATED_FIELDS: frozenset[str] = frozenset()
+
+# Short-flow fills these instead of asking (same flag as Handover short flow).
+WP_AI_FILLED_FIELDS: frozenset[str] = frozenset({"title", "description"})
+
+
+def wp_short_flow_enabled() -> bool:
+    """Reuse Handover short-flow switch for WP title/description autofill."""
+    from app.core.config import get_settings
+
+    return bool(get_settings().handover_short_flow_enabled)
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -306,6 +346,182 @@ def resolve_wp_sub_category(
     return "WORK_PERMIT"
 
 
+_WP_TITLE_MAX_LEN: Final[int] = 50  # Go WorkPermitOperations.Title max=50
+_WP_DESCRIPTION_MAX_LEN: Final[int] = 200  # Go WorkPermitOperations.Description max=200
+
+# Compact subtype labels for the 50-char title budget (brand must still fit).
+_WP_TITLE_SUBTYPE_LABELS: Final[dict[str, str]] = {
+    "CONSTRUCTION_HOT": "Construction Hot",
+    "CONSTRUCTION_COLD": "Construction Cold",
+    "CONSTRUCTION_ROOF_ACCESS": "Const Roof Access",
+    "MAINTENANCE_HOT": "Maintenance Hot",
+    "MAINTENANCE_COLD": "Maintenance Cold",
+    "MAINTENANCE_ROOF_ACCESS": "Maint Roof Access",
+    "OPERATIONS": "Operations",
+}
+
+
+def truncate_wp_title(title: str, *, max_len: int = _WP_TITLE_MAX_LEN) -> str:
+    """Clamp title to the platform max (ellipsis when truncated)."""
+    text = str(title or "").strip()
+    if len(text) <= max_len:
+        return text
+    if max_len <= 1:
+        return text[:max_len]
+    return text[: max_len - 1].rstrip() + "…"
+
+
+def truncate_wp_description(
+    description: str, *, max_len: int = _WP_DESCRIPTION_MAX_LEN
+) -> str:
+    """Clamp description to the platform max (ellipsis when truncated)."""
+    text = str(description or "").strip()
+    if len(text) <= max_len:
+        return text
+    if max_len <= 1:
+        return text[:max_len]
+    return text[: max_len - 1].rstrip() + "…"
+
+
+def _clean_brand_token(brand: str) -> str:
+    """Strip a leading ``Brand `` prefix from lease picker labels."""
+    text = str(brand or "").strip()
+    if text.lower().startswith("brand "):
+        return text[6:].strip() or text
+    return text
+
+
+def wp_location_label(collected: dict[str, Any] | None) -> str:
+    """Full lease / brand / mall string for descriptions."""
+    data = collected or {}
+    lease_brand_mall = str(data.get("lease_brand_mall") or "").strip()
+    if lease_brand_mall:
+        return lease_brand_mall
+    brand = _clean_brand_token(str(data.get("brand") or ""))
+    mall = str(data.get("mall") or "").strip()
+    if brand and mall:
+        return f"{brand} / {mall}"
+    if brand or mall:
+        return brand or mall
+    return str(data.get("lease_code") or "").strip()
+
+
+def wp_title_location_label(collected: dict[str, Any] | None) -> str:
+    """Compact brand/mall (and lease) for the 50-char title budget.
+
+    Prefers brand / mall over the long ``lease_brand_mall`` display string so
+    the subtype label still fits. Lease code is appended by ``generate_wp_title``
+    when there is room.
+    """
+    data = collected or {}
+    brand = _clean_brand_token(str(data.get("brand") or ""))
+    mall = str(data.get("mall") or "").strip()
+    if brand and mall:
+        return f"{brand} / {mall}"
+    if brand:
+        return brand
+    if mall:
+        return mall
+    # Fall back to lease_brand_mall but strip a leading lease-code segment when
+    # it duplicates lease_code (e.g. ``t0028922 - Brand Bershka - Mall``).
+    lease_brand_mall = str(data.get("lease_brand_mall") or "").strip()
+    lease_code = str(data.get("lease_code") or "").strip()
+    if lease_brand_mall:
+        cleaned = lease_brand_mall
+        if lease_code and cleaned.lower().startswith(lease_code.lower()):
+            rest = cleaned[len(lease_code) :].lstrip(" -/–—")
+            # Drop a leading "Brand " token from picker strings.
+            rest = _clean_brand_token(rest) if rest.lower().startswith("brand ") else rest
+            if rest:
+                return rest
+        return cleaned
+    return lease_code
+
+
+def wp_subtype_label(collected: dict[str, Any] | None) -> str:
+    """Human subtype label (e.g. ``Operations``, ``Construction – Hot Work``)."""
+    subtype = resolve_wp_sub_category(None, collected)
+    if subtype in WORK_PERMIT_TYPE_LABELS:
+        return WORK_PERMIT_TYPE_LABELS[subtype]
+    return subtype.replace("_", " ").title() if subtype else "Work Permit"
+
+
+def wp_title_subtype_label(collected: dict[str, Any] | None) -> str:
+    """Shorter subtype label for titles so brand still fits in 50 chars."""
+    subtype = resolve_wp_sub_category(None, collected)
+    if subtype in _WP_TITLE_SUBTYPE_LABELS:
+        return _WP_TITLE_SUBTYPE_LABELS[subtype]
+    return wp_subtype_label(collected)
+
+
+def generate_wp_title(collected: dict[str, Any] | None) -> str:
+    """Compact title: ``{short subtype} – {lease_code}`` within 50 chars."""
+    data = collected or {}
+    lease_code = str(data.get("lease_code") or "").strip()
+    if not lease_code:
+        return ""
+    label = wp_title_subtype_label(data)
+    return truncate_wp_title(f"{label} – {lease_code}")
+
+
+def generate_wp_description(collected: dict[str, Any] | None) -> str:
+    """Description: ``{subtype} work permit for {lease_code}.`` (max 200)."""
+    data = collected or {}
+    lease_code = str(data.get("lease_code") or "").strip()
+    if not lease_code:
+        return ""
+    label = wp_subtype_label(collected)
+    return truncate_wp_description(f"{label} work permit for {lease_code}.")
+
+
+def is_lease_code_only_wp_auto_text(
+    value: Any,
+    collected: dict[str, Any] | None,
+    *,
+    kind: str,
+) -> bool:
+    """Formerly refreshed lease-only auto text when brand/mall arrived.
+
+    Title/description are lease-code-only by design now, so there is nothing
+    to upgrade — always ``False`` (never clobber an existing value for this).
+    """
+    del value, collected, kind
+    return False
+
+
+def wp_text_should_autofill(
+    value: Any,
+    collected: dict[str, Any] | None,
+    *,
+    kind: str,
+) -> bool:
+    """True when short-flow should (re)write title/description.
+
+    Includes ``None`` (never asked), empty skip, and lease-code-only upgrades.
+    """
+    if value is None:
+        return True
+    if isinstance(value, str) and value.strip() == "":
+        return True
+    return is_lease_code_only_wp_auto_text(value, collected, kind=kind)
+
+
+def wp_text_should_skip_or_refresh(
+    value: Any,
+    collected: dict[str, Any] | None,
+    *,
+    kind: str,
+) -> bool:
+    """True for merge skip-fill: empty skip or lease-code-only upgrade.
+
+    Deliberately excludes ``None`` so the optional ask turn still happens when
+    short-flow is off (Handover-style).
+    """
+    if isinstance(value, str) and value.strip() == "":
+        return True
+    return is_lease_code_only_wp_auto_text(value, collected, kind=kind)
+
+
 def iso_to_ddmmyyyy(value: Any) -> str:
     """Convert ``YYYY-MM-DD`` (or pass through ``DD/MM/YYYY``) for WP planned dates."""
     raw = str(value or "").strip()
@@ -334,10 +550,50 @@ def ddmmyyyy_to_iso(value: Any) -> str:
     return raw
 
 
-def get_required_fields(stage_name: str) -> tuple[str, ...]:
-    """Return required fields for *stage_name*."""
+def get_create_required_fields(collected: dict[str, Any] | None = None) -> tuple[str, ...]:
+    """Lease + type always; optional title/description after location; then form.
+
+    After lease location is known, insert optional ``description`` / ``title``
+    (Handover-style ask-or-skip) before subtype tenant-form fields. Empty string
+    = skip → autofill. Short-flow omits them from ``get_missing_fields``.
+    """
+    collected = collected or {}
+    subtype = resolve_wp_sub_category(None, collected)
+    base = list(_CREATE_REQUIRED_BASE)
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for name in base:
+        if name not in seen:
+            seen.add(name)
+            ordered.append(name)
+    # Ask (or allow skip) once lease location + type are known — before form widgets.
+    if wp_location_label(collected) and (
+        collected.get("_wp_type_confirmed") or subtype in VALID_WORK_PERMIT_TYPES
+    ):
+        for name in ("description", "title"):
+            if name not in seen:
+                seen.add(name)
+                ordered.append(name)
+    spec = form_spec_for(subtype)
+    if spec is not None:
+        # Avoid duplicate lease_brand_mall vs lease_code — ask lease_code first;
+        # lease_brand_mall is filled by lease lookup.
+        for name in spec.required_tenant_fields:
+            if name in {"lease_brand_mall"} or name in seen:
+                continue
+            seen.add(name)
+            ordered.append(name)
+    return tuple(ordered)
+
+
+def get_required_fields(
+    stage_name: str, collected: dict[str, Any] | None = None
+) -> tuple[str, ...]:
+    """Return required fields for *stage_name* (subtype-aware on create)."""
     if stage_name == "CREATE_SR":
         stage_name = "CREATE_WORK_PERMIT"
+    if stage_name == "CREATE_WORK_PERMIT":
+        return get_create_required_fields(collected)
     stage = STAGE_REGISTRY.get(stage_name)
     if not stage:
         raise KeyError(f"Unknown work permit stage '{stage_name}'")
@@ -348,16 +604,31 @@ def get_missing_fields(stage_name: str, collected: dict[str, Any]) -> list[str]:
     """Return required fields absent from *collected* for *stage_name*.
 
     Review stages have no required fields. Optional create fields treat only
-    ``None`` as missing (empty string is an explicit skip).
+    ``None`` as missing (empty string is an explicit skip). Nested form widgets
+    (planneddate, workers, measureofsafety, …) use portal emptiness rules.
+
+    Short-flow skips asking for ``WP_AI_FILLED_FIELDS`` (filled by autofill).
     """
+    if stage_name == "CREATE_SR":
+        stage_name = "CREATE_WORK_PERMIT"
 
-    def _is_missing(field_name: str, value: Any) -> bool:
-        if field_name in OPTIONAL_FIELDS:
-            return value is None
-        return value is None or value == "" or value == []
+    required = get_required_fields(stage_name, collected)
+    subtype = resolve_wp_sub_category(None, collected)
+    spec = form_spec_for(subtype)
+    field_types = spec.field_types if spec else {}
+    optional = OPTIONAL_FIELDS | (spec.optional_tenant_fields if spec else frozenset())
+    unasked = WP_AI_FILLED_FIELDS if wp_short_flow_enabled() else frozenset()
 
-    return [
-        f
-        for f in get_required_fields(stage_name)
-        if _is_missing(f, collected.get(f))
-    ]
+    missing: list[str] = []
+    for field_name in required:
+        if field_name in unasked:
+            continue
+        value = collected.get(field_name)
+        if is_tenant_field_missing(
+            field_name,
+            value,
+            field_type=field_types.get(field_name),
+            optional=field_name in optional,
+        ):
+            missing.append(field_name)
+    return missing

@@ -18,6 +18,7 @@ Non-responsibilities (enforced)
 
 from __future__ import annotations
 
+import json
 import re
 import time
 from decimal import Decimal
@@ -59,12 +60,254 @@ def _is_bare_relative_date(message: str) -> bool:
     return bool(_RELATIVE_DATE_RE.search(message)) and not _HAS_DIGIT_RE.search(message)
 
 
+# Deterministic time-period parser for firstperiod/secondperiod.
+# Handles "4pm to 5pm", "2 to 3pm", "2-3pm", "9:30am to 12pm", "16:00 to 17:00".
+_TIME_12H_RE = re.compile(
+    r"(\d{1,2})(?::(\d{2}))?\s*(am|pm)",
+    re.IGNORECASE,
+)
+_TIME_24H_RE = re.compile(r"\b(\d{1,2}):(\d{2})\b")
+# Optional am/pm on either side — inherit from the side that has it.
+_TIME_RANGE_RE = re.compile(
+    r"(?P<from>\d{1,2}(?::\d{2})?\s*(?:am|pm)?)\s*(?:to|-)\s*"
+    r"(?P<to>\d{1,2}(?::\d{2})?\s*(?:am|pm)?)",
+    re.IGNORECASE,
+)
+
+_MONTH_NAMES: dict[str, int] = {
+    "jan": 1,
+    "january": 1,
+    "feb": 2,
+    "february": 2,
+    "mar": 3,
+    "march": 3,
+    "apr": 4,
+    "april": 4,
+    "may": 5,
+    "jun": 6,
+    "june": 6,
+    "jul": 7,
+    "july": 7,
+    "aug": 8,
+    "august": 8,
+    "sep": 9,
+    "sept": 9,
+    "september": 9,
+    "oct": 10,
+    "october": 10,
+    "nov": 11,
+    "november": 11,
+    "dec": 12,
+    "december": 12,
+}
+
+# "23 to 24 september" / "23-24 september 2026"
+_DAY_MONTH_RANGE_RE = re.compile(
+    r"\b(?P<d1>\d{1,2})\s*(?:to|-)\s*(?P<d2>\d{1,2})\s+"
+    r"(?P<month>[A-Za-z]+)(?:\s+(?P<year>\d{4}))?\b",
+    re.IGNORECASE,
+)
+# Single "23 september" / "23 september 2026"
+_DAY_MONTH_SINGLE_RE = re.compile(
+    r"\b(?P<d1>\d{1,2})\s+(?P<month>[A-Za-z]+)(?:\s+(?P<year>\d{4}))?\b",
+    re.IGNORECASE,
+)
+# "23/09 to 24/09" / "23/09/2026 to 24/09/2026"
+_SLASH_DATE_RANGE_RE = re.compile(
+    r"\b(?P<d1>\d{1,2})/(?P<m1>\d{1,2})(?:/(?P<y1>\d{2,4}))?\s*(?:to|-)\s*"
+    r"(?P<d2>\d{1,2})/(?P<m2>\d{1,2})(?:/(?P<y2>\d{2,4}))?\b",
+    re.IGNORECASE,
+)
+# "24th sep" / "23rd to 24th september" — strip ordinals before day-month match.
+_ORDINAL_DAY_RE = re.compile(r"\b(\d{1,2})(st|nd|rd|th)\b", re.IGNORECASE)
+
+_WP_SCHEDULE_FIELDS: frozenset[str] = frozenset(
+    {"effective_starting", "firstperiod", "secondperiod"}
+)
+
+
+def _strip_ordinal_days(message: str) -> str:
+    """Turn ``24th sep`` into ``24 sep`` so day-month regexes can match."""
+    return _ORDINAL_DAY_RE.sub(r"\1", message)
+
+
+def _schedule_value_from_extracted(entry: Any) -> Any:
+    """Unwrap ``{value, confidence}`` / JSON-string nested schedule widgets."""
+    val = entry.get("value") if isinstance(entry, dict) else entry
+    if isinstance(val, str) and val.strip().startswith("{"):
+        try:
+            return json.loads(val)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            return val
+    return val
+
+
+def _drop_incomplete_schedule_overwrites(
+    extracted_fields: dict[str, Any],
+    collected: dict[str, Any],
+) -> None:
+    """Remove incomplete schedule proposals that would wipe a complete collected value."""
+    from app.agents.schemas.work_permit_form_fields import is_tenant_field_missing
+
+    for field_name in _WP_SCHEDULE_FIELDS:
+        if field_name not in extracted_fields:
+            continue
+        collected_val = collected.get(field_name)
+        optional = field_name == "secondperiod"
+        if is_tenant_field_missing(field_name, collected_val, optional=optional):
+            continue
+        new_val = _schedule_value_from_extracted(extracted_fields[field_name])
+        if is_tenant_field_missing(field_name, new_val, optional=optional):
+            log.info(
+                "field_extraction.drop_incomplete_schedule",
+                field=field_name,
+            )
+            del extracted_fields[field_name]
+
+
+def _parse_time_to_hhmm(token: str, *, default_suffix: str | None = None) -> str | None:
+    """Convert a time token like '4pm', '9:30am', '16:00', or bare '2' to 'HH:MM'."""
+    raw = token.strip()
+    m12 = _TIME_12H_RE.fullmatch(raw)
+    if m12:
+        hour = int(m12.group(1))
+        minute = int(m12.group(2) or 0)
+        suffix = m12.group(3).lower()
+        if suffix == "pm" and hour != 12:
+            hour += 12
+        elif suffix == "am" and hour == 12:
+            hour = 0
+        if not (0 <= hour <= 23 and 0 <= minute <= 59):
+            return None
+        return f"{hour:02d}:{minute:02d}"
+    m24 = _TIME_24H_RE.fullmatch(raw)
+    if m24:
+        hour, minute = int(m24.group(1)), int(m24.group(2))
+        if not (0 <= hour <= 23 and 0 <= minute <= 59):
+            return None
+        return f"{hour:02d}:{minute:02d}"
+    # Bare hour/minute without am/pm — inherit from the other side of the range.
+    if default_suffix and re.fullmatch(r"\d{1,2}(?::\d{2})?", raw):
+        return _parse_time_to_hhmm(f"{raw}{default_suffix}")
+    return None
+
+
+def _extract_time_period(message: str) -> dict[str, str] | None:
+    """Return {from, to} if message contains a recognisable time range, else None."""
+    # Prefer a match that has at least one am/pm (avoids "23 to 24" day ranges).
+    best: re.Match[str] | None = None
+    for m in _TIME_RANGE_RE.finditer(message):
+        blob = f"{m.group('from')} {m.group('to')}".lower()
+        if "am" in blob or "pm" in blob or ":" in blob:
+            best = m
+            break
+    if best is None:
+        return None
+    left, right = best.group("from").strip(), best.group("to").strip()
+    left_suf = re.search(r"(am|pm)\s*$", left, re.IGNORECASE)
+    right_suf = re.search(r"(am|pm)\s*$", right, re.IGNORECASE)
+    shared = None
+    if left_suf:
+        shared = left_suf.group(1).lower()
+    elif right_suf:
+        shared = right_suf.group(1).lower()
+    from_hhmm = _parse_time_to_hhmm(left, default_suffix=shared)
+    to_hhmm = _parse_time_to_hhmm(right, default_suffix=shared)
+    if from_hhmm and to_hhmm:
+        return {"from": from_hhmm, "to": to_hhmm}
+    return None
+
+
+def _fmt_ddmmyyyy(day: int, month: int, year: int) -> str | None:
+    from datetime import date as _date
+
+    try:
+        _date(year, month, day)
+    except ValueError:
+        return None
+    return f"{day:02d}/{month:02d}/{year:04d}"
+
+
+def _expand_year(raw: str | None, default_year: int) -> int:
+    if not raw:
+        return default_year
+    y = int(raw)
+    if y < 100:
+        return 2000 + y
+    return y
+
+
+def _extract_effective_starting(
+    message: str,
+    *,
+    today: Any | None = None,
+) -> dict[str, str] | None:
+    """Return {datefrom, dateto} as DD/MM/YYYY when a date range is present."""
+    from datetime import date as _date
+
+    ref = today if isinstance(today, _date) else _date.today()
+    default_year = ref.year
+    message = _strip_ordinal_days(message)
+
+    m = _DAY_MONTH_RANGE_RE.search(message)
+    if m:
+        month = _MONTH_NAMES.get(m.group("month").lower())
+        if month:
+            year = _expand_year(m.group("year"), default_year)
+            d1, d2 = int(m.group("d1")), int(m.group("d2"))
+            left = _fmt_ddmmyyyy(d1, month, year)
+            right = _fmt_ddmmyyyy(d2, month, year)
+            if left and right:
+                return {"datefrom": left, "dateto": right}
+
+    m = _SLASH_DATE_RANGE_RE.search(message)
+    if m:
+        y1 = _expand_year(m.group("y1"), default_year)
+        y2 = _expand_year(m.group("y2"), y1)
+        left = _fmt_ddmmyyyy(int(m.group("d1")), int(m.group("m1")), y1)
+        right = _fmt_ddmmyyyy(int(m.group("d2")), int(m.group("m2")), y2)
+        if left and right:
+            return {"datefrom": left, "dateto": right}
+
+    m = _DAY_MONTH_SINGLE_RE.search(message)
+    if m:
+        month = _MONTH_NAMES.get(m.group("month").lower())
+        if month:
+            year = _expand_year(m.group("year"), default_year)
+            day = int(m.group("d1"))
+            both = _fmt_ddmmyyyy(day, month, year)
+            if both:
+                return {"datefrom": both, "dateto": both}
+    return None
+
+
 # Free-text fields whose value is simply whatever the user typed. When the
 # answer contains the field's own name ("Post description", "Notes variant 2")
 # the extraction LLM reads it as a reference to the field rather than content
 # and returns an empty value — wiping the field and looping the question.
 _FREE_TEXT_FIELDS: frozenset[str] = frozenset(
-    {"title", "description", "notes", "comments"}
+    {
+        "title",
+        "description",
+        "notes",
+        "comments",
+        "type_work",
+        "list_equipment",
+        "work_info",
+        "work_type",
+        "work_location",
+        "demand_appendices",
+        "special_conditions",
+        "contractor_name",
+        "owner",
+        "trade_name",
+        "responsible_person",
+        "entry_gate",
+        "permission_given_to",
+        # Contact fields: LLM often omits bare digit phones / short unit labels.
+        "phone",
+        "unit_type",
+    }
 )
 
 # Answers that genuinely mean "leave this blank".
@@ -301,10 +544,21 @@ async def field_extraction_node(state: ServiceRequestState) -> dict[str, Any]:
     # back as {"description": {"value": ""}} and "Post notes" as {}, which
     # blanked the field (auto-generating a replacement) and re-asked forever.
     # The user typed the value, so use it verbatim.
+    #
+    # Do NOT bind a digits-only reply onto unit_type (group primary) — that is
+    # a phone answer when phone is still open.
     if (
         active_field in _FREE_TEXT_FIELDS
         and not _SKIP_ANSWER_RE.match(user_message)
         and user_message.strip()
+        and not (
+            active_field == "unit_type"
+            and _WP_BARE_PHONE_RE.match(user_message.strip())
+            and (
+                "phone" in (missing_fields or [])
+                or "phone" in set((state.get("response_ui") or {}).get("fields") or [])
+            )
+        )
     ):
         entry = extracted_fields.get(active_field)
         current = entry.get("value") if isinstance(entry, dict) else entry
@@ -318,6 +572,166 @@ async def field_extraction_node(state: ServiceRequestState) -> dict[str, Any]:
                 "value": user_message.strip(),
                 "confidence": 1.0,
             }
+
+    # typeofwork is a nested widget (not in _FREE_TEXT_FIELDS), but suffers the
+    # same "field-name as reference" failure: "Type of work - Stock Removal"
+    # comes back empty because the LLM reads "Type of work" as a pointer to the
+    # field, not as content.  Strip the prefix deterministically and use the
+    # remainder so the user is not stuck in an infinite re-ask loop.
+    if (
+        active_field == "typeofwork"
+        and not _SKIP_ANSWER_RE.match(user_message)
+        and user_message.strip()
+    ):
+        entry = extracted_fields.get("typeofwork")
+        current = entry.get("value") if isinstance(entry, dict) else entry
+        if current in (None, "", []):
+            text = re.sub(
+                r"^[Tt]ype\s+of\s+work\s*[-:–—]\s*", "", user_message.strip()
+            ).strip()
+            if text:
+                log.info(
+                    "field_extraction.typeofwork_fallback",
+                    value=text,
+                )
+                extracted_fields["typeofwork"] = {"value": text, "confidence": 1.0}
+
+    # firstperiod / secondperiod: deterministic rescue for "4pm to 5pm" / "2 to 3pm"
+    # patterns the LLM may miss when both schedule fields are asked together.
+    # load_session often clears missing_fields / response_ui — expand open set
+    # from collected incompleteness when any schedule field is already in scope.
+    _ui_fields = (state.get("response_ui") or {}).get("fields") or []
+    _schedule_open = set(missing_fields or []) | set(_ui_fields)
+    if active_field:
+        _schedule_open.add(active_field)
+    _collected = state.get("collected_data") or {}
+    if _schedule_open & _WP_SCHEDULE_FIELDS:
+        from app.agents.schemas.work_permit_form_fields import (
+            form_spec_for,
+            is_tenant_field_missing,
+        )
+        from app.agents.schemas.work_permit_schema import resolve_wp_sub_category
+
+        _subtype = resolve_wp_sub_category(
+            state.get("sub_category"),
+            {
+                **_collected,
+                "work_permit_type": _collected.get("work_permit_type")
+                or state.get("sub_category"),
+            },
+        )
+        _spec = form_spec_for(_subtype)
+        _ft = (_spec.field_types if _spec else {}) or {}
+        for _sf in _WP_SCHEDULE_FIELDS:
+            if is_tenant_field_missing(
+                _sf,
+                _collected.get(_sf),
+                field_type=_ft.get(_sf),
+                optional=_sf == "secondperiod",
+            ):
+                _schedule_open.add(_sf)
+
+    for _period_field in ("firstperiod", "secondperiod"):
+        if _period_field not in _schedule_open:
+            continue
+        _period_entry = extracted_fields.get(_period_field)
+        _period_val = (
+            _period_entry.get("value") if isinstance(_period_entry, dict) else _period_entry
+        )
+        if isinstance(_period_val, str) and _period_val.strip().startswith("{"):
+            try:
+                _period_val = json.loads(_period_val)
+            except (json.JSONDecodeError, TypeError, ValueError):
+                pass
+        _period_empty = (
+            not _period_val
+            or (
+                isinstance(_period_val, str)
+                and not any(c.isdigit() for c in _period_val)
+            )
+            or (
+                isinstance(_period_val, dict)
+                and not str(_period_val.get("from") or "").strip()
+            )
+        )
+        if _period_empty:
+            parsed_period = _extract_time_period(user_message)
+            if parsed_period:
+                log.info(
+                    "field_extraction.period_fallback",
+                    field=_period_field,
+                    value=parsed_period,
+                )
+                extracted_fields[_period_field] = {
+                    "value": json.dumps(parsed_period),
+                    "confidence": 1.0,
+                }
+                break  # only bind the range to the first missing period field
+
+    # effective_starting: deterministic rescue for "23 to 24 september" (+ time).
+    # Also copy datefrom → dateto when LLM returned a single date only.
+    if "effective_starting" in _schedule_open and not _SKIP_ANSWER_RE.match(
+        user_message
+    ):
+        entry = extracted_fields.get("effective_starting")
+        inner: Any = None
+        if isinstance(entry, dict):
+            inner = entry.get("value")
+            if isinstance(inner, str) and inner.strip().startswith("{"):
+                try:
+                    inner = json.loads(inner)
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    inner = None
+        datefrom = ""
+        dateto = ""
+        if isinstance(inner, dict):
+            datefrom = str(inner.get("datefrom") or "").strip()
+            dateto = str(inner.get("dateto") or "").strip()
+            if datefrom and not dateto:
+                log.info(
+                    "field_extraction.effective_starting_single_date",
+                    datefrom=datefrom,
+                )
+                entry = dict(entry) if isinstance(entry, dict) else {}
+                entry["value"] = {"datefrom": datefrom, "dateto": datefrom}
+                entry.setdefault("confidence", 1.0)
+                extracted_fields["effective_starting"] = entry
+                datefrom = dateto = datefrom
+        if not datefrom or not dateto:
+            parsed_dates = _extract_effective_starting(user_message)
+            if parsed_dates:
+                log.info(
+                    "field_extraction.effective_starting_fallback",
+                    value=parsed_dates,
+                )
+                extracted_fields["effective_starting"] = {
+                    "value": json.dumps(parsed_dates),
+                    "confidence": 1.0,
+                }
+
+    # Drop incomplete schedule stubs that would wipe a complete collected value.
+    _drop_incomplete_schedule_overwrites(extracted_fields, _collected)
+
+    # Ops contact group: "Store, 8486697081" → unit_type + phone when LLM missed.
+    _apply_wp_unit_type_phone_split(
+        extracted_fields,
+        user_message=user_message,
+        active_field=active_field,
+        missing_fields=missing_fields,
+        response_ui=state.get("response_ui"),
+        workflow_stage=workflow_stage,
+        active_agent=state.get("active_agent"),
+    )
+    # Singleton phone ask: "8486697081" with no unit_type still open.
+    _apply_wp_bare_phone(
+        extracted_fields,
+        user_message=user_message,
+        active_field=active_field,
+        missing_fields=missing_fields,
+        response_ui=state.get("response_ui"),
+        workflow_stage=workflow_stage,
+        active_agent=state.get("active_agent"),
+    )
 
     final_update: dict[str, Any] = {"extracted_fields": extracted_fields}
     if correction is not None:
@@ -339,3 +753,116 @@ async def field_extraction_node(state: ServiceRequestState) -> dict[str, Any]:
         final_update["active_field"] = active_field
         final_update["correction_pending_field"] = active_field
     return final_update
+
+
+# "Store, 8486697081" / "Retail, +966501234567" / "F&B 8486697081"
+_WP_UNIT_PHONE_COMMA_RE = re.compile(
+    r"^\s*(?P<unit>[^,]+?)\s*,\s*(?P<phone>\+?\d[\d\s\-()]{5,})\s*$"
+)
+_WP_UNIT_PHONE_SPACE_RE = re.compile(
+    r"^\s*(?P<unit>[A-Za-z][&/A-Za-z0-9 ]{0,40}?)\s+(?P<phone>\+?\d{7,15})\s*$"
+)
+# Bare contact number after unit_type is already filled.
+_WP_BARE_PHONE_RE = re.compile(r"^\s*(?P<phone>\+?\d[\d\s\-()]{6,})\s*$")
+
+
+def _field_entry_value(extracted: dict[str, Any], key: str) -> Any:
+    entry = extracted.get(key)
+    if isinstance(entry, dict):
+        return entry.get("value")
+    return entry
+
+
+def _apply_wp_unit_type_phone_split(
+    extracted_fields: dict[str, Any],
+    *,
+    user_message: str,
+    active_field: str | None,
+    missing_fields: list[str],
+    response_ui: dict[str, Any] | None,
+    workflow_stage: str | None,
+    active_agent: str | None,
+) -> None:
+    """Fill unit_type + phone from a single free-text answer when the LLM omitted them."""
+    if (active_agent or "") != "work_permit_agent":
+        return
+    if (workflow_stage or "") not in {"CREATE_WORK_PERMIT", "CREATE_SR"}:
+        return
+    ui_fields = set((response_ui or {}).get("fields") or [])
+    open_fields = set(missing_fields or []) | ui_fields
+    if active_field:
+        open_fields.add(active_field)
+    if "unit_type" not in open_fields or "phone" not in open_fields:
+        return
+
+    msg = (user_message or "").strip()
+    if not msg:
+        return
+    match = _WP_UNIT_PHONE_COMMA_RE.match(msg) or _WP_UNIT_PHONE_SPACE_RE.match(msg)
+    if not match:
+        return
+    unit = match.group("unit").strip()
+    phone = re.sub(r"[\s\-()]", "", match.group("phone").strip())
+    if not unit or not phone:
+        return
+
+    filled = False
+    if _field_entry_value(extracted_fields, "unit_type") in (None, "", []):
+        extracted_fields["unit_type"] = {"value": unit, "confidence": 1.0}
+        filled = True
+    if _field_entry_value(extracted_fields, "phone") in (None, "", []):
+        extracted_fields["phone"] = {"value": phone, "confidence": 1.0}
+        filled = True
+    if filled:
+        log.info(
+            "field_extraction.wp_unit_phone_split",
+            unit_type=unit,
+            phone=phone[:4] + "…",
+        )
+
+
+def _apply_wp_bare_phone(
+    extracted_fields: dict[str, Any],
+    *,
+    user_message: str,
+    active_field: str | None,
+    missing_fields: list[str],
+    response_ui: dict[str, Any] | None,
+    workflow_stage: str | None,
+    active_agent: str | None,
+) -> None:
+    """Bind a digits-only reply to ``phone`` when that field is still open.
+
+    Live loop: after unit_type was filled the bot asked for phone alone; the
+    user typed ``84884848478``; the LLM often returned ``{}`` (phone is not a
+    nested widget and was not previously in the free-text rescue list). Response
+    generation still thanked them for the phone because the digits were in the
+    utterance — then missing_field re-asked forever.
+    """
+    if (active_agent or "") != "work_permit_agent":
+        return
+    if (workflow_stage or "") not in {"CREATE_WORK_PERMIT", "CREATE_SR"}:
+        return
+    ui_fields = set((response_ui or {}).get("fields") or [])
+    open_fields = set(missing_fields or []) | ui_fields
+    if active_field:
+        open_fields.add(active_field)
+    if "phone" not in open_fields:
+        return
+    if _field_entry_value(extracted_fields, "phone") not in (None, "", []):
+        return
+
+    msg = (user_message or "").strip()
+    if not msg:
+        return
+    # Combined answers belong to the unit+phone splitter.
+    if _WP_UNIT_PHONE_COMMA_RE.match(msg) or _WP_UNIT_PHONE_SPACE_RE.match(msg):
+        return
+    match = _WP_BARE_PHONE_RE.match(msg)
+    if not match:
+        return
+    phone = re.sub(r"[\s\-()]", "", match.group("phone").strip())
+    if len(re.sub(r"\D", "", phone)) < 7:
+        return
+    extracted_fields["phone"] = {"value": phone, "confidence": 1.0}
+    log.info("field_extraction.wp_bare_phone", phone=phone[:4] + "…")
