@@ -152,6 +152,20 @@ from app.agents.graph.nodes.handover.fm_api_submission_node import fm_api_submis
 from app.agents.graph.nodes.handover.rdd_api_submission_node import rdd_api_submission_node
 from app.agents.graph.state import ServiceRequestGraphState
 
+# ── General Inquiry agent nodes ───────────────────────────────────────────────
+from app.agents.graph.nodes.general_inquiry.general_inquiry_entry_node import (
+    general_inquiry_entry_node,
+)
+from app.agents.graph.nodes.general_inquiry.general_inquiry_confirmation_node import (
+    general_inquiry_confirmation_node,
+)
+from app.agents.graph.nodes.general_inquiry.general_inquiry_payload_builder_node import (
+    general_inquiry_payload_builder_node,
+)
+from app.agents.graph.nodes.general_inquiry.general_inquiry_api_submission_node import (
+    general_inquiry_api_submission_node,
+)
+
 # ── Hoisted from routing-function bodies (previously re-imported on every
 # turn — Python caches the module either way, but hiding dependencies inside
 # hot functions is unconventional). Aliased because all three OPTIONAL_FIELDS
@@ -160,6 +174,7 @@ from app.agents.services.help_interrupt_service import detect_help_interrupt
 from app.agents.schemas.fitout_confirm_schema import OPTIONAL_FIELDS as FITOUT_OPTIONAL_FIELDS
 from app.agents.schemas.work_permit_schema import OPTIONAL_FIELDS as WP_OPTIONAL_FIELDS
 from app.agents.schemas.handover_schema import OPTIONAL_FIELDS as HANDOVER_OPTIONAL_FIELDS
+from app.agents.schemas.general_inquiry_schema import OPTIONAL_FIELDS as GI_OPTIONAL_FIELDS
 
 # ---------------------------------------------------------------------------
 # Agent entry-node dispatch table
@@ -172,6 +187,7 @@ _AGENT_ENTRY_NODES: dict[str, str] = {
     "rdd_fitout_end_agent": "fitout_confirm_entry",
     "rdd_trading_confirmation_agent": "fitout_confirm_entry",
     "sales_data_agent": "sales_data_entry",
+    "general_inquiry_agent": "general_inquiry_entry",
 }
 
 # Intents that route to the FAQ node (Q&A path — no SR workflow activation)
@@ -199,6 +215,8 @@ _CREATE_NEW_SR_INTENTS: frozenset[str] = frozenset(
         "UPLOAD_SUPPORTING_DOCUMENT",
         "REVIEW_SALES_DATA",
         "APPROVE_SALES_DATA",
+        # General Inquiry is always a new SR (no multi-phase review)
+        "CREATE_GENERAL_INQUIRY",
     }
 )
 
@@ -516,6 +534,8 @@ def _route_after_validation(state: dict[str, Any]) -> str:
         if active_agent_for_optional in _FITOUT_AGENTS
         else WP_OPTIONAL_FIELDS
         if active_agent_for_optional == "work_permit_agent"
+        else GI_OPTIONAL_FIELDS
+        if active_agent_for_optional == "general_inquiry_agent"
         else HANDOVER_OPTIONAL_FIELDS
     )
 
@@ -575,6 +595,9 @@ def _route_after_validation(state: dict[str, Any]) -> str:
         from app.agents.schemas.fitout_confirm_schema import get_missing_fields as fc_missing
         sub_cat = state.get("sub_category") or ""
         still_missing = fc_missing(original_stage, sub_cat, collected)
+    elif active_agent == "general_inquiry_agent":
+        from app.agents.schemas.general_inquiry_schema import get_missing_fields as gi_missing
+        still_missing = gi_missing(original_stage, collected)
     else:
         from app.agents.schemas.handover_schema import get_missing_fields as rdd_missing
         still_missing = rdd_missing(original_stage, collected)
@@ -883,6 +906,29 @@ def _route_after_fitout_confirm_confirmation(state: dict[str, Any]) -> str:
 
 
 # ---------------------------------------------------------------------------
+# General Inquiry Agent routing
+# ---------------------------------------------------------------------------
+
+
+def _route_after_general_inquiry_entry(state: dict[str, Any]) -> str:
+    """Route after the general_inquiry_entry_node."""
+    if state.get("confirmation_status") == "CONFIRMED":
+        return "merge_state"
+    if state.get("confirmation_status") == "REJECTED":
+        return "field_extraction"
+    if state.get("status") in ("WAITING_FOR_USER", "CANCELLED"):
+        return "response_generation"
+    return "field_extraction"
+
+
+def _route_after_general_inquiry_confirmation(state: dict[str, Any]) -> str:
+    """Route after the general_inquiry_confirmation_node."""
+    if state.get("confirmation_status") == "CONFIRMED":
+        return "general_inquiry_payload_builder"
+    return "response_generation"
+
+
+# ---------------------------------------------------------------------------
 # Sales Data Agent routing
 # ---------------------------------------------------------------------------
 
@@ -1089,6 +1135,11 @@ def build_help_agent_graph():
     graph.add_node("fitout_confirm_confirmation", fitout_confirm_confirmation_node)
     graph.add_node("fitout_confirm_payload_builder", fitout_confirm_payload_builder_node)
     graph.add_node("fitout_confirm_api_submission", fitout_confirm_api_submission_node)
+    # ── General Inquiry agent nodes ───────────────────────────────────────────
+    graph.add_node("general_inquiry_entry", general_inquiry_entry_node)
+    graph.add_node("general_inquiry_confirmation", general_inquiry_confirmation_node)
+    graph.add_node("general_inquiry_payload_builder", general_inquiry_payload_builder_node)
+    graph.add_node("general_inquiry_api_submission", general_inquiry_api_submission_node)
     # ── Sales Data agent nodes ─────────────────────────────────────────────────
     graph.add_node("sales_data_entry", sales_data_entry_node)
     graph.add_node("pending_months_gate", pending_months_gate_node)
@@ -1135,6 +1186,7 @@ def build_help_agent_graph():
             "work_permit_entry": "work_permit_entry",
             "fitout_confirm_entry": "fitout_confirm_entry",
             "sales_data_entry": "sales_data_entry",
+            "general_inquiry_entry": "general_inquiry_entry",
             # Help question asked mid-collection — answered without disturbing
             # the draft (see detect_help_interrupt).
             "faq_node": "faq_node",
@@ -1207,6 +1259,7 @@ def build_help_agent_graph():
             "work_permit_entry": "work_permit_entry",
             "fitout_confirm_entry": "fitout_confirm_entry",
             "sales_data_entry": "sales_data_entry",
+            "general_inquiry_entry": "general_inquiry_entry",
             "response_generation": "response_generation",
         },
     )
@@ -1275,6 +1328,17 @@ def build_help_agent_graph():
         },
     )
 
+    # ── General Inquiry entry ─────────────────────────────────────────────────
+    graph.add_conditional_edges(
+        "general_inquiry_entry",
+        _route_after_general_inquiry_entry,
+        {
+            "field_extraction": "field_extraction",
+            "merge_state": "merge_state",
+            "response_generation": "response_generation",
+        },
+    )
+
     # ── Validation → confirmation ─────────────────────────────────────────────
     graph.add_conditional_edges(
         "validation",
@@ -1286,6 +1350,7 @@ def build_help_agent_graph():
             "rdd_confirmation": "rdd_confirmation",
             "work_permit_confirmation": "work_permit_confirmation",
             "fitout_confirm_confirmation": "fitout_confirm_confirmation",
+            "general_inquiry_confirmation": "general_inquiry_confirmation",
             "response_generation": "response_generation",
         },
     )
@@ -1326,6 +1391,14 @@ def build_help_agent_graph():
             "response_generation": "response_generation",
         },
     )
+    graph.add_conditional_edges(
+        "general_inquiry_confirmation",
+        _route_after_general_inquiry_confirmation,
+        {
+            "general_inquiry_payload_builder": "general_inquiry_payload_builder",
+            "response_generation": "response_generation",
+        },
+    )
 
     # ── Submission pipelines ──────────────────────────────────────────────────
     graph.add_edge("payload_builder", "api_submission")
@@ -1338,6 +1411,8 @@ def build_help_agent_graph():
     graph.add_edge("work_permit_api_submission", "response_generation")
     graph.add_edge("fitout_confirm_payload_builder", "fitout_confirm_api_submission")
     graph.add_edge("fitout_confirm_api_submission", "response_generation")
+    graph.add_edge("general_inquiry_payload_builder", "general_inquiry_api_submission")
+    graph.add_edge("general_inquiry_api_submission", "response_generation")
 
     # ── Sales Data agent edges ─────────────────────────────────────────────────
     graph.add_conditional_edges(

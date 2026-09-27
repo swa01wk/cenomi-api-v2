@@ -77,6 +77,9 @@ _SALES_DATA_ADMIN_INTENTS: frozenset[str] = frozenset(
     }
 )
 
+# General Inquiry — available to tenant contacts and admin roles that create SRs.
+_GENERAL_INQUIRY_INTENTS: frozenset[str] = frozenset({"CREATE_GENERAL_INQUIRY"})
+
 ROLE_PERMITTED_INTENTS: dict[str, frozenset[str]] = {
     # Phase 1 actor — can create/update RDD SRs, create work permit SRs, and
     # create Already Trading (HANDED_OVER) SRs.
@@ -91,6 +94,7 @@ ROLE_PERMITTED_INTENTS: dict[str, frozenset[str]] = {
             "CREATE_HANDED_OVER_SR",
             "CREATE_FITOUT_CONFIRM_TRADING",
             "APPROVE_FITOUT_CONFIRM_TRADING",
+            "CREATE_GENERAL_INQUIRY",
         }
     ),
     # Phase 2 actor — FM review: update stage fields, upload docs, approve/save
@@ -100,6 +104,7 @@ ROLE_PERMITTED_INTENTS: dict[str, frozenset[str]] = {
             "UPDATE_RDD_SERVICE_REQUEST",
             "APPROVE_RDD_SERVICE_REQUEST",
             "APPROVE_WORK_PERMIT_SR",
+            "CREATE_GENERAL_INQUIRY",
         }
     ),
     # Phase 2 support — same FM review actions as FM_MANAGER.
@@ -112,6 +117,7 @@ ROLE_PERMITTED_INTENTS: dict[str, frozenset[str]] = {
             "CREATE_FITOUT_CONFIRM_TRADING",
             "APPROVE_FITOUT_CONFIRM_TRADING",
             "APPROVE_WORK_PERMIT_SR",
+            "CREATE_GENERAL_INQUIRY",
         }
     ),
     # Phase 3 actor — RDD review is triggered by sr_status_sync, not supervisor intent.
@@ -124,15 +130,16 @@ ROLE_PERMITTED_INTENTS: dict[str, frozenset[str]] = {
             "APPROVE_FITOUT_CONFIRM_FOS",
             "APPROVE_FITOUT_CONFIRM_END",
             "APPROVE_WORK_PERMIT_SR",
+            "CREATE_GENERAL_INQUIRY",
         }
     ),
     # ── Sales Data roles ──────────────────────────────────────────────────
     # Tenant uploading CSV sales data
-    "TENANT_CSV_UPLOADER": _SR_READ_INTENTS | _SALES_DATA_TENANT_INTENTS,
+    "TENANT_CSV_UPLOADER": _SR_READ_INTENTS | _SALES_DATA_TENANT_INTENTS | _GENERAL_INQUIRY_INTENTS,
     # Tenant uploading supporting documents
-    "TENANT_DOC_UPLOADER": _SR_READ_INTENTS | _SALES_DATA_TENANT_INTENTS,
+    "TENANT_DOC_UPLOADER": _SR_READ_INTENTS | _SALES_DATA_TENANT_INTENTS | _GENERAL_INQUIRY_INTENTS,
     # Sales data team member who reviews and approves
-    "SALES_DATA_APPROVER": _SR_READ_INTENTS | _SALES_DATA_ADMIN_INTENTS,
+    "SALES_DATA_APPROVER": _SR_READ_INTENTS | _SALES_DATA_ADMIN_INTENTS | _GENERAL_INQUIRY_INTENTS,
     # Unrestricted
     "ADMIN": ALL_INTENTS,
     # Cold L2 Work Permit hop (workflow 6).
@@ -160,9 +167,9 @@ SALES_DATA_TENANT_PLATFORM_ROLES: frozenset[str] = frozenset(
 SALES_DATA_APPROVER_PLATFORM_ROLES: frozenset[str] = frozenset({"SALES_DATA_TEAM"})
 
 for _role in SALES_DATA_TENANT_PLATFORM_ROLES:
-    ROLE_PERMITTED_INTENTS[_role] = _SR_READ_INTENTS | _SALES_DATA_TENANT_INTENTS
+    ROLE_PERMITTED_INTENTS[_role] = _SR_READ_INTENTS | _SALES_DATA_TENANT_INTENTS | _GENERAL_INQUIRY_INTENTS
 for _role in SALES_DATA_APPROVER_PLATFORM_ROLES:
-    ROLE_PERMITTED_INTENTS[_role] = _SR_READ_INTENTS | _SALES_DATA_ADMIN_INTENTS
+    ROLE_PERMITTED_INTENTS[_role] = _SR_READ_INTENTS | _SALES_DATA_ADMIN_INTENTS | _GENERAL_INQUIRY_INTENTS
 
 
 def _rebuild_intents_for_roles() -> None:
