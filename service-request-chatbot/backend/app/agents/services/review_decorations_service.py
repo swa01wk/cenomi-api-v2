@@ -159,6 +159,12 @@ def payload_to_collected_data(payload: dict[str, Any]) -> dict[str, Any]:
         # Base milestone dates from the lease contract — needed so that
         # missing_field_node can show "original date" on APPROVE_SR.
         "base_fitout_start_date", "base_fitout_end_date", "base_trading_date",
+        # ── Fitout Progress workflow fields ────────────────────────────────────
+        # The percentage the request was raised with, and the note beside it
+        # (singular ``comment`` here — the confirmations use ``comments``).
+        # Without these an approver opened their own SR and was told it had no
+        # percentage recorded, with no "Approve 65%" to tap.
+        "fitout_progress_percentage", "comment",
     ):
         if key in payload and payload[key] not in (None, ""):
             mapped[key] = payload[key]

@@ -106,6 +106,10 @@ from app.agents.graph.nodes.fitout_confirm.fitout_confirm_entry_node import fito
 from app.agents.graph.nodes.fitout_confirm.fitout_confirm_confirmation_node import fitout_confirm_confirmation_node
 from app.agents.graph.nodes.fitout_confirm.fitout_confirm_payload_builder_node import fitout_confirm_payload_builder_node
 from app.agents.graph.nodes.fitout_confirm.fitout_confirm_api_submission_node import fitout_confirm_api_submission_node
+from app.agents.graph.nodes.fitout_progress.fitout_progress_entry_node import fitout_progress_entry_node
+from app.agents.graph.nodes.fitout_progress.fitout_progress_confirmation_node import fitout_progress_confirmation_node
+from app.agents.graph.nodes.fitout_progress.fitout_progress_payload_builder_node import fitout_progress_payload_builder_node
+from app.agents.graph.nodes.fitout_progress.fitout_progress_api_submission_node import fitout_progress_api_submission_node
 
 # ── Sales Data agent nodes ────────────────────────────────────────────────────
 from app.agents.graph.nodes.sales_data.sales_data_entry_node import sales_data_entry_node
@@ -161,6 +165,9 @@ from app.agents.graph.state import ServiceRequestGraphState
 # symbols share the same name across schema modules.
 from app.agents.services.help_interrupt_service import detect_help_interrupt
 from app.agents.schemas.fitout_confirm_schema import OPTIONAL_FIELDS as FITOUT_OPTIONAL_FIELDS
+from app.agents.schemas.fitout_progress_schema import (
+    OPTIONAL_FIELDS as FITOUT_PROGRESS_OPTIONAL_FIELDS,
+)
 from app.agents.schemas.work_permit_schema import OPTIONAL_FIELDS as WP_OPTIONAL_FIELDS
 from app.agents.schemas.handover_schema import OPTIONAL_FIELDS as HANDOVER_OPTIONAL_FIELDS
 
@@ -174,6 +181,7 @@ _AGENT_ENTRY_NODES: dict[str, str] = {
     "rdd_fitout_start_agent": "fitout_confirm_entry",
     "rdd_fitout_end_agent": "fitout_confirm_entry",
     "rdd_trading_confirmation_agent": "fitout_confirm_entry",
+    "rdd_fitout_progress_agent": "fitout_progress_entry",
     "sales_data_agent": "sales_data_entry",
 }
 
@@ -195,6 +203,7 @@ _CREATE_NEW_SR_INTENTS: frozenset[str] = frozenset(
         "CREATE_FITOUT_CONFIRM_FOS",
         "CREATE_FITOUT_CONFIRM_END",
         "CREATE_FITOUT_CONFIRM_TRADING",
+        "CREATE_FITOUT_PROGRESS",
         # Sales data intents never open an existing platform SR
         "UPLOAD_SALES_DATA",
         "ENTER_SALES_DATA_MANUAL",
@@ -210,6 +219,11 @@ _CREATE_NEW_SR_INTENTS: frozenset[str] = frozenset(
 _FITOUT_AGENTS: frozenset[str] = frozenset(
     {"rdd_fitout_start_agent", "rdd_fitout_end_agent", "rdd_trading_confirmation_agent"}
 )
+
+# Fitout progress is its own workflow: one field, its own schema, its own nodes.
+# Deliberately not folded into _FITOUT_AGENTS — that set means "shares the
+# fitout confirmation schema and confirmation path", which this does not.
+FITOUT_PROGRESS_AGENT = "rdd_fitout_progress_agent"
 
 
 def _should_open_existing_sr(state: dict[str, Any]) -> bool:
@@ -480,7 +494,41 @@ def _route_after_registry(state: dict[str, Any]) -> str:
     return _AGENT_ENTRY_NODES.get(agent or "", "handover_entry")
 
 
+# Gates where the assistant has asked a question and is holding the flow until
+# the user answers it — the milestone "continue or pick a different lease?" and
+# the cancel confirmation. Both are answered with a chip or a word, and both are
+# set by an entry node.
+_PENDING_USER_DECISION: frozenset[str] = frozenset(
+    {"MILESTONE_PENDING", "CANCEL_PENDING"}
+)
+
+
 def _route_after_merge(state: dict[str, Any]) -> str:
+    # A form patch that arrives while one of those questions is open must be
+    # merged — the draft and the form have to stay in step — but it must not
+    # carry on into the pipeline, because everything downstream asks something:
+    # the guided-tour choice, the next missing field, a validation correction.
+    # Whatever it asked replaced the question the user was already looking at,
+    # and the chips under it no longer matched the text above them.
+    #
+    # Reported live: picking a lease whose fit-out start was already confirmed
+    # showed "…already confirmed on 12/10/2026. Continue and revise, or pick a
+    # different lease?" and then, with no user turn in between, "Before we start
+    # — would you like me to guide you through the form?". The Continue / Cancel
+    # chips were still on screen with a different question above them.
+    #
+    # The user's own answer is unaffected: Continue and Cancel arrive as
+    # action_overrides, which the entry routers handle before this point.
+    #
+    # A lease selection is let through because it is itself an answer to
+    # "…or pick a different lease?". No UI offers that today — the milestone
+    # message replaces the picker, leaving Continue and Cancel — so the branch
+    # is a guard rather than a path, and it is deliberately untested.
+    if (
+        state.get("confirmation_status") in _PENDING_USER_DECISION
+        and not state.get("selected_lease")
+    ):
+        return "response_generation"
     if state.get("selected_lease"):
         return "lease_lookup"
     # Review / approve stages: lease was resolved at create time.
@@ -517,6 +565,8 @@ def _route_after_validation(state: dict[str, Any]) -> str:
     OPTIONAL_FIELDS = (
         FITOUT_OPTIONAL_FIELDS
         if active_agent_for_optional in _FITOUT_AGENTS
+        else FITOUT_PROGRESS_OPTIONAL_FIELDS
+        if active_agent_for_optional == FITOUT_PROGRESS_AGENT
         else WP_OPTIONAL_FIELDS
         if active_agent_for_optional == "work_permit_agent"
         else HANDOVER_OPTIONAL_FIELDS
@@ -578,6 +628,11 @@ def _route_after_validation(state: dict[str, Any]) -> str:
         from app.agents.schemas.fitout_confirm_schema import get_missing_fields as fc_missing
         sub_cat = state.get("sub_category") or ""
         still_missing = fc_missing(original_stage, sub_cat, collected)
+    elif active_agent == FITOUT_PROGRESS_AGENT:
+        from app.agents.schemas.fitout_progress_schema import (
+            get_missing_fields as fp_missing,
+        )
+        still_missing = fp_missing(original_stage, collected)
     else:
         from app.agents.schemas.handover_schema import get_missing_fields as rdd_missing
         still_missing = rdd_missing(original_stage, collected)
@@ -889,6 +944,43 @@ def _route_after_fitout_confirm_confirmation(state: dict[str, Any]) -> str:
     return "response_generation"
 
 
+def _route_after_fitout_progress_entry(state: dict[str, Any]) -> str:
+    """Route out of fitout_progress_entry.
+
+    ``confirmation_status`` is tested before the stale ``WAITING_FOR_USER`` left
+    by the turn that rendered the card, exactly as the other entry routers do:
+    testing status first short-circuits to response_generation and re-emits the
+    previous question instead of submitting.
+
+    A percentage the entry node already resolved (typed or tapped) arrives with
+    ``corrected_fields`` set and goes straight to merge_state — extraction has
+    nothing left to do with it, and sending it there risks the LLM re-reading a
+    bare number as some other field.
+    """
+    if state.get("confirmation_status") == "CONFIRMED":
+        return "merge_state"
+    if state.get("corrected_fields"):
+        return "merge_state"
+    # A rejection just armed by the entry node: "reject" is a decision, not a
+    # field value, so there is nothing for extraction to read out of it.
+    if (
+        (state.get("backend_refs") or {}).get("fitout_progress_action") == "reject"
+        and state.get("confirmation_status") is None
+    ):
+        return "merge_state"
+    if state.get("confirmation_status") == "REJECTED":
+        return "field_extraction"
+    if state.get("status") == "WAITING_FOR_USER":
+        return _form_patch_target(state) or "response_generation"
+    return _form_patch_target(state) or "field_extraction"
+
+
+def _route_after_fitout_progress_confirmation(state: dict[str, Any]) -> str:
+    if state.get("confirmation_status") == "CONFIRMED":
+        return "fitout_progress_payload_builder"
+    return "response_generation"
+
+
 # ---------------------------------------------------------------------------
 # Sales Data Agent routing
 # ---------------------------------------------------------------------------
@@ -1096,6 +1188,10 @@ def build_help_agent_graph():
     graph.add_node("fitout_confirm_confirmation", fitout_confirm_confirmation_node)
     graph.add_node("fitout_confirm_payload_builder", fitout_confirm_payload_builder_node)
     graph.add_node("fitout_confirm_api_submission", fitout_confirm_api_submission_node)
+    graph.add_node("fitout_progress_entry", fitout_progress_entry_node)
+    graph.add_node("fitout_progress_confirmation", fitout_progress_confirmation_node)
+    graph.add_node("fitout_progress_payload_builder", fitout_progress_payload_builder_node)
+    graph.add_node("fitout_progress_api_submission", fitout_progress_api_submission_node)
     # ── Sales Data agent nodes ─────────────────────────────────────────────────
     graph.add_node("sales_data_entry", sales_data_entry_node)
     graph.add_node("pending_months_gate", pending_months_gate_node)
@@ -1141,6 +1237,7 @@ def build_help_agent_graph():
             "handover_entry": "handover_entry",
             "work_permit_entry": "work_permit_entry",
             "fitout_confirm_entry": "fitout_confirm_entry",
+            "fitout_progress_entry": "fitout_progress_entry",
             "sales_data_entry": "sales_data_entry",
             # Help question asked mid-collection — answered without disturbing
             # the draft (see detect_help_interrupt).
@@ -1163,6 +1260,7 @@ def build_help_agent_graph():
             "fm_review_entry": "fm_review_entry",
             "rdd_review_entry": "rdd_review_entry",
             "fitout_confirm_entry": "fitout_confirm_entry",
+            "fitout_progress_entry": "fitout_progress_entry",
             "work_permit_entry": "work_permit_entry",
             "preview": "preview",
             "supervisor": "supervisor",
@@ -1213,6 +1311,7 @@ def build_help_agent_graph():
             "handover_entry": "handover_entry",
             "work_permit_entry": "work_permit_entry",
             "fitout_confirm_entry": "fitout_confirm_entry",
+            "fitout_progress_entry": "fitout_progress_entry",
             "sales_data_entry": "sales_data_entry",
             "response_generation": "response_generation",
         },
@@ -1252,7 +1351,13 @@ def build_help_agent_graph():
     graph.add_conditional_edges(
         "merge_state",
         _route_after_merge,
-        {"lease_lookup": "lease_lookup", "validation": "validation"},
+        {
+            "lease_lookup": "lease_lookup",
+            "validation": "validation",
+            # A patch merged while a pending question is on screen stops here:
+            # everything past validation asks something of its own.
+            "response_generation": "response_generation",
+        },
     )
     graph.add_conditional_edges(
         "lease_lookup",
@@ -1282,6 +1387,17 @@ def build_help_agent_graph():
         },
     )
 
+    # ── Fitout Progress entry ─────────────────────────────────────────────────
+    graph.add_conditional_edges(
+        "fitout_progress_entry",
+        _route_after_fitout_progress_entry,
+        {
+            "field_extraction": "field_extraction",
+            "merge_state": "merge_state",
+            "response_generation": "response_generation",
+        },
+    )
+
     # ── Validation → confirmation ─────────────────────────────────────────────
     graph.add_conditional_edges(
         "validation",
@@ -1293,6 +1409,7 @@ def build_help_agent_graph():
             "rdd_confirmation": "rdd_confirmation",
             "work_permit_confirmation": "work_permit_confirmation",
             "fitout_confirm_confirmation": "fitout_confirm_confirmation",
+            "fitout_progress_confirmation": "fitout_progress_confirmation",
             "response_generation": "response_generation",
         },
     )
@@ -1334,6 +1451,15 @@ def build_help_agent_graph():
         },
     )
 
+    graph.add_conditional_edges(
+        "fitout_progress_confirmation",
+        _route_after_fitout_progress_confirmation,
+        {
+            "fitout_progress_payload_builder": "fitout_progress_payload_builder",
+            "response_generation": "response_generation",
+        },
+    )
+
     # ── Submission pipelines ──────────────────────────────────────────────────
     graph.add_edge("payload_builder", "api_submission")
     graph.add_edge("api_submission", "response_generation")
@@ -1345,6 +1471,8 @@ def build_help_agent_graph():
     graph.add_edge("work_permit_api_submission", "response_generation")
     graph.add_edge("fitout_confirm_payload_builder", "fitout_confirm_api_submission")
     graph.add_edge("fitout_confirm_api_submission", "response_generation")
+    graph.add_edge("fitout_progress_payload_builder", "fitout_progress_api_submission")
+    graph.add_edge("fitout_progress_api_submission", "response_generation")
 
     # ── Sales Data agent edges ─────────────────────────────────────────────────
     graph.add_conditional_edges(

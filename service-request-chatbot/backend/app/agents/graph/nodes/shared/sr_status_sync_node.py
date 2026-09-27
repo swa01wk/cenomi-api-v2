@@ -71,6 +71,12 @@ _FITOUT_CONFIRM_SUB_CATEGORIES: frozenset[str] = frozenset({
     "FIT_OUT_CONFIRM_TRADING",
 })
 
+# Fitout progress also has a single approval step, but it can end REJECTED as
+# well as APPROVED — REJECT is in its allowed_actions — so it needs its own
+# mapping rather than the confirmations' "terminal means approved".
+_FITOUT_PROGRESS_SUB_CATEGORY = "FITOUT_PROGRESS"
+_FITOUT_PROGRESS_AGENT = "rdd_fitout_progress_agent"
+
 # Map fitout sub-category → active_agent name for re-hydrating the agent on open-SR.
 _FITOUT_SUB_CATEGORY_AGENTS: dict[str, str] = {
     "FIT_OUT_CONFIRM_FOS": "rdd_fitout_start_agent",
@@ -113,6 +119,18 @@ def _map_operations_to_stage(
     # Path B early exit: HANDED_OVER + APPROVED → terminal
     if sub_category == "HANDED_OVER" and (platform_status or "").upper() == "APPROVED":
         return "SR_COMPLETED"
+
+    # Fitout progress: single approval step, two ways to finish.
+    if sub_category == _FITOUT_PROGRESS_SUB_CATEGORY:
+        status = (platform_status or "").upper()
+        if status == "REJECTED":
+            return "SR_REJECTED"
+        if status in _TERMINAL_STATUSES:
+            return "SR_APPROVED"
+        for op in operations:
+            if (op.get("status") or "").upper() == "IN_PROGRESS":
+                return "APPROVE_SR"
+        return current_stage
 
     # Fitout confirm early exit: single approval step — any in-progress → APPROVE_SR,
     # terminal → SR_APPROVED.
@@ -354,6 +372,8 @@ async def sr_status_sync_node(state: ServiceRequestState) -> dict[str, Any]:
             sr_sub_category = "FIT_OUT_CONFIRM_END"
         elif "trading_done" in payload_tmp:
             sr_sub_category = "FIT_OUT_CONFIRM_TRADING"
+        elif "fitout_progress_percentage" in payload_tmp:
+            sr_sub_category = _FITOUT_PROGRESS_SUB_CATEGORY
 
     new_stage = _map_operations_to_stage(
         operations,
@@ -434,6 +454,13 @@ async def sr_status_sync_node(state: ServiceRequestState) -> dict[str, Any]:
             "lease_id": inner.get("lease_id") or inner.get("contract_id"),
             "service_request_id": sr_id,
         }
+        if (sr_sub_category or "") == _FITOUT_PROGRESS_SUB_CATEGORY:
+            # The approve PATCH must echo this payload back key for key —
+            # ValidateEditableFields refuses any change outside
+            # [fitout_progress_percentage, comment] — so keep the platform's own
+            # copy rather than one rebuilt from collected_data.
+            backend_refs["stored_payload"] = dict(payload)
+
         existing_collected: dict[str, Any] = dict(state.get("collected_data") or {})
         hydrated = payload_to_collected_data(payload)
         if hydrated:
@@ -442,7 +469,10 @@ async def sr_status_sync_node(state: ServiceRequestState) -> dict[str, Any]:
             # (and cleared actual dates) back to the original yes/actual values.
             if (
                 effective_stage == "APPROVE_SR"
-                and (sr_sub_category or "") in _FITOUT_CONFIRM_SUB_CATEGORIES
+                and (
+                    (sr_sub_category or "") in _FITOUT_CONFIRM_SUB_CATEGORIES
+                    or (sr_sub_category or "") == _FITOUT_PROGRESS_SUB_CATEGORY
+                )
                 and existing_collected
             ):
                 updates["collected_data"] = {**hydrated, **existing_collected}
@@ -460,6 +490,17 @@ async def sr_status_sync_node(state: ServiceRequestState) -> dict[str, Any]:
             updates["active_agent"] = "rdd_handover_agent"
             updates["service_category"] = "FIT_OUT_AND_HANDOVER"
             updates["sub_category"] = sr_sub_category or "HANDOVER"
+        elif (
+            effective_stage == "APPROVE_SR"
+            and sr_sub_category == _FITOUT_PROGRESS_SUB_CATEGORY
+        ):
+            # Both this workflow and the fitout confirmations declare APPROVE_SR
+            # in stage_sync_nodes, so _route_after_sync's "scan every config"
+            # fallback could pick either. Naming the agent is what makes the
+            # routing deterministic.
+            updates["active_agent"] = _FITOUT_PROGRESS_AGENT
+            updates["service_category"] = "FIT_OUT_AND_HANDOVER"
+            updates["sub_category"] = sr_sub_category
         elif effective_stage == "APPROVE_SR" and sr_sub_category in _FITOUT_CONFIRM_SUB_CATEGORIES:
             # Restore the fitout confirm agent so _route_after_sync uses the correct
             # stage_sync_nodes and validation/missing-field nodes behave correctly.
@@ -498,6 +539,16 @@ async def sr_status_sync_node(state: ServiceRequestState) -> dict[str, Any]:
                     f"Opening Work Permit SR **{sr_id}** ({label}). "
                     "Review the details below, then approve or reject this hop."
                 )
+        elif (
+            effective_stage == "APPROVE_SR"
+            and sr_sub_category == _FITOUT_PROGRESS_SUB_CATEGORY
+        ):
+            # Usually replaced in the same turn by the percentage question, which
+            # says the same thing with the number in it; this is what speaks when
+            # the flow has nothing to ask.
+            updates["response_message"] = (
+                f"Opening Fitout Progress SR **{sr_id}** for approval."
+            )
         elif effective_stage == "APPROVE_SR" and sr_sub_category in _FITOUT_CONFIRM_SUB_CATEGORIES:
             _FITOUT_OPEN_LABELS = {
                 "FIT_OUT_CONFIRM_FOS": "Fitout Start Confirmation",

@@ -1026,6 +1026,41 @@ async def merge_state_node(state: ServiceRequestState) -> dict[str, Any]:
                     if actual_key:
                         collected[actual_key] = ""
 
+    # Fitout progress: the same "the user actually answered" flag, for the one
+    # field that flow asks about.
+    #
+    # The gate is the turn, not the channel. Both other sources of this value
+    # look exactly like an answer once they reach collected_data: the approver's
+    # SR arrives with a percentage in its stored payload, and on create the web
+    # form computes the same elapsed-time default this agent suggests and writes
+    # it into the field as soon as a lease is picked, which the form→chat bridge
+    # then syncs back through corrected_fields.
+    #
+    # That sync is a *background* turn — no message, no action, nobody at the
+    # keyboard — and a background turn cannot answer a question. Counting it
+    # took DUMMY-CUST-001 from the question straight to "Recording fit-out
+    # progress at 100%", with the user never asked.
+    #
+    # A real turn is one the user took: they typed something (extraction reads
+    # their words), or they tapped a chip or edited the card (an action, or a
+    # chip value that arrives as their message).
+    if active_agent == "rdd_fitout_progress_agent":
+        from app.agents.schemas.fitout_progress_schema import (
+            PROGRESS_CONFIRMED_KEY,
+            PROGRESS_FIELD as _PROGRESS_FIELD,
+        )
+
+        user_spoke = bool(str(state.get("user_message") or "").strip())
+        user_acted = bool(str(state.get("action_override") or "").strip())
+        answered_by_extraction = (
+            user_spoke and _PROGRESS_FIELD in (state.get("extracted_fields") or {})
+        )
+        answered_by_action = (user_spoke or user_acted) and _PROGRESS_FIELD in (
+            state.get("corrected_fields") or {}
+        )
+        if answered_by_extraction or answered_by_action:
+            collected[PROGRESS_CONFIRMED_KEY] = True
+
     # RDD status: derive from the actually-uploaded document types now that we
     # show all three types in one document_requirement UI (no chip selection).
     # Rejected upload → auto-set document_status = DISAPPROVED.

@@ -36,6 +36,7 @@ from app.agents.schemas.fitout_confirm_schema import (
 from app.agents.services.validation_service import (
     ValidationService,
     validate_fitout_confirm_date_order,
+    validate_fitout_progress,
 )
 from app.observability.decorators import trace_node
 
@@ -43,12 +44,20 @@ logger = logging.getLogger(__name__)
 
 # Validation failures that mean the value is malformed rather than merely
 # wrong, so the field is cleared and re-asked instead of left on the form.
-_MALFORMED_VALUE_TYPES: frozenset[str] = frozenset({"date_format", "url"})
+# Failures meaning "this is not a value of this kind" — the field is cleared so
+# the rejected text does not linger in the form while the bot re-asks.
+_MALFORMED_VALUE_TYPES: frozenset[str] = frozenset(
+    {"date_format", "url", "percentage_format"}
+)
 
 _validation_service = ValidationService()
 
 # Fitout confirmation agents have their own required-field schema; skip the
 # handover STAGE_REGISTRY validation entirely and use fitout schema instead.
+# Fitout progress has its own one-field schema — neither the handover
+# STAGE_REGISTRY nor the fitout confirmation branch applies to it.
+FITOUT_PROGRESS_AGENT = "rdd_fitout_progress_agent"
+
 _FITOUT_CONFIRM_AGENTS: frozenset[str] = frozenset({
     "rdd_fitout_start_agent",
     "rdd_fitout_end_agent",
@@ -107,6 +116,27 @@ async def validation_node(state: ServiceRequestState) -> dict[str, Any]:
         validation_errors.extend(
             validate_fitout_confirm_date_order(sub_category, collected_data)
         )
+    elif active_agent == FITOUT_PROGRESS_AGENT:
+        from app.agents.schemas.fitout_progress_schema import (
+            OPTIONAL_FIELDS as _FITOUT_PROGRESS_OPTIONAL,
+            get_missing_fields as fitout_progress_get_missing_fields,
+        )
+
+        missing_fields = fitout_progress_get_missing_fields(
+            workflow_stage, collected_data
+        )
+        validation_errors = [
+            {
+                "field": f,
+                "validation_type": "required",
+                "status": "FAILED",
+                "message": f"Required field '{f}' is missing.",
+                "blocking": f not in _FITOUT_PROGRESS_OPTIONAL,
+            }
+            for f in missing_fields
+        ]
+        # 0-100, and a flag (not a block) when the number goes backwards.
+        validation_errors.extend(validate_fitout_progress(collected_data))
     else:
         validation_errors = _validation_service.validate_draft(
             data=collected_data,
@@ -176,6 +206,10 @@ async def validation_node(state: ServiceRequestState) -> dict[str, Any]:
     if has_blocking and state.get("confirmation_status") == "CONFIRMED":
         if active_agent in _FITOUT_CONFIRM_AGENTS:
             from app.agents.schemas.fitout_confirm_schema import (
+                OPTIONAL_FIELDS as _OPTIONAL,
+            )
+        elif active_agent == FITOUT_PROGRESS_AGENT:
+            from app.agents.schemas.fitout_progress_schema import (
                 OPTIONAL_FIELDS as _OPTIONAL,
             )
         elif active_agent == "work_permit_agent":

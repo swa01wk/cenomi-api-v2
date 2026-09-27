@@ -36,6 +36,8 @@ class SupervisorDecision(BaseModel):
         "APPROVE_FITOUT_CONFIRM_FOS",
         "APPROVE_FITOUT_CONFIRM_END",
         "APPROVE_FITOUT_CONFIRM_TRADING",
+        "CREATE_FITOUT_PROGRESS",
+        "APPROVE_FITOUT_PROGRESS",
         # ── Work Permit ───────────────────────────────────────────────────────
         "CREATE_WORK_PERMIT_SR",
         "APPROVE_WORK_PERMIT_SR",

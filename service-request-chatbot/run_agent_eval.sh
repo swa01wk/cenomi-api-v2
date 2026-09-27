@@ -29,6 +29,7 @@
 #   ./run_agent_eval.sh --no-start --tier 6e,6f,6g     # END full suite
 #   ./run_agent_eval.sh --no-start --tier 6h,6i,6j     # TRADING full suite
 #   ./run_agent_eval.sh --no-start --tier 6a,6b,6c,6d,6e,6f,6g,6h,6i,6j  # all Fitout per-agent
+#   ./run_agent_eval.sh --no-start --tier 6k           # Fitout Progress (create side)
 #   ./run_agent_eval.sh --no-start --tier 8        # FAQ + RBAC
 #   ./run_agent_eval.sh --no-start --tier 9        # Work Permit create + review hops
 #   ./run_agent_eval.sh --no-start --tier sd0      # Sales Data smoke (~2 min)
