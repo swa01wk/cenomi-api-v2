@@ -388,6 +388,15 @@ def _route_after_load(state: dict[str, Any]) -> str:
     return "supervisor"
 
 
+def _is_background_form_sync(state: dict[str, Any]) -> bool:
+    """True for the form bridge's silent patch: edits only, no message or action."""
+    return bool(
+        (state.get("corrected_fields") or {})
+        and not str(state.get("user_message") or "").strip()
+        and not state.get("action_override")
+    )
+
+
 def _route_after_sync(state: dict[str, Any]) -> str:
     """After status sync, route to the correct stage entry node.
 
@@ -417,6 +426,11 @@ def _route_after_sync(state: dict[str, Any]) -> str:
         s for c in WORKFLOW_CONFIG_REGISTRY.values() for s in c.terminal_stages
     )
     if workflow_stage in all_terminal:
+        # The form re-fetch after a final approve/reject echoes its values back
+        # as a silent patch. It is not an "open SR" request, and preview would
+        # answer it with an unrequested (Handover-labelled) SR card.
+        if _is_background_form_sync(state):
+            return "response_generation"
         backend_refs_terminal = state.get("backend_refs") or {}
         if backend_refs_terminal.get("sr_id"):
             return "preview"

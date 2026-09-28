@@ -158,6 +158,8 @@ class ServiceRequestGetResult:
     service_request_operations: list[dict[str, Any]] = field(default_factory=list)
     payload: dict[str, Any] | None = None
     service_request_attachments: list[dict[str, Any]] = field(default_factory=list)
+    service_request_history: list[dict[str, Any]] = field(default_factory=list)
+    work_permit_extension: dict[str, Any] | None = None
     endpoint: str = ""
     status_code: int | None = None
     latency_ms: int = 0
@@ -375,6 +377,16 @@ class ServiceRequestPlatformClient:
             if isinstance(body, dict):
                 data = body.get("data") or {}
 
+            history = (
+                data.get("service_request_history")
+                or data.get("sr_history")
+                or data.get("history")
+                or []
+            )
+            extension = (
+                data.get("work_permit_extension")
+                or data.get("workPermitExtension")
+            )
             return ServiceRequestGetResult(
                 success=True,
                 sr_id=str(data.get("service_request_id") or sr_id),
@@ -387,6 +399,12 @@ class ServiceRequestPlatformClient:
                 payload=self._merge_sr_payload_with_top_level_refs(data),
                 service_request_attachments=list(
                     data.get("service_request_attachments") or []
+                ),
+                service_request_history=(
+                    list(history) if isinstance(history, list) else []
+                ),
+                work_permit_extension=(
+                    extension if isinstance(extension, dict) else None
                 ),
                 endpoint=endpoint,
                 status_code=response.status_code,
@@ -451,6 +469,22 @@ class ServiceRequestPlatformClient:
         result = await self._patch(endpoint, payload)
         if result.success and result.sr_id is None:
             result.sr_id = self._extract_sr_id(result.response_payload) or sr_id
+        return result
+
+    async def update_work_permit_status(
+        self, payload: dict[str, Any]
+    ) -> PlatformCallResult:
+        """POST /service-requests/work-permit/status — extend / cancel decision."""
+        endpoint = f"{self._base_url}{self._SERVICE_REQUESTS_PATH}/work-permit/status"
+        if not self._uses_agentic_bearer("POST", endpoint):
+            await self.ensure_authenticated()
+        result = await self._post(endpoint, payload)
+        if result.sr_id is None:
+            result.sr_id = (
+                self._extract_sr_id(result.response_payload)
+                or str(payload.get("service_request_id") or "")
+                or None
+            )
         return result
 
     async def submit_report(self, payload: dict[str, Any]) -> PlatformCallResult:

@@ -394,6 +394,12 @@ async def sr_status_sync_node(state: ServiceRequestState) -> dict[str, Any]:
 
     backend_refs["platform_sr_status"] = platform_status
     backend_refs["sr_operations"] = operations
+    history = list(getattr(result, "service_request_history", None) or [])
+    if history:
+        backend_refs["sr_history"] = history
+    extension = getattr(result, "work_permit_extension", None)
+    if isinstance(extension, dict):
+        backend_refs["work_permit_extension"] = extension
 
     auth = state.get("auth_context")
     user_role = derive_user_role(auth)

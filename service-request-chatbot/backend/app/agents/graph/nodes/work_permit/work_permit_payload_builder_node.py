@@ -203,25 +203,78 @@ def build_review_work_permit_payload(
     *,
     sub_category: str,
     inner_payload: dict[str, Any],
-    approve: bool,
+    action: str = "approve",
     comment: str = "",
+    assign_to: str = "",
+    approve: bool | None = None,
 ) -> dict[str, Any]:
-    """Build PATCH body for a WP review hop (approve requires payload)."""
-    if not approve:
+    """Build PATCH body for a WP review hop (approve / reject / more info / assign).
+
+    ``approve`` is kept for older callers; prefer ``action``.
+    """
+    if approve is not None and action == "approve":
+        action = "approve" if approve else "reject"
+    cleaned = _strip_review_inner_envelope(dict(inner_payload or {}))
+    if action == "assign_to":
         body: dict[str, Any] = {
+            "status": "REASSIGN_TO",
+            "sub_category": sub_category,
+            "assign_to": assign_to,
+            "payload": cleaned,
+        }
+        if comment:
+            body["comment"] = comment
+        return body
+    if action == "reject":
+        body = {
             "status": "REJECTED",
             "sub_category": sub_category,
         }
         if comment:
             body["comment"] = comment
         return body
-    cleaned = _strip_review_inner_envelope(dict(inner_payload or {}))
+    if action == "action_required":
+        body = {
+            "status": "ACTION_REQUIRED",
+            "sub_category": sub_category,
+            "payload": cleaned,
+        }
+        if comment:
+            body["comment"] = comment
+        return body
     return {
         "status": "APPROVED",
         "sub_category": sub_category,
         "comment": comment,
         "payload": cleaned,
     }
+
+
+def build_wp_status_payload(
+    *,
+    sr_id: str,
+    action: str,
+    comment: str = "",
+    duration: dict[str, int] | None = None,
+) -> dict[str, Any]:
+    """POST /service-requests/work-permit/status body (Extend / Cancel decision)."""
+    status = "EXTEND" if action == "extend" else "CANCEL"
+    body: dict[str, Any] = {
+        "service_request_id": sr_id,
+        "status": status,
+        "comment": comment or "",
+        "document_ids": [],
+    }
+    if action == "extend" and isinstance(duration, dict):
+        if "extension_duration_in_days" in duration:
+            body["extension_duration_in_days"] = int(
+                duration["extension_duration_in_days"]
+            )
+        if "extension_duration_in_hours" in duration:
+            body["extension_duration_in_hours"] = int(
+                duration["extension_duration_in_hours"]
+            )
+    return body
 
 
 @trace_node("work_permit_payload_builder", "TOOL")
@@ -233,26 +286,47 @@ async def work_permit_payload_builder_node(state: ServiceRequestState) -> dict[s
 
     if workflow_stage in WP_REVIEW_STAGES:
         existing = backend_refs.get("create_payload") or {}
-        inner = existing.get("payload") if isinstance(existing.get("payload"), dict) else {}
+        inner = (
+            existing.get("payload")
+            if isinstance(existing.get("payload"), dict)
+            else {}
+        )
         if not inner:
             inner = _inner_payload_from_collected(collected_data)
         sub_category = resolve_wp_sub_category(
             state.get("sub_category") or existing.get("sub_category"),
             collected_data,
         )
-        approve = backend_refs.get("wp_action") != "reject"
-        comment = str(collected_data.get("comments") or collected_data.get("notes") or "")
-        payload = build_review_work_permit_payload(
-            sub_category=sub_category,
-            inner_payload=inner,
-            approve=approve,
-            comment=comment,
+        wp_action = str(backend_refs.get("wp_action") or "approve")
+        comment = str(
+            collected_data.get("comments") or collected_data.get("notes") or ""
         )
-        backend_refs["create_payload"] = payload
+        if wp_action in {"extend", "cancel_permit"}:
+            sr_id = str(backend_refs.get("sr_id") or "")
+            duration = backend_refs.get("wp_extension_duration")
+            payload = build_wp_status_payload(
+                sr_id=sr_id,
+                action="extend" if wp_action == "extend" else "cancel",
+                comment=comment,
+                duration=duration if isinstance(duration, dict) else None,
+            )
+            backend_refs["create_payload"] = payload
+            backend_refs["wp_submit_mode"] = "work_permit_status"
+        else:
+            assign_to = str(backend_refs.get("wp_assign_to") or "")
+            payload = build_review_work_permit_payload(
+                sub_category=sub_category,
+                inner_payload=inner,
+                action=wp_action,
+                comment=comment,
+                assign_to=assign_to,
+            )
+            backend_refs["create_payload"] = payload
+            backend_refs["wp_submit_mode"] = "patch"
         logger.info(
-            "work_permit_payload_builder_node: review payload stage=%s approve=%s sub=%s",
+            "work_permit_payload_builder_node: review payload stage=%s action=%s sub=%s",
             workflow_stage,
-            approve,
+            wp_action,
             sub_category,
         )
         return {"backend_refs": backend_refs}
@@ -270,6 +344,7 @@ async def work_permit_payload_builder_node(state: ServiceRequestState) -> dict[s
         return {"status": "FAILED"}
 
     backend_refs["create_payload"] = payload
+    backend_refs.pop("wp_submit_mode", None)
     logger.info(
         "work_permit_payload_builder_node: create payload lease_code=%s permit_type=%s",
         collected_data.get("lease_code"),

@@ -236,6 +236,36 @@ class TestWpGraphRouting:
         }
         assert _route_after_sync(state) == "work_permit_entry"
 
+    @pytest.mark.parametrize("stage", ["WP_APPROVED", "WP_REJECTED"])
+    def test_silent_form_patch_on_terminal_wp_skips_preview(self, stage: str) -> None:
+        state = {
+            "active_agent": "work_permit_agent",
+            "workflow_stage": stage,
+            "backend_refs": {"sr_id": "341526"},
+            "corrected_fields": {"title": "Shop fitting"},
+            "user_message": "",
+        }
+        assert _route_after_sync(state) == "response_generation"
+
+    def test_open_terminal_wp_still_previews(self) -> None:
+        state = {
+            "active_agent": "work_permit_agent",
+            "workflow_stage": "WP_APPROVED",
+            "backend_refs": {"sr_id": "341526"},
+            "user_message": "",
+        }
+        assert _route_after_sync(state) == "preview"
+
+    def test_typed_message_with_patch_on_terminal_wp_still_previews(self) -> None:
+        state = {
+            "active_agent": "work_permit_agent",
+            "workflow_stage": "WP_APPROVED",
+            "backend_refs": {"sr_id": "341526"},
+            "corrected_fields": {"title": "Shop fitting"},
+            "user_message": "show me the request",
+        }
+        assert _route_after_sync(state) == "preview"
+
     def test_confirm_routes_to_merge_not_waiting(self) -> None:
         state = {
             "confirmation_status": "CONFIRMED",
@@ -575,9 +605,11 @@ class TestWpEntryReviewActions:
             "workflow_stage": WP_FM_REVIEW,
             "action_override": "reject_wp",
             "backend_refs": {},
+            "collected_data": {"comments": "Incomplete paperwork"},
         }
         result = await work_permit_entry_node(state)
         assert result["backend_refs"]["wp_action"] == "reject"
+        assert result["confirmation_status"] == "CONFIRMED"
 
 
 class TestWpApprovePermission:
@@ -999,8 +1031,10 @@ class TestWpConfirmationRoleGate:
         result = await work_permit_confirmation_node(state)
         ui = result.get("response_ui") or {}
         assert ui.get("type") == "confirmation_card"
-        assert ui.get("confirmAction") == "confirm_approve_wp"
-        assert ui.get("rejectAction") == "reject_wp"
+        action_ids = [a["id"] for a in (ui.get("actions") or [])]
+        assert "confirm_approve_wp" in action_ids
+        assert "reject_wp" in action_ids
+        assert ui.get("confirmAction") is None
         assert result.get("confirmation_status") == "PENDING"
 
     async def test_operations_on_mm_ops_gets_approve_card(self) -> None:
@@ -1018,7 +1052,8 @@ class TestWpConfirmationRoleGate:
             "auth_context": _auth("OPERATIONS"),
         }
         result = await work_permit_confirmation_node(state)
-        assert result["response_ui"]["confirmAction"] == "confirm_approve_wp"
+        action_ids = [a["id"] for a in result["response_ui"]["actions"]]
+        assert "confirm_approve_wp" in action_ids
 
 
 @pytest.mark.asyncio
@@ -1079,6 +1114,125 @@ class TestWpReviewDecorationsNonActor:
         )
         assert deco.get("promote_preview") is True
         assert "suggestions" not in deco
+
+
+_STALE_REVIEW_DECO = {"promote_preview": True, "suggestions": {"kind": "labeled_options", "options": []}}
+_WP_PREVIEW = {
+    "type": "sr_preview_card",
+    "requestType": "Work Permit Service Request",
+    "srId": "341524",
+    "isSubmitted": True,
+    "fields": [{"key": "lease_code", "label": "Lease Code", "value": "t0099892"}],
+}
+
+
+def _review_state(*, stage: str, role: str, status: str, wp_action: str) -> dict[str, Any]:
+    return {
+        "workflow_stage": stage,
+        "confirmation_status": "CONFIRMED",
+        "validation_errors": [],
+        "response_decorations": dict(_STALE_REVIEW_DECO),
+        "backend_refs": {
+            "sr_id": "341524",
+            "wp_action": wp_action,
+            "create_payload": {"status": status, "sub_category": "OPERATIONS", "payload": {}},
+        },
+        "auth_context": _auth(role),
+    }
+
+
+async def _submit_review(state: dict[str, Any], get_result: Any) -> dict[str, Any]:
+    mock_patch = AsyncMock()
+    mock_patch.sr_id = "341524"
+    mock_patch.error = None
+    mock_patch.correlation_id = None
+    mock_patch.status_code = 200
+    with patch(
+        "app.agents.graph.nodes.work_permit.work_permit_api_submission_node.get_service_request_api_service"
+    ) as factory:
+        svc = AsyncMock()
+        svc.patch_service_request.return_value = mock_patch
+        svc.get_service_request.return_value = get_result
+        factory.return_value = svc
+        return await work_permit_api_submission_node(state)
+
+
+def _finalized(result: dict[str, Any]) -> dict[str, Any]:
+    from app.services.response_ui_finalize import finalize_response_ui
+
+    return finalize_response_ui(
+        result.get("response_ui") or {},
+        result.get("response_decorations"),
+        draft_preview=dict(_WP_PREVIEW),
+        response_message=result.get("response_message") or "",
+    )
+
+
+@pytest.mark.asyncio
+class TestWpReviewActionDropsPreviewCard:
+    """After a review action the reply is the message alone — no full SR card."""
+
+    async def test_final_approve_clears_decorations(self) -> None:
+        result = await _submit_review(
+            _review_state(stage=WP_MM_OPS_REVIEW, role="MALL_MANAGER", status="APPROVED", wp_action="approve"),
+            ServiceRequestGetResult(
+                success=True,
+                sr_id="341524",
+                status="APPROVED",
+                service_request_operations=_ops(("MALL_MANAGER", "FINISHED")),
+            ),
+        )
+        assert result["workflow_stage"] == WP_APPROVED
+        assert result["response_decorations"] == {}
+        ui = _finalized(result)
+        assert ui["type"] == "message"
+        assert "fully approved" in ui["message"]
+
+    async def test_reject_clears_decorations(self) -> None:
+        result = await _submit_review(
+            _review_state(stage=WP_MM_OPS_REVIEW, role="MALL_MANAGER", status="REJECTED", wp_action="reject"),
+            None,
+        )
+        assert result["workflow_stage"] == WP_REJECTED
+        assert result["response_decorations"] == {}
+        assert _finalized(result)["type"] == "message"
+
+    async def test_next_hop_approve_clears_decorations(self) -> None:
+        state = _review_state(stage=WP_FM_REVIEW, role="FM_MANAGER", status="APPROVED", wp_action="approve")
+        state["backend_refs"]["create_payload"]["sub_category"] = "CONSTRUCTION_COLD"
+        result = await _submit_review(
+            state,
+            ServiceRequestGetResult(
+                success=True,
+                sr_id="341524",
+                status="IN_PROCESS",
+                service_request_operations=_ops(
+                    ("FM_MANAGER", "FINISHED"),
+                    ("MALL_MANAGER", "IN_PROGRESS"),
+                    ("OPERATIONS", "IN_PROGRESS"),
+                ),
+            ),
+        )
+        assert result["workflow_stage"] == WP_MM_OPS_REVIEW
+        assert result["response_decorations"] == {}
+        assert _finalized(result)["type"] == "message"
+
+    async def test_refusal_on_review_clears_decorations(self) -> None:
+        state = _review_state(stage=WP_DD_REVIEW, role="FM_MANAGER", status="APPROVED", wp_action="approve")
+        state["backend_refs"]["sr_operations"] = _ops(("DD_ENGINEER", "IN_PROGRESS"))
+        result = await work_permit_api_submission_node(state)
+        assert result["status"] == "FAILED"
+        assert result["response_decorations"] == {}
+        assert _finalized(result)["type"] == "message"
+
+    async def test_create_leaves_decorations_alone(self) -> None:
+        state = {
+            "workflow_stage": "CREATE_WORK_PERMIT",
+            "confirmation_status": "PENDING",
+            "auth_context": _auth("MALL_MANAGER"),
+        }
+        result = await work_permit_api_submission_node(state)
+        assert "response_decorations" not in result
 
 
 def test_eval_tier9_scenario_ids_registered() -> None:
