@@ -133,8 +133,14 @@ async def response_generation_node(state: ServiceRequestState) -> dict[str, Any]
             "",
         )
         if previous.strip() == current_message.strip() and (state.get("user_message") or "").strip():
+            # Replace only the text — the card under it (attach control,
+            # review table, confirm buttons) must stay so the user can act.
             current_message = _SALES_REPEAT_FALLBACK
-            current_ui = {"type": "message", "verbatim": True, "message": current_message}
+            current_ui = (
+                {**current_ui, "message": current_message}
+                if current_ui
+                else {"type": "message", "verbatim": True, "message": current_message}
+            )
         updates = {"response_message": current_message}
         if current_ui:
             updates["response_ui"] = {**current_ui, "message": current_ui.get("message") or current_message}

@@ -211,6 +211,38 @@ def _resolve_command(message: str, stage: str | None) -> str | None:
     return None
 
 
+# The intent each command switches the conversation to.
+_COMMAND_INTENTS = {
+    "restart": "UPLOAD_SALES_DATA",
+    "csv_upload": "UPLOAD_SALES_DATA",
+    "doc_upload": "UPLOAD_SUPPORTING_DOCUMENT",
+}
+
+
+def _command_permitted(state: ServiceRequestState, command: str) -> bool:
+    """Commands must not switch a user into a flow their role cannot use.
+
+    Mid-conversation turns reach this node through session continuity, which
+    skips the supervisor's RBAC gate — so check the same permission table
+    here. Admin review steps never switch into tenant upload flows.
+    """
+    target = _COMMAND_INTENTS.get(command)
+    if target is None:
+        return True  # help / cancel are safe for every role
+    if (state.get("workflow_stage") or "").startswith("ADMIN"):
+        return False
+    auth = state.get("auth_context")
+    if auth is None:
+        return True
+    from app.agents.schemas.help_agent_schema import intents_for_roles
+
+    permitted = intents_for_roles(
+        frozenset(getattr(auth, "roles", None) or ()),
+        bool(getattr(auth, "is_global_admin", False)),
+    )
+    return target in permitted
+
+
 def _clear_file_state(state: ServiceRequestState) -> tuple[dict[str, Any], dict[str, Any]]:
     refs = dict(state.get("backend_refs") or {})
     for key in ("csv_session_id", "csv_rows", "csv_rows_all", "csv_filename",
@@ -376,6 +408,9 @@ async def sales_data_entry_node(state: ServiceRequestState) -> dict[str, Any]:
     # ── 00. Stage-independent typed commands ───────────────────────────────
     if not action_override:
         command = _resolve_command(state.get("user_message") or "", workflow_stage)
+        if command and not _command_permitted(state, command):
+            log.info("sales_data_entry.command_not_permitted", command=command, stage=workflow_stage)
+            command = None
         if command:
             log.info("sales_data_entry.command", command=command, stage=workflow_stage)
         if command == "help":

@@ -111,3 +111,37 @@ async def test_start_over_restarts_cleanly(stage) -> None:
 )
 def test_normal_answers_are_not_treated_as_commands(message, stage) -> None:
     assert _resolve_command(message, stage) is None
+
+
+def _with_roles(state: dict, *roles: str) -> dict:
+    from app.types.chat import AuthContext
+
+    return {**state, "auth_context": AuthContext(subject_id="u1", roles=frozenset(roles))}
+
+
+@pytest.mark.parametrize("message", ["let's start over", "upload again", "reupload", "upload the audited sales pdf"])
+@pytest.mark.parametrize("stage", ["ADMIN_REVIEW", "ADMIN_CONFIRM", None])
+@pytest.mark.asyncio
+async def test_admin_is_never_switched_into_a_tenant_upload_flow(message, stage) -> None:
+    result = await sales_data_entry_node(
+        _with_roles(_state(message, stage, intent="REVIEW_SALES_DATA"), "SALES_DATA_TEAM")
+    )
+    assert result.get("workflow_stage") not in ("PENDING_MONTHS_CHECK", "UPLOAD_INTENT")
+    assert result.get("intent") not in ("UPLOAD_SALES_DATA", "UPLOAD_SUPPORTING_DOCUMENT")
+
+
+@pytest.mark.asyncio
+async def test_tenant_commands_still_work_with_real_roles() -> None:
+    result = await sales_data_entry_node(
+        _with_roles(_state("reupload", "CSV_CORRECTION"), "SHOP_MANAGER", "TENANT")
+    )
+    assert result["workflow_stage"] == "UPLOAD_INTENT"
+
+
+@pytest.mark.parametrize("message", ["help", "cancel"])
+@pytest.mark.asyncio
+async def test_help_and_cancel_work_for_admins_too(message) -> None:
+    result = await sales_data_entry_node(
+        _with_roles(_state(message, "ADMIN_REVIEW", intent="REVIEW_SALES_DATA"), "SALES_DATA_TEAM")
+    )
+    assert result["response_ui"]["verbatim"] is True
