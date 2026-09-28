@@ -547,6 +547,100 @@ async def test_admin_request_audited_sales_confirms_ask_upload() -> None:
 
 
 @pytest.mark.asyncio
+async def test_admin_ui_chosen_action_beats_text_sniffing() -> None:
+    """The review table's per-row 'Ask upload' menu now lets the admin pick
+    Reupload / Supporting Document / Audited Sales explicitly (mirroring the
+    classic portal's 3-way radio choice) — sent as corrected_fields.admin_action
+    alongside the same "Request reupload for X" message the button already
+    sends. That explicit choice must win even if the accompanying message text
+    would otherwise sniff a different action via _deterministic_action.
+    """
+    client = AsyncMock()
+    client.get_sales_data = AsyncMock(
+        return_value=[
+            {
+                "lease_id": 8,
+                "lease_code": "LC-3001",
+                "status": "SUBMITTED",
+                "sales_period_start": "2026-07-01",
+                "sales_period_end": "2026-07-31",
+                "sales_amt": 41000.0,
+            }
+        ]
+    )
+    with (
+        patch(
+            "app.agents.graph.nodes.sales_data.admin_review_entry_node.get_current_bearer_token",
+            return_value="tok",
+        ),
+        patch(
+            "app.agents.graph.nodes.sales_data.admin_review_entry_node.SalesDataApiClient",
+            return_value=client,
+        ),
+    ):
+        result = await admin_review_entry_node(
+            {
+                "session_id": "sess-admin-ui-choice",
+                "user_id": "admin-001",
+                "user_message": "Ask upload for LC-3001",
+                "intent": "APPROVE_SALES_DATA",
+                "action_override": None,
+                "workflow_stage": "ADMIN_REVIEW",
+                "backend_refs": {},
+                "collected_data": {},
+                "corrected_fields": {"admin_action": "NEED_UPLOAD_AUDITED_SALES"},
+            }
+        )
+
+    assert result["collected_data"]["admin_action"] == "NEED_UPLOAD_AUDITED_SALES"
+    assert result["response_ui"]["action_label"] == "Request audited sales"
+
+
+@pytest.mark.asyncio
+async def test_admin_ui_chosen_action_ignores_invalid_value() -> None:
+    """A garbage/unexpected corrected_fields.admin_action must not silently
+    become the action — it should fall back to text-sniffing as before."""
+    client = AsyncMock()
+    client.get_sales_data = AsyncMock(
+        return_value=[
+            {
+                "lease_id": 9,
+                "lease_code": "LC-3002",
+                "status": "SUBMITTED",
+                "sales_period_start": "2026-07-01",
+                "sales_period_end": "2026-07-31",
+                "sales_amt": 8000.0,
+            }
+        ]
+    )
+    with (
+        patch(
+            "app.agents.graph.nodes.sales_data.admin_review_entry_node.get_current_bearer_token",
+            return_value="tok",
+        ),
+        patch(
+            "app.agents.graph.nodes.sales_data.admin_review_entry_node.SalesDataApiClient",
+            return_value=client,
+        ),
+    ):
+        result = await admin_review_entry_node(
+            {
+                "session_id": "sess-admin-ui-bad-choice",
+                "user_id": "admin-001",
+                "user_message": "Approve LC-3002",
+                "intent": "APPROVE_SALES_DATA",
+                "action_override": None,
+                "workflow_stage": "ADMIN_REVIEW",
+                "backend_refs": {},
+                "collected_data": {},
+                "corrected_fields": {"admin_action": "NOT_A_REAL_STATUS"},
+            }
+        )
+
+    assert result["collected_data"]["admin_action"] == "APPROVED"
+
+
+@pytest.mark.asyncio
 async def test_supporting_doc_same_lease_two_months_lists_both() -> None:
     client = AsyncMock()
     client.get_sales_data = AsyncMock(

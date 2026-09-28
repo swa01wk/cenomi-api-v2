@@ -433,6 +433,14 @@ async def admin_review_entry_node(state: ServiceRequestState) -> dict[str, Any]:
     action_override: str | None = state.get("action_override")
     collected: dict = dict(state.get("collected_data") or {})
     backend_refs: dict = dict(state.get("backend_refs") or {})
+    corrected_fields: dict = dict(state.get("corrected_fields") or {})
+    # A UI-originated choice (the review table's per-row "Ask upload" menu,
+    # which lets the admin pick Reupload / Supporting Document / Audited
+    # Sales explicitly) — takes priority over _deterministic_action's
+    # keyword-sniffing on the accompanying typed message below.
+    ui_admin_action = str(corrected_fields.get("admin_action") or "").strip().upper()
+    if ui_admin_action and ui_admin_action not in _VALID_ADMIN_STATUSES:
+        ui_admin_action = ""
 
     # ── Confirm admin action ───────────────────────────────────────────────
     if action_override in ("confirm_admin_action", "confirm"):
@@ -648,7 +656,7 @@ async def admin_review_entry_node(state: ServiceRequestState) -> dict[str, Any]:
             }
 
         fields: dict[str, Any] = {}
-        det_action = _deterministic_action(user_message)
+        det_action = ui_admin_action or _deterministic_action(user_message)
         # Real-format codes ("t0106037", from the review table's own Approve
         # button) first — _lease_tokens_from_message only recognises the
         # internal "LC-1234" demo format and bare digit runs, so a real code
