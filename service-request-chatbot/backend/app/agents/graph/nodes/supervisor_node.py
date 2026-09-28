@@ -20,6 +20,7 @@ Non-responsibilities (enforced)
 from __future__ import annotations
 
 import json
+import re
 import time
 from decimal import Decimal
 from typing import Any
@@ -198,6 +199,9 @@ _TENANT_STATUS_PHRASES: tuple[str, ...] = (
     "sales data status",
 )
 
+# Generic "upload again" / "different file" are NOT here: they mean the file the
+# user is currently working on (CSV or document) and are resolved by stage in
+# sales_data_entry_node._resolve_command.
 _TENANT_DOC_PHRASES: tuple[str, ...] = (
     "supporting document",
     "supporting doc",
@@ -210,10 +214,6 @@ _TENANT_DOC_PHRASES: tuple[str, ...] = (
     "re-upload pdf",
     "need a pdf",
     "needs a pdf",
-    "upload again",
-    "attach again",
-    "attach a different",
-    "different file",
 )
 
 # Takes precedence over status phrases so a notification deep-link like
@@ -232,8 +232,85 @@ _TENANT_UPLOAD_PHRASES: tuple[str, ...] = (
 )
 
 
+# Everyday phrasings: an action verb + a sales noun, in any order ("can I put
+# in this month's revenue", "need to send sales for aug"). Both are required —
+# these tenant roles also raise SRs, so a bare "upload my drawings" must not
+# land here.
+_UPLOAD_VERB_RE = re.compile(
+    # Present-tense only — "show submitted sales" is a status question.
+    r"\b(upload|uploading|submit|submitting|enter|entering|add|adding|put|putting|"
+    r"send|sending|record|log|share|fill|fill\s+in|give|provide|key\s+in|type)\b",
+    re.I,
+)
+_SALES_NOUN_RE = re.compile(r"\b(sales?|revenue|turnover|takings)\b", re.I)
+# "did my sales upload go through?" is a status question, not a new upload.
+_STATUS_QUESTION_RE = re.compile(r"^\s*(did|has|have|was|were)\b", re.I)
+
+
+# Questions about where sales data stands ("did my sales get approved",
+# "which months are pending") — asked, not an action to start.
+_SALES_STATUS_WORD_RE = re.compile(
+    r"\b(approved|pending|status|submitted|rejected|due|outstanding|overdue)\b", re.I
+)
+_QUESTION_START_RE = re.compile(
+    r"^\s*(which|what|whats|what's|has|have|did|do|does|is|are|was|were|any|show|list|check|tell me)\b",
+    re.I,
+)
+_SALES_CONTEXT_RE = re.compile(r"\b(sales?|submissions?|months?|revenue)\b", re.I)
+# A document described in words: "the pdf the team asked for".
+_DOC_WORD_RE = re.compile(r"\b(pdf|document|audited)\b", re.I)
+_DOC_ACTION_RE = re.compile(r"\b(upload\w*|attach\w*|send|share|asked|requested|need|needs)\b", re.I)
+# "here is my sales file", "my sales sheet".
+_SALES_FILE_RE = re.compile(r"\b(sales|csv)\s+(file|sheet|spreadsheet|report)\b", re.I)
+# Admin actions on the review queue — the admin node extracts the exact
+# action/leases deterministically from the text.
+_ADMIN_ACTION_RE = re.compile(
+    r"\b(approve\w*|accept\w*|reject\w*)\b|"
+    r"\b(request|ask)\b.*\b(re-?upload|supporting|audited|document)\b",
+    re.I,
+)
+_ADMIN_REVIEW_RE = re.compile(
+    r"\b(awaiting|to approve|my approval|need\w* (my )?approval|to review|review queue|"
+    r"show (me )?(the )?sales|sales data|submissions?)\b",
+    re.I,
+)
+
+
+def _looks_like_sales_status_question(message: str) -> bool:
+    text = message or ""
+    return bool(
+        _SALES_STATUS_WORD_RE.search(text)
+        and _SALES_CONTEXT_RE.search(text)
+        and (_QUESTION_START_RE.search(text) or text.strip().endswith("?"))
+    )
+
+
+def _looks_like_sales_upload_request(message: str) -> bool:
+    if _STATUS_QUESTION_RE.search(message or ""):
+        return False
+    return bool(
+        _UPLOAD_VERB_RE.search(message or "") and _SALES_NOUN_RE.search(message or "")
+    )
+
+
+def _looks_like_typed_sales_entry(message: str) -> bool:
+    """A lease code plus a month or an amount — "t0057323 aug 2026 12280"."""
+    from app.agents.graph.nodes.sales_data.manual_entry_parser import (
+        parse_manual_entry,
+    )
+
+    parsed = parse_manual_entry(message)
+    return bool(
+        parsed.get("lease_code")
+        and (parsed.get("sales_amt") or parsed.get("sales_period_start"))
+    )
+
+
 def _sales_data_shortcut(
-    message: str, roles: list[str] | tuple[str, ...] | None
+    message: str,
+    roles: list[str] | tuple[str, ...] | None,
+    *,
+    allow_typed_entry: bool = False,
 ) -> dict[str, Any] | None:
     """Deterministic sales-data routing for common question phrasings.
 
@@ -247,7 +324,15 @@ def _sales_data_shortcut(
         return None
 
     if role_set & _ADMIN_SALES_ROLES:
-        if any(p in lowered for p in _ADMIN_REVIEW_PHRASES):
+        if _ADMIN_ACTION_RE.search(lowered):
+            return {
+                "intent": "APPROVE_SALES_DATA",
+                "service_category": "SALES_DATA",
+                "sub_category": "ADMIN_REVIEW",
+                "active_agent": "sales_data_agent",
+                "status": "IN_PROGRESS",
+            }
+        if any(p in lowered for p in _ADMIN_REVIEW_PHRASES) or _ADMIN_REVIEW_RE.search(lowered):
             return {
                 "intent": "REVIEW_SALES_DATA",
                 "service_category": "SALES_DATA",
@@ -257,7 +342,9 @@ def _sales_data_shortcut(
             }
 
     if role_set & _TENANT_SALES_ROLES:
-        if any(p in lowered for p in _TENANT_DOC_PHRASES):
+        if any(p in lowered for p in _TENANT_DOC_PHRASES) or (
+            _DOC_WORD_RE.search(lowered) and _DOC_ACTION_RE.search(lowered)
+        ):
             return {
                 "intent": "UPLOAD_SUPPORTING_DOCUMENT",
                 "service_category": "SALES_DATA",
@@ -265,7 +352,23 @@ def _sales_data_shortcut(
                 "active_agent": "sales_data_agent",
                 "status": "IN_PROGRESS",
             }
-        if any(p in lowered for p in _TENANT_UPLOAD_PHRASES):
+        if _looks_like_sales_status_question(message) and not any(
+            p in lowered for p in _TENANT_UPLOAD_PHRASES
+        ):
+            return {
+                "intent": "CHECK_SALES_DATA_STATUS",
+                "service_category": "SALES_DATA",
+                "sub_category": "STATUS_CHECK",
+                "active_agent": "sales_data_agent",
+                "status": "IN_PROGRESS",
+            }
+        if (
+            any(p in lowered for p in _TENANT_UPLOAD_PHRASES)
+            or _looks_like_sales_upload_request(message)
+            or _SALES_FILE_RE.search(lowered)
+            # Only as a first message — mid-flow the sales agent reads it itself.
+            or (allow_typed_entry and _looks_like_typed_sales_entry(message))
+        ):
             return {
                 "intent": "UPLOAD_SALES_DATA",
                 "service_category": "SALES_DATA",
@@ -342,12 +445,55 @@ def _sales_data_unmatched_message(
             "Please rephrase what you'd like to do."
         )
     return (
-        "I couldn't match that to a sales data action. "
-        "I can help you upload a CSV, type your sales figures, "
-        "check your submission status, or upload a file if the team asked for "
-        "sales data, a supporting document, or audited sales. "
-        "Please rephrase what you'd like to do."
+        "I can help with your sales data: upload a CSV, enter your sales "
+        "figures, check your submission status, or upload a file the Sales "
+        "Data Team has requested. What would you like to do?"
     )
+
+
+# "create a handover SR", "raise a work permit" … from a role that cannot
+# create service requests. Without this the user got "I couldn't match that
+# to a sales data action", which reads as the assistant not understanding.
+_SR_KIND_LABELS: tuple[tuple[str, str], ...] = (
+    (r"hand\s*-?\s*over", "a handover service request"),
+    (r"work\s*-?\s*permit", "a work permit request"),
+    (r"fit\s*-?\s*out", "a fit-out service request"),
+    (r"\brdd\b", "an RDD service request"),
+    (r"service\s+request|\bsr\b", "a service request"),
+)
+_SR_CREATE_VERB_RE = re.compile(
+    r"\b(create|creating|raise|raising|new|start|submit|apply|book|make)\b",
+    re.I,
+)
+# Status / tracking questions are allowed for these roles — never block them.
+_SR_STATUS_RE = re.compile(r"\b(status|check|track|where|progress|update on)\b", re.I)
+
+
+def _requested_sr_kind(message: str) -> str | None:
+    lowered = (message or "").lower()
+    if (
+        not _SR_CREATE_VERB_RE.search(lowered)
+        or _SALES_NOUN_RE.search(lowered)
+        or _SR_STATUS_RE.search(lowered)
+    ):
+        return None
+    for pattern, label in _SR_KIND_LABELS:
+        if re.search(pattern, lowered):
+            return label
+    return None
+
+
+def _sr_create_not_permitted_patch(kind: str) -> dict[str, Any]:
+    message = (
+        f"Creating {kind} isn't available for your account. I can help you "
+        "with your sales data, check the status of a service request, or show "
+        "your notifications."
+    )
+    return {
+        "status": "WAITING_FOR_USER",
+        "response_message": message,
+        "response_ui": {"type": "message", "verbatim": True, "message": message},
+    }
 
 
 def _sales_data_unmatched_patch(
@@ -543,7 +689,17 @@ async def supervisor_node(state: ServiceRequestState) -> dict[str, Any]:  # noqa
     # on CHECK_SALES_DATA_STATUS.
     auth_early: AuthContext | None = state.get("auth_context")  # type: ignore[assignment]
     early_roles = list(auth_early.roles) if auth_early is not None else None
-    shortcut = _sales_data_shortcut(user_message, early_roles)
+    shortcut = _sales_data_shortcut(
+        user_message,
+        early_roles,
+        allow_typed_entry=active_agent != "sales_data_agent",
+    )
+    requested_sr_kind = (
+        _requested_sr_kind(user_message) if _is_sales_data_only_user(early_roles) else None
+    )
+    if requested_sr_kind and shortcut is None:
+        log.info("supervisor.sr_create_not_permitted", kind=requested_sr_kind)
+        return _sr_create_not_permitted_patch(requested_sr_kind)
     sales_data_idle = active_agent == "sales_data_agent" and (
         state.get("workflow_stage") or ""
     ) in {"STATUS_LOOKUP", "SALES_DATA_COMPLETE"}

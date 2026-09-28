@@ -52,7 +52,7 @@ async def admin_status_update_node(state: ServiceRequestState) -> dict[str, Any]
     if not action or not targets:
         return {
             "status": "WAITING_FOR_USER",
-            "response_message": "Missing lease ID or action. Please try again.",
+            "response_message": "I couldn't identify the submission to update. Please select it again from the review list.",
         }
 
     payloads: list[dict[str, Any]] = []
@@ -73,7 +73,7 @@ async def admin_status_update_node(state: ServiceRequestState) -> dict[str, Any]
     if not payloads:
         return {
             "status": "WAITING_FOR_USER",
-            "response_message": "Missing lease ID or action. Please try again.",
+            "response_message": "I couldn't identify the submission to update. Please select it again from the review list.",
         }
 
     denied = graph_permission_guard(state, "APPROVE_SALES_DATA")
@@ -94,7 +94,7 @@ async def admin_status_update_node(state: ServiceRequestState) -> dict[str, Any]
     if succeeded and not failed:
         listed = ", ".join(f"**{c}**" for c in codes_ok)
         message = (
-            f"✅ {len(succeeded)} submission(s) **{label}** successfully: {listed}."
+            f"{len(succeeded)} submission(s) {label}: {listed}."
             + (f'\nComment sent to tenant: "{comment}"' if comment else "")
         )
     elif succeeded and failed:
@@ -104,14 +104,14 @@ async def admin_status_update_node(state: ServiceRequestState) -> dict[str, Any]
                 f"**{r.get('lease_code')}** ({r.get('error') or 'unknown error'})"
             )
         message = (
-            f"⚠️ Partial update — {label} **{len(succeeded)}** of {len(results)}: "
+            f"{len(succeeded)} of {len(results)} submission(s) {label}: "
             + ", ".join(f"**{c}**" for c in codes_ok)
-            + ".\nFailed: "
+            + ".\nNot updated: "
             + "; ".join(fail_bits)
         )
     else:
         message = (
-            "⚠️ Update failed for "
+            "The update could not be completed for "
             + ", ".join(f"**{c}**" for c in codes_fail)
             + f": {failed[0].get('error') or 'Unknown error'}."
         )
@@ -142,5 +142,9 @@ async def admin_status_update_node(state: ServiceRequestState) -> dict[str, Any]
             "succeeded": len(succeeded),
             "failed": len(failed),
             "message": message,
+            # Precise, exact-count wording matters here (partial vs full
+            # success, which leases failed and why) — the LLM rewrite would
+            # otherwise vary or soften it on every turn.
+            "verbatim": True,
         },
     }

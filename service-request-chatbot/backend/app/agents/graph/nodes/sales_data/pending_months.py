@@ -94,7 +94,7 @@ def month_pending_on_lease(
 def format_pending_list_message(items: list[dict[str, Any]]) -> str:
     grouped = group_pending_by_lease(items)
     lines = [
-        "You have **PENDING** sales data that still needs to be uploaded:\n",
+        "You have pending sales data to submit:\n",
     ]
     for lease, months in grouped.items():
         context = " · ".join(
@@ -113,9 +113,8 @@ def format_pending_list_message(items: list[dict[str, Any]]) -> str:
             lines.append(f"• {month['label']}")
         lines.append("")
     lines.append(
-        "Tell me which **month** (and lease, if you have more than one) to start with, "
-        "or drop a CSV. **One file can include several PENDING months** — "
-        "you do not have to name the month first."
+        "Tell me the lease and month to start with, or attach a CSV — one file "
+        "can cover several pending months."
     )
     return "\n".join(lines).strip()
 
@@ -125,10 +124,9 @@ def format_pending_list_summary() -> str:
     per-lease/month enumeration — that part is shown once, as chips, by
     PendingMonthsListCard (the accompanying response_ui.leases)."""
     return (
-        "You have **PENDING** sales data that still needs to be uploaded.\n\n"
-        "Tell me which **month** (and lease, if you have more than one) to start with, "
-        "or drop a CSV. **One file can include several PENDING months** — "
-        "you do not have to name the month first."
+        "You have pending sales data to submit.\n\n"
+        "Tell me the lease and month to start with, or attach a CSV — one file "
+        "can cover several pending months."
     )
 
 
@@ -140,12 +138,12 @@ def format_other_months_reminder(
     other_lines = "\n".join(f"• **{month['label']}**" for month in other_months)
     examples = ", ".join(month["label"] for month in other_months[:2]) or "another month"
     return (
-        f"You're about to upload **{asked_label}** for **{lease_code}**.\n\n"
+        f"You are uploading **{asked_label}** for **{lease_code}**.\n\n"
         "This lease also has pending sales data for:\n"
         f"{other_lines}\n\n"
         f"You can **proceed** with {asked_label} and include the other pending "
-        "months in the **same CSV**. I'll confirm if the file covers more than "
+        "months in the **same CSV**; I will confirm if the file covers more than "
         f"{asked_label}.\n\n"
-        f"Or type a different month to start with that one instead "
+        f"Alternatively, type a different month to start with that one instead "
         f"(for example: **{examples}**)."
     )

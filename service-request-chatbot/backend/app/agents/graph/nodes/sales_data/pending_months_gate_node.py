@@ -115,6 +115,29 @@ def _upload_prompt(state: ServiceRequestState, *, lease: str, asked: dict[str, s
     return _upload_prompt_patch(patched_state)
 
 
+# Display-only caps for the pending-months chip list — a tenant with many
+# leases and years of PENDING history (observed: one lease alone going back
+# to 2016) rendered as a wall of hundreds of chips. `items` itself (used for
+# every routing decision — other_pending_months, leases_with_month,
+# month_pending_on_lease) stays the FULL, correct dataset; only what gets
+# displayed here is capped, so a lease/month outside the shown window can
+# still be uploaded by name — it just isn't listed as a chip.
+#
+# The window is the 2 most recent distinct calendar months that actually
+# appear anywhere in the PENDING dataset (dataset-wide recency), not "today's
+# real-world month" — demo/seeded data rarely has anything pending for the
+# literal current date, and not "each lease's own 2 least-old months" either
+# — a lease with years of backlog must not have its oldest-of-the-recent
+# months shown just because they're that lease's own least-old entries.
+_DISPLAY_MAX_LEASES = 5
+_DISPLAY_MONTH_WINDOW = 2
+
+
+def _current_display_window(items: list[dict[str, Any]]) -> set[str]:
+    distinct_months = sorted({item["year_month"] for item in items})
+    return set(distinct_months[-_DISPLAY_MONTH_WINDOW:])
+
+
 def _pending_list_payload(items: list[dict[str, Any]], collected: dict, refs: dict) -> dict[str, Any]:
     # The chat bubble gets the intro/trailing prose only — the per-lease/month
     # enumeration is shown once, as chips, by PendingMonthsListCard (below)
@@ -122,12 +145,33 @@ def _pending_list_payload(items: list[dict[str, Any]], collected: dict, refs: di
     message = format_pending_list_summary()
     collected["_pending_items"] = items
     refs["pending_items"] = items
-    grouped = {}
+    grouped: dict[str, list[dict[str, str]]] = {}
     for item in items:
         grouped.setdefault(item["lease_code"], []).append({
             "label": item["label"],
             "year_month": item["year_month"],
         })
+
+    total_leases = len(grouped)
+    window = _current_display_window(items)
+    # Only leases with at least one month in the 2 most recent distinct
+    # pending months (dataset-wide) are shown at all — a lease whose backlog
+    # is entirely older doesn't belong in this list, not even truncated.
+    windowed = {
+        lease: [m for m in months if m["year_month"] in window]
+        for lease, months in grouped.items()
+    }
+    windowed = {lease: months for lease, months in windowed.items() if months}
+    shown_leases = len(windowed)
+    capped_leases = [
+        {"lease_code": lease, "months": months, "more_months": 0}
+        for lease, months in list(windowed.items())[:_DISPLAY_MAX_LEASES]
+    ]
+    more_leases = max(0, shown_leases - _DISPLAY_MAX_LEASES)
+    # Leases with pending data entirely outside the 2-most-recent-months
+    # window — genuinely older backlog, not "more of what's already shown".
+    older_leases = max(0, total_leases - shown_leases)
+
     return {
         "workflow_stage": "AWAITING_PENDING_MONTHS_CHOICE",
         "status": "WAITING_FOR_USER",
@@ -137,10 +181,10 @@ def _pending_list_payload(items: list[dict[str, Any]], collected: dict, refs: di
         "response_message": message,
         "response_ui": {
             "type": "pending_months_list",
-            "leases": [
-                {"lease_code": lease, "months": months}
-                for lease, months in grouped.items()
-            ],
+            "leases": capped_leases,
+            "total_lease_count": total_leases,
+            "more_lease_count": more_leases,
+            "older_lease_count": older_leases,
             "show_file_upload": True,
             "show_template_download": True,
             "verbatim": True,
@@ -202,8 +246,8 @@ def _lease_already_submitted_payload(
     telling the tenant this one is already done.
     """
     note = (
-        f"✅ **{lease}** has no pending sales data right now — "
-        "it looks like it's already been submitted.\n\n"
+        f"**{lease}** has no pending sales data at the moment — "
+        "it appears to have already been submitted.\n\n"
     )
     if others:
         payload = _pending_list_payload(others, collected, refs)

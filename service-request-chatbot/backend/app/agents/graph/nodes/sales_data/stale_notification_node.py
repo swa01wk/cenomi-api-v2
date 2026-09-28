@@ -38,25 +38,25 @@ async def stale_notification_node(state: ServiceRequestState) -> dict[str, Any]:
 
     if no_access_count > 0 and no_pending_count == 0:
         message = (
-            "⚠️ **No access to these leases** — None of the lease codes in your file "
+            "**No access to these leases** — none of the lease codes in your file "
             "are associated with your account. Please check the lease codes and try again.\n\n"
             "If you believe this is an error, please contact your property manager."
         )
     elif no_pending_count > 0:
         message = (
-            "ℹ️ **No pending submissions found** — I couldn't find any pending sales data "
+            "**No pending submissions found** — there is no pending sales data "
             "for the leases and periods in your file.\n\n"
             "This may mean:\n"
             "• The data was already submitted via another channel\n"
             "• The notification you received is for a different period\n"
             "• Your submission deadline has passed\n\n"
-            "Please check the **[Sales Data listing page]** for your current status, "
+            "Please check the **Sales Data** page for the current status, "
             "or contact your property manager if you believe data is still due."
         )
     else:
         message = (
-            "ℹ️ **No pending submissions found** — I couldn't find any pending sales data "
-            "for your leases. Please check the Sales Data listing page for your current status."
+            "**No pending submissions found** — there is no pending sales data "
+            "for your leases. Please check the **Sales Data** page for the current status."
         )
 
     log.info(
