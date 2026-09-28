@@ -99,6 +99,13 @@ def _is_repeat_of_previous_question(message: str, previous: str) -> bool:
     return ratio >= _REPEAT_SIMILARITY_THRESHOLD
 
 
+_SALES_REPEAT_FALLBACK = (
+    "I'm not sure what you would like to do next. You can continue with the "
+    "current step, or say **upload sales data**, **check my status**, "
+    "**help** or **cancel**."
+)
+
+
 @trace_node("response_generation", "AGENT")
 async def response_generation_node(state: ServiceRequestState) -> dict[str, Any]:
     """Generate a natural LLM response and mark the turn as WAITING_FOR_USER."""
@@ -110,6 +117,30 @@ async def response_generation_node(state: ServiceRequestState) -> dict[str, Any]
     # Terminal paths: submission success/failure — use the message as-is but
     # still attempt LLM rewrite for a warmer tone.
     is_terminal = current_status in _TERMINAL_STATUSES
+
+    # Sales Data Agent replies are authored in one professional voice in the
+    # nodes themselves; an LLM rewrite reintroduced "Good news!"-style
+    # variance on any reply that forgot the per-message verbatim flag.
+    if current_message and state.get("active_agent") == "sales_data_agent":
+        # Never answer two different messages with the identical reply — that
+        # reads as the assistant being stuck. Offer the ways forward instead.
+        previous = next(
+            (
+                str(m.get("content") or "")
+                for m in reversed(state.get("conversation_history") or [])
+                if isinstance(m, dict) and m.get("role") == "assistant"
+            ),
+            "",
+        )
+        if previous.strip() == current_message.strip() and (state.get("user_message") or "").strip():
+            current_message = _SALES_REPEAT_FALLBACK
+            current_ui = {"type": "message", "verbatim": True, "message": current_message}
+        updates = {"response_message": current_message}
+        if current_ui:
+            updates["response_ui"] = {**current_ui, "message": current_ui.get("message") or current_message}
+        if not is_terminal:
+            updates["status"] = "WAITING_FOR_USER"
+        return updates
 
     # Fitout original-date confirm questions must keep the concrete date.
     # An LLM rewrite was dropping it and falling back to a generic ask.

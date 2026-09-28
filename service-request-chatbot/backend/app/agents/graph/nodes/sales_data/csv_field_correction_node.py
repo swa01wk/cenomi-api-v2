@@ -197,7 +197,7 @@ async def csv_field_correction_node(state: ServiceRequestState) -> dict[str, Any
             "status": "WAITING_FOR_USER",
             "workflow_stage": "CSV_CORRECTION",
             "response_message": (
-                f"Got it — I've updated {len(correction_map)} row(s). "
+                f"Updated {len(correction_map)} row(s). "
                 f"Still need the sales amount for: {missing_list}. "
                 "Please provide those amounts and I'll submit everything together."
             ),

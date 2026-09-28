@@ -65,7 +65,8 @@ async def manual_entry_confirmation_node(state: ServiceRequestState) -> dict[str
             "confirmation_status": "REJECTED",
             "workflow_stage": "MANUAL_ENTRY",
             "status": "WAITING_FOR_USER",
-            "response_message": "Cancelled. Please provide the correct details.",
+            "response_message": "Submission cancelled — nothing was submitted. What would you like to change: the lease, month or amount?",
+            "response_ui": {"type": "message", "verbatim": True, "message": "Submission cancelled — nothing was submitted. What would you like to change: the lease, month or amount?"},
         }
 
     # ── Text-based confirm ─────────────────────────────────────────────────
@@ -94,8 +95,9 @@ async def manual_entry_confirmation_node(state: ServiceRequestState) -> dict[str
                 "confirmation_status": "REJECTED",
                 "workflow_stage": "MANUAL_ENTRY",
                 "status": "WAITING_FOR_USER",
-                "collected_data": {},
-                "response_message": "No problem — let's start over. Please provide the lease code.",
+                # Keep the entry so "change the amount to 13,000" just works.
+                "response_message": "Submission cancelled — nothing was submitted. What would you like to change: the lease, month or amount?",
+                "response_ui": {"type": "message", "verbatim": True, "message": "Submission cancelled — nothing was submitted. What would you like to change: the lease, month or amount?"},
             }
 
     # ── Show confirmation card ─────────────────────────────────────────────

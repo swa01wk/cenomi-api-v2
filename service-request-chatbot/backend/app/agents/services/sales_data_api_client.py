@@ -176,6 +176,8 @@ class SalesDataApiClient:
         page: int = 1,
         limit: int = 100,
         all_my_companies: bool = True,
+        sales_period_start: str | None = None,
+        sales_period_end: str | None = None,
     ) -> list[dict[str, Any]]:
         """Return sales-data rows visible to the authenticated user.
 
@@ -201,6 +203,8 @@ class SalesDataApiClient:
             page=page,
             limit=limit,
             all_my_companies=all_my_companies,
+            sales_period_start=sales_period_start,
+            sales_period_end=sales_period_end,
         )
         return unwrap_sales_data_rows(resp.json())
 
@@ -212,6 +216,8 @@ class SalesDataApiClient:
         page: int = 1,
         limit: int = 10,
         all_my_companies: bool = True,
+        sales_period_start: str | None = None,
+        sales_period_end: str | None = None,
     ) -> tuple[list[dict[str, Any]], int]:
         """Like get_sales_data, but also returns the real total_count.
 
@@ -227,6 +233,8 @@ class SalesDataApiClient:
             page=page,
             limit=limit,
             all_my_companies=all_my_companies,
+            sales_period_start=sales_period_start,
+            sales_period_end=sales_period_end,
         )
         body = resp.json()
         rows = unwrap_sales_data_rows(body)
@@ -241,6 +249,8 @@ class SalesDataApiClient:
         page: int,
         limit: int,
         all_my_companies: bool,
+        sales_period_start: str | None = None,
+        sales_period_end: str | None = None,
     ) -> httpx.Response:
         params: dict[str, Any] = {"page": page, "limit": limit}
         if disable_pagination:
@@ -255,6 +265,11 @@ class SalesDataApiClient:
             params["lease_code"] = lease_code
         if all_my_companies:
             params["all_my_companies"] = "true"
+        # YYYY-MM-DD; cenomi-api filters start >= from AND end <= to.
+        if sales_period_start:
+            params["sales_period_start"] = sales_period_start
+        if sales_period_end:
+            params["sales_period_end"] = sales_period_end
 
         # This call regressed from ~200ms to 15-30s+ once all_my_companies=true
         # started being sent on every request — the first bump to 30s still

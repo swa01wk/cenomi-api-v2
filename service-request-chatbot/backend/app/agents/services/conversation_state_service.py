@@ -41,6 +41,25 @@ class ConversationStateService:
         self._session = session
         self._draft_repo = ServiceRequestDraftRepository(session)
 
+    # Sales Data working data that must survive between turns (the CSV the
+    # tenant is correcting, the month they asked for, the admin's review
+    # list). backend_refs has no DB column, so without this every follow-up
+    # turn ("t0112235 is 5000", "reupload") started with the rows gone.
+    # One-shot triggers (csv_session_id, doc_session_id) are deliberately NOT
+    # persisted — carried over they would re-run the upload on every message.
+    _SALES_REFS_KEY = "_sales_refs"
+    _SALES_PERSISTED_REFS = (
+        "csv_rows",
+        "csv_rows_all",
+        "csv_filename",
+        "asked_period",
+        "pending_items",
+        "period_mismatch",
+        "admin_review_rows",
+        "action_required_rows",
+        "submission_source",
+    )
+
     async def load(self, session_id: UUID) -> dict[str, Any]:
         """Return the latest draft fields for *session_id*, or ``{}`` if none exists.
 
@@ -59,6 +78,7 @@ class ConversationStateService:
             confirmation_status = raw_collected.pop("_confirmation_status", None)
             selected_lease = raw_collected.pop("_selected_lease", None)
             active_field = raw_collected.pop("_active_field", None)
+            sales_refs = raw_collected.pop(self._SALES_REFS_KEY, None)
 
             result: dict[str, Any] = {
                 "service_category": draft.service_category,
@@ -83,6 +103,8 @@ class ConversationStateService:
                 if draft.service_request_status:
                     backend_refs["service_request_status"] = draft.service_request_status
                 result["backend_refs"] = backend_refs
+            if isinstance(sales_refs, dict) and sales_refs:
+                result["backend_refs"] = {**(result.get("backend_refs") or {}), **sales_refs}
 
             return result
         except Exception:
@@ -134,6 +156,17 @@ class ConversationStateService:
                 raw_collected["_active_field"] = active_field
             else:
                 raw_collected.pop("_active_field", None)
+
+            refs = state.get("backend_refs") or {}
+            sales_refs = (
+                {k: refs[k] for k in self._SALES_PERSISTED_REFS if refs.get(k) is not None}
+                if service_category == "SALES_DATA" or state.get("active_agent") == "sales_data_agent"
+                else {}
+            )
+            if sales_refs:
+                raw_collected[self._SALES_REFS_KEY] = sales_refs
+            else:
+                raw_collected.pop(self._SALES_REFS_KEY, None)
 
             draft = await self._draft_repo.get_by_session(session_id)
 

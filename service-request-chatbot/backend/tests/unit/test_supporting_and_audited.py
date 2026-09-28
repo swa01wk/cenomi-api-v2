@@ -113,13 +113,13 @@ async def test_cancel_supporting_doc_restores_pdf_prompt() -> None:
     assert "doc_session_id" not in (result.get("backend_refs") or {})
 
 
-def test_upload_again_shortcuts_to_supporting_document() -> None:
+def test_upload_again_shortcuts_to_sales_upload_not_supporting_document() -> None:
     result = _sales_data_shortcut(
         "i want to upload again",
         ["TENANT_CSV_UPLOADER"],
     )
     assert result is not None
-    assert result["intent"] == "UPLOAD_SUPPORTING_DOCUMENT"
+    assert result["intent"] == "UPLOAD_SALES_DATA"
 
 
 def test_tenant_doc_shortcut_beats_csv_upload_phrase() -> None:
@@ -690,3 +690,153 @@ async def test_supporting_doc_same_lease_two_months_lists_both() -> None:
     assert picked["workflow_stage"] == "AWAITING_DOC_UPLOAD"
     assert picked["collected_data"]["sales_period_start"] == "2026-07-01"
     assert picked["collected_data"]["sales_amt"] == 4000.0
+
+
+@pytest.mark.asyncio
+async def test_resolved_notification_reports_its_own_lease_not_others() -> None:
+    """Opening a re-upload notification for T0098038 whose August request was
+    since approved must say so — not list another lease's re-upload request
+    (t0042757) as if the notification were about that one."""
+    rows = [
+        {
+            "lease_id": 11,
+            "lease_code": "t0098038",
+            "status": "APPROVED",
+            "sales_period_start": "2026-08-01",
+            "sales_period_end": "2026-08-31",
+        },
+        {
+            "lease_id": 12,
+            "lease_code": "t0042757",
+            "status": "NEED_REUPLOAD",
+            "sales_period_start": "2026-08-01",
+            "sales_period_end": "2026-08-31",
+        },
+    ]
+    client = AsyncMock()
+    client.get_sales_data = AsyncMock(return_value=rows)
+    with (
+        patch(
+            "app.agents.graph.nodes.sales_data.supporting_doc_upload_node.get_current_bearer_token",
+            return_value="tok",
+        ),
+        patch(
+            "app.agents.graph.nodes.sales_data.supporting_doc_upload_node.SalesDataApiClient",
+            return_value=client,
+        ),
+    ):
+        result = await supporting_doc_upload_node(
+            _state(
+                corrected_fields={
+                    "notification_context": {
+                        "lease_code": "T0098038",
+                        "period_hint": "month August",
+                        "source": "notification",
+                    }
+                }
+            )
+        )
+
+    assert result["response_ui"]["type"] == "stale_notification"
+    assert "t0098038" in result["response_message"].lower()
+    assert "Approved" in result["response_message"]
+    assert "t0042757" not in result["response_message"]
+
+
+@pytest.mark.asyncio
+async def test_notification_open_targets_only_its_own_month_and_request() -> None:
+    """September supporting-doc notification must not also list August's re-upload."""
+    from app.agents.graph.nodes.sales_data.supporting_doc_upload_node import (
+        supporting_doc_upload_node,
+    )
+
+    rows = [
+        {
+            "lease_id": 21,
+            "lease_code": "t0106013",
+            "status": "NEED_UPLOAD_SUPPORTING_DOCUMENT",
+            "sales_period_start": "2026-09-01",
+            "sales_period_end": "2026-09-30",
+        },
+        {
+            "lease_id": 21,
+            "lease_code": "t0106013",
+            "status": "NEED_REUPLOAD",
+            "sales_period_start": "2026-08-01",
+            "sales_period_end": "2026-08-31",
+        },
+    ]
+    client = AsyncMock()
+    client.get_sales_data = AsyncMock(return_value=rows)
+    with (
+        patch(
+            "app.agents.graph.nodes.sales_data.supporting_doc_upload_node.get_current_bearer_token",
+            return_value="tok",
+        ),
+        patch(
+            "app.agents.graph.nodes.sales_data.supporting_doc_upload_node.SalesDataApiClient",
+            return_value=client,
+        ),
+    ):
+        result = await supporting_doc_upload_node(
+            _state(
+                corrected_fields={
+                    "notification_context": {
+                        "lease_code": "t0106013",
+                        "period_hint": "",
+                        "period_date": "2026-09",
+                        "key": "SALES_DATA_NEED_UPLOAD_SUPPORTING_DOCUMENT",
+                        "source": "notification",
+                    }
+                }
+            )
+        )
+
+    collected = result.get("collected_data") or {}
+    assert collected.get("sales_period_start") == "2026-09-01"
+    assert collected.get("current_status") == "NEED_UPLOAD_SUPPORTING_DOCUMENT"
+    assert "2026-08-01" not in (result.get("response_message") or "")
+
+
+@pytest.mark.asyncio
+async def test_resolved_notification_uses_the_named_month_in_any_year() -> None:
+    """ "for the month December" must report December 2024, not the latest row."""
+    from app.agents.graph.nodes.sales_data.supporting_doc_upload_node import (
+        supporting_doc_upload_node,
+    )
+
+    rows = [
+        {"lease_id": 31, "lease_code": "t0106038", "status": "UPLOADED_AUDITED_SALES",
+         "sales_period_start": "2024-12-01", "sales_period_end": "2024-12-31"},
+        {"lease_id": 31, "lease_code": "t0106038", "status": "SUBMITTED",
+         "sales_period_start": "2026-05-01", "sales_period_end": "2026-05-31"},
+    ]
+    client = AsyncMock()
+    client.get_sales_data = AsyncMock(return_value=rows)
+    with (
+        patch(
+            "app.agents.graph.nodes.sales_data.supporting_doc_upload_node.get_current_bearer_token",
+            return_value="tok",
+        ),
+        patch(
+            "app.agents.graph.nodes.sales_data.supporting_doc_upload_node.SalesDataApiClient",
+            return_value=client,
+        ),
+    ):
+        result = await supporting_doc_upload_node(
+            _state(
+                corrected_fields={
+                    "notification_context": {
+                        "lease_code": "t0106038",
+                        "period_hint": "month December",
+                        "period_date": "2026-12",
+                        "key": "SALES_DATA_NEED_UPLOAD_AUDITED_SALES",
+                        "source": "notification",
+                    }
+                }
+            )
+        )
+
+    message = result["response_message"]
+    assert "December 2024" in message
+    assert "May 2026" not in message
