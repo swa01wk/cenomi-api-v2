@@ -300,8 +300,9 @@ def _notification_lease_resolved(
 
     if row is None:
         message = (
-            f"Lease **{lease_code}** isn't linked to your account. "
-            "Please check the lease code and share it again."
+            f"Lease **{lease_code}** isn't linked to your current company. "
+            "If it belongs to another of your companies, switch to that "
+            "company and try again; otherwise, please check the lease code."
         )
     else:
         ym = year_month_from_start(str(row.get("sales_period_start") or ""))

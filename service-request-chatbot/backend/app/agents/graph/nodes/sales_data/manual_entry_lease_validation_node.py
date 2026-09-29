@@ -110,7 +110,7 @@ async def manual_entry_lease_validation_node(state: ServiceRequestState) -> dict
     if no_access:
         collected.pop("lease_code", None)
         suggestions = _open_leases(backend_rows)
-        message = f"Lease **{lease_code}** isn't linked to your account."
+        message = f"Lease **{lease_code}** isn't linked to your current company."
         if suggestions:
             message += (
                 " Leases with pending sales data include "

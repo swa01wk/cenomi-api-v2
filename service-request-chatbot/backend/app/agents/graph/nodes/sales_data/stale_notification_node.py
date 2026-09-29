@@ -39,7 +39,9 @@ async def stale_notification_node(state: ServiceRequestState) -> dict[str, Any]:
     if no_access_count > 0 and no_pending_count == 0:
         message = (
             "**No access to these leases** — none of the lease codes in your file "
-            "are associated with your account. Please check the lease codes and try again.\n\n"
+            "are linked to your current company. If they belong to another of your "
+            "companies, switch to that company and upload again; otherwise, please "
+            "check the lease codes.\n\n"
             "If you believe this is an error, please contact your property manager."
         )
     elif no_pending_count > 0:

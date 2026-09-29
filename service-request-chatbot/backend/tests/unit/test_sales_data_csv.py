@@ -397,7 +397,7 @@ async def test_csv_reports_every_problem_in_one_pass() -> None:
 
     message = result["response_message"]
     assert "3 rows need attention" in message
-    assert "**t0111654** is not linked to your account" in message
+    assert "**t0111654** is not linked to your current company" in message
     assert "**t0088828**: the sales amount (-123) must be greater than 0" in message
     assert "**t0112235**: the sales amount is missing" in message
     assert "Ready to submit: **t0092927**" in message
