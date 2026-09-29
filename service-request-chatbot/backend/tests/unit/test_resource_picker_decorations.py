@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from app.agents.services.resource_picker_decorations import (
     build_create_lease_picker,
+    build_gi_lease_picker,
     build_handover_inbox_picker,
     build_resource_picker,
     lease_picker_purpose,
@@ -168,6 +169,33 @@ def test_should_browse_leases_work_permit_resolved() -> None:
         "collected_data": {"lease_id": 1},
     }
     assert should_browse_leases(state) is False
+
+
+def test_build_gi_lease_picker_uses_its_own_resource() -> None:
+    """GI must not reuse handover's leases resource — that calls GET /leases."""
+    spec = build_gi_lease_picker()["suggestions"]
+    assert spec["kind"] == "resource_picker"
+    assert spec["resource"] == "gi_leases"
+    assert spec["searchable"] is True
+    assert spec["selection"] == {"mode": "select_lease"}
+    assert spec["filters"] == {
+        "limit": 5,
+        "offset": 0,
+        "sort_by": "activation_date",
+        "order": "desc",
+    }
+    assert "purpose" not in spec["filters"]
+
+
+def test_should_browse_leases_general_inquiry() -> None:
+    state = {
+        "active_agent": "general_inquiry_agent",
+        "workflow_stage": "CREATE_SR",
+        "collected_data": {},
+    }
+    assert should_browse_leases(state) is True
+    assert should_browse_leases({**state, "collected_data": {"lease_id": 1}}) is False
+    assert should_browse_leases({**state, "workflow_stage": "GI_MM_REVIEW"}) is False
 
 
 def test_should_browse_leases_wp_review_stage() -> None:

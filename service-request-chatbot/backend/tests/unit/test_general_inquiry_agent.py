@@ -18,6 +18,7 @@ from app.agents.graph.help_agent_graph import (
     _SR_ACTION_INTENTS,
     _route_after_general_inquiry_confirmation,
     _route_after_general_inquiry_entry,
+    _route_after_load,
     _route_after_validation,
 )
 from app.agents.graph.nodes.general_inquiry.general_inquiry_api_submission_node import (
@@ -71,6 +72,9 @@ def _complete_collected() -> dict[str, Any]:
         "contract_id": 95404,
         "unit_codes": ["FF050"],
         "city": "Jeddah",
+        # The optional document step is already answered, so confirmation
+        # builds the review card instead of offering Upload / Skip.
+        "gi_optional_upload_status": "done",
     }
 
 
@@ -115,8 +119,11 @@ class TestGeneralInquiryRegistry:
         wc = get_workflow_config("general_inquiry_agent")
         assert wc is not None
         assert wc.agent_name == "general_inquiry_agent"
-        assert wc.collection_stages == frozenset({"CREATE_SR"})
-        assert wc.confirmation_nodes == {"CREATE_SR": "general_inquiry_confirmation"}
+        assert wc.collection_stages == frozenset({"CREATE_SR", "GI_CRT_REVIEW"})
+        assert wc.confirmation_nodes == {
+            "CREATE_SR": "general_inquiry_confirmation",
+            "GI_CRT_REVIEW": "general_inquiry_confirmation",
+        }
         assert wc.terminal_stages == frozenset({"SR_CREATED"})
         assert "CREATE_GENERAL_INQUIRY" in wc.action_intents
         assert "lease_code" in wc.lease_trigger_fields
@@ -185,7 +192,14 @@ class TestGeneralInquirySupervisorAndRbac:
 
     @pytest.mark.parametrize(
         "role",
-        ["MALL_MANAGER", "FM_MANAGER", "OPERATIONS", "DD_ENGINEER", "ADMIN"],
+        [
+            "MALL_MANAGER",
+            "FM_MANAGER",
+            "OPERATIONS",
+            "DD_ENGINEER",
+            "ADMIN",
+            "CUSTOMER_RELATIONS_TEAM",
+        ],
     )
     def test_admin_roles_permitted(self, role: str) -> None:
         assert "CREATE_GENERAL_INQUIRY" in ROLE_PERMITTED_INTENTS[role]
@@ -215,13 +229,68 @@ class TestGeneralInquiryRouting:
         state = _state(confirmation_status="CONFIRMED")
         assert _route_after_general_inquiry_entry(state) == "merge_state"
 
+    @pytest.mark.asyncio
+    async def test_approve_action_confirms_review(self) -> None:
+        state = _state(
+            workflow_stage="GI_CRT_REVIEW",
+            action_override="confirm_approve_gi",
+            backend_refs={"sr_id": "8898"},
+        )
+        result = await general_inquiry_entry_node(state)
+        assert result["confirmation_status"] == "CONFIRMED"
+        assert result["backend_refs"]["gi_action"] == "approve"
+
+    @pytest.mark.asyncio
+    async def test_reject_action_asks_for_a_comment(self) -> None:
+        state = _state(workflow_stage="GI_CRT_REVIEW", action_override="reject_gi")
+        result = await general_inquiry_entry_node(state)
+        assert result["backend_refs"]["gi_pending_action"] == "reject"
+        assert result["collected_data"]["gi_pending_action"] == "reject"
+        assert "comment" in result["response_message"].lower()
+        assert _route_after_general_inquiry_entry({**state, **result}) == "response_generation"
+
+    @pytest.mark.asyncio
+    async def test_reject_comment_is_kept_on_the_draft(self) -> None:
+        """The next turn only has collected_data — backend_refs lost the pending flag."""
+        state = _state(
+            workflow_stage="GI_CRT_REVIEW",
+            user_message="Out of scope for mall management",
+            action_override=None,
+            backend_refs={"sr_id": "8899"},
+            collected_data={"gi_pending_action": "reject", "title": "Hours"},
+        )
+        result = await general_inquiry_entry_node(state)
+        assert result["confirmation_status"] == "CONFIRMED"
+        assert result["backend_refs"]["gi_action"] == "reject"
+        assert result["collected_data"]["gi_action"] == "reject"
+        assert "gi_pending_action" not in result["collected_data"]
+        assert result["collected_data"]["review_comment"] == "Out of scope for mall management"
+        assert _route_after_load(state) == "general_inquiry_entry"
+
     def test_entry_rejected_goes_to_extraction(self) -> None:
         state = _state(confirmation_status="REJECTED")
         assert _route_after_general_inquiry_entry(state) == "field_extraction"
 
-    def test_entry_waiting_goes_to_response(self) -> None:
+    def test_entry_waiting_without_a_field_goes_to_response(self) -> None:
         state = _state(status="WAITING_FOR_USER")
         assert _route_after_general_inquiry_entry(state) == "response_generation"
+
+    def test_lease_code_answer_goes_to_extraction(self) -> None:
+        """The reply to 'share the lease code' must be looked up, not narrated."""
+        state = _state(
+            status="WAITING_FOR_USER",
+            active_field="lease_code",
+            user_message="I want to create a General Inquiry service request for lease t0028935",
+        )
+        assert _route_after_general_inquiry_entry(state) == "field_extraction"
+
+    def test_lease_chip_goes_to_merge(self) -> None:
+        state = _state(
+            status="WAITING_FOR_USER",
+            selected_lease={"id": "t0028935"},
+            user_message="I want to create a General Inquiry service request for Brand X, lease t0028935.",
+        )
+        assert _route_after_general_inquiry_entry(state) == "merge_state"
 
     def test_entry_default_goes_to_extraction(self) -> None:
         state = _state()
@@ -302,6 +371,21 @@ class TestGeneralInquiryEntryNode:
 
 class TestGeneralInquiryConfirmationNode:
     @pytest.mark.asyncio
+    async def test_confirmation_card_has_confirm_action(self) -> None:
+        """The confirmation card must carry confirmAction='confirm_submit'.
+
+        Without it the frontend sends action_override=undefined and
+        general_inquiry_entry_node never sets confirmation_status=CONFIRMED —
+        the flow loops forever on the card.
+        """
+        state = _state(collected_data=_complete_collected())
+        result = await general_inquiry_confirmation_node(state)
+        card = result.get("response_ui") or {}
+        assert card.get("confirmAction") == "confirm_submit", (
+            f"confirmation_card is missing confirmAction='confirm_submit'; got: {card.get('confirmAction')!r}"
+        )
+
+    @pytest.mark.asyncio
     async def test_builds_card_when_complete(self) -> None:
         state = _state(collected_data=_complete_collected())
         result = await general_inquiry_confirmation_node(state)
@@ -313,6 +397,17 @@ class TestGeneralInquiryConfirmationNode:
         assert "title" in keys
         assert "description" in keys
         assert "lease_code" in keys
+
+    @pytest.mark.asyncio
+    async def test_offers_upload_and_skip_before_the_card(self) -> None:
+        collected = _complete_collected()
+        collected.pop("gi_optional_upload_status")
+        state = _state(collected_data=collected)
+        result = await general_inquiry_confirmation_node(state)
+        options = result["response_ui"]["suggestions"]["options"]
+        assert [opt["label"] for opt in options] == ["Upload", "Skip"]
+        assert result["collected_data"]["gi_optional_upload_status"] == "awaiting_choice"
+        assert result["response_ui"]["type"] == "message"
 
     @pytest.mark.asyncio
     async def test_skips_when_missing_required(self) -> None:
@@ -339,7 +434,11 @@ class TestGeneralInquiryPayloadBuilder:
     @pytest.mark.asyncio
     async def test_builds_inquiry_general_shape(self) -> None:
         state = _state(collected_data=_complete_collected())
-        result = await general_inquiry_payload_builder_node(state)
+        with patch(
+            "app.agents.graph.nodes.general_inquiry.general_inquiry_payload_builder_node.lookup_primary_tenant_contact",
+            new=AsyncMock(return_value=("Jane Doe - Primary Tenant Contact", 42)),
+        ):
+            result = await general_inquiry_payload_builder_node(state)
         payload = result["backend_refs"]["create_payload"]
         assert payload["service_category"] == "INQUIRY"
         assert payload["sub_category"] == "GENERAL"
@@ -348,6 +447,9 @@ class TestGeneralInquiryPayloadBuilder:
         assert payload["lease_id"] == 95404
         assert payload["payload"]["description"].startswith("Please clarify")
         assert payload["payload"]["documents_ids"] == []
+        assert payload["payload"]["company_name"] == "116"
+        assert payload["payload"]["tenant_contact"] == "Jane Doe - Primary Tenant Contact"
+        assert payload["created_for"] == 42
         assert result["status"] == "READY_TO_SUBMIT"
 
     @pytest.mark.asyncio
@@ -361,10 +463,44 @@ class TestGeneralInquiryPayloadBuilder:
                 ]
             },
         )
-        result = await general_inquiry_payload_builder_node(state)
+        with patch(
+            "app.agents.graph.nodes.general_inquiry.general_inquiry_payload_builder_node.lookup_primary_tenant_contact",
+            new=AsyncMock(return_value=("", None)),
+        ):
+            result = await general_inquiry_payload_builder_node(state)
         inner = result["backend_refs"]["create_payload"]["payload"]
         assert inner["documents_ids"] == ["doc-aaa", "doc-bbb"]
         assert inner["file"] == "doc-aaa"
+        assert inner["company_name"] == "116"
+
+    @pytest.mark.asyncio
+    async def test_reject_body_includes_the_inquiry_payload(self) -> None:
+        state = _state(
+            workflow_stage="GI_CRT_REVIEW",
+            collected_data={
+                **_complete_collected(),
+                "gi_action": "reject",
+                "review_comment": "Out of scope",
+            },
+            backend_refs={"sr_id": "8899"},
+            documents=[
+                {
+                    "document_id": "gen-inq-1",
+                    "document_type_id": "SR_GEN_INQ",
+                    "filename": "note.pdf",
+                }
+            ],
+        )
+        with patch(
+            "app.agents.graph.nodes.general_inquiry.general_inquiry_payload_builder_node.lookup_primary_tenant_contact",
+            new=AsyncMock(return_value=("", None)),
+        ):
+            result = await general_inquiry_payload_builder_node(state)
+        body = result["backend_refs"]["create_payload"]
+        assert body["status"] == "REJECTED"
+        assert body["comment"] == "Out of scope"
+        assert body["payload"]["title"] == "Query about service charge"
+        assert "gen-inq-1" in body["payload"]["documents_ids"]
 
 
 # ---------------------------------------------------------------------------
@@ -469,3 +605,78 @@ class TestGeneralInquiryApiSubmission:
 
         assert result["status"] == "FAILED"
         assert "API error" in result["response_message"]
+
+
+# ---------------------------------------------------------------------------
+# Regression: missing_field_node must never ask handover questions for GI
+# ---------------------------------------------------------------------------
+
+
+class TestMissingFieldNodeGI:
+    """missing_field_node uses GI schema, not handover schema, for general_inquiry_agent.
+
+    Regression guard: before the fix, missing_field_node fell through to
+    ``handover_get_missing_fields``, whose first user-missing field for CREATE_SR
+    is ``already_handovered``, causing the "Has the handover already been completed
+    for this lease?" question (with Already Trading / Initiate Handover chips) to
+    appear in every GI session.
+    """
+
+    @pytest.mark.asyncio
+    async def test_no_handover_question_when_no_lease_resolved(self) -> None:
+        """With no lease resolved, the bot must ask for lease_code, not already_handovered."""
+        from app.agents.graph.nodes.shared.missing_field_node import missing_field_node
+
+        state = _state(
+            collected_data={},
+            workflow_stage="CREATE_SR",
+        )
+        result = await missing_field_node(state)  # type: ignore[arg-type]
+
+        # The response must NOT mention the handover question or show handover chips
+        msg = (result.get("response_message") or "").lower()
+        assert "handover" not in msg, (
+            f"GI missing_field_node asked a handover question: {msg!r}"
+        )
+        decorations = result.get("response_decorations") or {}
+        suggestions = (decorations.get("suggestions") or {}).get("options") or []
+        option_actions = {opt.get("action") for opt in suggestions}
+        assert "select_handover_type_already_trading" not in option_actions, (
+            "GI missing_field_node returned 'Already Trading' chip — handover schema was used"
+        )
+        assert "select_handover_type_initiate_handover" not in option_actions, (
+            "GI missing_field_node returned 'Initiate Handover' chip — handover schema was used"
+        )
+        # The active_field must be a GI-relevant field, not a handover-only one
+        active_field = result.get("active_field")
+        assert active_field != "already_handovered", (
+            "GI missing_field_node set active_field=already_handovered"
+        )
+
+    @pytest.mark.asyncio
+    async def test_asks_for_title_after_lease_resolved(self) -> None:
+        """After lease resolution, missing_field_node must ask for title or description."""
+        from app.agents.graph.nodes.shared.missing_field_node import missing_field_node
+
+        # All backend fields filled (lease resolved), but title and description missing
+        state = _state(
+            collected_data={
+                **{k: v for k, v in _complete_collected().items() if k not in ("title", "description")},
+                "guided_tour": "guided",  # guided tour already answered
+            },
+            workflow_stage="CREATE_SR",
+        )
+        result = await missing_field_node(state)  # type: ignore[arg-type]
+
+        active_field = result.get("active_field")
+        assert active_field in ("title", "description"), (
+            f"Expected missing_field_node to ask for title or description after lease resolve, "
+            f"got active_field={active_field!r}. Response: {result.get('response_message')!r}"
+        )
+        # Must not ask handover question, and must skip the handover rewriter.
+        msg = (result.get("response_message") or "").lower()
+        assert "handover" not in msg
+        ui = result.get("response_ui") or {}
+        assert ui.get("verbatim") is True
+        if active_field == "title":
+            assert "inquiry" in msg

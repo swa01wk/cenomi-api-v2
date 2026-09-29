@@ -519,8 +519,8 @@ def _build_general_inquiry_config() -> WorkflowConfig:
     """Build the ``WorkflowConfig`` for the General Inquiry Agent.
 
     Single-phase create: tenant or admin raises a free-text question against
-    a lease.  One approver level (Mall Manager).  Auto-approved when a Mall
-    Manager creates it.  No multi-phase review.
+    a lease.  One approver level (Customer Relations Team).  Auto-approved
+    when a Customer Relations Team user creates it.  No multi-phase review.
     """
     from app.agents.prompts.general_inquiry_extraction_prompt import (
         GENERAL_INQUIRY_EXTRACTION_SYSTEM_PROMPT,
@@ -546,9 +546,16 @@ def _build_general_inquiry_config() -> WorkflowConfig:
         agent_name="general_inquiry_agent",
         extraction_prompt=GENERAL_INQUIRY_EXTRACTION_SYSTEM_PROMPT,
         field_questions=field_questions,
-        stage_sync_nodes={},
-        collection_stages=frozenset({"CREATE_SR"}),
-        confirmation_nodes={"CREATE_SR": "general_inquiry_confirmation"},
+        stage_sync_nodes={
+            "GI_CRT_REVIEW": "response_generation",
+            "GI_APPROVED": "response_generation",
+            "GI_REJECTED": "response_generation",
+        },
+        collection_stages=frozenset({"CREATE_SR", "GI_CRT_REVIEW"}),
+        confirmation_nodes={
+            "CREATE_SR": "general_inquiry_confirmation",
+            "GI_CRT_REVIEW": "general_inquiry_confirmation",
+        },
         terminal_stages=frozenset({"SR_CREATED"}),
         backend_fields=frozenset(
             {

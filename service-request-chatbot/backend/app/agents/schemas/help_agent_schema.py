@@ -144,6 +144,8 @@ ROLE_PERMITTED_INTENTS: dict[str, frozenset[str]] = {
     "ADMIN": ALL_INTENTS,
     # Cold L2 Work Permit hop (workflow 6).
     "OPERATION_EXECUTIVES": _SR_READ_INTENTS | frozenset({"APPROVE_WORK_PERMIT_SR"}),
+    # Level-1 approver for General Inquiry (INQUIRY / GENERAL).
+    "CUSTOMER_RELATIONS_TEAM": _SR_READ_INTENTS | _GENERAL_INQUIRY_INTENTS,
 }
 
 # Live cenomi-api AI session JWTs stamp platform role names, not the demo

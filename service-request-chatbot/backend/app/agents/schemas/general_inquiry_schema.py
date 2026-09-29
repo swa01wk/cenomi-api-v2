@@ -1,8 +1,8 @@
 """General Inquiry SR — workflow configuration schema.
 
 Single-stage workflow: CREATE_SR only.  No multi-phase review.
-Approval is handled entirely by the platform (Mall Manager, level 1).
-Auto-approved if a Mall Manager creates it themselves.
+Approval is handled entirely by the platform (Customer Relations Team, level 1).
+Auto-approved if a Customer Relations Team user creates it themselves.
 
 Fields mirror the platform form skeleton (``1730109769_update_workflow_sr_gen_inq``):
   title, description, notes (optional), file/documents_ids (optional).

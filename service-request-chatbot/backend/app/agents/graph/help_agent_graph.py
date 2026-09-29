@@ -264,7 +264,7 @@ def _should_open_existing_sr(state: dict[str, Any]) -> bool:
 # routed to the supervisor, classified as an approve intent, and RBAC-denied
 # instead of being stored as the comment.
 _FREE_TEXT_ANSWER_FIELDS: frozenset[str] = frozenset(
-    {"title", "description", "notes", "comments"}
+    {"title", "description", "notes", "comments", "review_comment"}
 )
 
 
@@ -318,6 +318,21 @@ def _route_after_load(state: dict[str, Any]) -> str:
         "confirm_cancel_sr", "decline_cancel_sr",
     })
     action = state.get("action_override") or ""
+    _GI_REVIEW_ACTIONS: frozenset[str] = frozenset(
+        {"confirm_approve_gi", "reject_gi", "ask_more_info_gi", "reassign_gi"}
+    )
+    # Pending lives on collected_data: backend_refs is restored as sr_id only,
+    # so a reject comment typed on the next turn would otherwise miss this
+    # branch, reopen the review card, and never PATCH.
+    pending_review = str(
+        (state.get("backend_refs") or {}).get("gi_pending_action")
+        or (state.get("collected_data") or {}).get("gi_pending_action")
+        or ""
+    )
+    if action in _GI_REVIEW_ACTIONS or (
+        pending_review and (state.get("user_message") or "").strip()
+    ):
+        return "general_inquiry_entry"
     if action in _CANCEL_BYPASS_ACTIONS and sr_id:
         agent = state.get("active_agent") or ""
         return _AGENT_ENTRY_NODES.get(agent, "handover_entry")
@@ -508,6 +523,7 @@ def _route_after_merge(state: dict[str, Any]) -> str:
         "WP_FM_REVIEW",
         "WP_MM_REVIEW",
         "WP_MM_OPS_REVIEW",
+        "GI_CRT_REVIEW",
     ):
         return "validation"
     collected = state.get("collected_data") or {}
@@ -911,14 +927,35 @@ def _route_after_fitout_confirm_confirmation(state: dict[str, Any]) -> str:
 
 
 def _route_after_general_inquiry_entry(state: dict[str, Any]) -> str:
-    """Route after the general_inquiry_entry_node."""
+    """Route after the general_inquiry_entry_node.
+
+    A lease chip or a typed lease code arrives while status is still
+    WAITING_FOR_USER from the question that asked for it. Sending that turn
+    straight to response_generation skips lease lookup, so the model only
+    talks about the code. Handover runs the same reply through extraction
+    and lease lookup first.
+    """
     if state.get("confirmation_status") == "CONFIRMED":
+        return "merge_state"
+    if state.get("response_message") and (
+        (state.get("workflow_stage") or "") == "GI_CRT_REVIEW"
+        or (state.get("backend_refs") or {}).get("gi_pending_action")
+        or (state.get("collected_data") or {}).get("gi_pending_action")
+    ):
+        return "response_generation"
+    if _guided_tour_service.has_pending_answer(state):
         return "merge_state"
     if state.get("confirmation_status") == "REJECTED":
         return "field_extraction"
-    if state.get("status") in ("WAITING_FOR_USER", "CANCELLED"):
+    if state.get("status") == "CANCELLED":
         return "response_generation"
-    return "field_extraction"
+    # Chip selection carries the lease id. Merge keeps it, then lease lookup
+    # resolves the row the same way a handover chip does.
+    if state.get("selected_lease"):
+        return "merge_state"
+    if state.get("status") == "WAITING_FOR_USER":
+        return _waiting_short_circuit_target(state)
+    return _form_patch_target(state) or "field_extraction"
 
 
 def _route_after_general_inquiry_confirmation(state: dict[str, Any]) -> str:

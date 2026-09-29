@@ -60,6 +60,28 @@ LEASE_PICKER_PURPOSE_BY_AGENT: dict[str, str] = {
 }
 
 
+_GI_LEASE_AGENTS: frozenset[str] = frozenset({"general_inquiry_agent"})
+
+
+def build_gi_lease_picker() -> dict[str, Any]:
+    """Activated leases a General Inquiry can be raised against.
+
+    Resource ``gi_leases`` is separate from handover ``leases`` so the portal
+    calls GET /general-inquiry/leases and shows GI empty-state copy.
+    """
+    return build_resource_picker(
+        "gi_leases",
+        filters={
+            "limit": 5,
+            "offset": 0,
+            "sort_by": "activation_date",
+            "order": "desc",
+        },
+        selection={"mode": "select_lease"},
+        searchable=True,
+    )
+
+
 def build_create_lease_picker(purpose: str | None = None) -> dict[str, Any]:
     """Leases this workflow can be raised against, when none is resolved yet.
 
@@ -95,9 +117,10 @@ def lease_picker_purpose(state: dict[str, Any]) -> str | None:
 def should_browse_leases(state: dict[str, Any]) -> bool:
     """True when a CREATE turn should offer lease browse chips.
 
-    Handover, Work Permit create, and the three fitout confirmations each get
-    a list. ``lease_picker_purpose`` carries the fitout rule to the platform;
-    handover and Work Permit use the same eligible-lease list (no purpose).
+    Handover, Work Permit create, General Inquiry, and the three fitout
+    confirmations each get a list. ``lease_picker_purpose`` carries the fitout
+    rule to the platform; handover and Work Permit use the eligible-lease list.
+    General Inquiry uses ``gi_leases`` (GET /general-inquiry/leases).
     """
     from app.core.config import settings
 
@@ -119,6 +142,10 @@ def should_browse_leases(state: dict[str, Any]) -> bool:
     # Work Permit create shares Handover's eligible-lease picker.
     if agent == "work_permit_agent" or stage == "CREATE_WORK_PERMIT":
         return stage in _LEASE_BROWSE_STAGES
+
+    # General Inquiry lists any activated lease, via its own endpoint.
+    if agent in _GI_LEASE_AGENTS:
+        return stage == "CREATE_SR"
 
     # The workflow must be known. An unpinned session used to qualify, and was
     # shown handover's leases by default — the wrong list for whatever it

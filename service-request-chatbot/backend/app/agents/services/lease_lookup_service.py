@@ -582,6 +582,30 @@ class MockLeaseLookupService(AbstractLeaseLookupService):
         return []
 
 
+class HttpGiLeaseLookupService(HttpLeaseLookupService):
+    """Production adapter — GET /general-inquiry/leases.
+
+    Same response shape as handover GET /leases. Scope comes from the bearer
+    token, so ``purpose`` and ``property_id`` are not sent.
+    """
+
+    _ENDPOINT_PATH = "/general-inquiry/leases"
+
+    @staticmethod
+    def _build_params(query: LeaseLookupQuery) -> dict[str, Any]:
+        params = HttpLeaseLookupService._build_params(query)
+        params.pop("purpose", None)
+        params.pop("property_id", None)
+        return params
+
+
+class MockGiLeaseLookupService(MockLeaseLookupService):
+    """In-memory GI lookup. Includes every mock lease, including ones a
+    handover picker would hide behind an existing handover SR."""
+
+    _MOCK_ENDPOINT = "mock://lease-tenant-api/general-inquiry/leases"
+
+
 # ---------------------------------------------------------------------------
 # Factory helper
 # ---------------------------------------------------------------------------
@@ -598,3 +622,10 @@ def get_lease_lookup_service() -> AbstractLeaseLookupService:
     if settings.lease_tenant_api_base_url and not settings.lease_lookup_use_mock:
         return HttpLeaseLookupService()
     return MockLeaseLookupService()
+
+
+def get_gi_lease_lookup_service() -> AbstractLeaseLookupService:
+    """GI lease lookup. Same base URL as handover; path is /general-inquiry/leases."""
+    if settings.lease_tenant_api_base_url and not settings.lease_lookup_use_mock:
+        return HttpGiLeaseLookupService()
+    return MockGiLeaseLookupService()

@@ -102,6 +102,17 @@ def _map_operations_to_stage(
     Work Permit must run before the Handover DD/FM mapping: a WP
     ``DD_ENGINEER IN_PROGRESS`` is ``WP_DD_REVIEW``, not ``RDD_REVIEW``.
     """
+    # General Inquiry is reviewed by Customer Relations Team. The live workflow
+    # row may still assign level 1 to Mall Manager (role 11), which the handover
+    # mapper treats as FM_REVIEW. Opening that SR must stay on the inquiry path.
+    if _is_general_inquiry(category, sub_category):
+        status = (platform_status or "").upper()
+        if status in {"APPROVED", "CLOSED"}:
+            return "GI_APPROVED"
+        if status == "REJECTED":
+            return "GI_REJECTED"
+        return "GI_CRT_REVIEW"
+
     if is_work_permit_category(category, sub_category):
         return map_wp_operations_to_stage(
             operations,
@@ -148,6 +159,13 @@ def _map_operations_to_stage(
         return "SR_COMPLETED"
 
     return current_stage
+
+
+def _is_general_inquiry(category: str | None, sub_category: str | None) -> bool:
+    """True for INQUIRY / GENERAL, including a missing sub-category."""
+    if (category or "").upper() != "INQUIRY":
+        return False
+    return (sub_category or "GENERAL").upper() in {"", "GENERAL"}
 
 
 def _attachments_to_documents(attachments: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -415,21 +433,27 @@ async def sr_status_sync_node(state: ServiceRequestState) -> dict[str, Any]:
 
     payload: dict[str, Any] = getattr(result, "payload", None) or {}
     wp_sr = is_work_permit_category(sr_category, sr_sub_category)
+    gi_sr = _is_general_inquiry(sr_category, sr_sub_category)
     if payload:
         # Snapshot for builders (open-existing path never ran create payload builder).
         inner = dict(payload)
         wp_sub = resolve_wp_sub_category(sr_sub_category, inner) if wp_sr else None
+        if wp_sr:
+            snapshot_category = "WORK_PERMIT"
+            snapshot_sub = wp_sub
+        elif gi_sr:
+            snapshot_category = "INQUIRY"
+            snapshot_sub = "GENERAL"
+        else:
+            snapshot_category = "FIT_OUT_AND_HANDOVER"
+            snapshot_sub = sr_sub_category or inner.get("sub_category") or "HANDOVER"
         backend_refs["create_payload"] = {
             "payload": inner,
             "title": inner.get("title") or "",
             "tenant_profile_id": inner.get("tenant_profile_id"),
             "property_id": inner.get("property_id"),
-            "service_category": "WORK_PERMIT" if wp_sr else "FIT_OUT_AND_HANDOVER",
-            "sub_category": (
-                wp_sub
-                if wp_sr
-                else (sr_sub_category or inner.get("sub_category") or "HANDOVER")
-            ),
+            "service_category": snapshot_category,
+            "sub_category": snapshot_sub,
             "lease_code": inner.get("lease_code") or inner.get("lease") or "",
             "lease_id": inner.get("lease_id") or inner.get("contract_id"),
             "service_request_id": sr_id,
@@ -455,6 +479,10 @@ async def sr_status_sync_node(state: ServiceRequestState) -> dict[str, Any]:
         updates["service_category"] = "WORK_PERMIT"
         if sr_sub_category:
             updates["sub_category"] = sr_sub_category
+    elif gi_sr:
+        updates["active_agent"] = "general_inquiry_agent"
+        updates["service_category"] = "INQUIRY"
+        updates["sub_category"] = "GENERAL"
     elif not state.get("active_agent"):
         if effective_stage in ("FM_REVIEW", "RDD_REVIEW"):
             updates["active_agent"] = "rdd_handover_agent"
@@ -477,7 +505,30 @@ async def sr_status_sync_node(state: ServiceRequestState) -> dict[str, Any]:
             review_deco,
         )
 
-    if not state.get("response_message") and sr_id and effective_stage in (
+    if not state.get("response_message") and sr_id and effective_stage == "GI_CRT_REVIEW":
+        from app.agents.services.general_inquiry_review_summary import (
+            build_gi_review_card,
+        )
+
+        collected = updates.get("collected_data") or payload_to_collected_data(payload)
+        card = build_gi_review_card(
+            collected,
+            sr_id=str(sr_id),
+            lease_label=payload.get("lease_brand_mall"),
+        )
+        updates["response_message"] = card["message"]
+        updates["response_ui"] = {**card, "verbatim": True}
+    elif not state.get("response_message") and sr_id and effective_stage in (
+        "GI_APPROVED",
+        "GI_REJECTED",
+    ):
+        if effective_stage == "GI_APPROVED":
+            lead = f"General Inquiry SR **{sr_id}** is approved."
+        else:
+            lead = f"General Inquiry SR **{sr_id}** was rejected."
+        updates["response_message"] = lead
+        updates["response_ui"] = {"type": "message", "verbatim": True}
+    elif not state.get("response_message") and sr_id and effective_stage in (
         "FM_REVIEW",
         "RDD_REVIEW",
         "APPROVE_SR",
