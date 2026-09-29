@@ -970,8 +970,14 @@ def _route_after_fitout_progress_entry(state: dict[str, Any]) -> str:
         return "merge_state"
     if state.get("confirmation_status") == "REJECTED":
         return "field_extraction"
+    # Every question saves WAITING_FOR_USER, so it is present on the turn that
+    # carries the answer. Short-circuiting it to response_generation swallowed
+    # the answer: typing the lease code instead of tapping the chip was
+    # re-asked, because response_generation cannot write collected_data.
+    # ``_waiting_short_circuit_target`` is the shared reading of that state —
+    # it lets an answer to the open field, and a correction, through.
     if state.get("status") == "WAITING_FOR_USER":
-        return _form_patch_target(state) or "response_generation"
+        return _waiting_short_circuit_target(state)
     return _form_patch_target(state) or "field_extraction"
 
 

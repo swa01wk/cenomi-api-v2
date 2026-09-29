@@ -443,15 +443,32 @@ async def fitout_progress_entry_node(state: ServiceRequestState) -> dict[str, An
         }
 
     # ── 6. Stage-pin on the first turn ────────────────────────────────────
+    #
+    # ``status`` is cleared with the stage. The routers short-circuit a turn
+    # whose persisted status is WAITING_FOR_USER straight to
+    # response_generation, and that status survives a switch of agent: asking
+    # for fit-out progress in a session that was waiting on another flow's
+    # question meant this turn never reached field_extraction, so the lease and
+    # the percentage in "update fitout progress t0112745 30 %" were both
+    # dropped and the assistant asked for the lease code again.
+    #
+    # ``active_field`` goes with it, for the same reason: it is the other
+    # flow's open question, and while it is set the correction detector reads
+    # "update fitout progress …" as a request to change something rather than
+    # as the request itself — which discards the message.
+    #
+    # Safe because the pin only fires when no stage is set — the start of a
+    # request, which by definition has nothing of its own pending.
     if state.get("active_agent") == AGENT_NAME and not state.get("workflow_stage"):
+        fresh = {"status": "IN_PROGRESS", "active_field": None}
         if sr_id:
             log.info("fitout_progress_entry.routing_to_approve_sr", sr_id=sr_id)
-            return {"workflow_stage": "APPROVE_SR"}
+            return {"workflow_stage": "APPROVE_SR", **fresh}
         if str(state.get("intent") or "") == APPROVE_INTENT:
             log.info("fitout_progress_entry.routing_to_approve_sr_via_intent")
-            return {"workflow_stage": "APPROVE_SR"}
+            return {"workflow_stage": "APPROVE_SR", **fresh}
         log.info("fitout_progress_entry.routing_to_create_sr")
-        return {"workflow_stage": "CREATE_SR"}
+        return {"workflow_stage": "CREATE_SR", **fresh}
 
     return {}
 

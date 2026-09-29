@@ -461,3 +461,38 @@ class TestGuidedTourChoice:
         assert "How complete is the fit-out today?" in out["response_message"]
         options = out["response_decorations"]["suggestions"]["options"]
         assert any("suggested" in o["label"] for o in options)
+
+
+class TestExtractionPromptContract:
+    """The provider's own requirement, not a style preference."""
+
+    def test_the_prompt_asks_for_json(self) -> None:
+        # The extraction call sets response_format=json_object, and the API
+        # answers 400 unless the word "json" appears in the messages:
+        #   "'messages' must contain the word 'json' in some form"
+        # Without it every extraction call for this agent failed and the turn
+        # collected nothing, so the assistant re-asked for what it had.
+        from app.agents.prompts.fitout_progress_extraction_prompt import (
+            FITOUT_PROGRESS_EXTRACTION_SYSTEM_PROMPT,
+        )
+
+        assert "json" in FITOUT_PROGRESS_EXTRACTION_SYSTEM_PROMPT.lower()
+
+    def test_every_agent_that_uses_the_extractor_asks_for_json(self) -> None:
+        """One guard for all of them, so the next agent cannot ship without it.
+
+        ``sales_data_agent`` is excluded on purpose: its nodes never call the
+        shared ``FieldExtractionService`` — none of them reads
+        ``extraction_prompt`` — so its registered prompt is inert and the
+        provider's rule cannot bite it.
+        """
+        from app.agents.registries.workflow_config import (
+            WORKFLOW_CONFIG_REGISTRY,
+            get_workflow_config,
+        )
+
+        get_workflow_config("rdd_handover_agent")
+        for name, cfg in WORKFLOW_CONFIG_REGISTRY.items():
+            if name == "sales_data_agent":
+                continue
+            assert "json" in cfg.extraction_prompt.lower(), name

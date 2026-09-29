@@ -32,6 +32,7 @@ from app.agents.llm.gateway import get_default_gateway
 from app.agents.registries.workflow_config import get_workflow_config
 from app.agents.services.field_correction_service import (
     detect_correction_intent,
+    draft_has_content,
     is_unspecified_correction,
 )
 from app.agents.services.field_extraction_service import FieldExtractionService
@@ -361,8 +362,24 @@ async def field_extraction_node(state: ServiceRequestState) -> dict[str, Any]:
     # Runs before LLM extraction: the extractor is primed toward active_field
     # and the previous question, so it tends to mis-bind correction phrases
     # like "I want to change the title" to whatever field is being collected.
-    correction = detect_correction_intent(
-        user_message, collected_data, active_field, workflow_stage
+    #
+    # Both correction paths need a conversation to be under way: a question on
+    # screen, or something already collected. Without either there is nothing to
+    # revisit, and acting on the cue throws the message away — the redirect path
+    # skips the LLM entirely.
+    #
+    # Reported by a client on "update fitout progress t0112745 30 %", which
+    # names both the lease and the answer: read as a correction on the first
+    # turn, it collected nothing and the assistant asked for the lease code the
+    # user had just given.
+    conversation_under_way = bool(active_field) or draft_has_content(collected_data)
+
+    correction = (
+        detect_correction_intent(
+            user_message, collected_data, active_field, workflow_stage
+        )
+        if conversation_under_way
+        else None
     )
     if correction is not None:
         target_field, has_inline_value = correction
@@ -397,8 +414,10 @@ async def field_extraction_node(state: ServiceRequestState) -> dict[str, Any]:
     # discarded and the same question is re-asked, and retyping the note fails
     # the identical way, so the conversation cannot move on. While one of these
     # fields is active the message IS the value, not an instruction.
-    if active_field not in _FREE_TEXT_FIELDS and is_unspecified_correction(
-        user_message, workflow_stage
+    if (
+        active_field not in _FREE_TEXT_FIELDS
+        and conversation_under_way
+        and is_unspecified_correction(user_message, workflow_stage)
     ):
         log.info(
             "field_extraction.correction_unspecified",

@@ -1058,8 +1058,50 @@ async def merge_state_node(state: ServiceRequestState) -> dict[str, Any]:
         answered_by_action = (user_spoke or user_acted) and _PROGRESS_FIELD in (
             state.get("corrected_fields") or {}
         )
-        if answered_by_extraction or answered_by_action:
+        # "Leave the form open" means the form is where they answer. A synced
+        # percentage counts when the assistant is asking for one — the form's
+        # own default arrives earlier than that, while the lease question is
+        # open or nothing is being asked at all.
+        answered_in_the_form = str(
+            state.get("active_field") or ""
+        ) == _PROGRESS_FIELD and _PROGRESS_FIELD in (
+            state.get("corrected_fields") or {}
+        )
+        if answered_by_extraction or answered_by_action or answered_in_the_form:
             collected[PROGRESS_CONFIRMED_KEY] = True
+
+        # …and once they have answered, the form's arithmetic must not quietly
+        # replace their number. corrected_fields is a maximum-confidence write,
+        # so a background sync of the form's own default overwrote it: the user
+        # asked for 30% in one sentence, the form hydrated the lease, computed
+        # 100% from the elapsed window, and the review card offered 100%.
+        #
+        # An edit they make themselves still wins — that arrives with a message
+        # or an action, not on a background turn.
+        previous = (state.get("collected_data") or {}).get(_PROGRESS_FIELD)
+        if (
+            not user_spoke
+            and not user_acted
+            and not answered_in_the_form
+            and collected.get(PROGRESS_CONFIRMED_KEY)
+            and _PROGRESS_FIELD in (state.get("corrected_fields") or {})
+            and previous not in (None, "")
+        ):
+            collected[_PROGRESS_FIELD] = previous
+
+        # The form's two read-only date rows are `fitout_start_date` and
+        # `fitout_end_date` — the payload's own names. The lease lookup writes
+        # the lease's `actual_*` / `base_*` columns, so without this the rows
+        # stayed empty on a lease the assistant had already resolved.
+        from app.agents.services.fitout_progress_suggestions_service import (
+            resolve_window,
+        )
+
+        start, end = resolve_window(collected)
+        if start and not collected.get("fitout_start_date"):
+            collected["fitout_start_date"] = start
+        if end and not collected.get("fitout_end_date"):
+            collected["fitout_end_date"] = end
 
     # RDD status: derive from the actually-uploaded document types now that we
     # show all three types in one document_requirement UI (no chip selection).

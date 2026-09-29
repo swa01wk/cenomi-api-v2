@@ -15,6 +15,7 @@ TestSubmission            — guards, auto-approve wording, failure wording
 TestEntryApproveReject    — the approver's decision chips and their text forms
 TestRejectionCard         — a rejection is confirmed, and changes nothing
 TestApprovalSubmission    — PATCH wording, and the approver guard
+TestFirstTurnIsNotACorrection — a correction cue needs something to correct
 """
 
 from __future__ import annotations
@@ -280,21 +281,39 @@ class TestEntryUnsupported:
 
 
 class TestEntryStagePin:
+    # Pinning a stage also clears what the previous flow left behind. A
+    # persisted WAITING_FOR_USER short-circuits the turn to
+    # response_generation, and a stale active_field makes the correction
+    # detector read the request as a request to change something — either one
+    # drops the message that started the request.
+    _FRESH = {"status": "IN_PROGRESS", "active_field": None}
+
     async def test_create_on_a_fresh_turn(self) -> None:
         out = await fitout_progress_entry_node(_state(workflow_stage=None))
-        assert out == {"workflow_stage": "CREATE_SR"}
+        assert out == {"workflow_stage": "CREATE_SR", **self._FRESH}
 
     async def test_approve_when_an_sr_is_open(self) -> None:
         out = await fitout_progress_entry_node(
             _state(workflow_stage=None, backend_refs={"sr_id": "8517"})
         )
-        assert out == {"workflow_stage": "APPROVE_SR"}
+        assert out == {"workflow_stage": "APPROVE_SR", **self._FRESH}
 
     async def test_approve_by_intent(self) -> None:
         out = await fitout_progress_entry_node(
             _state(workflow_stage=None, intent="APPROVE_FITOUT_PROGRESS")
         )
-        assert out == {"workflow_stage": "APPROVE_SR"}
+        assert out == {"workflow_stage": "APPROVE_SR", **self._FRESH}
+
+    async def test_the_pin_clears_another_flows_open_question(self) -> None:
+        out = await fitout_progress_entry_node(
+            _state(
+                workflow_stage=None,
+                status="WAITING_FOR_USER",
+                active_field="actual_fitout_start_date",
+            )
+        )
+        assert out["status"] == "IN_PROGRESS"
+        assert out["active_field"] is None
 
     async def test_stale_terminal_stage_is_cleared_in_the_same_turn(self) -> None:
         out = await fitout_progress_entry_node(
@@ -860,3 +879,37 @@ class TestAskingForMoreInfo:
         )
         assert "no action-required step" in out["response_message"]
         assert "backend_refs" not in out
+
+
+# ---------------------------------------------------------------------------
+# TestFirstTurnIsNotACorrection  (client report, 2026-09-29)
+# ---------------------------------------------------------------------------
+
+
+class TestFirstTurnIsNotACorrection:
+    """A correction cue needs a conversation to correct."""
+
+    def test_nothing_collected_is_not_a_conversation(self) -> None:
+        from app.agents.services.field_correction_service import draft_has_content
+
+        assert draft_has_content({}) is False
+        assert draft_has_content(None) is False
+        # Session bookkeeping is not something the user said.
+        assert draft_has_content({"_progress_confirmed": True}) is False
+        assert draft_has_content({"guided_tour": ""}) is False
+
+    def test_a_collected_value_is(self) -> None:
+        from app.agents.services.field_correction_service import draft_has_content
+
+        assert draft_has_content({"lease_code": "t0112745"}) is True
+
+    def test_the_parser_still_reads_the_sentence(self) -> None:
+        # The precondition lives in field_extraction_node, not here: this
+        # function answers "which field does this name?" and nothing else.
+        from app.agents.services.field_correction_service import (
+            detect_correction_intent,
+        )
+
+        assert detect_correction_intent(
+            "can you update the mall", {}, active_field="startDate"
+        ) == ("mall", False)

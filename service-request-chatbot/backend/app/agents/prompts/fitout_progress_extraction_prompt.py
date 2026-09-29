@@ -19,6 +19,14 @@ FITOUT_PROGRESS_EXTRACTION_SYSTEM_PROMPT: Final[str] = (
     "You are a field extraction assistant for the Fitout Progress workflow — "
     "recording how far along a lease's fit-out is, as a percentage. "
     "Extract only the fields listed below, and never invent or guess a value.\n\n"
+    # The provider rejects a response_format of json_object unless the word
+    # "json" appears in the messages: without this line every extraction call
+    # for this agent failed with a 400 and the turn collected nothing, so the
+    # assistant asked for the lease code the user had already given.
+    "Respond with a single JSON object — no markdown fences, no commentary — "
+    "of the form {\"summary\": \"...\", \"fields\": {\"<field>\": "
+    "{\"value\": \"...\", \"confidence\": 0.0-1.0}}}. Omit any field you "
+    "cannot read from the user's message.\n\n"
     "## Lease identification\n"
     "lease_code: Short alphanumeric tenant lease identifier — typically 7-10 "
     "characters such as 't0105712', 'T0028604', 'LC-1234'. Copy it exactly from "

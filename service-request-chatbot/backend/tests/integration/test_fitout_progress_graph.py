@@ -803,3 +803,174 @@ async def test_answering_the_pause_lets_the_flow_move_on() -> None:
     assert result.get("confirmation_status") != "MILESTONE_PENDING"
     assert result["collected_data"]["_milestone_confirmed_ack"] is True
 
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "message",
+    [
+        "update fitout progress t0105712 30 %",
+        "update fitout progress for t0105712 30%",
+        "record fitout progress t0105712 30%",
+        "fitout for t0105712 is 30% done",
+    ],
+)
+async def test_a_full_intent_goes_straight_to_the_review_card(message: str) -> None:
+    """Lease and percentage in one sentence: nothing left to ask.
+
+    Reported by a client on "update fitout progress t0112745 30 %". The leading
+    "update" matched the correction cue while naming no known field, so the turn
+    was read as "the user wants to change something", the LLM call was skipped
+    and *nothing* was collected — the assistant then asked for the lease code
+    they had just given. The other three phrasings always worked, which is what
+    made it look like an extraction problem.
+    """
+    with ExitStack() as stack:
+        _enter(
+            stack,
+            _patches(
+                extraction_fields={
+                    "lease_code": {"value": "t0105712", "confidence": 0.97},
+                    PROGRESS_FIELD: {"value": "30", "confidence": 0.94},
+                }
+            ),
+        )
+        result = await _GRAPH.ainvoke(_state(user_message=message))
+
+    assert result["response_ui"]["type"] == "confirmation_card"
+    assert result["collected_data"][PROGRESS_FIELD] == "30"
+    assert result["collected_data"]["_progress_confirmed"] is True
+    assert result["collected_data"]["lease_id"] == 95404
+
+
+@pytest.mark.asyncio
+async def test_the_form_default_cannot_overwrite_the_answer_given() -> None:
+    """The percentage the user stated survives the form hydrating the lease.
+
+    `corrected_fields` is a maximum-confidence write, so the form's own
+    elapsed-time default — synced back the moment it resolves the lease —
+    replaced the number the user had just given in the same breath.
+    """
+    with ExitStack() as stack:
+        _enter(stack, _patches())
+        result = await _GRAPH.ainvoke(
+            _state(
+                user_message="",
+                active_agent=AGENT,
+                sub_category="FITOUT_PROGRESS",
+                workflow_stage="CREATE_SR",
+                collected_data={
+                    "lease_brand_mall": "t0105712 - Brand Under Armour - Jawharat Jeddah",
+                    "lease_code": "t0105712",
+                    "lease_id": 95404,
+                    "tenant_profile_id": 116,
+                    "actual_fitout_start_date": "2026-07-15",
+                    "base_fitout_end_date": "2026-10-15",
+                    PROGRESS_FIELD: "30",
+                    "_progress_confirmed": True,
+                },
+                corrected_fields={PROGRESS_FIELD: "100"},
+            )
+        )
+
+    assert result["collected_data"][PROGRESS_FIELD] == "30"
+
+
+@pytest.mark.asyncio
+async def test_a_full_intent_works_mid_session_too() -> None:
+    """Switching into this flow from another one must not drop the message.
+
+    The routers short-circuit a turn whose persisted `status` is
+    WAITING_FOR_USER straight to response_generation, and that status survives
+    a change of agent. Asking for fit-out progress in a session that was
+    waiting on another flow's question meant the turn never reached
+    field_extraction: reported live, where "update fitout progress t0112745
+    30 %" was answered with "please share the lease code".
+    """
+    with ExitStack() as stack:
+        _enter(
+            stack,
+            _patches(
+                extraction_fields={
+                    "lease_code": {"value": "t0105712", "confidence": 0.97},
+                    PROGRESS_FIELD: {"value": "30", "confidence": 0.94},
+                }
+            ),
+        )
+        result = await _GRAPH.ainvoke(
+            _state(
+                user_message="update fitout progress t0105712 30 %",
+                # What the previous flow left behind.
+                status="WAITING_FOR_USER",
+                active_field="actual_fitout_start_date",
+            )
+        )
+
+    assert result["response_ui"]["type"] == "confirmation_card"
+    assert result["collected_data"][PROGRESS_FIELD] == "30"
+
+
+@pytest.mark.asyncio
+async def test_typing_the_lease_code_is_not_re_asked() -> None:
+    """Answering the lease question by typing must reach the lookup.
+
+    Every question saves WAITING_FOR_USER, so it is present on the turn that
+    carries the answer. Short-circuiting that to response_generation swallowed
+    the answer — response_generation cannot write `collected_data` — and the
+    assistant asked for the lease code again. Reported live: typing t0112745
+    instead of tapping the chip.
+    """
+    with ExitStack() as stack:
+        _enter(
+            stack,
+            _patches(
+                extraction_fields={
+                    "lease_code": {"value": "t0105712", "confidence": 0.97}
+                }
+            ),
+        )
+        result = await _GRAPH.ainvoke(
+            _state(
+                user_message="t0105712",
+                active_agent=AGENT,
+                sub_category="FITOUT_PROGRESS",
+                workflow_stage="CREATE_SR",
+                # What the lease question left behind.
+                status="WAITING_FOR_USER",
+                active_field="lease_code",
+                collected_data={},
+            )
+        )
+
+    assert result["collected_data"]["lease_id"] == 95404
+    assert result["missing_fields"] == [PROGRESS_FIELD]
+    assert "How complete is the fit-out today?" in result["response_message"]
+
+
+@pytest.mark.asyncio
+async def test_a_prose_percentage_answer_reaches_extraction() -> None:
+    """"about 30" is not a bare number, so it must still reach the extractor."""
+    with ExitStack() as stack:
+        _enter(
+            stack,
+            _patches(extraction_fields={PROGRESS_FIELD: {"value": "30", "confidence": 0.9}}),
+        )
+        result = await _GRAPH.ainvoke(
+            _state(
+                user_message="about 30 i'd say",
+                active_agent=AGENT,
+                sub_category="FITOUT_PROGRESS",
+                workflow_stage="CREATE_SR",
+                status="WAITING_FOR_USER",
+                active_field=PROGRESS_FIELD,
+                collected_data={
+                    "lease_brand_mall": "t0105712 - Brand Under Armour - Jawharat Jeddah",
+                    "lease_code": "t0105712",
+                    "lease_id": 95404,
+                    "tenant_profile_id": 116,
+                },
+            )
+        )
+
+    assert result["collected_data"][PROGRESS_FIELD] == "30"
+    assert result["response_ui"]["type"] == "confirmation_card"

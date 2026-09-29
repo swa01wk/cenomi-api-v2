@@ -131,9 +131,11 @@ VALID INTENTS
       User wants to record HOW FAR ALONG a lease's fitout is, as a percentage
       (Fitout Progress — sub_category FITOUT_PROGRESS). This is a progress
       reading on a fitout still under way, not a milestone confirmation.
-      Keywords: fitout progress, record fitout progress, update fitout progress,
-                fitout percentage, fitout is 80% done, how far along is the fitout,
-                log fitout progress, set fitout progress to 60
+      Keywords: fitout progress, fit-out progress, record fitout progress,
+                update fitout progress, fitout percentage, fitout is 80% done,
+                how far along is the fitout, log fitout progress,
+                set fitout progress to 60, "I need to record fit-out progress
+                for <brand>, lease <code>" (the lease-picker chip's wording)
       NOTE: Distinguish from CREATE_FITOUT_CONFIRM_FOS / _END — those confirm that
       fitout STARTED or FINISHED on a date. A percentage of completion, or any
       "% done" phrasing, is this intent.
