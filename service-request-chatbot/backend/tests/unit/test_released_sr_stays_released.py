@@ -113,3 +113,115 @@ async def test_an_sr_id_on_the_turn_is_still_written() -> None:
     repo = _FakeDraftRepo(_draft_on(None))
     await _service(repo).save_checkpoint(uuid4(), _create_turn_state({"sr_id": "321050"}))
     assert repo.updates[-1]["sr_id"] == "321050"
+
+
+# ---------------------------------------------------------------------------
+# Documents — reported on SR 321094: a second "create handover" in the same
+# chat showed the first SR's upload, and deleting it there deleted it from
+# SR 321094, because it was the same platform document id.
+# ---------------------------------------------------------------------------
+
+_OLD_DOC = {
+    "document_id": "c026fb66-5839-47b3-b8b5-162d7368838e",
+    "document_type_id": "SR_HANDOVER_OTHER",
+    "filename": "ChatGPT Image.png",
+}
+
+
+def _submitted_draft_with_upload() -> SimpleNamespace:
+    draft = _draft_on("321094")
+    draft.workflow_stage = "SR_CREATED"
+    draft.documents = [dict(_OLD_DOC)]
+    return draft
+
+
+@pytest.mark.asyncio
+async def test_a_released_sr_takes_its_documents_with_it() -> None:
+    repo = _FakeDraftRepo(_submitted_draft_with_upload())
+    await _service(repo).save_checkpoint(
+        uuid4(), _create_turn_state({"released_sr_id": "321094"})
+    )
+    assert repo.updates[-1]["documents"] == []
+
+
+@pytest.mark.asyncio
+async def test_the_new_flow_does_not_load_the_old_upload() -> None:
+    repo = _FakeDraftRepo(_submitted_draft_with_upload())
+    service = _service(repo)
+    await service.save_checkpoint(
+        uuid4(), _create_turn_state({"released_sr_id": "321094"})
+    )
+    loaded = await service.load(uuid4())
+    assert loaded["documents"] == []
+
+
+@pytest.mark.asyncio
+async def test_uploads_of_the_new_request_are_kept_on_release() -> None:
+    new_doc = {"document_id": "new-1", "document_type_id": "SR_HANDOVER_OTHER"}
+    repo = _FakeDraftRepo(_submitted_draft_with_upload())
+    state = _create_turn_state({"released_sr_id": "321094"})
+    state["documents"] = [new_doc]
+    await _service(repo).save_checkpoint(uuid4(), state)
+    assert repo.updates[-1]["documents"] == [new_doc]
+
+
+@pytest.mark.asyncio
+async def test_without_the_signal_documents_are_still_merged() -> None:
+    """An ordinary turn must not drop an upload the turn's state never saw."""
+    repo = _FakeDraftRepo(_submitted_draft_with_upload())
+    await _service(repo).save_checkpoint(uuid4(), _create_turn_state({"sr_id": "321094"}))
+    assert [d["document_id"] for d in repo.updates[-1]["documents"]] == [
+        _OLD_DOC["document_id"]
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Every "new request after a finished one" path sends the signal
+# ---------------------------------------------------------------------------
+
+
+def _finished(intent: str, stage: str, agent: str, message: str) -> dict[str, Any]:
+    return {
+        "active_agent": agent,
+        "intent": intent,
+        "workflow_stage": stage,
+        "user_message": message,
+        "collected_data": {"lease_code": "t0107456"},
+        "documents": [dict(_OLD_DOC)],
+        "backend_refs": {"sr_id": "321094"},
+        "auth_context": SimpleNamespace(roles=["MALL_MANAGER", "DD_ENGINEER"]),
+    }
+
+
+@pytest.mark.asyncio
+async def test_handover_stale_clear_releases_the_sr() -> None:
+    from app.agents.graph.nodes.handover.handover_entry_node import handover_entry_node
+
+    out = await handover_entry_node(
+        _finished(
+            "CREATE_RDD_SERVICE_REQUEST",
+            "SR_CREATED",
+            "rdd_handover_agent",
+            "I need a handover request for Brand Link, lease t0107555",
+        )
+    )
+    assert out["backend_refs"] == {"released_sr_id": "321094"}
+    assert out["documents"] == []
+
+
+@pytest.mark.asyncio
+async def test_fitout_progress_stale_clear_releases_the_sr() -> None:
+    from app.agents.graph.nodes.fitout_progress.fitout_progress_entry_node import (
+        fitout_progress_entry_node,
+    )
+
+    out = await fitout_progress_entry_node(
+        _finished(
+            "CREATE_FITOUT_PROGRESS",
+            "SR_CREATED",
+            "rdd_fitout_progress_agent",
+            "update fitout progress t0107555 40%",
+        )
+    )
+    assert out["backend_refs"] == {"released_sr_id": "321094"}
+    assert out["documents"] == []

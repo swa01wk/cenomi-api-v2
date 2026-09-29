@@ -44,6 +44,7 @@ from app.agents.services.fitout_progress_suggestions_service import (
     format_percentage,
     parse_percentage_answer,
 )
+from app.agents.services.sr_release import released_backend_refs
 from app.observability.decorators import trace_node
 
 log = structlog.get_logger(__name__)
@@ -435,7 +436,7 @@ async def fitout_progress_entry_node(state: ServiceRequestState) -> dict[str, An
             "validation_errors": [],
             "selected_lease": None,
             "lease_matches": [],
-            "backend_refs": {},
+            "backend_refs": released_backend_refs(state),
             "documents": [],
             "response_ui": {},
             "status": "IN_PROGRESS",

@@ -17,6 +17,7 @@ from app.agents.services.deleted_documents import (
     deleted_document_ids,
     without_deleted,
 )
+from app.agents.services.sr_release import releases_sr
 from app.db.repositories.service_request_draft_repo import ServiceRequestDraftRepository
 
 log = structlog.get_logger(__name__)
@@ -173,6 +174,12 @@ class ConversationStateService:
                 state_docs = state.get("documents")
                 if state_docs is None:
                     merged_docs = list(draft.documents or [])
+                elif releases_sr(state.get("backend_refs")):
+                    # A new request over a finished SR owns only its own
+                    # uploads. The union below would write the finished SR's
+                    # documents back into the new flow — same document ids, so
+                    # deleting one there deleted it from the old SR.
+                    merged_docs = list(state_docs)
                 else:
                     merged_docs = _merge_documents(
                         list(draft.documents or []),
@@ -202,7 +209,7 @@ class ConversationStateService:
                 sr_id = _extract_sr_id(state)
                 if sr_id:
                     updates["sr_id"] = sr_id
-                elif (state.get("backend_refs") or {}).get("released_sr_id"):
+                elif releases_sr(state.get("backend_refs")):
                     # The turn deliberately let go of the SR to start a new
                     # request (new_request_node). An sr_id is otherwise only
                     # ever written, never cleared, so the draft would restore

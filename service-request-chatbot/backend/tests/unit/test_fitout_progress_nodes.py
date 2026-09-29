@@ -325,7 +325,10 @@ class TestEntryStagePin:
         )
         assert out["workflow_stage"] == "CREATE_SR"
         assert out["collected_data"] == {}
-        assert out["backend_refs"] == {}
+        # Released, not just dropped: the save step clears the finished SR and
+        # its documents from the session draft.
+        assert out["backend_refs"] == {"released_sr_id": "8517"}
+        assert out["documents"] == []
         # IN_PROGRESS, not WAITING_FOR_USER: the new request must be processed
         # on this same turn rather than swallowing the message.
         assert out["status"] == "IN_PROGRESS"
