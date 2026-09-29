@@ -168,7 +168,7 @@ async def _lease_check(
     result = partition_rows_by_lease_access(rows, backend_rows)
     issues: list[dict[str, Any]] = []
     for row in result["no_access"]:
-        issues.append({"lease_code": row.get("lease_code"), "text": "is not linked to your account"})
+        issues.append({"lease_code": row.get("lease_code"), "text": "is not linked to your current company"})
     for row in result["no_pending_row"]:
         ym = year_month_from_start(str(row.get("sales_period_start") or ""))
         month = format_year_month(ym) if ym else "this period"
