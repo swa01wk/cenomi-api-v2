@@ -974,3 +974,57 @@ async def test_a_prose_percentage_answer_reaches_extraction() -> None:
 
     assert result["collected_data"][PROGRESS_FIELD] == "30"
     assert result["response_ui"]["type"] == "confirmation_card"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("retyped, expected", [("30", "30"), ("45", "45")])
+async def test_retyping_the_request_over_the_card_re_renders_it(
+    retyped: str, expected: str
+) -> None:
+    """The whole request typed again while its review card is pending.
+
+    "update" used to reject the card and then read as a correction verb naming
+    no field: nothing was extracted, no card came back, and the reply was
+    improvised. The retype is the request again and lands on the card again.
+    """
+    with ExitStack() as stack:
+        _enter(
+            stack,
+            _patches(
+                extraction_fields={
+                    "lease_code": {"value": "t0105712", "confidence": 0.97},
+                    PROGRESS_FIELD: {"value": "30", "confidence": 0.95},
+                }
+            ),
+        )
+        first = await _GRAPH.ainvoke(
+            _state(user_message="update fitout progress t0105712 30%")
+        )
+    assert first["response_ui"]["type"] == "confirmation_card"
+
+    carried = {
+        key: value
+        for key, value in first.items()
+        if key not in ("response_message", "response_ui", "corrected_fields")
+    }
+    with ExitStack() as stack:
+        _enter(
+            stack,
+            _patches(
+                extraction_fields={
+                    "lease_code": {"value": "t0105712", "confidence": 0.97},
+                    PROGRESS_FIELD: {"value": retyped, "confidence": 0.95},
+                }
+            ),
+        )
+        second = await _GRAPH.ainvoke(
+            {
+                **carried,
+                "user_message": f"update fitout progress t0105712 {retyped}%",
+            }
+        )
+
+    assert second["response_ui"]["type"] == "confirmation_card"
+    assert second["confirmation_status"] == "PENDING"
+    assert second["collected_data"][PROGRESS_FIELD] == expected
+    assert second["collected_data"]["lease_id"] == 95404

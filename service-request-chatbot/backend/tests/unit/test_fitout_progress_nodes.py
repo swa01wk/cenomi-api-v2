@@ -5,6 +5,7 @@ Coverage
 TestEntryRoleGuard        — create is offered only to the role the form offers it to
 TestEntryPercentage       — a typed or tapped percentage resolves without the LLM
 TestEntryConfirmation     — yes / a revised number / anything else
+TestEntryRestatedRequest  — the whole request retyped over a card or a question
 TestEntryCancel           — draft cancel clears; a recorded SR cannot be cancelled
 TestEntryUnsupported      — reassign / attach / action-required / save-only
 TestEntryStagePin         — CREATE_SR vs APPROVE_SR, and the stale-clear
@@ -212,6 +213,91 @@ class TestEntryConfirmation:
             _state(confirmation_status="PENDING", action_override="cancel")
         )
         assert out["confirmation_status"] == "REJECTED"
+
+
+# ---------------------------------------------------------------------------
+# TestEntryRestatedRequest
+# ---------------------------------------------------------------------------
+
+
+class TestEntryRestatedRequest:
+    """"update fitout progress t0112745 30%" retyped over an open draft.
+
+    It used to be read as "update" = reject the card, then as a correction
+    verb naming no field, so nothing was extracted and no card came back.
+    """
+
+    def _pending(self, message: str, **overrides: Any) -> dict[str, Any]:
+        collected = {**_LEASE, PROGRESS_FIELD: "30", PROGRESS_CONFIRMED_KEY: True}
+        return _state(
+            confirmation_status="PENDING",
+            status="WAITING_FOR_USER",
+            collected_data=collected,
+            user_message=message,
+            **overrides,
+        )
+
+    async def test_with_a_lease_code_the_draft_is_read_afresh(self) -> None:
+        out = await fitout_progress_entry_node(
+            self._pending("update fitout progress t0105712 30%")
+        )
+        assert out["workflow_stage"] == "CREATE_SR"
+        assert out["confirmation_status"] is None
+        assert out["status"] == "IN_PROGRESS"
+        # Nothing left for the correction detector to read "update" against,
+        # so extraction takes the sentence exactly as on the first turn.
+        assert out["collected_data"] == {}
+        assert out["selected_lease"] is None
+        assert out["active_field"] is None
+        assert "corrected_fields" not in out
+
+    async def test_a_different_lease_is_not_mixed_with_the_old_one(self) -> None:
+        out = await fitout_progress_entry_node(
+            self._pending("update fit-out progress DUMMY-CUST-001 55 %")
+        )
+        assert "lease_code" not in out["collected_data"]
+        assert "lease_id" not in out["collected_data"]
+
+    async def test_session_bookkeeping_survives_the_restart(self) -> None:
+        state = self._pending("update fitout progress t0105712 45%")
+        state["collected_data"]["_guided_tour_choice"] = "guided"
+        out = await fitout_progress_entry_node(state)
+        assert out["collected_data"] == {"_guided_tour_choice": "guided"}
+
+    async def test_without_a_lease_code_only_the_number_changes(self) -> None:
+        out = await fitout_progress_entry_node(
+            self._pending("fitout progress is 90")
+        )
+        assert out["corrected_fields"] == {PROGRESS_FIELD: "90"}
+        assert out["confirmation_status"] == "REJECTED"
+        assert out["collected_data"]["lease_code"] == "t0105712"
+
+    async def test_while_the_question_is_open(self) -> None:
+        out = await fitout_progress_entry_node(
+            _state(
+                status="WAITING_FOR_USER",
+                active_field=PROGRESS_FIELD,
+                user_message="update fitout progress t0105712 30%",
+            )
+        )
+        assert out["collected_data"] == {}
+        assert out["active_field"] is None
+
+    async def test_an_approval_is_never_restarted(self) -> None:
+        out = await fitout_progress_entry_node(
+            self._pending(
+                "update fitout progress t0105712 30%",
+                workflow_stage="APPROVE_SR",
+                backend_refs={"sr_id": "8517"},
+            )
+        )
+        # Whatever the approval path does, it is not a restart of a create.
+        assert out.get("workflow_stage") != "CREATE_SR"
+        assert out.get("collected_data") != {}
+
+    async def test_a_plain_yes_still_confirms(self) -> None:
+        out = await fitout_progress_entry_node(self._pending("yes"))
+        assert out == {"confirmation_status": "CONFIRMED", "status": "IN_PROGRESS"}
 
 
 # ---------------------------------------------------------------------------

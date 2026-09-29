@@ -496,3 +496,62 @@ class TestExtractionPromptContract:
             if name == "sales_data_agent":
                 continue
             assert "json" in cfg.extraction_prompt.lower(), name
+
+
+class TestFitoutDraftPreviewFields:
+    """What the browser receives to fill a fit-out form from the chat."""
+
+    _COLLECTED = {
+        "lease_brand_mall": "t0112745 - Brand Sweet Moon - Mall Of Arabia",
+        "lease_code": "t0112745",
+        "company": "Qamar Alhalwa Trading CO",
+        "brand": "Brand Sweet Moon",
+        "mall": "Mall Of Arabia",
+        "tenant_profile_id": 116,
+        "lease_id": 95404,
+        "contract_id": 95404,
+        "property_id": 3041,
+        "brand_id": 771,
+        "fitout_progress_percentage": "60",
+    }
+
+    def _keys(self, agent: str, collected: dict | None = None) -> list[str]:
+        from app.services.chat_orchestration_service import (
+            _fitout_draft_preview_fields,
+        )
+
+        return [
+            row["key"]
+            for row in _fitout_draft_preview_fields(
+                agent, collected if collected is not None else self._COLLECTED
+            )
+        ]
+
+    def test_a_typed_lease_carries_the_ids_the_form_submits_with(self) -> None:
+        # Without them Submit on the form failed with "should provide a valid
+        # tenant profile id": a typed lease code has no lease card to bring them.
+        keys = self._keys("rdd_fitout_progress_agent")
+        for key in ("tenant_profile_id", "lease_id", "contract_id", "property_id"):
+            assert key in keys
+
+    @pytest.mark.parametrize(
+        "agent",
+        [
+            "rdd_fitout_start_agent",
+            "rdd_fitout_end_agent",
+            "rdd_trading_confirmation_agent",
+        ],
+    )
+    def test_the_confirmations_get_the_lease_block_and_ids(self, agent: str) -> None:
+        keys = self._keys(agent)
+        assert {"company", "brand", "mall", "tenant_profile_id", "lease_id"} <= set(keys)
+        assert "fitout_progress_percentage" not in keys
+
+    def test_other_agents_get_nothing(self) -> None:
+        assert self._keys("rdd_handover_agent") == []
+
+    def test_empty_values_are_not_sent(self) -> None:
+        keys = self._keys(
+            "rdd_fitout_progress_agent", {"lease_code": "t0112745", "lease_id": ""}
+        )
+        assert keys == ["lease_code"]

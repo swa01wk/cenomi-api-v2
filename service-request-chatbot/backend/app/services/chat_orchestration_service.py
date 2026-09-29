@@ -945,15 +945,25 @@ _FITOUT_AGENTS_WITH_PREVIEW: frozenset[str] = frozenset(
     }
 )
 
-# The lease block every fit-out form shows. Display values only — never the ids
-# (tenant_profile_id, lease_id, …): the handover form keeps the tenant profile
-# id in its company field, and an id written into a display box reads as noise.
+# The lease block every fit-out form shows, plus the ids it submits with. The
+# ids land in hidden fields, never a display box: the browser writes
+# tenant_profile_id into ``company_name`` (the form's id field, as on handover)
+# while these forms display the name from ``company``.
 _FITOUT_LEASE_PREVIEW_KEYS: tuple[tuple[str, str], ...] = (
     ("lease_brand_mall", "Lease"),
     ("lease_code", "Lease Code"),
     ("company", "Company Name"),
     ("brand", "Brand Name"),
     ("mall", "Mall Name"),
+    # The ids the form submits with. A tapped lease chip brings them in its
+    # lease card; a typed lease code has no card, so without these the form
+    # kept the names only and Submit on it failed with "should provide a valid
+    # tenant profile id" (Fitout Progress, open-form mode).
+    ("tenant_profile_id", "Tenant Profile Id"),
+    ("lease_id", "Lease Id"),
+    ("contract_id", "Contract Id"),
+    ("property_id", "Property Id"),
+    ("brand_id", "Brand Id"),
 )
 
 # Fitout Progress's own fields. Limited to this agent on purpose: the three

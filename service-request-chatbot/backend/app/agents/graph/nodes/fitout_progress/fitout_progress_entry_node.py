@@ -40,8 +40,10 @@ from app.agents.schemas.fitout_progress_schema import (
     PROGRESS_FIELD,
     TERMINAL_STAGES,
 )
+from app.agents.services.field_correction_service import draft_has_content
 from app.agents.services.fitout_progress_suggestions_service import (
     format_percentage,
+    parse_percentage,
     parse_percentage_answer,
 )
 from app.agents.services.sr_release import released_backend_refs
@@ -182,6 +184,15 @@ _UNSUPPORTED: tuple[tuple[re.Pattern[str], str], ...] = (
         ),
     ),
 )
+
+# Naming the workflow again is restating the request, not answering the open
+# question: "update fitout progress t0112745 30%" typed over the review card.
+_RESTATED_REQUEST_RE = re.compile(r"\bfit[\s-]?out\s+progress\b", re.IGNORECASE)
+
+# A lease code is letters and digits together (t0112745, DUMMY-CUST-001); a
+# percentage is digits alone, so "30%" never counts as one.
+_LEASE_TOKEN_RE = re.compile(r"\b(?=[\w-]*[A-Za-z])(?=[\w-]*\d)[\w-]{4,}\b")
+_NUMBER_RE = re.compile(r"\d+(?:\.\d+)?")
 
 _CLEARED_DRAFT_MESSAGE = (
     "Nothing was recorded — I've cleared the draft. "
@@ -375,7 +386,12 @@ async def fitout_progress_entry_node(state: ServiceRequestState) -> dict[str, An
         )
         return patch
 
-    # ── 3. Confirmation response parsing ──────────────────────────────────
+    # ── 3. The request restated over an open draft ────────────────────────
+    restart = _restart_restated_request(state)
+    if restart is not None:
+        return restart
+
+    # ── 4. Confirmation response parsing ──────────────────────────────────
     if confirmation_status == "PENDING":
         if _contains_phrase(user_message, _CONFIRM_PHRASES):
             log.info("fitout_progress_entry.confirmation_accepted")
@@ -404,7 +420,7 @@ async def fitout_progress_entry_node(state: ServiceRequestState) -> dict[str, An
             ),
         }
 
-    # ── 4. Actions this workflow does not have ────────────────────────────
+    # ── 5. Actions this workflow does not have ────────────────────────────
     unsupported = _unsupported_request(user_message)
     if unsupported is not None:
         log.info("fitout_progress_entry.unsupported_request")
@@ -414,7 +430,7 @@ async def fitout_progress_entry_node(state: ServiceRequestState) -> dict[str, An
             "response_ui": {"type": "message", "verbatim": True},
         }
 
-    # ── 5. Stale-clear for terminal stages or a previous failure ──────────
+    # ── 6. Stale-clear for terminal stages or a previous failure ──────────
     if str(state.get("intent") or "") == CREATE_INTENT and (
         state.get("workflow_stage") in TERMINAL_STAGES
         or state.get("status") == "FAILED"
@@ -443,7 +459,7 @@ async def fitout_progress_entry_node(state: ServiceRequestState) -> dict[str, An
             "active_field": None,
         }
 
-    # ── 6. Stage-pin on the first turn ────────────────────────────────────
+    # ── 7. Stage-pin on the first turn ────────────────────────────────────
     #
     # ``status`` is cleared with the stage. The routers short-circuit a turn
     # whose persisted status is WAITING_FOR_USER straight to
@@ -472,6 +488,80 @@ async def fitout_progress_entry_node(state: ServiceRequestState) -> dict[str, An
         return {"workflow_stage": "CREATE_SR", **fresh}
 
     return {}
+
+
+def _restart_restated_request(state: ServiceRequestState) -> dict[str, Any] | None:
+    """Start the create over when the user restates it, or None.
+
+    Retyping "update fitout progress t0112745 30%" over the review card used
+    to read "update" as a rejection of the card, and then field_extraction
+    read it as a correction verb with no field named — so nothing was
+    extracted, no card came back and the reply was improvised. The message is
+    the whole request again, possibly with a new lease or number, so it is
+    treated exactly as it was on the first turn: the draft is dropped and
+    extraction reads the sentence afresh, which is the path that already
+    goes straight to the card.
+
+    Without a lease code ("fitout progress is 90") the lease stays and only
+    the number is taken, as a bare number on the card is; dropping the draft
+    there would ask for a lease the user never meant to change.
+
+    Only while creating and before anything is submitted — an approval is
+    about an SR that already exists, and there is nothing to restart there.
+    Session bookkeeping (underscore keys such as the guided-tour choice)
+    survives, apart from the "answered" flag the new reading sets again.
+    """
+    if state.get("workflow_stage") != "CREATE_SR":
+        return None
+    if (state.get("backend_refs") or {}).get("sr_id"):
+        return None
+    user_message = str(state.get("user_message") or "")
+    if not _RESTATED_REQUEST_RE.search(user_message):
+        return None
+    collected = state.get("collected_data") or {}
+    if not draft_has_content(collected):
+        return None
+
+    if not _LEASE_TOKEN_RE.search(user_message):
+        numbers = _NUMBER_RE.findall(user_message)
+        value = parse_percentage(numbers[0]) if len(numbers) == 1 else None
+        if value is None:
+            return None
+        revised = dict(collected)
+        revised[PROGRESS_CONFIRMED_KEY] = True
+        log.info("fitout_progress_entry.request_restated_percentage", value=value)
+        return {
+            "collected_data": revised,
+            "corrected_fields": {PROGRESS_FIELD: format_percentage(value)},
+            "confirmation_status": "REJECTED",
+            "status": "IN_PROGRESS",
+            "active_field": None,
+        }
+
+    log.info(
+        "fitout_progress_entry.request_restated",
+        confirmation_status=state.get("confirmation_status"),
+    )
+    bookkeeping = {
+        key: value
+        for key, value in collected.items()
+        if key.startswith("_") and key != PROGRESS_CONFIRMED_KEY
+    }
+    return {
+        "workflow_stage": "CREATE_SR",
+        "confirmation_status": None,
+        "confirmation_required": False,
+        "collected_data": bookkeeping,
+        "extracted_fields": {},
+        "missing_fields": [],
+        "validation_errors": [],
+        "selected_lease": None,
+        "lease_matches": [],
+        "response_ui": {},
+        "status": "IN_PROGRESS",
+        "active_field": None,
+        "correction_pending_field": None,
+    }
 
 
 def _start_rejection(state: ServiceRequestState) -> dict[str, Any]:
