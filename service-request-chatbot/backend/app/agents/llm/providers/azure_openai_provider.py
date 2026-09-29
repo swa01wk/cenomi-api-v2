@@ -26,13 +26,21 @@ class AzureOpenAIGateway(BaseLLMGateway):
         api_key: str,
         api_version: str = "2024-02-15-preview",
         temperature: float = 0.0,
+        timeout: float | None = None,
+        max_retries: int = 2,
     ) -> None:
         super().__init__(model=model, provider_name="azure_openai")
         self._temperature = temperature
+        # The SDK treats an explicit ``timeout=None`` as "never time out", so the
+        # argument is only forwarded when set.
+        client_kwargs: dict[str, Any] = {"max_retries": max_retries}
+        if timeout is not None:
+            client_kwargs["timeout"] = timeout
         self._client = AsyncAzureOpenAI(
             azure_endpoint=azure_endpoint,
             api_key=api_key,
             api_version=api_version,
+            **client_kwargs,
         )
 
     @classmethod
@@ -45,6 +53,8 @@ class AzureOpenAIGateway(BaseLLMGateway):
             api_key=settings.azure_ai_api_key or "",
             api_version=settings.azure_ai_api_version,
             temperature=0.0,
+            timeout=settings.azure_openai_request_timeout_seconds,
+            max_retries=settings.azure_openai_max_retries,
         )
 
     async def generate(
