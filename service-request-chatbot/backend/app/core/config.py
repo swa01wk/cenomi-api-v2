@@ -283,11 +283,12 @@ class Settings(BaseSettings):
         description="Azure OpenAI deployment name for chat completions (defaults to LLM_MODEL when absent).",
     )
     azure_openai_request_timeout_seconds: float = Field(
-        default=45.0,
+        default=20.0,
         validation_alias="AZURE_OPENAI_REQUEST_TIMEOUT_SECONDS",
         description=(
-            "Per-attempt timeout for Azure OpenAI chat completions. The SDK default "
-            "(600s) lets a stalled request hang a chat turn for ten minutes."
+            "Per-attempt timeout for Azure OpenAI chat completions. Healthy calls "
+            "finish in 2-11s; the SDK default (600s) let a stalled request hang a "
+            "chat turn for ten minutes, and 20s retries it long before that."
         ),
     )
     azure_openai_max_retries: int = Field(
