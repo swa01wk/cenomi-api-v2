@@ -41,6 +41,7 @@ from app.agents.services.action_resolver import (
     resolve_actions,
     wp_assign_to_options,
 )
+from app.agents.services.conversation_state_service import PENDING_REVIEW_REFS
 from app.agents.services.permission_service import PermissionService
 from app.observability.decorators import trace_node
 from app.types.chat import AuthContext
@@ -203,13 +204,135 @@ def _normalize_review_action(action_override: str | None) -> str | None:
     return None
 
 
-def _comment_from_state(state: ServiceRequestState, user_message: str) -> str:
-    collected = state.get("collected_data") or {}
-    for key in ("comments", "notes", "comment"):
-        val = str(collected.get(key) or "").strip()
-        if val:
-            return val
-    return (user_message or "").strip()
+# A button click sends its id (or label) as the message; neither is a comment.
+_ACTION_ECHOES: frozenset[str] = frozenset(
+    a.casefold()
+    for a in (
+        *_APPROVE_ACTIONS,
+        *_REJECT_SR_ACTIONS,
+        *_MORE_INFO_ACTIONS,
+        *_ASSIGN_ACTIONS,
+        *_EXTEND_ACTIONS,
+        *_CANCEL_PERMIT_ACTIONS,
+        "Approve",
+        "Reject",
+        "Ask for more info",
+        "Assign to",
+        "Extend",
+        "Cancel permit",
+    )
+)
+_SKIP_COMMENT_VALUE = "approve without comment"
+_SKIP_COMMENT_PHRASES: frozenset[str] = frozenset(
+    {_SKIP_COMMENT_VALUE, "without comment", "no comment", "skip", "no", "none"}
+)
+_CANCEL_PROMPT_PHRASES: frozenset[str] = frozenset(
+    {"cancel", "never mind", "nevermind", "stop"}
+)
+_CANCEL_CHIP: dict[str, str] = {"label": "Cancel", "value": "cancel"}
+
+# action_key → (action id, label, prompt, comment required)
+_COMMENT_PROMPTS: dict[str, tuple[str, str, str, bool]] = {
+    "approve": (
+        WP_ACTION_APPROVE,
+        "Approve",
+        "I'll approve this permit. Would you like to add a comment? It's optional.",
+        False,
+    ),
+    "action_required": (
+        WP_ACTION_MORE_INFO,
+        "Ask for more info",
+        "I'll send this back to the tenant. What should I tell them?",
+        True,
+    ),
+    "reject": (
+        WP_ACTION_REJECT,
+        "Reject",
+        "I'll reject this permit. What reason should I include?",
+        True,
+    ),
+}
+
+
+def _reply_text(user_message: str) -> str:
+    """The user's typed reply, or ``""`` when it is a clicked action's echo."""
+    text = (user_message or "").strip()
+    return "" if text.casefold() in _ACTION_ECHOES else text
+
+
+def _ask_for_comment(state: ServiceRequestState, action_key: str) -> dict[str, Any]:
+    action_id, label, prompt, required = _COMMENT_PROMPTS[action_key]
+    options = [_CANCEL_CHIP]
+    comment_for: dict[str, Any] = {
+        "action_id": action_id,
+        "label": label,
+        "required": required,
+    }
+    if not required:
+        options = [{"label": "Approve without comment", "value": _SKIP_COMMENT_VALUE}, _CANCEL_CHIP]
+        comment_for["skip_value"] = _SKIP_COMMENT_VALUE
+    return _ask_for_input(
+        state,
+        pending=action_key,
+        message=prompt,
+        suggestions={"kind": "labeled_options", "options": options},
+        ui_extra={"comment_for": comment_for, "verbatim": True},
+    )
+
+
+def _clear_pending(backend_refs: dict[str, Any]) -> None:
+    for key in PENDING_REVIEW_REFS:
+        backend_refs.pop(key, None)
+
+
+def _mark_pending(
+    backend_refs: dict[str, Any], state: ServiceRequestState, pending: str
+) -> None:
+    backend_refs["wp_pending_action"] = pending
+    backend_refs["wp_pending_stage"] = state.get("workflow_stage") or ""
+    backend_refs["wp_pending_sr_id"] = str(backend_refs.get("sr_id") or "")
+
+
+def _pending_is_current(backend_refs: dict[str, Any], workflow_stage: str) -> bool:
+    """A prompt only answers on the stage and SR it was asked on."""
+    return str(backend_refs.get("wp_pending_stage") or "") == workflow_stage and str(
+        backend_refs.get("wp_pending_sr_id") or ""
+    ) == str(backend_refs.get("sr_id") or "")
+
+
+def _cancel_pending_prompt(state: ServiceRequestState) -> dict[str, Any]:
+    backend_refs = dict(state.get("backend_refs") or {})
+    _clear_pending(backend_refs)
+    backend_refs.pop("wp_review_comment", None)
+    message = "No problem, the permit is still waiting for your review."
+    return {
+        "backend_refs": backend_refs,
+        "confirmation_status": "PENDING",
+        "confirmation_required": True,
+        "status": "WAITING_FOR_USER",
+        "response_message": message,
+        "response_ui": {"type": "message", "message": message, "verbatim": True},
+        "response_decorations": {},
+    }
+
+
+def _confirmed(
+    backend_refs: dict[str, Any], *, action_key: str, comment: str
+) -> dict[str, Any]:
+    backend_refs["wp_action"] = action_key
+    if comment:
+        backend_refs["wp_review_comment"] = comment
+    else:
+        backend_refs.pop("wp_review_comment", None)
+    duration = backend_refs.get("wp_extension_duration")
+    _clear_pending(backend_refs)
+    if action_key == "extend" and duration is not None:
+        backend_refs["wp_extension_duration"] = duration
+    return {
+        "backend_refs": backend_refs,
+        "confirmation_status": "CONFIRMED",
+        "status": "IN_PROGRESS",
+    }
 
 
 def _parse_duration(text: str) -> dict[str, int] | None:
@@ -233,10 +356,11 @@ def _ask_for_input(
     pending: str,
     message: str,
     suggestions: dict[str, Any] | None = None,
+    ui_extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     backend_refs = dict(state.get("backend_refs") or {})
-    backend_refs["wp_pending_action"] = pending
-    ui: dict[str, Any] = {"type": "message", "message": message}
+    _mark_pending(backend_refs, state, pending)
+    ui: dict[str, Any] = {"type": "message", "message": message, **(ui_extra or {})}
     if suggestions:
         ui["suggestions"] = suggestions
     return {
@@ -256,8 +380,14 @@ def _begin_or_complete_review_action(
     workflow_stage: str,
     action_key: str,
     user_message: str = "",
+    resuming: bool = False,
 ) -> dict[str, Any]:
-    """Validate permission, collect required inputs, then set CONFIRMED."""
+    """Validate permission, collect the comment and other inputs, then set CONFIRMED.
+
+    Starting an action always asks for its comment in chat; only the reply to
+    that prompt (``resuming``) is taken as the comment, so a clicked button's
+    id, a typed "approve", or an earlier hop's comment never is.
+    """
     denied = _deny_review_action(state, workflow_stage)
     if denied is not None:
         return denied
@@ -294,32 +424,26 @@ def _begin_or_complete_review_action(
                 "response_ui": {"type": "message"},
             }
 
-    collected = dict(state.get("collected_data") or {})
     backend_refs = dict(state.get("backend_refs") or {})
-    comment = _comment_from_state(state, user_message)
+    reply = _reply_text(user_message) if resuming else ""
+    if resuming and reply.casefold() in _CANCEL_PROMPT_PHRASES:
+        return _cancel_pending_prompt(state)
 
     if action_key in {"reject", "action_required"}:
-        if not comment:
-            prompt = (
-                "I'll send that back. What should I tell them?"
-                if action_key == "action_required"
-                else "I'll decline this permit. What reason should I include?"
-            )
-            return _ask_for_input(state, pending=action_key, message=prompt)
-        collected["comments"] = comment
-        backend_refs["wp_action"] = action_key
-        backend_refs.pop("wp_pending_action", None)
-        return {
-            "collected_data": collected,
-            "backend_refs": backend_refs,
-            "confirmation_status": "CONFIRMED",
-            "status": "IN_PROGRESS",
-        }
+        if not reply:
+            return _ask_for_comment(state, action_key)
+        return _confirmed(backend_refs, action_key=action_key, comment=reply)
+
+    if action_key == "approve":
+        if not resuming or not reply:
+            return _ask_for_comment(state, action_key)
+        comment = "" if reply.casefold() in _SKIP_COMMENT_PHRASES else reply
+        return _confirmed(backend_refs, action_key="approve", comment=comment)
 
     if action_key == "assign_to":
         role = str(
             backend_refs.get("wp_assign_to")
-            or collected.get("assign_to")
+            or (state.get("collected_data") or {}).get("assign_to")
             or ""
         ).strip()
         # Message may be the role value from a chip.
@@ -368,21 +492,13 @@ def _begin_or_complete_review_action(
                     ],
                 },
             )
-        backend_refs["wp_action"] = "assign_to"
         backend_refs["wp_assign_to"] = role
-        backend_refs.pop("wp_pending_action", None)
-        if comment:
-            collected["comments"] = comment
-        return {
-            "collected_data": collected,
-            "backend_refs": backend_refs,
-            "confirmation_status": "CONFIRMED",
-            "status": "IN_PROGRESS",
-        }
+        return _confirmed(backend_refs, action_key="assign_to", comment="")
 
     if action_key == "extend":
         duration = backend_refs.get("wp_extension_duration")
-        if not isinstance(duration, dict):
+        has_duration = isinstance(duration, dict)
+        if not has_duration:
             duration = _parse_duration(user_message)
         if not duration:
             return _ask_for_input(
@@ -402,9 +518,10 @@ def _begin_or_complete_review_action(
                     ],
                 },
             )
+        comment = reply if has_duration else ""
         if not comment:
             backend_refs["wp_extension_duration"] = duration
-            backend_refs["wp_pending_action"] = "extend"
+            _mark_pending(backend_refs, state, "extend")
             return {
                 "backend_refs": backend_refs,
                 "confirmation_status": "PENDING",
@@ -412,19 +529,11 @@ def _begin_or_complete_review_action(
                 "response_message": "Got it. Any comment to include with the extension?",
                 "response_ui": {"type": "message"},
             }
-        backend_refs["wp_action"] = "extend"
         backend_refs["wp_extension_duration"] = duration
-        backend_refs.pop("wp_pending_action", None)
-        collected["comments"] = comment
-        return {
-            "collected_data": collected,
-            "backend_refs": backend_refs,
-            "confirmation_status": "CONFIRMED",
-            "status": "IN_PROGRESS",
-        }
+        return _confirmed(backend_refs, action_key="extend", comment=comment)
 
     if action_key == "cancel_permit":
-        if not comment:
+        if not reply:
             return _ask_for_input(
                 state,
                 pending="cancel_permit",
@@ -433,32 +542,35 @@ def _begin_or_complete_review_action(
                     "what comment should I include?"
                 ),
             )
-        backend_refs["wp_action"] = "cancel_permit"
-        backend_refs.pop("wp_pending_action", None)
-        collected["comments"] = comment
-        return {
-            "collected_data": collected,
-            "backend_refs": backend_refs,
-            "confirmation_status": "CONFIRMED",
-            "status": "IN_PROGRESS",
-        }
+        return _confirmed(backend_refs, action_key="cancel_permit", comment=reply)
 
-    # approve — comment optional
-    if comment:
-        collected["comments"] = comment
-    backend_refs["wp_action"] = "approve"
-    backend_refs.pop("wp_pending_action", None)
-    return {
-        "collected_data": collected,
-        "backend_refs": backend_refs,
-        "confirmation_status": "CONFIRMED",
-        "status": "IN_PROGRESS",
-    }
+    return _confirmed(backend_refs, action_key=action_key, comment="")
 
 
 @trace_node("work_permit_entry", "AGENT")
 async def work_permit_entry_node(state: ServiceRequestState) -> dict[str, Any]:
     """Parse confirmation / cancel / approve / reject at the WP workflow boundary."""
+    backend_refs: dict[str, Any] = dict(state.get("backend_refs") or {})
+    workflow_stage: str = state.get("workflow_stage") or ""
+    pending = backend_refs.get("wp_pending_action")
+    if not pending or (
+        workflow_stage in WP_REVIEW_STAGES and _pending_is_current(backend_refs, workflow_stage)
+    ):
+        return await _work_permit_entry(state)
+
+    # An abandoned prompt from another hop or SR must not swallow this reply.
+    log.info(
+        "work_permit_entry.stale_pending_dropped",
+        pending=pending,
+        pending_stage=backend_refs.get("wp_pending_stage"),
+        workflow_stage=workflow_stage,
+    )
+    _clear_pending(backend_refs)
+    result = await _work_permit_entry({**state, "backend_refs": backend_refs})  # type: ignore[typeddict-item]
+    return result if "backend_refs" in result else {**result, "backend_refs": backend_refs}
+
+
+async def _work_permit_entry(state: ServiceRequestState) -> dict[str, Any]:
     user_message: str = state.get("user_message") or ""
     confirmation_status: str | None = state.get("confirmation_status")
     action_override: str | None = state.get("action_override")  # type: ignore[assignment]
@@ -517,6 +629,7 @@ async def work_permit_entry_node(state: ServiceRequestState) -> dict[str, Any]:
             workflow_stage=workflow_stage,
             action_key=pending,
             user_message=user_message,
+            resuming=True,
         )
 
     # ── 1. Workflow cancel / restart ───────────────────────────────────────

@@ -397,6 +397,17 @@ async def sr_status_sync_node(state: ServiceRequestState) -> dict[str, Any]:
     history = list(getattr(result, "service_request_history", None) or [])
     if history:
         backend_refs["sr_history"] = history
+    creator = {
+        key: value
+        for key, value in (
+            ("name", getattr(result, "created_by", None)),
+            ("role", getattr(result, "created_user_role", None)),
+            ("created_at", getattr(result, "created_at", None)),
+        )
+        if isinstance(value, str) and value.strip()
+    }
+    if creator:
+        backend_refs["sr_creator"] = creator
     extension = getattr(result, "work_permit_extension", None)
     if isinstance(extension, dict):
         backend_refs["work_permit_extension"] = extension

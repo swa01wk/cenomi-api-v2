@@ -363,6 +363,36 @@ async def test_general_inquiry_open_stays_on_crt_review() -> None:
 
 
 @pytest.mark.asyncio
+async def test_history_and_creator_stored_in_backend_refs() -> None:
+    ops = [{"assigned_role": "FM_MANAGER", "status": "IN_PROGRESS"}]
+    mock_result = _make_result(ops)
+    mock_result.service_request_history = [
+        {"status": "CREATED", "operator_name": "Ali Hassan"}
+    ]
+    mock_result.created_by = "Ali Hassan"
+    mock_result.created_user_role = "PRIMARY_TENANT_CONTACT"
+    with patch(
+        "app.agents.graph.nodes.shared.sr_status_sync_node.get_service_request_api_service",
+        return_value=AsyncMock(get_service_request=AsyncMock(return_value=mock_result)),
+    ):
+        result = await sr_status_sync_node(_base_state())
+    refs = result["backend_refs"]
+    assert refs["sr_history"] == [{"status": "CREATED", "operator_name": "Ali Hassan"}]
+    assert refs["sr_creator"] == {"name": "Ali Hassan", "role": "PRIMARY_TENANT_CONTACT"}
+
+
+@pytest.mark.asyncio
+async def test_no_creator_fields_leave_no_sr_creator() -> None:
+    ops = [{"assigned_role": "FM_MANAGER", "status": "IN_PROGRESS"}]
+    with patch(
+        "app.agents.graph.nodes.shared.sr_status_sync_node.get_service_request_api_service",
+        return_value=AsyncMock(get_service_request=AsyncMock(return_value=_make_result(ops))),
+    ):
+        result = await sr_status_sync_node(_base_state())
+    assert "sr_creator" not in result["backend_refs"]
+
+
+@pytest.mark.asyncio
 async def test_no_sr_id_returns_empty_dict() -> None:
     state = {
         "session_id": "sess-empty",

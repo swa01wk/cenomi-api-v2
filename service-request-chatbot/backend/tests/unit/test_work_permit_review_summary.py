@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import pytest
+
 from app.agents.services.work_permit_review_summary import (
+    build_wp_review_details,
     build_wp_review_facts,
     build_wp_review_prompt_suggestions,
     build_wp_review_summary,
+    compose_wp_history_sentence,
     compose_wp_review_message,
 )
 
@@ -160,3 +164,287 @@ class TestWpReviewSummaryItems:
         assert deco["kind"] == "labeled_options"
         for opt in deco["options"]:
             assert "action" not in opt or opt.get("action") is None
+
+
+class TestWpReviewDetailsSummaryKey:
+    def test_cold_details_point_at_the_summary_items_they_repeat(self) -> None:
+        details = build_wp_review_details(_cold_collected(), subtype="CONSTRUCTION_COLD")
+        tagged = {d["key"]: d.get("summaryKey") for d in details}
+        assert tagged["brand"] == "brand"
+        assert tagged["mall"] == "mall"
+        assert tagged["unit_codes"] == "unit"
+        assert tagged["work_permit_type"] == "request_type"
+        assert tagged["type_work"] == "type_of_work"
+        assert tagged["planneddate"] == "schedule"
+        assert tagged["list_equipment"] is None
+        assert tagged["responsible_person"] is None
+
+    def test_ops_schedule_fields_fold_into_schedule(self) -> None:
+        details = build_wp_review_details(_ops_collected(), subtype="OPERATIONS")
+        tagged = {d["key"]: d.get("summaryKey") for d in details}
+        assert tagged["typeofwork"] == "type_of_work"
+        assert tagged["effective_starting"] == "schedule"
+        assert tagged["firstperiod"] == "schedule"
+        assert tagged["entry_gate"] is None
+
+
+def _history(*rows: dict) -> list[dict]:
+    return list(rows)
+
+
+_ALI_CREATED = {
+    "status": "CREATED",
+    "operator_name": "Ali Hassan",
+    "operator_role": "PRIMARY_TENANT_CONTACT",
+    "user_type": "ADMIN",
+    "created_at": "2026-09-28T08:00:00.000Z",
+}
+
+
+class TestWpHistorySentence:
+    def test_submitted_only_names_the_submitter(self) -> None:
+        assert compose_wp_history_sentence(_history(_ALI_CREATED)) == (
+            "**Ali Hassan** (Tenant) submitted this request."
+        )
+
+    def test_submitter_then_latest_step(self) -> None:
+        sentence = compose_wp_history_sentence(
+            _history(
+                _ALI_CREATED,
+                {"status": "APPROVED", "operator_name": "Omar", "operator_role": "FM_MANAGER",
+                 "created_at": "2026-09-28T12:00:00.000Z"},
+                {"status": "APPROVED", "operator_name": "Sara", "operator_role": "DD_ENGINEER",
+                 "created_at": "2026-09-29T10:15:00.000Z"},
+            )
+        )
+        assert sentence == (
+            "**Ali Hassan** (Tenant) submitted this request, and "
+            "**Sara** (DD Engineer) approved it."
+        )
+
+    def test_latest_step_without_a_submission_row(self) -> None:
+        sentence = compose_wp_history_sentence(
+            _history({"status": "APPROVED", "operator_name": "Sara", "operator_role": 12,
+                      "created_at": "2026-09-29T10:15:00.000Z"})
+        )
+        assert sentence == "**Sara** (DD Engineer) approved this request."
+
+    def test_creator_fills_in_the_submitter(self) -> None:
+        sentence = compose_wp_history_sentence(
+            _history({"status": "ACTION_REQUIRED", "operator_role": "FM_MANAGER"}),
+            creator={"name": "Ali Hassan", "role": "PRIMARY_TENANT_CONTACT",
+                     "created_at": "2026-09-28T08:00:00Z"},
+        )
+        assert sentence == (
+            "**Ali Hassan** (Tenant) submitted this request, and "
+            "the **FM Manager** asked for more information."
+        )
+
+    def test_creator_alone(self) -> None:
+        assert compose_wp_history_sentence(None, creator={"name": "Ali Hassan"}) == (
+            "**Ali Hassan** submitted this request."
+        )
+
+    def test_tenant_user_type_is_a_role(self) -> None:
+        sentence = compose_wp_history_sentence(
+            _history({"status": "CREATED", "operator_name": "Ali", "user_type": "TENANT"})
+        )
+        assert sentence == "**Ali** (Tenant) submitted this request."
+
+    def test_form_saves_and_skips_are_ignored(self) -> None:
+        sentence = compose_wp_history_sentence(
+            _history(
+                {"status": "CREATED", "operator_name": "Ali", "user_type": "TENANT"},
+                {"status": "UPDATE", "operator_name": "Omar"},
+                {"status": "SKIPPED"},
+                {"status": "RE_EXAMINE", "operator_name": "Omar"},
+            )
+        )
+        assert sentence == "**Ali** (Tenant) submitted this request."
+
+    def test_no_actor_goes_passive_without_inventing_a_person(self) -> None:
+        sentence = compose_wp_history_sentence(
+            _history(
+                {"status": "CREATED", "operator_name": "Ali"},
+                {"status": "REJECTED", "created_at": "not-a-date"},
+            )
+        )
+        assert sentence == "**Ali** submitted this request, and it was rejected."
+
+    def test_dates_are_never_shown(self) -> None:
+        sentence = compose_wp_history_sentence(
+            _history(
+                _ALI_CREATED,
+                {"status": "APPROVED", "operator_name": "Sara", "operator_role": "DD_ENGINEER",
+                 "created_at": "2026-09-29T10:15:00.000Z"},
+            )
+        )
+        assert "/2026" not in sentence
+        assert " on **" not in sentence
+
+    @pytest.mark.parametrize(
+        "role", ["COMPANY_ADMIN", "COMPANY_ADMIN_CENTRAL", "AUTHORIZED_SIGNATORY", "STORE MANAGER"]
+    )
+    def test_tenant_side_roles_read_tenant(self, role: str) -> None:
+        sentence = compose_wp_history_sentence(
+            _history({"status": "CREATED", "operator_name": "Tenant Central",
+                      "operator_role": role, "user_type": "ADMIN"})
+        )
+        assert sentence == "**Tenant Central** (Tenant) submitted this request."
+
+    def test_leasing_manager_keeps_its_label(self) -> None:
+        sentence = compose_wp_history_sentence(
+            _history({"status": "CREATED", "operator_name": "Lina",
+                      "operator_role": "LEASING_MANAGER"})
+        )
+        assert sentence == "**Lina** (Leasing Manager) submitted this request."
+
+    @pytest.mark.parametrize(
+        "reply", ["RE_EXAMINE", "UPDATE", "IN_PROCESS", "RE_SUBMITTED", "SUBMITTED", "SUBMIT"]
+    )
+    def test_tenant_reply_to_send_back_is_a_resubmission(self, reply: str) -> None:
+        sentence = compose_wp_history_sentence(
+            _history(
+                {"status": "CREATED", "operator_name": "Tenant Central",
+                 "operator_role": "COMPANY_ADMIN"},
+                {"status": "ACTION_REQUIRED", "operator_name": "IT User7",
+                 "operator_role": "MALL_MANAGER"},
+                {"status": reply, "operator_name": "Tenant Central",
+                 "operator_role": "COMPANY_ADMIN"},
+            )
+        )
+        assert sentence == (
+            "**Tenant Central** (Tenant) submitted this request, and "
+            "resubmitted it with the requested information."
+        )
+
+    def test_submitted_again_after_mall_manager_send_back(self) -> None:
+        # SR 341529: FM approved, the Mall Manager sent it back, and the
+        # tenant's resubmission came back as a second "Submitted" row.
+        sentence = compose_wp_history_sentence(
+            _history(
+                {"status": "SUBMITTED", "operator_name": "Tenant Central",
+                 "operator_role": "COMPANY_ADMIN_CENTRAL"},
+                {"status": "APPROVED", "operator_name": "IT User6",
+                 "operator_role": "FM_MANAGER", "comment": "confirm_approve_wp"},
+                {"status": "ACTION_REQUIRED", "operator_name": "IT User7",
+                 "operator_role": "MALL_MANAGER", "comment": "ask_more_info_wp"},
+                {"status": "SUBMITTED", "operator_name": "Tenant Central",
+                 "operator_role": "COMPANY_ADMIN_CENTRAL"},
+            )
+        )
+        assert sentence == (
+            "**Tenant Central** (Tenant) submitted this request, and "
+            "resubmitted it with the requested information."
+        )
+
+    def test_repeat_submission_without_send_back_is_not_a_step(self) -> None:
+        sentence = compose_wp_history_sentence(
+            _history(
+                {"status": "SUBMITTED", "operator_name": "Tenant Central",
+                 "operator_role": "COMPANY_ADMIN"},
+                {"status": "APPROVED", "operator_name": "Sara", "operator_role": "DD_ENGINEER"},
+                {"status": "SUBMITTED", "operator_name": "Tenant Central",
+                 "operator_role": "COMPANY_ADMIN"},
+            )
+        )
+        assert sentence == (
+            "**Tenant Central** (Tenant) submitted this request, and "
+            "**Sara** (DD Engineer) approved it."
+        )
+
+    def test_unanswered_send_back_names_the_reviewer(self) -> None:
+        sentence = compose_wp_history_sentence(
+            _history(
+                {"status": "CREATED", "operator_name": "Tenant Central",
+                 "operator_role": "COMPANY_ADMIN"},
+                {"status": "ACTION_REQUIRED", "operator_name": "IT User7",
+                 "operator_role": "MALL_MANAGER"},
+            )
+        )
+        assert sentence == (
+            "**Tenant Central** (Tenant) submitted this request, and "
+            "**IT User7** (Mall Manager) asked for more information."
+        )
+
+    def test_resubmission_by_someone_else_keeps_their_name(self) -> None:
+        sentence = compose_wp_history_sentence(
+            _history(
+                {"status": "CREATED", "operator_name": "Tenant Central",
+                 "operator_role": "COMPANY_ADMIN"},
+                {"status": "REQUESTED_RE_UPLOAD", "operator_name": "IT User7",
+                 "operator_role": "MALL_MANAGER"},
+                {"status": "UPDATE", "operator_name": "Omar", "user_type": "TENANT"},
+            )
+        )
+        assert sentence == (
+            "**Tenant Central** (Tenant) submitted this request, and "
+            "**Omar** (Tenant) resubmitted it with the requested information."
+        )
+
+    def test_later_decision_after_resubmission_wins(self) -> None:
+        sentence = compose_wp_history_sentence(
+            _history(
+                {"status": "CREATED", "operator_name": "Tenant Central",
+                 "operator_role": "COMPANY_ADMIN"},
+                {"status": "ACTION_REQUIRED", "operator_name": "IT User7"},
+                {"status": "RE_EXAMINE", "operator_name": "Tenant Central"},
+                {"status": "APPROVED", "operator_name": "Sara", "operator_role": "DD_ENGINEER"},
+                {"status": "UPDATE", "operator_name": "Sara"},
+            )
+        )
+        assert sentence == (
+            "**Tenant Central** (Tenant) submitted this request, and "
+            "**Sara** (DD Engineer) approved it."
+        )
+
+    def test_history_rows_are_not_mutated(self) -> None:
+        rows = _history(
+            {"status": "CREATED", "operator_name": "A"},
+            {"status": "ACTION_REQUIRED", "operator_name": "B"},
+            {"status": "RE_EXAMINE", "operator_name": "A"},
+        )
+        compose_wp_history_sentence(rows)
+        assert rows[2]["status"] == "RE_EXAMINE"
+
+    def test_nothing_known_gives_no_sentence(self) -> None:
+        assert compose_wp_history_sentence(None) == ""
+        assert compose_wp_history_sentence([{"status": "UPDATE"}, "junk"]) == ""  # type: ignore[list-item]
+        assert compose_wp_history_sentence(None, creator={"name": " "}) == ""
+
+    def test_unknown_status_is_humanized(self) -> None:
+        sentence = compose_wp_history_sentence(
+            _history({"status": "ON_HOLD", "operator_name": "Sara"})
+        )
+        assert sentence.startswith("**Sara** moved this request to **")
+        assert "ON_HOLD" not in sentence
+
+    def test_message_ends_with_history_then_question(self) -> None:
+        msg = compose_wp_review_message(
+            _cold_collected(),
+            workflow_stage="WP_FM_REVIEW",
+            request_history=_history(
+                _ALI_CREATED,
+                {"status": "APPROVED", "operator_name": "Sara", "operator_role": "DD_ENGINEER"},
+            ),
+        )
+        parts = msg.split("\n\n")
+        assert len(parts) == 4
+        assert parts[0] == "Hi!"
+        assert parts[1].startswith("**Zara** wants to carry out")
+        assert parts[2] == (
+            "This **Construction – Cold Work** permit is now pending your **FM review**."
+        )
+        assert parts[3] == (
+            "**Ali Hassan** (Tenant) submitted this request, and "
+            "**Sara** (DD Engineer) approved it. What would you like to do?"
+        )
+
+    def test_message_without_history_keeps_question_on_pending_line(self) -> None:
+        parts = compose_wp_review_message(
+            _cold_collected(), workflow_stage="WP_DD_REVIEW"
+        ).split("\n\n")
+        assert len(parts) == 3
+        assert parts[2].endswith("pending your **DD review**. What would you like to do?")
+        assert "Last action" not in "".join(parts)
+

@@ -65,6 +65,11 @@ def _truncate_for_log(value: Any) -> Any:
             return text
     return text[:_MAX_LOG_JSON_CHARS] + "…"
 
+
+def _opt_str(value: Any) -> str | None:
+    text = str(value).strip() if value is not None else ""
+    return text or None
+
 # Top-level SR DTO fields needed for PUT /files and collected_data hydration.
 # Platform keeps these outside nested ``payload`` (see ServiceRequestDTO).
 _SR_TOP_LEVEL_REF_KEYS = (
@@ -160,6 +165,9 @@ class ServiceRequestGetResult:
     service_request_attachments: list[dict[str, Any]] = field(default_factory=list)
     service_request_history: list[dict[str, Any]] = field(default_factory=list)
     work_permit_extension: dict[str, Any] | None = None
+    created_by: str | None = None
+    created_user_role: str | None = None
+    created_at: str | None = None
     endpoint: str = ""
     status_code: int | None = None
     latency_ms: int = 0
@@ -378,7 +386,8 @@ class ServiceRequestPlatformClient:
                 data = body.get("data") or {}
 
             history = (
-                data.get("service_request_history")
+                data.get("operation_history")
+                or data.get("service_request_history")
                 or data.get("sr_history")
                 or data.get("history")
                 or []
@@ -406,6 +415,9 @@ class ServiceRequestPlatformClient:
                 work_permit_extension=(
                     extension if isinstance(extension, dict) else None
                 ),
+                created_by=_opt_str(data.get("created_by")),
+                created_user_role=_opt_str(data.get("created_user_role")),
+                created_at=_opt_str(data.get("created_at")),
                 endpoint=endpoint,
                 status_code=response.status_code,
                 latency_ms=latency_ms,

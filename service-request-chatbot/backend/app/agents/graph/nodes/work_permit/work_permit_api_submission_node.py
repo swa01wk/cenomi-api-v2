@@ -22,6 +22,7 @@ from app.agents.schemas.work_permit_schema import (
     in_progress_roles,
     map_wp_operations_to_stage,
 )
+from app.agents.services.conversation_state_service import PENDING_REVIEW_REFS
 from app.agents.services.permission_service import PermissionDeniedError, PermissionService
 from app.agents.services.service_request_api_service import get_service_request_api_service
 from app.observability.analytics_constants import (
@@ -193,7 +194,13 @@ async def _submit(state: ServiceRequestState) -> dict[str, Any]:
             flow=FLOW_WORK_PERMIT,
             stage=workflow_stage,
         )
-        return await _review_result(svc, backend_refs, payload, result.sr_id)
+        out = await _review_result(svc, backend_refs, payload, result.sr_id)
+        # The decision is spent; the next hop must collect its own comment.
+        refs = out.get("backend_refs")
+        if isinstance(refs, dict):
+            for key in ("wp_review_comment", "wp_action", *PENDING_REVIEW_REFS):
+                refs.pop(key, None)
+        return out
 
     return await _create_result(svc, backend_refs, payload, result.sr_id)
 

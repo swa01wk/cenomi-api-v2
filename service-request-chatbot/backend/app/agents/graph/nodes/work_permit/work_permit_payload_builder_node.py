@@ -242,12 +242,14 @@ def build_review_work_permit_payload(
         if comment:
             body["comment"] = comment
         return body
-    return {
+    body = {
         "status": "APPROVED",
         "sub_category": sub_category,
-        "comment": comment,
         "payload": cleaned,
     }
+    if comment:
+        body["comment"] = comment
+    return body
 
 
 def build_wp_status_payload(
@@ -298,9 +300,7 @@ async def work_permit_payload_builder_node(state: ServiceRequestState) -> dict[s
             collected_data,
         )
         wp_action = str(backend_refs.get("wp_action") or "approve")
-        comment = str(
-            collected_data.get("comments") or collected_data.get("notes") or ""
-        )
+        comment = str(backend_refs.get("wp_review_comment") or "").strip()
         if wp_action in {"extend", "cancel_permit"}:
             sr_id = str(backend_refs.get("sr_id") or "")
             duration = backend_refs.get("wp_extension_duration")

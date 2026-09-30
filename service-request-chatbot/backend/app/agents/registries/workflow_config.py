@@ -81,6 +81,13 @@ class WorkflowConfig:
         field question (see ``guided_tour_service``).  Defaults to True so a
         newly registered workflow inherits it; set False for a flow with
         nothing to collect, where the question would be noise.
+    status_view_node:
+        Graph node that answers "open / show this existing SR" when no review
+        step is waiting on it (terminal stages, sent back, unknown stage).
+        Defaults to the shared ``preview`` node.
+    request_type_label:
+        Human label for this workflow's SR (card header, e.g.
+        "Handover Service Request").
     """
 
     agent_name: str
@@ -95,6 +102,8 @@ class WorkflowConfig:
     lease_trigger_fields: tuple[str, ...]
     action_intents: frozenset[str]
     guided_tour_gate: bool = True
+    status_view_node: str = "preview"
+    request_type_label: str = "Service Request"
 
 
 # ---------------------------------------------------------------------------
@@ -168,6 +177,7 @@ def _build_rdd_config() -> WorkflowConfig:
                 "CREATE_HANDED_OVER_SR",
             }
         ),
+        request_type_label="Handover Service Request",
     )
 
 
@@ -251,6 +261,7 @@ def _build_work_permit_config() -> WorkflowConfig:
             "WP_FM_REVIEW": "work_permit_entry",
             "WP_MM_REVIEW": "work_permit_entry",
             "WP_MM_OPS_REVIEW": "work_permit_entry",
+            "WP_ACTION_REQUIRED": "work_permit_status",
         },
         collection_stages=frozenset(
             {
@@ -285,6 +296,8 @@ def _build_work_permit_config() -> WorkflowConfig:
         auto_generated_fields=frozenset(),
         lease_trigger_fields=("lease_code", "company", "lease_brand_mall"),
         action_intents=frozenset({"CREATE_WORK_PERMIT_SR", "APPROVE_WORK_PERMIT_SR"}),
+        status_view_node="work_permit_status",
+        request_type_label="Work Permit Service Request",
     )
 
 
@@ -459,6 +472,7 @@ def _build_fitout_start_config() -> WorkflowConfig:
         action_intents=frozenset(
             {"CREATE_FITOUT_CONFIRM_FOS", "APPROVE_FITOUT_CONFIRM_FOS"}
         ),
+        request_type_label="Fitout Start Confirmation Service Request",
     )
 
 
@@ -488,6 +502,7 @@ def _build_fitout_end_config() -> WorkflowConfig:
         action_intents=frozenset(
             {"CREATE_FITOUT_CONFIRM_END", "APPROVE_FITOUT_CONFIRM_END"}
         ),
+        request_type_label="Fitout End Confirmation Service Request",
     )
 
 
@@ -517,6 +532,7 @@ def _build_trading_confirm_config() -> WorkflowConfig:
         action_intents=frozenset(
             {"CREATE_FITOUT_CONFIRM_TRADING", "APPROVE_FITOUT_CONFIRM_TRADING"}
         ),
+        request_type_label="Trading Confirmation Service Request",
     )
 
 
@@ -551,6 +567,7 @@ def _build_sales_data_config() -> WorkflowConfig:
             "REVIEW_SALES_DATA",
             "APPROVE_SALES_DATA",
         }),
+        request_type_label="Sales Data Submission",
     )
 
 

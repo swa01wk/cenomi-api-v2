@@ -79,6 +79,8 @@ WP_REVIEW_STAGES: frozenset[str] = frozenset(
 WP_APPROVED: Final[str] = "WP_APPROVED"
 WP_REJECTED: Final[str] = "WP_REJECTED"
 WP_CREATED: Final[str] = "WP_CREATED"
+# Sent back to the tenant (platform ACTION_REQUIRED): no review hop is open.
+WP_ACTION_REQUIRED: Final[str] = "WP_ACTION_REQUIRED"
 
 WP_TERMINAL_STAGES: frozenset[str] = frozenset(
     {WP_CREATED, WP_APPROVED, WP_REJECTED}
@@ -93,6 +95,7 @@ STAGE_LABELS: dict[str, str] = {
     WP_CREATED: "Submitted",
     WP_APPROVED: "Approved",
     WP_REJECTED: "Rejected",
+    WP_ACTION_REQUIRED: "Sent back to tenant",
 }
 
 # Seed role_id → name (migration 1707406122 + handover OPERATIONS 81).
@@ -113,6 +116,7 @@ _PLATFORM_APPROVED: frozenset[str] = frozenset(
     {"APPROVED", "COMPLETED", "DONE", "ACTIVE", "EXPIRED", "CLOSED", "EXTENDED"}
 )
 _PLATFORM_REJECTED: frozenset[str] = frozenset({"REJECTED"})
+_PLATFORM_ACTION_REQUIRED: frozenset[str] = frozenset({"ACTION_REQUIRED"})
 
 # Who may PATCH APPROVED at each chatbot review stage.
 WP_REVIEW_ROLES: dict[str, frozenset[str]] = {
@@ -305,12 +309,15 @@ def map_wp_operations_to_stage(
     """Derive chatbot ``workflow_stage`` from V1 ``service_request_operations``.
 
     First IN_PROGRESS hop wins, in platform order: DD → FM → MM / Cold L2.
+    ACTION_REQUIRED (sent back to the tenant) wins over a stale review stage.
     """
     status = (platform_status or "").upper()
     if status in _PLATFORM_REJECTED:
         return WP_REJECTED
     if status in _PLATFORM_APPROVED:
         return WP_APPROVED
+    if status in _PLATFORM_ACTION_REQUIRED:
+        return WP_ACTION_REQUIRED
 
     roles = in_progress_roles(operations)
     if not roles:

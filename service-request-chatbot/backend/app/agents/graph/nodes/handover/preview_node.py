@@ -24,9 +24,11 @@ import structlog
 
 from app.agents.graph.nodes.shared.sr_status_sync_node import (
     _FITOUT_CONFIRM_SUB_CATEGORIES,
+    _FITOUT_SUB_CATEGORY_AGENTS,
 )
 from app.agents.graph.state import ServiceRequestState
 from app.agents.prompts.response_generation_prompt import FIELD_LABELS
+from app.agents.registries.workflow_config import get_workflow_config
 from app.agents.services.display_formatters import (
     format_enum_label,
     format_field_display_value,
@@ -250,6 +252,22 @@ def _ops_field(ops: list[dict[str, Any]]) -> dict[str, Any] | None:
 # ---------------------------------------------------------------------------
 
 
+_DEFAULT_REQUEST_TYPE = "Handover Service Request"
+
+
+def _request_type_label(state: ServiceRequestState) -> str:
+    """Card header for the SR being previewed, from its workflow config.
+
+    A terminal Handover / Fitout SR can be opened before ``active_agent`` is
+    restored, so fall back to the fitout sub-category, then to Handover.
+    """
+    agent = state.get("active_agent") or _FITOUT_SUB_CATEGORY_AGENTS.get(
+        str(state.get("sub_category") or "")
+    )
+    cfg = get_workflow_config(agent or "")
+    return cfg.request_type_label if cfg else _DEFAULT_REQUEST_TYPE
+
+
 @trace_node("preview", "LANGGRAPH_NODE")
 async def preview_node(state: ServiceRequestState) -> dict[str, Any]:
     """Build a rich preview of the current service request for the user.
@@ -269,6 +287,7 @@ async def preview_node(state: ServiceRequestState) -> dict[str, Any]:
     sr_id: str | None = backend_refs.get("sr_id")
     collected_data: dict[str, Any] = state.get("collected_data") or {}
     hidden: frozenset[str] = _hidden_preview_keys(state)
+    request_type = _request_type_label(state)
 
     if sr_id:
         # ── Submitted SR — use synced state when available, else platform GET ──
@@ -282,7 +301,7 @@ async def preview_node(state: ServiceRequestState) -> dict[str, Any]:
             response_ui = {
                 "type": "sr_preview_card",
                 "message": f"Here is your submitted service request (ID: {sr_id}).",
-                "requestType": "Handover Service Request",
+                "requestType": request_type,
                 "srId": sr_id,
                 "status": platform_status or "SUBMITTED",
                 "isSubmitted": True,
@@ -318,7 +337,7 @@ async def preview_node(state: ServiceRequestState) -> dict[str, Any]:
                 response_ui: dict[str, Any] = {
                     "type": "sr_preview_card",
                     "message": f"Here is your submitted service request (ID: {sr_id}).",
-                    "requestType": "Handover Service Request",
+                    "requestType": request_type,
                     "srId": sr_id,
                     "status": result.status or "SUBMITTED",
                     "isSubmitted": True,
@@ -337,7 +356,7 @@ async def preview_node(state: ServiceRequestState) -> dict[str, Any]:
                 response_ui = {
                     "type": "sr_preview_card",
                     "message": f"Could not fetch live SR {sr_id} — showing draft data.",
-                    "requestType": "Handover Service Request",
+                    "requestType": request_type,
                     "srId": sr_id,
                     "status": None,
                     "isSubmitted": False,
@@ -353,7 +372,7 @@ async def preview_node(state: ServiceRequestState) -> dict[str, Any]:
             response_ui = {
                 "type": "sr_preview_card",
                 "message": f"Could not reach the platform for SR {sr_id} — showing draft data.",
-                "requestType": "Handover Service Request",
+                "requestType": request_type,
                 "srId": sr_id,
                 "status": None,
                 "isSubmitted": False,
@@ -370,7 +389,7 @@ async def preview_node(state: ServiceRequestState) -> dict[str, Any]:
             response_ui = {
                 "type": "sr_preview_card",
                 "message": "Nothing has been collected yet in this session.",
-                "requestType": "Handover Service Request",
+                "requestType": request_type,
                 "srId": None,
                 "status": None,
                 "isSubmitted": False,
@@ -383,7 +402,7 @@ async def preview_node(state: ServiceRequestState) -> dict[str, Any]:
             response_ui = {
                 "type": "sr_preview_card",
                 "message": "Here is what has been collected so far (not yet submitted).",
-                "requestType": "Handover Service Request",
+                "requestType": request_type,
                 "srId": None,
                 "status": "DRAFT",
                 "isSubmitted": False,

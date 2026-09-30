@@ -35,6 +35,7 @@ from app.agents.services.action_resolver import (
 )
 from app.agents.services.permission_service import PermissionService
 from app.agents.services.work_permit_review_summary import (
+    build_wp_review_details,
     build_wp_review_prompt_suggestions,
     build_wp_review_summary,
     compose_wp_review_message,
@@ -96,11 +97,7 @@ def _caller_can_act_on_review(state: ServiceRequestState, workflow_stage: str) -
 def _non_actor_review_message(stage: str, sr_id: str | None) -> str:
     label = STAGE_LABELS.get(stage, "the next reviewer")
     sr_bit = f" SR **{sr_id}**" if sr_id else ""
-    return (
-        f"Work Permit{sr_bit} is with **{label}**. "
-        "You do not have an action on this hop — open the Service Request to view status, "
-        "or wait for the assigned reviewer."
-    )
+    return f"Work Permit{sr_bit} is with **{label}**. You don't have an action on this step."
 
 
 def _summarize_workers(value: Any) -> str:
@@ -291,9 +288,6 @@ def _review_context(
     )
 
 
-_ON_SR_PAGE_NOTE = "All request details are available in the form on the left."
-
-
 def _is_on_sr_page(state: ServiceRequestState, sr_id: Any) -> bool:
     """True when the widget is open beside this SR's details form."""
     if not sr_id:
@@ -310,7 +304,8 @@ def _build_review_confirmation_card(
 ) -> dict[str, Any]:
     """Generic summary layout: message + ``summary`` + separate ``actions``.
 
-    No full field dump and no in-card links — the SR form holds the details.
+    ``details`` carries every filled field for the card's collapsed-by-default
+    "View details"; no note and no in-card links.
     """
     collected: dict[str, Any] = dict(state.get("collected_data") or {})
     backend_refs: dict[str, Any] = dict(state.get("backend_refs") or {})
@@ -322,6 +317,8 @@ def _build_review_confirmation_card(
         workflow_stage=workflow_stage,
         subtype=subtype,
         first_name=auth.first_name if auth is not None else None,
+        request_history=backend_refs.get("sr_history"),
+        creator=backend_refs.get("sr_creator"),
     )
     ctx = _review_context(state, workflow_stage=workflow_stage, is_actor=True)
     actions = actions_to_ui(resolve_actions(ctx))
@@ -331,12 +328,11 @@ def _build_review_confirmation_card(
         "requestType": f"Work Permit — {STAGE_LABELS.get(workflow_stage, 'Review')}",
         "message": message,
         "summary": build_wp_review_summary(collected, subtype=subtype),
+        "details": build_wp_review_details(collected, subtype=subtype),
         "actions": actions,
         "suggestions": suggestions,
     }
-    if _is_on_sr_page(state, sr_id):
-        card["note"] = _ON_SR_PAGE_NOTE
-    elif sr_id:
+    if sr_id and not _is_on_sr_page(state, sr_id):
         opts = list(suggestions.get("options") or [])
         opts.append(
             {
@@ -387,8 +383,9 @@ async def work_permit_confirmation_node(state: ServiceRequestState) -> dict[str,
             "type": "message",
             "message": msg,
             "workflow_stage": workflow_stage,
+            "verbatim": True,
         }
-        if sr_id:
+        if sr_id and not _is_on_sr_page(state, sr_id):
             ui["suggestions"] = {
                 "kind": "labeled_options",
                 "options": [
@@ -405,6 +402,9 @@ async def work_permit_confirmation_node(state: ServiceRequestState) -> dict[str,
             "status": "WAITING_FOR_USER",
             "response_message": msg,
             "response_ui": ui,
+            # Sync's View SR chip would be merged back in by finalize; this
+            # reply owns its chips (none while the SR form is already open).
+            "response_decorations": {},
         }
 
     logger.info(

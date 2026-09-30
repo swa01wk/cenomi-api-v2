@@ -54,8 +54,12 @@ Work Permit is the first agent built on the **generic review rails** (action res
 | Action menu | In-progress hop: **Approve / Ask for more info / Reject**. Active permit with a tenant extend/cancel request: **Extend / Cancel**. |
 | Assign To removed | Removed from the chat menu (`WorkPermitActionResolver`) and from the SR form action bar (`actionButtonSR.tsx`, `WORK_PERMIT` branch). Applies to every approver at every level. A stale or typed `assign_to_wp` gets the "not available" reply. |
 | Pending inputs | Reject and Ask for more info collect a comment; Extend collects a duration then a comment; Cancel collects a comment (`work_permit_entry_node`, `wp_pending_action`). |
+| Comment step on every review action | Approve, Ask for more info and Reject all ask for a comment in chat before anything is sent (§7.5). The comment is required for Ask for more info and Reject; Approve offers an "Approve without comment" chip. Every prompt has a Cancel chip. The clicked action id is never taken as the comment, and the comment lives in `backend_refs.wp_review_comment` (cleared after submission) instead of `collected_data`. The reply bubble reads "Reject: Missing safety certificate", or just "Approve" when skipped (§8.3). |
 | Summary card | The review card is a conversational summary (`work_permit_review_summary.py`): greeting by first name, a compact summary grid, business actions, prompt chips. |
-| Note vs navigation chip | On the SR page the card shows "All request details are available in the form on the left."; elsewhere it offers an "Open full request" chip. |
+| View details | The card carries `details` (every filled field). "View details" with an "N of M fields" count grows the same chip grid with the fields the summary leaves out (no layout switch, no duplicates via `summaryKey`); "Hide details" returns to the six chips. |
+| Pinned actions | Approve / Ask for more info / Reject sit in a footer below the chat scroller (`.chat-ui-pinned-actions`) while the review is pending with the user, so they never cover the card, and vanish once the action is done. |
+| Who did what | The review message ends with who submitted the request and the latest step since, from the platform `operation_history` (or the SR creator): "**Ali Hassan** (Tenant) submitted this request, and **Sara** (DD Engineer) approved it. What would you like to do?" No dates. Tenant-side roles read "(Tenant)". The tenant's reply to a send-back counts as a resubmission, so it is the latest step: "**Tenant Central** (Tenant) submitted this request, and resubmitted it with the requested information." (§7.6) |
+| Navigation chip | On the SR page the card has no note; the reviewer uses "View details" for the rest of the fields. Elsewhere it also offers an "Open full request" chip. |
 | New platform calls | `PATCH` with `ACTION_REQUIRED` / `REASSIGN_TO`; `POST /service-requests/work-permit/status` for `EXTEND` / `CANCEL`. Envelope keys are stripped from the nested review payload. |
 | PDF 500 | A 500 on a review action returns a message explaining final approval generates the permit PDF, and suggests the SR page. |
 | Mid-hop | After a mid-hop approve the reply names the next hop, sets `stage_complete`, and keeps `active_agent=work_permit_agent`. |
@@ -67,8 +71,16 @@ Work Permit is the first agent built on the **generic review rails** (action res
 | Symptom | Cause | Fix |
 |---|---|---|
 | User bubble showed `confirm_approve_wp` | Action buttons sent the id as bubble text | `WorkflowActionBar` passes `(id, label)`; `sendTurn({userBubbleText: label})`; `resolveUserBubbleText`. |
+| Reject / Ask for more info went through with the comment `reject_wp` / `ask_more_info_wp` | The button sends the action id as the message, and the entry node used the message as the comment | `_reply_text` drops action echoes; a comment is only taken from the reply to the comment prompt (§7.5). |
+| A comment from an earlier action reappeared on the next one | The comment was kept in `collected_data.comments`, which lives across hops | Stored in `backend_refs.wp_review_comment`; `work_permit_api_submission_node` clears it with `wp_action` / `wp_pending_action` after the call. |
+| History sentence said a reviewer asked for more info after the tenant had already resubmitted | The tenant's reply rows (`RE_EXAMINE`, `UPDATE`, `IN_PROCESS`) were skipped as noise | `_meaningful_rows` turns the first reply after a send-back into a resubmission (§7.6). |
+| History sentence still named the Mall Manager's send-back after the tenant resubmitted (SR 341529) | The resubmission came back as a second `SUBMITTED` row, and the latest-step search skips submission rows | A submission row inside an open send-back window is also re-tagged as `RESUBMITTED` (§7.6). |
+| The reason typed after "What should I tell them?" was answered by the LLM and nothing was sent back | The graph keeps no state between turns and the draft only restored `sr_id` / `service_request_status` into `backend_refs`, so `wp_pending_action` was lost and the reply fell through to the generic confirmation branch | `save_checkpoint` stores the pending prompt as `collected_data._wp_pending`; `load` restores it into `backend_refs` (§7.5). |
+| SR page on the left still showed the old hop after approving with a comment | `maybeDispatchSrDetailRefresh` only fired for a mutating card action; the comment reply that completes the action carries no action id (and `reject_wp` / `ask_more_info_wp` were never mutating) | Also refresh on a successful non-silent turn whose `ui` has `stage_complete` / `workflow_complete` (`stepCompleted`, §8.7). |
 | Full SR details card after every review action | Review decorations carried `promote_preview`, and finalize swapped the reply for the preview card | `work_permit_api_submission_node` sets `response_decorations = {}` for `WP_REVIEW_STAGES`. |
 | "HANDOVER SERVICE REQUEST / Approved" card ~0.3 s after final approval, with no user bubble | Approval triggered `sr-v2-detail-refresh`; the form re-fetch echoed values through the bridge as a silent `corrected_fields` patch; `_route_after_sync` sent a terminal SR with `sr_id` to `preview`, which builds a Handover-labelled `sr_preview_card`; silent turns may render that card type | Backend: `_is_background_form_sync` routes terminal-stage silent patches to `response_generation`. Frontend: `patchDraftFields` drops patches once the stage is `WP_APPROVED` / `WP_REJECTED` (`shouldDropFormPatch`). |
+| "Work Permit Service Request / Submitted" details card when a non-approver opens an SR under review, with LLM-reworded text | `build_review_decorations` set `promote_preview` on WP review stages, so finalize swapped the non-actor `message` for the preview card; the message was not `verbatim` | WP review stages no longer set `promote_preview`. The non-actor reply is a fixed `verbatim` message, with `response_decorations = {}`, and the "Open full request" chip only off the SR page. |
+| "HANDOVER SERVICE REQUEST / Review" card and a Handover "Form completion 7/15" meter when opening a Work Permit that was sent back to the tenant | Platform `ACTION_REQUIRED` has no IN_PROGRESS operation, so `map_wp_operations_to_stage` returned `None`; `_route_after_sync` fell back to the hard-coded `preview` node, which always labels its card "Handover Service Request". The frontend meter counted Handover fields for any agent and for existing SRs | `ACTION_REQUIRED` → `WP_ACTION_REQUIRED`. `WorkflowConfig.status_view_node` (default `preview`) replaces every hard-coded `preview` route; Work Permit uses `work_permit_status` (§7.12). `preview_node` takes its header from `WorkflowConfig.request_type_label`. The meter only shows while drafting a new SR for a workflow with a known field set (§8.11). |
 | Thumbs in the middle of a reply | Feedback rendered before the card | `SrFabMessages` renders `ChatFeedbackThumbs` after `SrChatUiRenderer`. |
 | Plain bold in replies | — | Assistant `strong` uses `--chat-ui-primary` (`AIChatWidget.css`, `copilotV2.css`). |
 
@@ -85,8 +97,10 @@ Work Permit is the first agent built on the **generic review rails** (action res
 | Create stage | `CREATE_WORK_PERMIT` (not Handover `CREATE_SR`) |
 | Review stages | `WP_DD_REVIEW`, `WP_FM_REVIEW`, `WP_MM_REVIEW`, `WP_MM_OPS_REVIEW` (`WP_REVIEW_STAGES`) |
 | Terminal stages | `WP_CREATED`, `WP_APPROVED`, `WP_REJECTED` (`WP_TERMINAL_STAGES`) |
+| Sent back | `WP_ACTION_REQUIRED` (platform `ACTION_REQUIRED`; no review hop open) |
 | Supervisor intents | `CREATE_WORK_PERMIT_SR`, `APPROVE_WORK_PERMIT_SR` |
-| Preview label | `draft_preview.requestType = "Work Permit Service Request"` (`chat_orchestration_service.py`) |
+| Preview label | `draft_preview.requestType = "Work Permit Service Request"` (`chat_orchestration_service.py`); `WorkflowConfig.request_type_label` |
+| Status view | `work_permit_status` node — never the Handover `preview` node (§7.12) |
 
 All seven subtypes (plus the legacy `WORK_PERMIT` key used before the subtype is known) route to the same agent:
 
@@ -107,12 +121,16 @@ All seven subtypes (plus the legacy `WORK_PERMIT` key used before the subtype is
 
 | Field | Value |
 |---|---|
-| `stage_sync_nodes` | the four review stages → `work_permit_entry` |
+| `stage_sync_nodes` | the four review stages → `work_permit_entry`; `WP_ACTION_REQUIRED` → `work_permit_status` |
 | `collection_stages` | `CREATE_WORK_PERMIT` + the four review stages |
 | `confirmation_nodes` | all five → `work_permit_confirmation` |
 | `terminal_stages` | `WP_CREATED`, `WP_APPROVED`, `WP_REJECTED` |
 | `action_intents` | `CREATE_WORK_PERMIT_SR`, `APPROVE_WORK_PERMIT_SR` |
 | `lease_trigger_fields` | `lease_code`, `company`, `lease_brand_mall` |
+| `status_view_node` | `work_permit_status` (default for other workflows: `preview`) |
+| `request_type_label` | "Work Permit Service Request" |
+
+`status_view_node` and `request_type_label` are generic: Handover uses `preview` + "Handover Service Request"; Fitout Start / Fitout End / Trading use `preview` + "Fitout Start Confirmation Service Request" / "Fitout End Confirmation Service Request" / "Trading Confirmation Service Request".
 
 ---
 
@@ -473,6 +491,7 @@ Stages are **WP-prefixed** so they never collide with Handover `FM_REVIEW` / `RD
 | `WP_CREATED` | Create succeeded; also after Ask for more info | Submitted | — |
 | `WP_APPROVED` | Final approve, or platform terminal approved | Approved | — |
 | `WP_REJECTED` | Rejected | Rejected | — |
+| `WP_ACTION_REQUIRED` | Platform `ACTION_REQUIRED` (sent back to the tenant) | Sent back to tenant | — |
 
 ### 7.2 Status sync (GET → stage)
 
@@ -482,12 +501,16 @@ Stages are **WP-prefixed** so they never collide with Handover `FM_REVIEW` / `RD
 
 1. Platform `REJECTED` → `WP_REJECTED`.
 2. Platform in `{APPROVED, COMPLETED, DONE, ACTIVE, EXPIRED, CLOSED, EXTENDED}` → `WP_APPROVED`.
-3. First IN_PROGRESS role: DD → `WP_DD_REVIEW`; FM → `WP_FM_REVIEW`; MM / OE / OPERATIONS → `WP_MM_OPS_REVIEW` if Cold or several roles, else `WP_MM_REVIEW`.
-4. No IN_PROGRESS ops → keep the current stage.
+3. Platform `ACTION_REQUIRED` → `WP_ACTION_REQUIRED` (wins over a stale review stage in the checkpoint).
+4. First IN_PROGRESS role: DD → `WP_DD_REVIEW`; FM → `WP_FM_REVIEW`; MM / OE / OPERATIONS → `WP_MM_OPS_REVIEW` if Cold or several roles, else `WP_MM_REVIEW`.
+5. No IN_PROGRESS ops → keep the current stage.
 
-Written to `backend_refs`: `platform_sr_status`, `sr_operations`, `sr_history`, `work_permit_extension`, `user_role`, `create_payload` (snapshot; `sub_category` via `resolve_wp_sub_category`). State: `active_agent=work_permit_agent`, `service_category=WORK_PERMIT`, `sub_category`.
+Written to `backend_refs`: `platform_sr_status`, `sr_operations`, `sr_history`, `sr_creator`, `work_permit_extension`, `user_role`, `create_payload` (snapshot; `sub_category` via `resolve_wp_sub_category`). State: `active_agent=work_permit_agent`, `service_category=WORK_PERMIT`, `sub_category`.
 
-Decorations: `review_decorations_service.build_review_decorations` returns `{"promote_preview": True}` on WP review stages (plus View SR chips for non-actors).
+- `sr_history`: the detail DTO returns the approval history as `operation_history` (the key the SR page reads). `platform_api_client.get_service_request` reads `operation_history`, then `service_request_history` / `sr_history` / `history`. Rows: `status`, `operator_name`, `operator_role`, `user_type`, `comment`, `created_at`.
+- `sr_creator`: `{name, role, created_at}` from the DTO's top-level `created_by`, `created_user_role` and `created_at` (`ServiceRequestGetResult.created_*`); blank values are dropped, and the key is absent when all three are blank.
+
+Decorations: `review_decorations_service.build_review_decorations` returns `{}` on WP review stages for the actor, and only a View SR chip for non-actors. It does **not** set `promote_preview`: the full "Work Permit Service Request / Submitted" details card duplicates the SR form on the left, and the review card is a `confirmation_card`, which never relied on the swap. Handover (FM/RDD) still promotes the preview.
 
 ### 7.3 Hop RBAC
 
@@ -498,7 +521,12 @@ There is no `APPROVE_SR_WORK_PERMIT` permission. The gate is `PermissionService.
 
 Denial (`work_permit_entry_node._deny_review_action`): "You do not have permission to act on this Work Permit hop ({label}). This stage is assigned to another reviewer." The submission node re-checks with `ensure_can_approve_work_permit`.
 
-Non-actors opening the SR get `_non_actor_review_message`: "Work Permit SR **X** is with **{label}**. You do not have an action on this hop — …", a `message` UI, an "Open full request" chip, and no actions.
+Non-actors opening the SR get `_non_actor_review_message`, a fixed text: "Work Permit SR **X** is with **{label}**. You don't have an action on this step." The reply is:
+
+- a `message` UI with `verbatim: True`, so response generation never rewords it;
+- no actions;
+- an "Open full request" chip only when the user is **not** already on that SR's page (`_is_on_sr_page`); on the page, the message stands alone;
+- `response_decorations = {}`, so finalize neither swaps it for the SR details card nor merges the sync turn's View SR chip back in.
 
 Not in any WP flow: HSE, CONTRACTOR, SUB_CONTRACTOR, `REGIONAL_DD_ENGINEER`.
 
@@ -575,15 +603,29 @@ Assign To was removed on 2026-09-28 for every approver at every level; the SR fo
 
 1. **Hop RBAC** (`_deny_review_action`).
 2. **Legal-action gate.** `_legal_action_ids` builds a `ServiceRequestContext` from `backend_refs` and calls `resolve_actions`. An action not in the legal set (except approve / reject) is refused: "That action is not available on this hop right now. Please choose one of the options shown." (`confirmation_status` stays `PENDING`). Assign To always lands here now.
-3. **Reject / Ask for more info.** Comment from `collected.comments` / `notes` / `comment` or the user message. If missing, `_ask_for_input` sets `backend_refs.wp_pending_action`, `PENDING`, `WAITING_FOR_USER`:
-   - more info: "I'll send that back. What should I tell them?"
-   - reject: "I'll decline this permit. What reason should I include?"
-   With a comment: `collected.comments`, `backend_refs.wp_action`, `CONFIRMED`.
-4. **Extend.** Duration from `wp_extension_duration` or `_parse_duration` (hours or days; bare number = hours) → `{extension_duration_in_hours|days: n}`. Missing duration → ask with chips 1 Hour / 2 Hours / 4 Hours / 1 Day. Missing comment → "Got it. Any comment to include with the extension?". Both → `CONFIRMED`.
-5. **Cancel permit.** Asks "They've asked to cancel. I'll confirm the cancellation — what comment should I include?", then `CONFIRMED`.
-6. **Approve.** Comment optional; `wp_action=approve`; `CONFIRMED`.
+3. **Approve / Ask for more info / Reject: comment prompt.** Clicking the button (or typing the action) never submits straight away. `_ask_for_comment` asks in chat and sets `backend_refs.wp_pending_action`, `PENDING`, `WAITING_FOR_USER`:
 
-A pending input is resumed on the next turn when the stage is a review stage, `wp_pending_action` is set and status is `PENDING`; the user message becomes the comment / duration.
+   | Action | Prompt (`_COMMENT_PROMPTS`) | Comment | Chips (`labeled_options`) |
+   |---|---|---|---|
+   | Approve | "I'll approve this permit. Would you like to add a comment? It's optional." | Optional | Approve without comment (`approve without comment`), Cancel (`cancel`) |
+   | Ask for more info | "I'll send this back to the tenant. What should I tell them?" | Required | Cancel |
+   | Reject | "I'll reject this permit. What reason should I include?" | Required | Cancel |
+
+   The prompt's UI carries `verbatim: true` (so `response_generation_node` keeps the wording) and `comment_for: {action_id, label, required, skip_value?}`, which the frontend uses for the reply bubble (§8.3).
+4. **Resuming the prompt** (next turn, `resuming=True`). `_reply_text` returns the typed reply, or `""` when the message is only an action echo (`_ACTION_ECHOES`: every action id and button label, case-insensitive). Comments are never read from `collected_data` or from the clicked action id.
+   - Cancel phrase (`cancel`, `never mind`, `nevermind`, `stop`): `_cancel_pending_prompt` clears `wp_pending_action` / `wp_review_comment` and replies "No problem, the permit is still waiting for your review." (`verbatim`, `confirmation_status=PENDING`).
+   - Ask for more info / Reject: an empty reply asks again; otherwise the reply is the comment.
+   - Approve: a skip phrase (`approve without comment`, `without comment`, `no comment`, `skip`, `no`, `none`) approves with no comment; any other text is the comment.
+   - Clicking a different action while a prompt is open starts that action's prompt instead.
+   - `_confirmed` stores `backend_refs.wp_action` and `backend_refs.wp_review_comment` (popped when there is no comment), clears `wp_pending_action`, and sets `CONFIRMED` / `IN_PROGRESS`.
+5. **Extend.** Duration from `wp_extension_duration` or `_parse_duration` (hours or days; bare number = hours) → `{extension_duration_in_hours|days: n}`. Missing duration → ask with chips 1 Hour / 2 Hours / 4 Hours / 1 Day. Missing comment → "Got it. Any comment to include with the extension?" (a reply is taken as the comment only once the duration is stored). Both → `CONFIRMED`.
+6. **Cancel permit.** Asks "They've asked to cancel. I'll confirm the cancellation — what comment should I include?", then `CONFIRMED` with the reply as `wp_review_comment`.
+
+A pending input is resumed on the next turn when the stage is a review stage, `wp_pending_action` is set and status is `PENDING`.
+
+**Across turns.** The graph has no checkpointer; each turn starts from the session draft. `_ask_for_input` (and the Extend comment step) records `wp_pending_action`, `wp_pending_stage` (the workflow stage) and `wp_pending_sr_id`. `ConversationStateService.save_checkpoint` writes those plus `wp_extension_duration` (`PENDING_REVIEW_REFS`) to the reserved `collected_data._wp_pending` key while a prompt is open and removes it otherwise; `load` pops it back into `backend_refs`, so nodes and payloads never see it. `work_permit_entry_node` resumes only when the stored stage and SR id match the current ones; a prompt from another hop or SR is dropped (`work_permit_entry.stale_pending_dropped`) and the turn carries on as if none was open.
+
+`work_permit_api_submission_node` pops `wp_review_comment`, `wp_action` and every `PENDING_REVIEW_REFS` key from `backend_refs` after the platform call, so nothing carries over to the next hop or action.
 
 Typed text while `PENDING`: reject phrases (`reject, decline, refuse, not approved, do not approve, don't approve`) → reject; "more info / ask for more / action required" → more info; confirm phrases (`yes, confirm, approve, ok…`) → approve; change phrases → `REJECTED`.
 
@@ -597,10 +639,12 @@ Typed text while `PENDING`: reject phrases (`reject, decline, refuse, not approv
 | `requestType` | `Work Permit — {STAGE_LABELS[stage]}` |
 | `message` | `compose_wp_review_message` (below) |
 | `summary` | `build_wp_review_summary` (below) |
+| `details` | `build_wp_review_details` (below): every filled form field, for "View details" |
 | `actions` | `actions_to_ui(resolve_actions(ctx))` |
 | `suggestions` | `build_wp_review_prompt_suggestions` (`labeled_options`) |
-| `note` | "All request details are available in the form on the left." when `msp_context.current_sr_id == sr_id` (`_is_on_sr_page`) |
-| Navigation chip | Otherwise `{"label": "Open full request", "value": sr_id, "action": "view_service_request"}` appended to suggestions |
+| Navigation chip | Only when the user is **not** on that SR's page (`_is_on_sr_page`: `msp_context.current_sr_id != sr_id`): `{"label": "Open full request", "value": sr_id, "action": "view_service_request"}` appended to suggestions. On the SR page there is no chip. |
+
+The card sends no `note`: the compact summary plus "View details" (§8.2) cover the request, so a pointer to the form on the left is redundant.
 
 Node return: `confirmation_required=True`, `confirmation_status=PENDING`, `status=READY_TO_SUBMIT`, `response_message=None` (keeps the deterministic card text; no LLM rewrite), `response_decorations={"suggestions": card.suggestions}`.
 
@@ -615,7 +659,17 @@ Node return: `confirmation_required=True`, `confirmation_status=PENDING`, `statu
 | `request_type` | Permit / Request Type | `document` | `WORK_PERMIT_TYPE_LABELS[subtype]` |
 | `type_of_work` | Type of work | `tool` | Ops `typeofwork` (keys → labels); Cold `type_work`; Hot / Roof `work_type` |
 
-**Message** (`compose_wp_review_message`), three paragraphs:
+**Details** (`build_wp_review_details`, same row shape as summary items without `icon` / `detail`, plus an optional `summaryKey`). Nothing is hardcoded; every value comes from `collected_data`:
+
+- **Keys:** the subtype's form spec (`form_spec_for(subtype)`: `common_keys` + `field_types` keys) plus `work_permit_type`. With no known subtype, every `FIELD_LABELS` key.
+- **Order:** Mall, Brand, Unit, then `FIELD_LABELS` order, then Company Name.
+- **Skipped:** `lease`, `country_code`, `tenant_contact`, `lease_brand_mall` (form plumbing) and `planned_second_period` (already folded into `planneddate`), plus any empty value.
+- **Values:** nested widgets through `format_wp_field_display` (planned window, workers, safety checklist, Ops dates and periods); Ops `typeofwork` keys → labels; `work_permit_type` → `WORK_PERMIT_TYPE_LABELS`; `department` → its dropdown label; lists joined with ", ".
+- **`summaryKey`** (`_DETAIL_SUMMARY_KEYS`): names the summary chip that already shows the field, so the expanded grid does not repeat it. `brand` → `brand`, `mall` → `mall`, `unit_codes` → `unit`, `work_permit_type` → `request_type`, `work_type` / `type_work` / `typeofwork` → `type_of_work`, `planneddate` / `effective_starting` / `firstperiod` / `secondperiod` → `schedule`. Fields with no summary chip (contractor, workers, safety, gate, equipment…) carry no `summaryKey`.
+
+The card shows the summary by default; "View details" appends the remaining `details` to the same grid (§8.2).
+
+**Message** (`compose_wp_review_message(..., request_history=sr_history, creator=sr_creator)`), four paragraphs, with the history sentence last and the question closing it:
 
 ```
 Hi {first_name}!            (or "Hi!")
@@ -623,9 +677,44 @@ Hi {first_name}!            (or "Hi!")
 **{brand}** wants to carry out **{work}** at **{mall}, Unit {unit}**, from **{from} to {to}**.
     (single day: "on **{date}**"; no work text: "has requested a **{permit}** permit"; no brand: "A tenant")
 
-Ops:    The **Operations review** is now pending with you. What would you like to do?
-Others: This **{permit}** permit is now pending your **{hop} review**. What would you like to do?
+Ops:    The **Operations review** is now pending with you.
+Others: This **{permit}** permit is now pending your **{hop} review**.
+
+**{submitter}** ({role}) submitted this request, and **{actor}** ({role}) approved it. What would you like to do?
 ```
+
+When there is no history sentence, the message has three paragraphs and "What would you like to do?" ends the pending line.
+
+**History sentence** (`compose_wp_history_sentence(history, creator)`): who submitted the request and, when there is one, the latest step since. Intermediate steps are not listed.
+
+- **Meaningful rows** (`_meaningful_rows`, a copy; input rows are never mutated). Non-dict rows are ignored. A send-back (`_SEND_BACK_STATUSES`: `ACTION_REQUIRED`, `ASK_FOR_MORE_INFO`, `REQUEST_MORE_INFO`, `REQUESTED_RE_UPLOAD`, `REQUEST_TO_REUPLOAD`) opens a reply window. The first tenant reply inside it (`_REPLY_STATUSES`: `UPDATE` from the workflow bar, `RE_EXAMINE` from the SR form, `IN_PROCESS` from the level-0 resubmit, or a fresh submission `CREATED` / `NEW` / `SUBMIT` / `SUBMITTED`, which the SR page shows as a second "Submitted" row) becomes a `RESUBMITTED` row and closes the window. Any other status is kept and also closes it, including an explicit `RESUBMIT(TED)` / `RE_SUBMITTED`. Replies outside a window, and noise (`_HISTORY_NOISE`: `""`, `SKIPPED`, `UPDATE`, `RE_EXAMINE`), are dropped.
+- **Submitter:** the first row whose `status` is `CREATED` / `NEW` / `SUBMIT` / `SUBMITTED`; without one, `creator` (`sr_creator`) stands in as a `CREATED` row when it has a name or a role.
+- **Latest step:** the last meaningful row after the submission row (all rows when the submitter came from `creator`) that is not another submission. A later decision wins over an earlier resubmission. A send-back with no reply yet stays the latest step ("…, and **Sara** (DD Engineer) asked for more information.").
+- **Same actor:** when the latest step's `operator_name` matches the submitter's (case-insensitive), the joined clause drops the name and role: "**Tenant Central** (Tenant) submitted this request, and resubmitted it with the requested information."
+- **Verb** (`_HISTORY_VERBS`, active / passive). In the joined clause "this request" becomes "it":
+
+| `status` | Active | Passive |
+|---|---|---|
+| `CREATED`, `NEW`, `SUBMIT(TED)` | submitted this request | was submitted |
+| `RESUBMIT(TED)`, `RE_SUBMITTED` (and replies to a send-back) | resubmitted this request with the requested information | was resubmitted with the requested information |
+| `APPROVE(D)`, `FINISHED`, `DONE`, `COMPLETED` | approved this request | was approved |
+| `REJECT(ED)` | rejected this request | was rejected |
+| `ACTION_REQUIRED`, `ASK_FOR_MORE_INFO`, `REQUEST_MORE_INFO` | asked for more information | was sent back for more information |
+| `REQUESTED_RE_UPLOAD`, `REQUEST_TO_REUPLOAD` | asked for documents to be re-uploaded | was sent back for re-upload |
+| `REASSIGN_TO`, `REASSIGN_ROLE`, `ASSIGN_TO` | reassigned this request | was reassigned |
+| `EXTEND` | requested an extension | had an extension requested |
+| `CANCEL(LED)` | requested a cancellation | had a cancellation requested |
+| anything else | moved this request to **{Humanized Status}** | moved to **{Humanized Status}** |
+
+- **Actor:** `operator_name`; role from `operator_role` through `normalize_wp_role` (names or seed ids 11 / 12 / 20 / 81). Tenant-side roles (`_TENANT_ROLES`: `TENANT`, `PRIMARY_TENANT_CONTACT`, `SECONDARY_TENANT_CONTACT`, `COMPANY_ADMIN`, `COMPANY_ADMIN_CENTRAL`, `AUTHORIZED_SIGNATORY`, `BILLING_CONTACT`, `FINANCIAL_CONTROLLER`, `SHOP_MANAGER`, `STORE_MANAGER`, `EXISTING_TENANT`, `PROSPECTIVE_TENANT`) all read "Tenant"; `LEASING_MANAGER` is not one of them (Cenomi staff hold it too) and keeps its own label. Staff roles go through `_WP_ROLE_LABELS` (DD Engineer, FM Manager, Mall Manager, Operations, Operation Executive, Admin). With no role, `user_type: TENANT` falls back to "Tenant". Name + role → "**Sara** (DD Engineer)"; name only → "**Sara**"; role only → "The **FM Manager**" ("the" mid-sentence); neither → the clause goes passive ("This request was rejected", "…, and it was rejected") rather than inventing a person.
+- **No dates.** Dates are never shown; the form and the SR page already carry them.
+- **Shapes:**
+  - Submitted only: "**Ali Hassan** (Tenant) submitted this request."
+  - Submitted, then a later step: "**Ali Hassan** (Tenant) submitted this request, and **Sara** (DD Engineer) approved it."
+  - Sent back, then the tenant replied: "**Tenant Central** (Tenant) submitted this request, and resubmitted it with the requested information."
+  - Resubmitted by someone else: "**Ali Hassan** (Tenant) submitted this request, and **Omar** (Tenant) resubmitted it with the requested information."
+  - Later step, no submitter known: "**Sara** (DD Engineer) approved this request."
+  - Nothing known: `""`, and the paragraph is omitted (no generic fallback).
 
 **Prompt chips** (`build_wp_review_prompt_suggestions`, no action ids, sent as text): "Show safety details" (first, when `measureofsafety` is set or Hot/Roof), "Who raised this?", "Show work details", "Show the schedule" (when a schedule exists).
 
@@ -633,11 +722,13 @@ Others: This **{permit}** permit is now pending your **{hop} review**. What woul
 
 `work_permit_payload_builder_node`. The inner payload is `backend_refs.create_payload.payload` (from sync) or rebuilt from `collected_data`. `_strip_review_inner_envelope` removes `_REVIEW_INNER_ENVELOPE_KEYS` (`category, service_category, lease_id, lease_code, tenant_profile_id, property_id, sub_category, workflow_version, contract_id`) from the nested payload.
 
+The comment is `backend_refs.wp_review_comment` (stripped), set by the comment prompt (§7.5). `collected_data.comments` is not read for review actions.
+
 `PATCH /v1/service-requests/{id}` — `build_review_work_permit_payload` (`wp_submit_mode="patch"`):
 
 | Action | Body |
 |---|---|
-| approve | `{status:"APPROVED", sub_category, comment, payload}` — payload **required** (empty fails `ValidateSR`) |
+| approve | `{status:"APPROVED", sub_category, comment?, payload}` — payload **required** (empty fails `ValidateSR`); `comment` only when the approver added one |
 | reject | `{status:"REJECTED", sub_category, comment?}` — no payload |
 | action_required | `{status:"ACTION_REQUIRED", sub_category, payload, comment?}` |
 | assign_to | `{status:"REASSIGN_TO", sub_category, assign_to, payload, comment?}` — builder kept; not reachable from chat |
@@ -652,7 +743,7 @@ Cancel is the same with `status: "CANCEL"` and no duration.
 
 ### 7.8 Submission outcomes
 
-`work_permit_api_submission_node` wraps `_submit`. For `WP_REVIEW_STAGES` it always sets `response_decorations = {}` so `finalize_response_ui` does not swap the reply for the SR preview card (`promote_preview`) or re-attach review chips.
+`work_permit_api_submission_node` wraps `_submit`. For `WP_REVIEW_STAGES` it always sets `response_decorations = {}` so `finalize_response_ui` does not re-attach review chips (or, from a stale checkpoint written before WP stopped setting `promote_preview`, swap the reply for the SR preview card).
 
 | Outcome | Message | Next stage | Flags |
 |---|---|---|---|
@@ -705,11 +796,42 @@ if workflow_stage in all_terminal:
     if _is_background_form_sync(state):
         return "response_generation"      # not preview: no unrequested card
     if backend_refs.get("sr_id"):
-        return "preview"                  # deliberate "open SR" still previews
+        return _status_view_node(state)   # deliberate "open SR": workflow's status view
     return "supervisor"
 ```
 
 `response_generation` yields a plain `message` UI, which the frontend does not show for silent turns (§8.4). The frontend also stops sending these patches (§8.5), so this is defence in depth.
+
+### 7.12 Status view (no review step waiting)
+
+`_status_view_node(state)` returns `get_workflow_config(active_agent).status_view_node`, or `preview` with no agent. It replaces every hard-coded `preview` route: the sync terminal branch, the sync fallback (unknown stage with `sr_id`), and the supervisor's `PREVIEW_SERVICE_REQUEST` / `CHECK_SERVICE_REQUEST_STATUS` intents. `WP_ACTION_REQUIRED` reaches the node directly through `stage_sync_nodes`.
+
+`work_permit_status_node` (`nodes/work_permit/work_permit_status_node.py`) builds the same compact card as the review hop, with no workflow actions:
+
+| Key | Value |
+|---|---|
+| `type` | `confirmation_card` |
+| `requestType` | `Work Permit — {STAGE_LABELS[stage]}` (for example "Sent back to tenant", "Approved"), the humanized platform status for an unknown stage, or "Draft" with no `sr_id` |
+| `message` | `compose_wp_status_message` (below) |
+| `summary` / `details` | `build_wp_review_summary` / `build_wp_review_details` (same "View details" toggle as §7.6) |
+| `actions` | `[]` — `WorkflowActionBar` renders nothing and nothing is pinned |
+| `suggestions` | "Open full request" only when the widget is not on this SR's page |
+
+The node returns `response_message = None` (the card's wording is kept verbatim), `status = WAITING_FOR_USER`, and `response_decorations` holding only its own chip. With an `sr_id` it also clears `confirmation_required` / `confirmation_status`; a draft preview leaves a pending create confirmation alone.
+
+`compose_wp_status_message` (`work_permit_review_summary.py`):
+
+| Case | Message |
+|---|---|
+| `WP_ACTION_REQUIRED`, reviewer | "Work Permit SR **{id}** (**{permit}**) was sent back to the tenant for more information. It returns to the review queue once they update the requested details and resubmit it, so there is nothing for you to do on it right now. Use **View details** below to see what was submitted." |
+| `WP_ACTION_REQUIRED`, tenant (any `TENANT*` role) | "…was sent back to you for more information. Update the requested details in the form and resubmit it to restart the review…" |
+| `WP_APPROVED` | "…has been approved by all reviewers, so the permit is final. No further action is needed…" |
+| `WP_REJECTED` | "…was rejected, and its review is closed. To carry out this work, a new Work Permit needs to be raised…" |
+| Review stage (status check) | "…is currently at **{hop}**. It's waiting on that reviewer…" |
+| `WP_CREATED` / unknown | "…is in progress (status: **{platform status}**). There is no step waiting on you right now…" |
+| No `sr_id` | "Here's your **{permit}** Work Permit draft so far — it hasn't been submitted yet…" |
+
+`preview_node` (Handover, Fitout) takes its `requestType` from `request_type_label` of the active workflow, then the fitout `sub_category`, then "Handover Service Request".
 
 ---
 
@@ -731,7 +853,8 @@ HTTP surface: `POST /api/chat/service-request` via `postServiceRequestChatTurn` 
 | `confirmAction` / `cancelAction` | Create card buttons |
 | `actions` | `SrChatbotBusinessAction[]`: `{id, label, type?: 'workflow_action', requires?: {comment?, role?, duration?, confirm?}}` |
 | `summary` | `SrChatbotSummaryItem[]`: `{key, label, value, detail?, icon?}`; icons `store, location, building, calendar, document, tool, person` |
-| `note` | One-line note under the summary |
+| `details` | `SrChatbotSummaryItem[]` (`{key, label, value}`): every filled field, shown when the summary card is expanded |
+| `note` | Optional one-line note under the summary (generic; Work Permit does not send it) |
 | `links` | `SrChatbotResponseLink[]`: `{id, label, type?, srId?}` |
 | `suggestions` | `static_options {options: string[]}`, `labeled_options {options: {label, value, action?}[]}`, `resource_picker`, `handover_leases`, `pending_handover_srs` |
 | Lifecycle | `stage`, `srId`, `status`, `isSubmitted`, `stage_complete`, `workflow_complete`, `cancelled`, `reset_conversation`, `workflow_stage`, `refresh_card` |
@@ -745,11 +868,15 @@ HTTP surface: `POST /api/chat/service-request` via `postServiceRequestChatTurn` 
 | UI | Renders |
 |---|---|
 | `message`, `text_question` | Nothing extra (bubble text only) |
-| `confirmation_card` with `summary` | `.chat-ui-summary-layout` → `SummaryGrid(items, note)` + `WorkflowActionBar(actions, links)` |
+| `confirmation_card` with `summary` | `.chat-ui-summary-layout` → `SummaryGrid(items, details, note, t)` + `WorkflowActionBar(actions, links)`, unless `hideActions` (the chat threads always pass it; see pinned actions below) |
 | Other `confirmation_card` | `ConfirmationCard` (full field card; `actions` replace Confirm / Cancel when present) |
 | `sr_preview_card` | `SrPreviewCard` |
 
-- `SummaryGrid.tsx`: `ChatCard.chat-ui-summary-card` → `dl.chat-ui-summary-grid` (two columns); each item `div[data-summary-key]` with icon + label and a value chip (`.chat-ui-summary-chip`) and optional `.chat-ui-summary-detail`; note as `p.chat-ui-summary-note`.
+- `SummaryGrid.tsx`: `ChatCard.chat-ui-summary-card` → `dl.chat-ui-summary-grid` (two columns); each item `div[data-summary-key]` with icon + label and a value chip (`.chat-ui-summary-chip`) and optional `.chat-ui-summary-detail`; a `note`, when sent, as `p.chat-ui-summary-note` (Work Permit sends none).
+  - **View details:** `extraDetails(items, details)` keeps the `details` rows the summary does not already show: a row is skipped when its `summaryKey` (or, without one, its `key`) matches a summary item's `key`, or when its `key` repeats. A row whose `summaryKey` points at a chip that was not sent stays. When at least one extra remains, a footer (`.chat-ui-summary-footer`) shows "{shown} of {total} fields" (`srChatbotFieldCount`, total = summary + extras) and a "View details" toggle (`srChatbotViewDetails`).
+  - **Footer styling:** one slim row inside the card: `margin-top: 8px`, no divider or padding, about 20px tall, the count on the left (xs, muted) and the toggle on the right. The toggle is a native `button.chat-ui-summary-toggle` (not `ChatButton`), styled as an xs primary-coloured text link with a 12px chevron (`svg.chat-ui-summary-chevron`) that rotates 180deg while `aria-expanded="true"`. Hover gives a soft primary background and `focus-visible` a 2px primary outline. The rotation is off under `prefers-reduced-motion`.
+  - **Expanded:** the same `dl.chat-ui-summary-grid` stays and gains `.chat-ui-summary-grid--expanded` (`grid-auto-flow: row dense`); the extras are appended after the summary items as the same label + icon + chip items (`div[data-detail-key]`), with a short fade-in (`chat-ui-summary-reveal`, off under `prefers-reduced-motion`). A detail value longer than 28 characters or containing a newline is `.chat-ui-summary-item--wide`: it spans both columns and its chip wraps (`white-space: pre-line`, 12px radius). Summary chips never go wide, so the compact layout is unchanged. The button becomes "Hide details" (`srChatbotHideDetails`), and collapsing returns to the six chips. The toggle is local state with `aria-expanded` and `aria-controls` pointing at the grid's `id`; nothing navigates, so the user stays on the SR page.
+- **Pinned review actions** (`SrFabMessages`, and the deprecated `AgenticChatShell`): summary cards never draw their own action bar. `pinnedReviewActionsMessage` (`confirmationCardDisabled.ts`) picks the live card: the latest `confirmation_card`, with `summary` and `actions`, while the flow is not `isComplete` / `stageComplete` / `cancelled` and no later reply carries `stage_complete` or `workflow_complete`. Its actions render once in `div.chat-ui-pinned-actions[data-pinned-actions]`, a sibling placed **after** the scrollable thread (`.cenomi-messages` in `SrFabMessages`; before `.agentic-sr-panel-footer` in `AgenticChatShell`), not inside it. The footer is `flex: 0 0 auto` with a surface background and a top border, so the thread shrinks to make room and the bar can never overlap the card or an expanded grid. The bar is disabled while a turn is in flight and disappears once the action lands. Older and spent cards show no actions; their summary and "View details" still work. Conversational follow-ups keep the bar; suggestion chips stay in `SuggestionFooter`, inside the scroller and separate from the bar.
 - `WorkflowActionBar.tsx`: one `ChatButton` per action; ids containing `reject` / `cancel` use the outline variant. On click: `setChatTurnInFlight(true)`, then `setTimeout(() => onAction(id, label), 0)`. Links render as outline buttons (`onLink`).
 - `ConfirmationCard.tsx` (create): edits commit on blur through `srSession.patchDraftFields`; Confirm overlays `notes` / `comments` from `peekFormValues()`, builds `corrected_fields`, calls `onConfirm(corrected, confirmAction)`.
 - Disabled state (`confirmationCardDisabled.ts`): older cards are disabled; the latest card is disabled after a mid-hop `stage_complete` until a new card with `confirmAction` or `actions` arrives.
@@ -767,6 +894,8 @@ HTTP surface: `POST /api/chat/service-request` via `postServiceRequestChatTurn` 
 | `correctedFields` | Form edits riding to the draft |
 
 `resolveUserBubbleText` order: `userBubbleText` → `message` → `Open SR <id>` → `action` → `selectedLeaseId`.
+
+**Comment replies.** When a turn has no `action` and no `userBubbleText`, and the last message is an assistant message whose `ui.comment_for` is set (the review comment prompt, §7.5), `commentBubbleText(lastMessage, text)` supplies the bubble: "{label}: {text}" (e.g. "Reject: Missing safety certificate"), or just "{label}" when the text equals `skip_value` case-insensitively (the "Approve without comment" chip → "Approve"). A `cancel` reply or an empty reply keeps the normal bubble. `SrChatbotUiPayload.comment_for` is typed `{action_id, label, required?, skip_value?}`.
 
 Wired in `AIChatWidget.tsx` (both surfaces), `AgenticHandoverWorkspace.tsx` and `CenomiAssistantPanel` → `AgenticChatShell`:
 
@@ -815,7 +944,7 @@ The stage is read through a ref so the bridge's memoised callback sees the lates
 
 ### 8.7 Refresh and form-action sync
 
-- **Refresh after chat mutations:** after each turn, on the next tick, `maybeDispatchSrDetailRefresh({action, actionResult, srId})` emits `CustomEvent('sr-v2-detail-refresh', {detail: {srId}})` when `action_result === 'success'` and the action is mutating (`PLATFORM_MUTATING_ACTIONS` or any `confirm_*`). `confirm_approve_wp` qualifies; `reject_wp`, `ask_more_info_wp`, `extend_wp` do not (§14, G-6).
+- **Refresh after chat mutations:** after each turn, on the next tick, `maybeDispatchSrDetailRefresh({action, actionResult, srId, stepCompleted})` emits `CustomEvent('sr-v2-detail-refresh', {detail: {srId}})` when `action_result === 'success'` and either the action is mutating (`PLATFORM_MUTATING_ACTIONS` or any `confirm_*`) or `stepCompleted` is set. `sendTurn` sets `stepCompleted` on a non-silent turn whose `ui` carries `stage_complete` or `workflow_complete`, which every Work Permit review result does (§7.8). That covers review actions that complete on the comment reply (§7.5), which is sent with no action id, and Reject / Ask for more info / Extend / Cancel, whose ids are not in the mutating list. Silent turns never take the `stepCompleted` path, so a form-to-chat sync cannot loop.
 - **Form actions reported to chat:** the SR form dispatches `SR_SAVED_EVENT` (`cenomi:sr-saved`) on POST / PATCH. `formActionFor(detail, {sessionId, workflowStage, activeAgent, activeSrId})` maps a PATCH on the active SR to `approved`, `more_info` (`ACTION_REQUIRED` / `REQUESTED_RE_UPLOAD`), `rejected`, `reassigned`, `report_submitted`, and a POST in a create stage (`CREATE_WORK_PERMIT` included) to `created:<sub_category>`. `DRAFT` saves are ignored. The hook sends `{action: 'form_action_done:<kind>', srId}` (§7.10).
 - **Opening:** `openExistingSr(srId)` / `openNotification(ref)` reset the session and send with `forceNewSession: true`. A deep-link effect opens `pageContext.srId` unless it is already the active or created SR.
 - **Completion:** `CREATE_SUCCESS_WORKFLOW_STAGES` (`SR_CREATED`, `SR_APPROVED`, `SR_COMPLETED`, `HANDED_OVER_COMPLETED`, `WP_CREATED`, `WP_APPROVED`) drive `isComplete` and View SR / Create another.
@@ -836,6 +965,18 @@ The stage is read through a ref so the bridge's memoised callback sees the lates
 - `notifications/notificationTypes.ts`: `AGENT_NOTIFICATION_SUB_CATEGORIES` includes the seven subtypes; `canOpenNotificationInAssistant` needs `action_required`, `notification_type === 'SERVICE_REQUEST'`, an SR id and a supported subtype.
 - `agenticSrAccess.ts`: `NOTIFICATION_CHIPS.work_permit` and the `work_permit` inbox tab for FM_MANAGER, MALL_MANAGER, DD_ENGINEER, OPERATIONS.
 - Backend (`notification_inbox_service.py`): per-subtype paths (e.g. `/notifications/agent/construction-hot`), audiences (Hot/Roof: DD, FM, MM; Cold: DD, MM, OPERATIONS, OE; Maintenance: FM, MM; Operations: MM), and a 404 from a category route is treated as an empty group. "work permit(s)" in a list request expands to all seven subtypes (`notification_intent._WORK_PERMIT_SUBS`).
+
+### 8.11 "Form completion" meter
+
+`SrCopilotPanel` shows the meter when `showProgress && totalCount > 0 && !isComplete`. `useServiceRequestChat` gets `filledCount` / `totalCount` from `computeDraftProgress({activeAgent, activeSrId, draft})` (`handoverAgenticFormConfig.ts`). The rule is generic for every SR type:
+
+| Case | Meter |
+|---|---|
+| `activeSrId` set (reviewing or viewing any existing SR) | Hidden (`total: 0`) |
+| Fitout Start / Fitout End / Trading agent | `computeFitoutConfirmProgress` |
+| `rdd_handover_agent` | `HANDOVER_PROGRESS_FIELD_KEYS` |
+| Any other agent (Work Permit, Sales Data) | Hidden (`total: 0`) |
+| No agent yet | Fitout set when the draft has a fitout status field, else Handover |
 
 ---
 
@@ -921,7 +1062,7 @@ Work Permit is the reference implementation for SR agents that **create** and **
 | P-16 | Gate every action twice: hop RBAC, then the legal-action set, with a friendly stale-action refusal. Re-check permission in the submission node. | `_deny_review_action`, `_legal_action_ids`, `ensure_can_approve_work_permit` |
 | P-17 | Declare inputs with `ActionRequires` and collect them conversationally with a pending-action slot, so the next free-text reply completes the action. | `wp_pending_action`, `_ask_for_input` |
 | P-18 | Build the review card deterministically: summary builder that drops empty rows, greeting by `first_name`, and **`response_message=None`** so the LLM does not rewrite it. | `build_wp_review_summary`, `compose_wp_review_message` |
-| P-19 | Use `current_sr_id` from the page context: show a `note` when the SR form is already open; offer an "Open full request" chip otherwise. | `_is_on_sr_page` |
+| P-19 | Use `current_sr_id` from the page context: offer an "Open full request" chip only when the SR form is not already open. Don't add "see the form" notes; make the card expandable ("View details") instead. | `_is_on_sr_page` |
 | P-20 | After a review action, set `response_decorations = {}` so finalize does not promote the preview card or re-attach review chips. | `work_permit_api_submission_node` |
 | P-21 | After a mid-hop action, name the next hop, set `stage_complete`, keep `active_agent`. After the last hop, set `workflow_complete`. | `_review_result` |
 | P-22 | Keep chat actions and SR form actions identical. If an action is removed in chat, remove it in `actionButtonSR.getActionList` too. | `WORK_PERMIT` branch |
@@ -944,8 +1085,8 @@ Work Permit is the reference implementation for SR agents that **create** and **
 - Stage mapping from GET operations, including numeric role ids and the early exit before Handover.
 - Hop RBAC: right role passes, wrong hop denied, admin bypass, non-actor gets no actions.
 - Resolver menu per context, and the stale-action refusal for actions not offered.
-- Pending inputs: action without comment asks; the next reply completes it.
-- Review card: summary keys and order, empty rows dropped, deterministic message, note vs chip.
+- Pending inputs: every action asks for its comment in chat; the clicked action id is never the comment; the next reply completes it, a skip chip submits an optional one empty, Cancel backs out; the comment is cleared after submission.
+- Review card: summary keys and order, `details` list, empty rows dropped, deterministic message, no note, chip only off the SR page.
 - Submission: each outcome's message, stage and flags; `response_decorations == {}` after review actions.
 - Routing: terminal stage + background patch → `response_generation`; deliberate open → `preview`.
 - Frontend: renderer picks the summary layout, `(id, label)` reaches `onCardAction`, bubble shows the label, finished stages drop patches.
@@ -1014,10 +1155,14 @@ Go platform: `IssueAISessionToken` adds the `first_name` claim to the AI session
 
 | Area | Files |
 |---|---|
-| Review hops, mapping, routing (incl. background-sync guard), decorations reset | `test_work_permit_review.py` |
-| Review actions, pending inputs, Assign To refusal, PATCH bodies | `test_work_permit_review_actions.py` |
-| Review card contract (summary layout, exact action list, message, note vs chip) | `test_work_permit_review_card.py` |
-| Summary builder and message | `test_work_permit_review_summary.py` |
+| Review hops, mapping (incl. `ACTION_REQUIRED` → `WP_ACTION_REQUIRED`), routing (background-sync guard, status view never `preview` for WP), decorations reset | `test_work_permit_review.py` |
+| Status view card (per-status message, tenant variant, no actions, chip only off the SR page, draft keeps pending confirmation) and `preview_node` labels per workflow | `test_work_permit_status.py` |
+| Review actions, pending inputs, Assign To refusal, PATCH bodies; comment step (button echo prompts instead of submitting, stale form comment ignored, `comment_for` and chips per action, required comment re-asked, approve skip / typed comment, Cancel chip, switching action mid-prompt, `wp_review_comment` read by the payload builder, APPROVED `comment` only when set) | `test_work_permit_review_actions.py` |
+| Pending prompt across turns (save / load round trip then the typed reason confirms Ask for more info, nothing kept once answered, Extend duration kept, prompt from another stage or SR dropped) | `test_wp_pending_prompt_persists.py` |
+| Review card contract (summary layout, `details` list with `summaryKey`, exact action list, message ending with the history sentence from `sr_history` / `sr_creator`, no note, chip only off the SR page, non-actor reply) | `test_work_permit_review_card.py` |
+| Summary builder and message; `summaryKey` mappings (Cold, Ops); history sentence (submitted only, submitter + latest step, latest step only, creator fallback, tenant-side roles read Tenant, leasing manager keeps its label, dates never shown, reply to a send-back becomes a resubmission for `RE_EXAMINE` / `UPDATE` / `IN_PROCESS` / `RE_SUBMITTED` / `SUBMITTED` / `SUBMIT`, the SR 341529 sequence, a repeat submission with no send-back is not a step, same-actor shortening, resubmission by someone else, unanswered send-back, a later decision wins, rows not mutated, noise skipped, passive, empty when nothing is known, unknown status, history last with the closing question) | `test_work_permit_review_summary.py` |
+| GET reads `operation_history` and `created_by` / `created_user_role` / `created_at` | `test_platform_api_client.py` |
+| Sync stores `sr_history` and `sr_creator` | `test_sr_status_sync_role_ids.py` |
 | Action resolver (menus per context, no Assign To for any approver) | `test_action_resolver.py` |
 | Create and hop permissions | `test_work_permit_permissions.py` |
 | Grouped questions | `test_work_permit_grouped_questions.py` |
@@ -1034,7 +1179,7 @@ Run: `pytest tests/unit --ignore=tests/unit/indexer` (the indexer tests need net
 
 ### 12.2 Frontend specs (`…/`)
 
-`SrChatUiRenderer.spec.tsx`, `ConfirmationCardV2.spec.tsx`, `formPatchGuard.spec.ts`, `userBubbleText.spec.ts`, `confirmationCardDisabled.spec.ts`, `silentTurnMessage.spec.ts`, `srDetailRefresh.spec.ts`, `formActionSync.spec.ts`, `AIChatWidget/SrFabMessages.spec.tsx`, `HandoverAgenticBridge.spec.tsx`, `agenticSrAccess.spec.ts`, `agenticSrNavigation.spec.ts`, `serviceRequestAgenticRegistry.spec.ts`, `notifications/notificationTypes.spec.ts`, `actionButton/WorkflowActionBarUiV2.spec.tsx`.
+`SrChatUiRenderer.spec.tsx`, `SummaryGrid.spec.tsx` (same grid when expanded, only unique extras, `summaryKey` dedupe, wide detail chips only, counts, `aria-controls`, collapse, slim text-link toggle with chevron), `draftProgress.spec.ts`, `ConfirmationCardV2.spec.tsx`, `formPatchGuard.spec.ts`, `userBubbleText.spec.ts` (button label; comment reply bubble "Reject: …", skip chip → "Approve", cancel / empty / no prompt untouched), `confirmationCardDisabled.spec.ts`, `silentTurnMessage.spec.ts`, `srDetailRefresh.spec.ts` (completed step on a reply with no action refreshes; not without success, an SR id, or a signal), `formActionSync.spec.ts`, `AIChatWidget/SrFabMessages.spec.tsx` (pinned actions render after `.cenomi-messages`, not inside it), `HandoverAgenticBridge.spec.tsx`, `agenticSrAccess.spec.ts`, `agenticSrNavigation.spec.ts`, `serviceRequestAgenticRegistry.spec.ts`, `notifications/notificationTypes.spec.ts`, `actionButton/WorkflowActionBarUiV2.spec.tsx`.
 
 ### 12.3 Eval (tier 9)
 
@@ -1074,10 +1219,18 @@ The local mock must seed WP operations (not Handover FM → DD), or L240–L245 
 - [x] Review menu is Approve / Ask for more info / Reject for every approver at every level; Extend / Cancel when a tenant request is pending.
 - [x] Assign To is not offered in chat or on the SR form; stale or typed Assign To is refused.
 - [x] Reject and Ask for more info collect a comment; Extend collects a duration and a comment; Cancel collects a comment.
-- [x] Review card: first-name greeting, summary grid, actions, prompt chips, note on the SR page or "Open full request" elsewhere.
+- [x] Approve, Ask for more info and Reject each ask for a comment in chat before submitting (required for Ask and Reject, optional for Approve with an "Approve without comment" chip, Cancel on every prompt); the action id is never taken as the comment; `wp_review_comment` is cleared after submission.
+- [x] The history sentence shows the tenant's resubmission as the latest step, reads "(Tenant)" for tenant-side roles, and shows no dates.
+- [x] Review card: first-name greeting, summary grid with "View details" / "Hide details", pinned actions, prompt chips, "Open full request" only off the SR page.
+- [x] "View details" grows the same chip grid with only the fields the summary leaves out; long values wrap across the row; collapsing restores the six chips.
+- [x] Pinned actions sit in a footer below the chat scroller and never cover the card.
+- [x] The "N of M fields / View details" row is a slim, borderless part of the card.
+- [x] The review message ends with who submitted the request and the latest step since (name, role, date), from the platform `operation_history`, with no generic fallback.
 - [x] The user bubble for a card action shows the button label.
+- [x] The reply to a comment prompt shows "{Action}: {comment}", or just the action label when skipped.
 - [x] No SR details card after a review action.
 - [x] No stray Handover card after final approval (frontend drops patches; backend routes background patches on terminal stages to `response_generation`).
+- [x] Opening a Work Permit that is sent back, approved, rejected or in an unknown stage shows the Work Permit status card (no actions), never the Handover preview card; the "Form completion" meter is hidden for existing SRs and for workflows without a field set.
 - [x] Work Permit subtypes appear in the notification inbox.
 - [x] Eval `--tier 9` and L240–L245 registered.
 - [ ] Eval coverage for Ask for more info, Extend, Cancel.
@@ -1095,7 +1248,7 @@ Found while reviewing the code for this revision. None block the current flows.
 | G-3 | Entry-node fallback text still says "approve, ask for more info, assign, or reject". | Mentions an action that is no longer offered. | Remove "assign". |
 | G-4 | `assign_to_options` is never written; `wp_assign_to_options` and the Assign To branch are dead code. | None today. | Delete if Assign To stays out of scope. |
 | G-5 | The review HTTP 500 message says "approval" for any review action, and the permission-denied text says "approve" for every action. | Slightly misleading wording on reject / more info failures. | Word by action. |
-| G-6 | `reject_wp`, `ask_more_info_wp`, `extend_wp` are not in `PLATFORM_MUTATING_ACTIONS`. | The SR form does not auto-refresh after these chat actions. | Add them (and `cancel_permit_wp`); extend `FINISHED_REVIEW_WORKFLOW_STAGES` if needed. |
+| G-6 | ~~`reject_wp`, `ask_more_info_wp`, `extend_wp` are not in `PLATFORM_MUTATING_ACTIONS`.~~ **Resolved:** the refresh also fires on `stage_complete` / `workflow_complete` (§8.7). | — | Extend `FINISHED_REVIEW_WORKFLOW_STAGES` if needed. |
 | G-7 | Roof "required" text fields (`work_type`, `work_location`, `demand_appendices`, `special_conditions`) are also in `OPTIONAL_FIELDS`. | Asked, but a skip is accepted. | Confirm intended behaviour with product. |
 | G-8 | `preview_node` always labels its card "Handover Service Request". | Deliberately opening an approved / rejected Work Permit shows a Handover-labelled card. | Label by `active_agent`, reuse `wp_draft_fields_from_collected`. |
 | G-9 | The review summary shows Type of work only; List of Equipment (Cold `list_equipment`) is not shown, and Hot `work_type` is often empty. | Reviewers see less context on Cold / Hot permits. | Add an equipment row (Cold `list_equipment`; Hot ticked `equipment_for_carryingout`). Pending product decision. |
