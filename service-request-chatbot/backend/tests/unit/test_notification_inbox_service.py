@@ -74,10 +74,21 @@ class TestAudienceSelection:
             "HANDOVER",
             "FIT_OUT_CONFIRM_FOS",
             "FIT_OUT_CONFIRM_END",
+            "FITOUT_PROGRESS",
             "CONSTRUCTION_HOT",
             "CONSTRUCTION_COLD",
             "CONSTRUCTION_ROOF_ACCESS",
             "MAINTENANCE_ROOF_ACCESS",
+        )
+
+    def test_fitout_progress_is_the_rdd_project_managers_alone(self) -> None:
+        # The weekly SR waits on the RDDPM; no other role can act on it.
+        for role in ("MALL_MANAGER", "FM_MANAGER", "OPERATIONS"):
+            assert "FITOUT_PROGRESS" not in _select_sub_categories(
+                frozenset({role}), None
+            )
+        assert "FITOUT_PROGRESS" in _select_sub_categories(
+            frozenset({"DD_ENGINEER"}), None
         )
 
     def test_empty_roles_call_all(self) -> None:
@@ -214,6 +225,36 @@ class TestHttpFetch:
         assert args[0] == "https://platform.example/v1/notifications/agent/handover"
         assert kwargs["headers"] == {"x-internal-api-token": "tok-123"}
         assert kwargs["params"]["user_id"] == "123"
+
+    @pytest.mark.asyncio
+    async def test_fitout_progress_calls_its_own_tool(self) -> None:
+        item = {
+            "id": "ntf-fp",
+            "text_content": {
+                "message": "Service request (reference no: 320981) for Fitout Progress has been assigned to you for review.",
+                "type": "SERVICE_REQUEST",
+                "id": "320981",
+                "sub_category": "fitout_progress",
+            },
+            "created_at": "2026-09-01T13:30:00Z",
+            "read_at": None,
+            "action_required": True,
+        }
+        with patch("httpx.AsyncClient") as mock_httpx:
+            get = AsyncMock(
+                return_value=_mock_response(200, _platform_body("FITOUT_PROGRESS", [item]))
+            )
+            mock_httpx.return_value.__aenter__.return_value.get = get
+            result = await _http_service().fetch_inbox(
+                user_id="1077321",
+                roles=frozenset({"DD_ENGINEER"}),
+                filters=NotificationListFilters(sub_categories=("FITOUT_PROGRESS",)),
+            )
+        args, _ = get.call_args
+        assert args[0] == "https://platform.example/v1/notifications/agent/fitout-progress"
+        group = result.groups[0]
+        assert group.sub_category == "FITOUT_PROGRESS"
+        assert group.items[0].sr_id == "320981"
 
     @pytest.mark.asyncio
     async def test_text_content_as_json_string(self) -> None:

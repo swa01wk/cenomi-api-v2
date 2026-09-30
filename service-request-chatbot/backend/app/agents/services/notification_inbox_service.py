@@ -2,7 +2,7 @@
 
 Platform contract (cenomi-api-2, TC-3520, ``docs/NOTIFICATION_AGENT_TOOLS_SPEC.md``):
 sub-category-scoped GET endpoints under ``/notifications/agent/...`` (Handover,
-Fit-out Confirm, Sales Data, and seven Work Permit subtypes), authenticated
+Fit-out Confirm, Fit-out Progress, Sales Data, and seven Work Permit subtypes), authenticated
 with the ``x-internal-api-token`` header ONLY (no user Bearer, no S2S login).
 The platform:
 
@@ -50,6 +50,7 @@ NOTIFICATION_SUB_CATEGORIES: tuple[str, ...] = (
     "FIT_OUT_CONFIRM_FOS",
     "FIT_OUT_CONFIRM_END",
     "FIT_OUT_CONFIRM_TRADING",
+    "FITOUT_PROGRESS",
     "SALES_DATA",
     "CONSTRUCTION_HOT",
     "CONSTRUCTION_COLD",
@@ -65,6 +66,7 @@ _SUB_CATEGORY_PATHS: dict[str, str] = {
     "FIT_OUT_CONFIRM_FOS": "/notifications/agent/fit-out-confirm-fos",
     "FIT_OUT_CONFIRM_END": "/notifications/agent/fit-out-confirm-end",
     "FIT_OUT_CONFIRM_TRADING": "/notifications/agent/fit-out-confirm-trading",
+    "FITOUT_PROGRESS": "/notifications/agent/fitout-progress",
     "SALES_DATA": "/notifications/agent/sales-data",
     "CONSTRUCTION_HOT": "/notifications/agent/construction-hot",
     "CONSTRUCTION_COLD": "/notifications/agent/construction-cold",
@@ -93,6 +95,9 @@ _SUB_CATEGORY_AUDIENCE: dict[str, frozenset[str]] = {
     # Trading confirmations are raised against the mall, not RDD — the
     # scheduler targets MALL_MANAGER and OPERATIONS (mirrors the Go handler).
     "FIT_OUT_CONFIRM_TRADING": frozenset({"MALL_MANAGER", "OPERATIONS"}),
+    # The weekly fit-out progress SR waits on the RDD Project Manager, the one
+    # role that may approve, reject or re-record it (mirrors the Go handler).
+    "FITOUT_PROGRESS": frozenset({"DD_ENGINEER"}),
     "SALES_DATA": frozenset(
         {"TENANT_CSV_UPLOADER", "TENANT_DOC_UPLOADER", "SALES_DATA_APPROVER"}
     )
@@ -112,6 +117,7 @@ SUB_CATEGORY_LABELS: dict[str, str] = {
     "FIT_OUT_CONFIRM_FOS": "Fit-out Start Confirmation",
     "FIT_OUT_CONFIRM_END": "Fit-out End Confirmation",
     "FIT_OUT_CONFIRM_TRADING": "Trading Confirmation",
+    "FITOUT_PROGRESS": "Fit-out Progress",
     "SALES_DATA": "Sales Data",
     "CONSTRUCTION_HOT": "Construction – Hot Work",
     "CONSTRUCTION_COLD": "Construction – Cold Work",
@@ -498,6 +504,20 @@ _MOCK_FIXTURES: dict[str, list[dict[str, Any]]] = {
                 "id": "11750",
             },
             "created_at": "2026-08-24T12:00:00Z",
+            "read_at": None,
+            "action_required": True,
+            "notification_type": "SERVICE_REQUEST",
+        },
+    ],
+    "FITOUT_PROGRESS": [
+        {
+            "id": "ntf-fp-001",
+            "text_content": {
+                "message": "Fit-out progress review needed for SR 11760.",
+                "type": "SERVICE_REQUEST",
+                "id": "11760",
+            },
+            "created_at": "2026-08-25T09:00:00Z",
             "read_at": None,
             "action_required": True,
             "notification_type": "SERVICE_REQUEST",
