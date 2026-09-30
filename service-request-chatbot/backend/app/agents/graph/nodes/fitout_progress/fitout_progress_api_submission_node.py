@@ -237,9 +237,14 @@ async def fitout_progress_api_submission_node(state: ServiceRequestState) -> dic
                 "updated. A new request can be raised with the right "
                 "percentage."
             )
+        # SUBMITTED, as the confirmation agents' approvals return: it is what
+        # makes the turn report action_result=success, and that is the signal
+        # the SR details page refreshes on. With WAITING_FOR_USER the SR was
+        # approved but the page kept "Pending" and its Action button, which
+        # read as if nothing had happened.
         return {
             "backend_refs": backend_refs,
-            "status": "WAITING_FOR_USER",
+            "status": "SUBMITTED",
             "workflow_stage": stage,
             "confirmation_status": None,
             "confirmation_required": False,

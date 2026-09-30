@@ -962,6 +962,8 @@ class TestApprovalSubmission:
         assert out["workflow_stage"] == "SR_APPROVED"
         assert "approved at **82%**" in out["response_message"]
         assert "lease now reads 82%" in out["response_message"]
+        # SUBMITTED is what makes the details page refresh after the decision.
+        assert out["status"] == "SUBMITTED"
 
     async def test_rejected_says_the_lease_was_not(self) -> None:
         # The write-back hook is registered for APPROVED only.
@@ -969,6 +971,7 @@ class TestApprovalSubmission:
         assert out["workflow_stage"] == "SR_REJECTED"
         assert "rejected" in out["response_message"].lower()
         assert "not updated" in out["response_message"]
+        assert out["status"] == "SUBMITTED"
 
     async def test_non_approver_is_refused_before_any_patch(self) -> None:
         state = self._patch_state()
