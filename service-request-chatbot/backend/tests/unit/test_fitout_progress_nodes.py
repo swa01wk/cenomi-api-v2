@@ -208,6 +208,43 @@ class TestEntryConfirmation:
         assert "different percentage" in out["response_message"]
         assert "confirmation_status" not in out
 
+    async def test_a_percentage_edited_in_the_form_revises_the_card(self) -> None:
+        # A silent form→chat turn: no message, the edit in corrected_fields.
+        out = await fitout_progress_entry_node(
+            _state(
+                confirmation_status="PENDING",
+                user_message="",
+                corrected_fields={PROGRESS_FIELD: "45 %"},
+            )
+        )
+        assert out["confirmation_status"] == "REJECTED"
+        assert out["corrected_fields"] == {PROGRESS_FIELD: "45"}
+        assert out["collected_data"][PROGRESS_CONFIRMED_KEY] is True
+        # So merge_state reads it as answered in the form, not a background default.
+        assert out["active_field"] == PROGRESS_FIELD
+        assert "response_message" not in out
+
+    async def test_a_comment_edited_in_the_form_revises_the_card(self) -> None:
+        out = await fitout_progress_entry_node(
+            _state(
+                confirmation_status="PENDING",
+                user_message="",
+                corrected_fields={"comment": "Ceiling done"},
+            )
+        )
+        assert out["confirmation_status"] == "REJECTED"
+        assert "active_field" not in out
+
+    async def test_a_background_form_sync_is_not_answered_yes_or_no(self) -> None:
+        out = await fitout_progress_entry_node(
+            _state(
+                confirmation_status="PENDING",
+                user_message="",
+                corrected_fields={"brand_name": "Brand Under Armour"},
+            )
+        )
+        assert out == {}
+
     async def test_cancel_action_on_the_card_reopens_the_question(self) -> None:
         out = await fitout_progress_entry_node(
             _state(confirmation_status="PENDING", action_override="cancel")

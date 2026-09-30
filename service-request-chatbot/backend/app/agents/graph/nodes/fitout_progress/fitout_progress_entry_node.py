@@ -393,6 +393,9 @@ async def fitout_progress_entry_node(state: ServiceRequestState) -> dict[str, An
 
     # ── 4. Confirmation response parsing ──────────────────────────────────
     if confirmation_status == "PENDING":
+        form_edit = _card_edited_in_the_form(state)
+        if form_edit is not None:
+            return form_edit
         if _contains_phrase(user_message, _CONFIRM_PHRASES):
             log.info("fitout_progress_entry.confirmation_accepted")
             return {"confirmation_status": "CONFIRMED", "status": "IN_PROGRESS"}
@@ -488,6 +491,54 @@ async def fitout_progress_entry_node(state: ServiceRequestState) -> dict[str, An
         return {"workflow_stage": "CREATE_SR", **fresh}
 
     return {}
+
+
+# Form fields that change what the review card shows.
+_CARD_FORM_FIELDS: frozenset[str] = frozenset({PROGRESS_FIELD, "comment"})
+
+
+def _card_edited_in_the_form(state: ServiceRequestState) -> dict[str, Any] | None:
+    """Take a form edit made while the review card is pending, or None.
+
+    A form edit reaches this node as a silent turn: no message, the changed
+    fields in ``corrected_fields``. Over the card that fell through to the
+    yes/no parsing, which found neither and answered "Please reply yes", so
+    a % or a comment changed in the form never reached the card. Seen on
+    "update fitout progress t0112745 30%", which goes straight to the card;
+    the question flow was unaffected because nothing is pending while the
+    question is open.
+
+    The edit is the user's own, so it is handled as a number typed on the
+    card: the card is rebuilt with it. ``active_field`` names the percentage
+    so merge_state counts it as answered in the form rather than as the
+    form's own default arriving in the background — which it would restore.
+    Any other silent sync (the lease rows the form hydrates) passes through
+    without the yes/no reply.
+    """
+    if str(state.get("user_message") or "").strip():
+        return None
+    corrected = dict(state.get("corrected_fields") or {})
+    if not corrected:
+        return None
+    if not _CARD_FORM_FIELDS & set(corrected):
+        log.info("fitout_progress_entry.card_background_sync", fields=sorted(corrected))
+        return {}
+
+    patch: dict[str, Any] = {
+        "confirmation_status": "REJECTED",
+        "status": "IN_PROGRESS",
+    }
+    if PROGRESS_FIELD in corrected:
+        value = parse_percentage(corrected[PROGRESS_FIELD])
+        if value is not None:
+            corrected[PROGRESS_FIELD] = format_percentage(value)
+            patch["corrected_fields"] = corrected
+        collected = dict(state.get("collected_data") or {})
+        collected[PROGRESS_CONFIRMED_KEY] = True
+        patch["collected_data"] = collected
+        patch["active_field"] = PROGRESS_FIELD
+    log.info("fitout_progress_entry.card_edited_in_form", fields=sorted(corrected))
+    return patch
 
 
 def _restart_restated_request(state: ServiceRequestState) -> dict[str, Any] | None:

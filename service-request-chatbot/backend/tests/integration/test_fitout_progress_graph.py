@@ -1028,3 +1028,69 @@ async def test_retyping_the_request_over_the_card_re_renders_it(
     assert second["confirmation_status"] == "PENDING"
     assert second["collected_data"][PROGRESS_FIELD] == expected
     assert second["collected_data"]["lease_id"] == 95404
+
+
+async def _card_for_30() -> dict:
+    with ExitStack() as stack:
+        _enter(
+            stack,
+            _patches(
+                extraction_fields={
+                    "lease_code": {"value": "t0105712", "confidence": 0.97},
+                    PROGRESS_FIELD: {"value": "30", "confidence": 0.95},
+                }
+            ),
+        )
+        first = await _GRAPH.ainvoke(
+            _state(user_message="update fitout progress t0105712 30%")
+        )
+    assert first["response_ui"]["type"] == "confirmation_card"
+    # What a real next turn starts from: the session restores the draft, not
+    # this turn's extraction or its reply.
+    return {
+        key: value
+        for key, value in first.items()
+        if key
+        not in ("response_message", "response_ui", "corrected_fields", "extracted_fields")
+    }
+
+
+async def _form_sync(carried: dict, corrected: dict) -> dict:
+    """A silent form→chat turn: no message, the changed fields only."""
+    with ExitStack() as stack:
+        _enter(stack, _patches())
+        return await _GRAPH.ainvoke(
+            {**carried, "user_message": "", "corrected_fields": corrected}
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_percentage_edited_in_the_form_updates_the_pending_card() -> None:
+    """One-shot straight to the card, then the % changed in the open form.
+
+    It used to fall through to "Please reply yes", and merge_state would have
+    restored 30 anyway, reading the edit as the form's background default.
+    """
+    result = await _form_sync(await _card_for_30(), {PROGRESS_FIELD: "45"})
+
+    assert result["collected_data"][PROGRESS_FIELD] == "45"
+    assert result["confirmation_status"] == "PENDING"
+    assert result["response_ui"]["type"] == "confirmation_card"
+
+
+@pytest.mark.asyncio
+async def test_a_comment_added_in_the_form_reaches_the_pending_card() -> None:
+    result = await _form_sync(await _card_for_30(), {"comment": "Ceiling works done"})
+
+    assert result["collected_data"]["comment"] == "Ceiling works done"
+    assert result["collected_data"][PROGRESS_FIELD] == "30"
+    assert result["response_ui"]["type"] == "confirmation_card"
+
+
+@pytest.mark.asyncio
+async def test_a_background_lease_sync_over_the_card_is_not_answered() -> None:
+    result = await _form_sync(await _card_for_30(), {"brand_name": "Brand Under Armour"})
+
+    assert "Please reply" not in str(result.get("response_message") or "")
+    assert result["collected_data"][PROGRESS_FIELD] == "30"
+    assert result["confirmation_status"] == "PENDING"
