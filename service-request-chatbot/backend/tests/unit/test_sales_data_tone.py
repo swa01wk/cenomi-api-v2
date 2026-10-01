@@ -114,3 +114,36 @@ async def test_sales_agent_never_repeats_the_identical_reply() -> None:
     assert "upload sales data" in result["response_message"]
     # The card (and its attach control) is kept, only the text changes.
     assert result["response_ui"]["type"] == "supporting_doc_prompt"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "turn",
+    [
+        {"corrected_fields": {"csv_session_id": "sess-1"}},
+        {"action_override": "csv_uploaded"},
+    ],
+)
+async def test_reupload_gets_its_real_reply_not_the_fallback(turn) -> None:
+    from app.agents.graph.nodes.shared.response_generation_node import (
+        response_generation_node,
+    )
+
+    reply = (
+        "**salesdatatemplate.csv** has no sales amounts filled in. "
+        "Nothing has been submitted."
+    )
+    result = await response_generation_node({
+        "active_agent": "sales_data_agent",
+        "user_message": "salesdatatemplate.csv",
+        "response_message": reply,
+        "response_ui": {"type": "csv_validation_error", "show_file_upload": True},
+        "status": "WAITING_FOR_USER",
+        "conversation_history": [
+            {"role": "user", "content": "salesdatatemplate.csv"},
+            {"role": "assistant", "content": reply},
+        ],
+        **turn,
+    })
+    assert result["response_message"] == reply
+    assert result["response_ui"]["type"] == "csv_validation_error"
