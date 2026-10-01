@@ -305,8 +305,9 @@ class ServiceRequestPlatformClient:
         self, service_category: str, sub_category: str
     ) -> PlatformCallResult:
         """GET /service-requests/workflows for the form skeleton."""
-        await self.ensure_authenticated()
         endpoint = f"{self._base_url}{self._WORKFLOWS_PATH}"
+        if not self._uses_agentic_bearer("GET", endpoint):
+            await self.ensure_authenticated()
         params = {
             "service_category": service_category,
             "sub_category": sub_category,
@@ -614,7 +615,7 @@ class ServiceRequestPlatformClient:
             return True
         if m == "PATCH" and cls._is_service_request_by_id_path(path):
             return True
-        return False
+        return m == "GET" and path.endswith("/service-requests/workflows")
 
     def _uses_agentic_bearer(self, method: str, url: str) -> bool:
         return self._is_agentic_route(method, url) and get_current_bearer_token() is not None

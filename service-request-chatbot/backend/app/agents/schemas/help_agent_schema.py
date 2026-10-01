@@ -26,6 +26,11 @@ from __future__ import annotations
 
 from pydantic import BaseModel
 
+from app.agents.schemas.ceiling_schema import (
+    ACK_ROLES as _CEILING_ACK_ROLES,
+    CREATE_ROLES as _CEILING_CREATE_ROLES,
+)
+
 # ---------------------------------------------------------------------------
 # Shared read intents — available to every authenticated role
 # ---------------------------------------------------------------------------
@@ -178,6 +183,23 @@ for _role in _TENANT_WORK_PERMIT_CREATE_ROLES:
     ROLE_PERMITTED_INTENTS[_role] = ROLE_PERMITTED_INTENTS.get(
         _role, _SR_READ_INTENTS
     ) | frozenset({"CREATE_WORK_PERMIT_SR"})
+
+# ── Ceiling Inspection (Open / Close) ─────────────────────────────────────────
+# Create: Mall Manager, FM Manager, RDD PM; acknowledge: tenant roles
+# (ceiling_schema.CREATE_ROLES / ACK_ROLES — read from there, so the two schemas
+# cannot drift). Review / approve are further gated by the live operation's role
+# in ceiling_review_entry_node.
+_CEILING_EXTRA_INTENTS: dict[str, set[str]] = {}
+for _role in _CEILING_CREATE_ROLES:
+    _CEILING_EXTRA_INTENTS.setdefault(_role, set()).add("CREATE_CEILING_INSPECTION_SR")
+for _role in _CEILING_ACK_ROLES:
+    _CEILING_EXTRA_INTENTS.setdefault(_role, set()).add("ACKNOWLEDGE_CEILING_INSPECTION_SR")
+_CEILING_EXTRA_INTENTS.setdefault("DD_ENGINEER", set()).add("REVIEW_CEILING_INSPECTION_SR")
+_CEILING_EXTRA_INTENTS.setdefault("FM_MANAGER", set()).add("APPROVE_CEILING_INSPECTION_SR")
+for _role, _intents in _CEILING_EXTRA_INTENTS.items():
+    ROLE_PERMITTED_INTENTS[_role] = (
+        ROLE_PERMITTED_INTENTS.get(_role, _SR_READ_INTENTS) | frozenset(_intents)
+    )
 
 
 def _rebuild_intents_for_roles() -> None:

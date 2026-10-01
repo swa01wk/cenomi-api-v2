@@ -24,6 +24,8 @@ _CREATE_LABELS: dict[str, str] = {
     "FIT_OUT_CONFIRM_FOS": "Fitout Start Confirmation",
     "FIT_OUT_CONFIRM_END": "Fitout End Confirmation",
     "FIT_OUT_CONFIRM_TRADING": "Trading Confirmation",
+    "OPEN_CEILING_INSPECTION": "Open Ceiling Inspection",
+    "CLOSE_CEILING_INSPECTION": "Close Ceiling Inspection",
 }
 
 _REVIEW_OUTCOMES: dict[str, str] = {

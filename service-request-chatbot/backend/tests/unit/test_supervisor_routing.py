@@ -858,7 +858,13 @@ class TestSalesDataRbac:
 
         demo = intents_for_roles(frozenset({"TENANT_CSV_UPLOADER"}))
         live = intents_for_roles(frozenset({"BILLING_CONTACT", "LEASING_MANAGER"}))
-        assert demo == live
+        # Real tenant roles also acknowledge ceiling inspections (they no longer
+        # raise them — Mall Manager, FM Manager and RDD PM do); the demo alias is
+        # sales-data only.
+        ceiling = {"ACKNOWLEDGE_CEILING_INSPECTION_SR"}
+        assert ceiling <= live
+        assert "CREATE_CEILING_INSPECTION_SR" not in live
+        assert demo == live - ceiling
         assert "UPLOAD_SALES_DATA" in live
         assert "REVIEW_SALES_DATA" not in live
 

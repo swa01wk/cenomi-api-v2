@@ -180,6 +180,14 @@ from app.agents.services.notification_intent import parse_notification_list_filt
         ),
         ("show construction hot work notifications", ("CONSTRUCTION_HOT",), None),
         ("list maintenance cold notifications", ("MAINTENANCE_COLD",), None),
+        # The Copilot's ceiling chip: both inspections.
+        (
+            "Show my ceiling inspection notifications",
+            ("OPEN_CEILING_INSPECTION", "CLOSE_CEILING_INSPECTION"),
+            None,
+        ),
+        ("show open ceiling notifications", ("OPEN_CEILING_INSPECTION",), None),
+        ("unread CCI notifications", ("CLOSE_CEILING_INSPECTION",), True),
     ],
 )
 def test_parse_notification_list_filters(message, subs, unread) -> None:

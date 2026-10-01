@@ -512,6 +512,40 @@ def _build_trading_confirm_config() -> WorkflowConfig:
     )
 
 
+def _build_ceiling_inspection_config() -> WorkflowConfig:
+    """Build the ``WorkflowConfig`` for the RDD Ceiling Inspection Agent.
+
+    One agent for OPEN_CEILING_INSPECTION and CLOSE_CEILING_INSPECTION — the
+    two share their form and approval flow; ``CEILING_SUBCAT_CONFIG`` holds the
+    only differences. Only the create stage runs the shared collection
+    pipeline; review and acknowledgement are deterministic entry nodes reached
+    through status sync.
+    """
+    from app.agents.prompts.ceiling_extraction_prompt import (
+        CEILING_EXTRACTION_SYSTEM_PROMPT,
+        CEILING_FIELD_QUESTIONS,
+    )
+    from app.agents.schemas import ceiling_schema as cs
+
+    return WorkflowConfig(
+        agent_name=cs.AGENT_NAME,
+        extraction_prompt=CEILING_EXTRACTION_SYSTEM_PROMPT,
+        field_questions=CEILING_FIELD_QUESTIONS,
+        stage_sync_nodes={
+            cs.STAGE_L1_REVIEW: "ceiling_review_entry",
+            cs.STAGE_L2_REVIEW: "ceiling_review_entry",
+            cs.STAGE_REPORT_SUBMITTED: "ceiling_ack_entry",
+        },
+        collection_stages=frozenset({cs.STAGE_CREATE}),
+        confirmation_nodes={cs.STAGE_CREATE: "ceiling_confirmation"},
+        terminal_stages=cs.TERMINAL_STAGES,
+        backend_fields=cs.BACKEND_DERIVED_FIELDS,
+        auto_generated_fields=frozenset({"inspection_done_by"}),
+        lease_trigger_fields=("lease_code", "company", "lease_brand_mall"),
+        action_intents=cs.ACTION_INTENTS,
+    )
+
+
 def _build_sales_data_config() -> WorkflowConfig:
     """Build the ``WorkflowConfig`` for the Sales Data Agent.
 
@@ -558,6 +592,7 @@ def _init_registry() -> None:
         _build_fitout_start_config(),
         _build_fitout_end_config(),
         _build_trading_confirm_config(),
+        _build_ceiling_inspection_config(),
     ):
         WORKFLOW_CONFIG_REGISTRY[cfg.agent_name] = cfg
 

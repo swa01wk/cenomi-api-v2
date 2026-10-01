@@ -57,6 +57,10 @@ LEASE_PICKER_PURPOSE_BY_AGENT: dict[str, str] = {
     "rdd_fitout_start_agent": "fitout_confirm",
     "rdd_fitout_end_agent": "fitout_end",
     "rdd_trading_confirmation_agent": "trading_confirm",
+    # A ceiling inspection can be raised on any lease the caller can access:
+    # this purpose carries neither the handover-eligibility gate nor a
+    # milestone filter on the platform.
+    "rdd_ceiling_inspection_agent": "ceiling_inspection",
 }
 
 
@@ -86,6 +90,13 @@ def build_create_lease_picker(purpose: str | None = None) -> dict[str, Any]:
 
 _LEASE_BROWSE_STAGES: frozenset[str] = frozenset({"CREATE_SR", "CREATE_WORK_PERMIT"})
 
+# Create stages of the RDD agents that browse leases: Handover and the fitout
+# confirmations collect in CREATE_SR; ceiling inspection has its own stage
+# (ceiling_schema.STAGE_CREATE).
+_RDD_CREATE_BROWSE_STAGES: frozenset[str] = frozenset(
+    {"CREATE_SR", "CREATE_CEILING_INSPECTION_SR"}
+)
+
 
 def lease_picker_purpose(state: dict[str, Any]) -> str | None:
     """The ``purpose`` this state's lease picker must carry, if any."""
@@ -95,9 +106,10 @@ def lease_picker_purpose(state: dict[str, Any]) -> str | None:
 def should_browse_leases(state: dict[str, Any]) -> bool:
     """True when a CREATE turn should offer lease browse chips.
 
-    Handover, Work Permit create, and the three fitout confirmations each get
-    a list. ``lease_picker_purpose`` carries the fitout rule to the platform;
-    handover and Work Permit use the same eligible-lease list (no purpose).
+    Handover, Work Permit create, the three fitout confirmations and ceiling
+    inspection each get a list. ``lease_picker_purpose`` carries the workflow's
+    lease rule to the platform; handover and Work Permit use the same
+    eligible-lease list (no purpose).
     """
     from app.core.config import settings
 
@@ -126,4 +138,4 @@ def should_browse_leases(state: dict[str, Any]) -> bool:
     # leases are the right ones.
     if agent != "rdd_handover_agent" and agent not in LEASE_PICKER_PURPOSE_BY_AGENT:
         return False
-    return stage == "CREATE_SR"
+    return stage in _RDD_CREATE_BROWSE_STAGES

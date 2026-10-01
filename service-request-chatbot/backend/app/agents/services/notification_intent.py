@@ -176,6 +176,14 @@ _SUB_CATEGORY_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
         re.compile(r"\bfit[\s-]?out\s+(end|complet\w*)\b", re.IGNORECASE),
     ),
     ("FIT_OUT_CONFIRM_TRADING", re.compile(r"\btrading\b", re.IGNORECASE)),
+    (
+        "OPEN_CEILING_INSPECTION",
+        re.compile(r"\bopen\s+ceiling\b|\boci\b", re.IGNORECASE),
+    ),
+    (
+        "CLOSE_CEILING_INSPECTION",
+        re.compile(r"\bclose[ds]?\s+ceiling\b|\bcci\b", re.IGNORECASE),
+    ),
     ("SALES_DATA", re.compile(r"\bsales[\s-]?data\b", re.IGNORECASE)),
     (
         "CONSTRUCTION_HOT",
@@ -224,6 +232,13 @@ _FITOUT_CONFIRM_SUBS = (
     "FIT_OUT_CONFIRM_END",
 )
 
+# Bare "ceiling inspection notifications" (the Copilot chip) means both.
+_GENERIC_CEILING_PATTERN = re.compile(r"\bceiling\b", re.IGNORECASE)
+_CEILING_SUBS = (
+    "OPEN_CEILING_INSPECTION",
+    "CLOSE_CEILING_INSPECTION",
+)
+
 # Bare "work permit notifications" expands to all seven WP subtypes.
 _GENERIC_WORK_PERMIT_PATTERN = re.compile(r"\bwork[\s-]?permits?\b", re.IGNORECASE)
 _WORK_PERMIT_SUBS = (
@@ -259,6 +274,12 @@ def parse_notification_list_filters(message: str) -> NotificationListFilters:
         sub in matched for sub in _FITOUT_CONFIRM_SUBS
     ):
         matched.extend(_FITOUT_CONFIRM_SUBS)
+    # Generic "ceiling inspection notifications" expands to open and close when
+    # neither was named.
+    if _GENERIC_CEILING_PATTERN.search(text) and not any(
+        sub in matched for sub in _CEILING_SUBS
+    ):
+        matched.extend(_CEILING_SUBS)
     # Generic "work permit notifications" expands to all WP subtypes when no
     # more specific WP keyword already matched.
     if _GENERIC_WORK_PERMIT_PATTERN.search(text) and not any(

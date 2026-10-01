@@ -24,6 +24,7 @@ from typing import Any
 from app.agents.graph.nodes.handover.confirmation_node import _FIELD_LABELS
 from app.agents.graph.state import ServiceRequestState
 from app.agents.registries.workflow_config import get_workflow_config
+from app.agents.schemas.ceiling_schema import AGENT_NAME as CEILING_AGENT_NAME
 from app.agents.schemas.fitout_confirm_schema import (
     get_missing_fields as fitout_confirm_get_missing_fields,
 )
@@ -960,6 +961,9 @@ _FITOUT_CONFIRM_AGENTS: frozenset[str] = frozenset(
     }
 )
 
+# Open / Close Ceiling Inspection — its own stage names and required fields.
+_CEILING_AGENT = CEILING_AGENT_NAME
+
 
 def _fitout_card_refresh(state: dict[str, Any]) -> dict[str, Any] | None:
     """Rebuild the fitout confirmation card for the draft as it now stands.
@@ -1039,7 +1043,11 @@ async def _ask_next_missing_field(state: ServiceRequestState) -> dict[str, Any]:
 
     # Gracefully degrade if an unrecognised stage arrives — but only for agents
     # that use the handover STAGE_REGISTRY (fitout agents have their own stages).
-    if active_agent not in _FITOUT_CONFIRM_AGENTS and workflow_stage not in STAGE_REGISTRY:
+    if (
+        active_agent not in _FITOUT_CONFIRM_AGENTS
+        and active_agent != _CEILING_AGENT
+        and workflow_stage not in STAGE_REGISTRY
+    ):
         workflow_stage = "CREATE_SR"
 
     field_questions: dict[str, str] = (
@@ -1162,6 +1170,14 @@ async def _ask_next_missing_field(state: ServiceRequestState) -> dict[str, Any]:
     elif active_agent in _FITOUT_CONFIRM_AGENTS:
         sub_category: str = state.get("sub_category") or ""  # type: ignore[assignment]
         all_missing = fitout_confirm_get_missing_fields(workflow_stage, sub_category, collected)
+    elif active_agent == _CEILING_AGENT:
+        from app.agents.schemas.ceiling_schema import (
+            get_missing_fields as ceiling_get_missing_fields,
+        )
+
+        all_missing = ceiling_get_missing_fields(
+            workflow_stage, state.get("sub_category"), collected
+        )
     else:
         all_missing = handover_get_missing_fields(workflow_stage, collected)
 
@@ -1274,7 +1290,7 @@ async def _ask_next_missing_field(state: ServiceRequestState) -> dict[str, Any]:
                             f"'{start_display} 6:00 PM'."
                         )
                     verbatim_question = True
-        elif v_type == "fitout_confirm_date_order" and error_field:
+        elif v_type in ("fitout_confirm_date_order", "ceiling_date_order") and error_field:
             # The message names the refused date, the milestone it has to
             # follow and the earliest valid date; the bare field question gave
             # no sign which value was refused, or why.

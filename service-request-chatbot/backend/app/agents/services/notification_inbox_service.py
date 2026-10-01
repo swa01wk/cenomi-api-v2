@@ -24,6 +24,8 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+import uuid
+from datetime import datetime, timezone
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any
@@ -31,6 +33,7 @@ from typing import Any
 import httpx
 import structlog
 
+from app.agents.schemas.ceiling_schema import TENANT_ROLES
 from app.agents.schemas.help_agent_schema import (
     SALES_DATA_APPROVER_PLATFORM_ROLES,
     SALES_DATA_TENANT_PLATFORM_ROLES,
@@ -58,7 +61,15 @@ NOTIFICATION_SUB_CATEGORIES: tuple[str, ...] = (
     "MAINTENANCE_COLD",
     "MAINTENANCE_ROOF_ACCESS",
     "OPERATIONS",
+    "OPEN_CEILING_INSPECTION",
+    "CLOSE_CEILING_INSPECTION",
 )
+
+# Sub-categories only the mock inbox serves; the HTTP adapter skips them so a
+# live inbox never reports a 404 as a partial failure. Empty: the ceiling
+# inspection routes now exist on the platform
+# (/notifications/agent/{open,close}-ceiling-inspection).
+MOCK_ONLY_SUB_CATEGORIES: frozenset[str] = frozenset()
 
 _SUB_CATEGORY_PATHS: dict[str, str] = {
     "HANDOVER": "/notifications/agent/handover",
@@ -73,6 +84,8 @@ _SUB_CATEGORY_PATHS: dict[str, str] = {
     "MAINTENANCE_COLD": "/notifications/agent/maintenance-cold",
     "MAINTENANCE_ROOF_ACCESS": "/notifications/agent/maintenance-roof-access",
     "OPERATIONS": "/notifications/agent/operations",
+    "OPEN_CEILING_INSPECTION": "/notifications/agent/open-ceiling-inspection",
+    "CLOSE_CEILING_INSPECTION": "/notifications/agent/close-ceiling-inspection",
 }
 
 # Tool audiences per the platform spec.  Used only to SKIP endpoints the user
@@ -85,6 +98,7 @@ _WP_COLD_AUDIENCE: frozenset[str] = frozenset(
     {"DD_ENGINEER", "MALL_MANAGER", "OPERATIONS", "OPERATION_EXECUTIVES"}
 )
 _WP_MAINTENANCE_AUDIENCE: frozenset[str] = frozenset({"FM_MANAGER", "MALL_MANAGER"})
+_CEILING_AUDIENCE: frozenset[str] = frozenset({"DD_ENGINEER", "FM_MANAGER"}) | TENANT_ROLES
 
 _SUB_CATEGORY_AUDIENCE: dict[str, frozenset[str]] = {
     "HANDOVER": frozenset({"MALL_MANAGER", "FM_MANAGER", "OPERATIONS", "DD_ENGINEER"}),
@@ -105,6 +119,9 @@ _SUB_CATEGORY_AUDIENCE: dict[str, frozenset[str]] = {
     "MAINTENANCE_COLD": _WP_MAINTENANCE_AUDIENCE,
     "MAINTENANCE_ROOF_ACCESS": _WP_HOT_ROOF_AUDIENCE,
     "OPERATIONS": frozenset({"MALL_MANAGER"}),
+    # L1 reviewer, L2 approver, and the tenant who acknowledges the report.
+    "OPEN_CEILING_INSPECTION": _CEILING_AUDIENCE,
+    "CLOSE_CEILING_INSPECTION": _CEILING_AUDIENCE,
 }
 
 SUB_CATEGORY_LABELS: dict[str, str] = {
@@ -120,6 +137,8 @@ SUB_CATEGORY_LABELS: dict[str, str] = {
     "MAINTENANCE_COLD": "Maintenance – Cold Work",
     "MAINTENANCE_ROOF_ACCESS": "Maintenance – Roof Access",
     "OPERATIONS": "Operations",
+    "OPEN_CEILING_INSPECTION": "Open Ceiling Inspection",
+    "CLOSE_CEILING_INSPECTION": "Close Ceiling Inspection",
 }
 
 
@@ -204,6 +223,7 @@ class AbstractNotificationInboxService(ABC):
 def _select_sub_categories(
     roles: frozenset[str],
     filters: NotificationListFilters | None,
+    exclude: frozenset[str] = frozenset(),
 ) -> tuple[str, ...]:
     """Pick which endpoints to call: requested ∩ audience-eligible.
 
@@ -213,7 +233,7 @@ def _select_sub_categories(
     requested = tuple(
         sub
         for sub in ((filters.sub_categories if filters else None) or NOTIFICATION_SUB_CATEGORIES)
-        if sub in _SUB_CATEGORY_PATHS
+        if sub in _SUB_CATEGORY_PATHS and sub not in exclude
     )
     normalized = frozenset(r.upper() for r in roles)
     known = normalized & frozenset().union(*_SUB_CATEGORY_AUDIENCE.values())
@@ -319,7 +339,7 @@ class HttpNotificationInboxService(AbstractNotificationInboxService):
         limit: int = 10,
         page: int = 1,
     ) -> NotificationInboxResult:
-        selected = _select_sub_categories(roles, filters)
+        selected = _select_sub_categories(roles, filters, exclude=MOCK_ONLY_SUB_CATEGORIES)
         if not selected:
             return NotificationInboxResult(success=True, groups=[])
 
@@ -622,6 +642,66 @@ _MOCK_FIXTURES: dict[str, list[dict[str, Any]]] = {
 }
 
 
+# Rows recorded at runtime by the mock SR service as a ceiling inspection moves
+# between parties (create → DD, L1 → FM, L2 → tenant). In memory, like the
+# mock SR state — a restart clears both. Each row carries the roles it is for.
+_MOCK_RUNTIME_ROWS: list[dict[str, Any]] = []
+
+
+def record_mock_notification(
+    *,
+    sub_category: str,
+    sr_id: str,
+    audience_roles: frozenset[str],
+    message: str,
+    key: str,
+) -> None:
+    """Record an action-required row for the parties who act next on *sr_id*.
+
+    Earlier rows for the same SR are dropped first — once the SR moves on, the
+    previous party's action is discharged.
+    """
+    clear_mock_notifications(sr_id)
+    _MOCK_RUNTIME_ROWS.append(
+        {
+            "id": f"ntf-{uuid.uuid4().hex[:12]}",
+            "sub_category": sub_category,
+            "audience": frozenset(r.upper() for r in audience_roles),
+            "text_content": {
+                "en": message,
+                "type": "SERVICE_REQUEST",
+                "id": sr_id,
+                "key": key,
+            },
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "read_at": None,
+            "action_required": True,
+            "notification_type": "SERVICE_REQUEST",
+        }
+    )
+
+
+def clear_mock_notifications(sr_id: str) -> None:
+    """Drop every runtime row about *sr_id* (the SR moved on or closed)."""
+    _MOCK_RUNTIME_ROWS[:] = [
+        row for row in _MOCK_RUNTIME_ROWS if row["text_content"]["id"] != sr_id
+    ]
+
+
+def reset_mock_notifications() -> None:
+    _MOCK_RUNTIME_ROWS.clear()
+
+
+def _runtime_rows_for(sub_category: str, roles: frozenset[str]) -> list[dict[str, Any]]:
+    normalized = frozenset(r.upper() for r in roles)
+    return [
+        row
+        for row in reversed(_MOCK_RUNTIME_ROWS)  # newest first
+        if row["sub_category"] == sub_category
+        and ("ADMIN" in normalized or row["audience"] & normalized)
+    ]
+
+
 class MockNotificationInboxService(AbstractNotificationInboxService):
     """Deterministic in-memory inbox for local dev and tests."""
 
@@ -637,7 +717,7 @@ class MockNotificationInboxService(AbstractNotificationInboxService):
         selected = _select_sub_categories(roles, filters)
         groups: list[NotificationGroup] = []
         for sub in selected:
-            entries = _MOCK_FIXTURES.get(sub, [])
+            entries = _runtime_rows_for(sub, roles) + _MOCK_FIXTURES.get(sub, [])
             items = [_parse_item(e, sub) for e in entries]
             # Platform parity: read rows STAY listed — every agent row is
             # action-required and reading one does not discharge the action
