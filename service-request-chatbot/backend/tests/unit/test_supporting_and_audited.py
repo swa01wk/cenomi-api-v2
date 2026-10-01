@@ -177,6 +177,10 @@ async def test_supporting_doc_prompt_uses_portal_label() -> None:
     assert ui["ask_label"] == "Supporting document"
     assert "supporting document" in result["response_message"].lower()
     assert "comment is required" in result["response_message"].lower()
+    # Card title/button must name THIS request, not a generic "Attach".
+    assert ui["title"] == "Supporting document"
+    assert ui["cta"] == "Upload supporting document"
+    assert ".csv" not in ui["accept"]
 
 
 @pytest.mark.asyncio
@@ -202,6 +206,40 @@ async def test_audited_sales_prompt_uses_portal_label() -> None:
     assert ui["current_status"] == "NEED_UPLOAD_AUDITED_SALES"
     assert ui["target_status"] == "UPLOADED_AUDITED_SALES"
     assert ui["ask_label"] == "Audited sales data"
+    assert ui["title"] == "Audited sales data"
+    assert ui["cta"] == "Upload audited sales"
+    assert ".csv" not in ui["accept"]
+
+
+@pytest.mark.asyncio
+async def test_reupload_prompt_uses_portal_label_and_accepts_csv() -> None:
+    """NEED_REUPLOAD asks for a corrected sales data FILE — the same CSV the
+    tenant originally uploaded — so its card must say so and its attach
+    control must take .csv, unlike the two document-only ask-types above."""
+    client = AsyncMock()
+    client.get_sales_data = AsyncMock(return_value=_NEED_ROWS)
+    with (
+        patch(
+            "app.agents.graph.nodes.sales_data.supporting_doc_upload_node.get_current_bearer_token",
+            return_value="tok",
+        ),
+        patch(
+            "app.agents.graph.nodes.sales_data.supporting_doc_upload_node.SalesDataApiClient",
+            return_value=client,
+        ),
+    ):
+        result = await supporting_doc_upload_node(
+            _state(user_message="I need to re-upload sales data for lease LC-1003")
+        )
+
+    ui = result["response_ui"]
+    assert ui["lease_code"] == "LC-1003"
+    assert ui["current_status"] == "NEED_REUPLOAD"
+    assert ui["target_status"] == "RE_UPLOADED"
+    assert ui["ask_label"] == "Sales data"
+    assert ui["title"] == "Sales data"
+    assert ui["cta"] == "Re-upload sales data"
+    assert ".csv" in ui["accept"]
 
 
 @pytest.mark.asyncio
