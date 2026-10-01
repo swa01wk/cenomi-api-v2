@@ -308,8 +308,17 @@ async def csv_validation_node(state: ServiceRequestState) -> dict[str, Any]:
     # Never treat it as data or offer to "submit everything" — nothing was filled in.
     if amt_missing_rows and len(amt_missing_rows) == len(rows):
         log.info("csv_validation.blank_template", row_count=len(rows))
+        previous = next(
+            (
+                str(m.get("content") or "")
+                for m in reversed(state.get("conversation_history") or [])
+                if isinstance(m, dict) and m.get("role") == "assistant"
+            ),
+            "",
+        )
+        still = " still" if "has no sales amounts filled in" in previous else ""
         return _verbatim_reply(
-            f"**{filename}** has no sales amounts filled in — it looks like the blank "
+            f"**{filename}**{still} has no sales amounts filled in — it looks like the blank "
             "template. Please enter the **Sales Amount** for each lease in the file "
             "and upload it again.\n\n"
             "Nothing has been submitted."

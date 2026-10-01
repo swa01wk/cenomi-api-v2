@@ -132,7 +132,21 @@ async def response_generation_node(state: ServiceRequestState) -> dict[str, Any]
             ),
             "",
         )
-        if previous.strip() == current_message.strip() and (state.get("user_message") or "").strip():
+        # A file upload or button click is a new answer the user gave, not
+        # a typed message the agent failed to understand — re-uploading the
+        # same broken file must get the same fix-and-re-upload reply.
+        acted = bool(
+            state.get("action_override")
+            or any(
+                (state.get("corrected_fields") or {}).get(key)
+                for key in ("csv_session_id", "doc_session_id")
+            )
+        )
+        if (
+            not acted
+            and previous.strip() == current_message.strip()
+            and (state.get("user_message") or "").strip()
+        ):
             # Replace only the text — the card under it (attach control,
             # review table, confirm buttons) must stay so the user can act.
             current_message = _SALES_REPEAT_FALLBACK
