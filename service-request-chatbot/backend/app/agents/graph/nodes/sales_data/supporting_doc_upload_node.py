@@ -165,6 +165,21 @@ def _narrow_to_notification(
     return narrowed
 
 
+def _accept_for_status(status: str) -> str:
+    """Allowed file types for the attach control, per Ask Upload type.
+
+    NEED_REUPLOAD asks for a corrected **sales data** file — the same CSV
+    the tenant originally uploaded — so it must accept .csv in addition to
+    the document formats the other two ask-types take. Kept in sync with
+    supporting_doc_upload.py's _ALLOWED_EXTENSIONS (document formats) and
+    the CSV upload path (sales_data_entry_node._CSV_UPLOAD_ACTIONS).
+    """
+    doc_types = ".pdf,.png,.jpg,.jpeg,.doc,.xlsx,.zip"
+    if status == "NEED_REUPLOAD":
+        return f".csv,{doc_types}"
+    return doc_types
+
+
 def _prompt_for_file(row: dict[str, Any]) -> dict[str, Any]:
     lease_code = row.get("lease_code", "")
     start = row.get("sales_period_start", "")
@@ -205,15 +220,23 @@ def _prompt_for_file(row: dict[str, Any]) -> dict[str, Any]:
             "current_status": status,
             "target_status": target,
             "ask_label": ask_label,
+            # Card title and attach-button label — so the tenant sees "Upload
+            # supporting document" / "Upload audited sales" / "Re-upload
+            # sales data" instead of one generic "Attach" for all three.
+            "title": copy["title"],
+            "cta": copy["cta"],
             "sales_amt": amt,
             "comment_text": comment or None,
             "show_file_upload": True,
-            # Kept in sync with supporting_doc_upload.py's _ALLOWED_EXTENSIONS,
-            # which mirrors the live cenomi-api PUT /files allow-list — picking
-            # a format outside this set (e.g. GIF/WEBP/TIFF, which "image/*"
-            # alone would otherwise let through) used to cache fine here and
-            # only fail once forwarded to the real backend.
-            "accept": ".pdf,.png,.jpg,.jpeg,.doc,.xlsx,.zip",
+            # Document formats for NEED_UPLOAD_SUPPORTING_DOCUMENT and
+            # NEED_UPLOAD_AUDITED_SALES; NEED_REUPLOAD (a corrected sales
+            # data file) also accepts .csv. Kept in sync with
+            # supporting_doc_upload.py's _ALLOWED_EXTENSIONS, which mirrors
+            # the live cenomi-api PUT /files allow-list — picking a format
+            # outside this set (e.g. GIF/WEBP/TIFF, which "image/*" alone
+            # would otherwise let through) used to cache fine here and only
+            # fail once forwarded to the real backend.
+            "accept": _accept_for_status(status),
             "message": message,
         },
     }
