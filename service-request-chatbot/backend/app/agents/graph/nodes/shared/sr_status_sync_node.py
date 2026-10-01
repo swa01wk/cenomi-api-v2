@@ -42,6 +42,7 @@ from app.agents.services.review_decorations_service import (
     merge_decorations,
     payload_to_collected_data,
 )
+from app.agents.registries.workflow_config import get_workflow_config
 from app.agents.services.display_formatters import format_enum_label
 from app.agents.services.service_request_api_service import get_service_request_api_service
 from app.agents.schemas.work_permit_schema import (
@@ -264,6 +265,66 @@ def _apply_document_refs(
         backend_refs["rdd_document_id"] = str(rdd_report["document_id"])
 
 
+# Owned by the documents path (upload / delete), never kept as a form edit.
+_NON_FORM_EDIT_KEYS: frozenset[str] = frozenset(
+    {
+        "documents",
+        "document_id",
+        "document_type_id",
+        "documents_ids",
+        "document_ids",
+        "document_saved",
+        "deleted_document_ids",
+        "fileName",
+        "file_name",
+        "filename",
+    }
+)
+
+
+def _keep_form_edits(
+    state: ServiceRequestState,
+    updates: dict[str, Any],
+    backend_refs: dict[str, Any],
+    *,
+    hydrated: dict[str, Any],
+    stage: str | None,
+    agent: str | None,
+) -> None:
+    """Keep the requester's unsaved form edits over the platform's saved values.
+
+    On a form-edit stage (a Work Permit sent back to the tenant) the form bridge
+    patches each edit to the chat, but every turn rehydrates from the platform,
+    whose values predate the edit; the reply then wrote them back over the form.
+    An edit leaves ``form_edits`` once the platform returns the same value, and
+    all of them go once the SR leaves the stage (resubmitted).
+    """
+    cfg = get_workflow_config(agent)
+    if cfg is None or stage not in cfg.form_edit_stages:
+        backend_refs.pop("form_edits", None)
+        return
+    stored = backend_refs.get("form_edits")
+    edits = {
+        **(stored if isinstance(stored, dict) else {}),
+        **(state.get("corrected_fields") or {}),
+    }
+    edits = {
+        key: value
+        for key, value in edits.items()
+        if not key.startswith("_")
+        and key not in _NON_FORM_EDIT_KEYS
+        and (key not in hydrated or hydrated[key] != value)
+    }
+    if not edits:
+        backend_refs.pop("form_edits", None)
+        return
+    base = updates.get("collected_data")
+    if base is None:
+        base = dict(state.get("collected_data") or {})
+    updates["collected_data"] = {**base, **edits}
+    backend_refs["form_edits"] = edits
+
+
 @trace_node("sr_status_sync", "TOOL")
 async def sr_status_sync_node(state: ServiceRequestState) -> dict[str, Any]:
     """Fetch platform SR status and update workflow_stage in state.
@@ -451,6 +512,7 @@ async def sr_status_sync_node(state: ServiceRequestState) -> dict[str, Any]:
     payload: dict[str, Any] = getattr(result, "payload", None) or {}
     wp_sr = is_work_permit_category(sr_category, sr_sub_category)
     gi_sr = _is_general_inquiry(sr_category, sr_sub_category)
+    hydrated: dict[str, Any] = {}
     if payload:
         # Snapshot for builders (open-existing path never ran create payload builder).
         inner = dict(payload)
@@ -489,6 +551,15 @@ async def sr_status_sync_node(state: ServiceRequestState) -> dict[str, Any]:
                 updates["collected_data"] = {**hydrated, **existing_collected}
             else:
                 updates["collected_data"] = {**existing_collected, **hydrated}
+
+    _keep_form_edits(
+        state,
+        updates,
+        backend_refs,
+        hydrated=hydrated,
+        stage=effective_stage,
+        agent="work_permit_agent" if wp_sr else state.get("active_agent"),
+    )
 
     # Ensure active_agent for review routing when opening existing SR.
     if wp_sr:

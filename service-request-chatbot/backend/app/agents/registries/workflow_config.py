@@ -88,6 +88,10 @@ class WorkflowConfig:
     request_type_label:
         Human label for this workflow's SR (card header, e.g.
         "Handover Service Request").
+    form_edit_stages:
+        Stages where the requester edits the platform form directly (e.g. a
+        Work Permit sent back for more information). Status sync keeps the
+        form's unsaved edits over the platform's saved values on these stages.
     """
 
     agent_name: str
@@ -104,6 +108,7 @@ class WorkflowConfig:
     guided_tour_gate: bool = True
     status_view_node: str = "preview"
     request_type_label: str = "Service Request"
+    form_edit_stages: frozenset[str] = frozenset()
 
 
 # ---------------------------------------------------------------------------
@@ -298,6 +303,7 @@ def _build_work_permit_config() -> WorkflowConfig:
         action_intents=frozenset({"CREATE_WORK_PERMIT_SR", "APPROVE_WORK_PERMIT_SR"}),
         status_view_node="work_permit_status",
         request_type_label="Work Permit Service Request",
+        form_edit_stages=frozenset({"WP_ACTION_REQUIRED"}),
     )
 
 

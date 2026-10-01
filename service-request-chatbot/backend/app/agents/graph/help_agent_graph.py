@@ -416,6 +416,10 @@ def _route_after_sync(state: dict[str, Any]) -> str:
 
     # 1. Per-workflow stage → entry node (keyed by active_agent)
     cfg = get_workflow_config(agent)
+    # A form edit on a form-edit stage was merged by sr_status_sync; rebuilding
+    # the status card for it would drop a card into the chat on every blur.
+    if cfg and workflow_stage in cfg.form_edit_stages and _is_background_form_sync(state):
+        return "response_generation"
     if cfg and workflow_stage in cfg.stage_sync_nodes:
         return cfg.stage_sync_nodes[workflow_stage]
 

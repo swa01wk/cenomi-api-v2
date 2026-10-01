@@ -77,6 +77,7 @@ Work Permit is the first agent built on the **generic review rails** (action res
 | History sentence still named the Mall Manager's send-back after the tenant resubmitted (SR 341529) | The resubmission came back as a second `SUBMITTED` row, and the latest-step search skips submission rows | A submission row inside an open send-back window is also re-tagged as `RESUBMITTED` (§7.6). |
 | The reason typed after "What should I tell them?" was answered by the LLM and nothing was sent back | The graph keeps no state between turns and the draft only restored `sr_id` / `service_request_status` into `backend_refs`, so `wp_pending_action` was lost and the reply fell through to the generic confirmation branch | `save_checkpoint` stores the pending prompt as `collected_data._wp_pending`; `load` restores it into `backend_refs` (§7.5). |
 | SR page on the left still showed the old hop after approving with a comment | `maybeDispatchSrDetailRefresh` only fired for a mutating card action; the comment reply that completes the action carries no action id (and `reject_wp` / `ask_more_info_wp` were never mutating) | Also refresh on a successful non-silent turn whose `ui` has `stage_complete` / `workflow_complete` (`stepCompleted`, §8.7). |
+| Tenant's form edit reverted on blur while the chat was open (SR sent back for more info) | The bridge patched the edit to the chat, but status sync rehydrated `collected_data` from the platform (whose value predates the edit), the edit was never merged, and the silent turn went to the status view; the reply's `draftFields` wrote the saved value back into the form | On `WorkflowConfig.form_edit_stages` (WP: `WP_ACTION_REQUIRED`) sync lays the patched fields over the platform values and keeps them in `backend_refs.form_edits` across turns (§7.2); a silent patch there goes to `response_generation` (§7.11). |
 | Full SR details card after every review action | Review decorations carried `promote_preview`, and finalize swapped the reply for the preview card | `work_permit_api_submission_node` sets `response_decorations = {}` for `WP_REVIEW_STAGES`. |
 | "HANDOVER SERVICE REQUEST / Approved" card ~0.3 s after final approval, with no user bubble | Approval triggered `sr-v2-detail-refresh`; the form re-fetch echoed values through the bridge as a silent `corrected_fields` patch; `_route_after_sync` sent a terminal SR with `sr_id` to `preview`, which builds a Handover-labelled `sr_preview_card`; silent turns may render that card type | Backend: `_is_background_form_sync` routes terminal-stage silent patches to `response_generation`. Frontend: `patchDraftFields` drops patches once the stage is `WP_APPROVED` / `WP_REJECTED` (`shouldDropFormPatch`). |
 | "Work Permit Service Request / Submitted" details card when a non-approver opens an SR under review, with LLM-reworded text | `build_review_decorations` set `promote_preview` on WP review stages, so finalize swapped the non-actor `message` for the preview card; the message was not `verbatim` | WP review stages no longer set `promote_preview`. The non-actor reply is a fixed `verbatim` message, with `response_decorations = {}`, and the "Open full request" chip only off the SR page. |
@@ -510,6 +511,13 @@ Written to `backend_refs`: `platform_sr_status`, `sr_operations`, `sr_history`, 
 - `sr_history`: the detail DTO returns the approval history as `operation_history` (the key the SR page reads). `platform_api_client.get_service_request` reads `operation_history`, then `service_request_history` / `sr_history` / `history`. Rows: `status`, `operator_name`, `operator_role`, `user_type`, `comment`, `created_at`.
 - `sr_creator`: `{name, role, created_at}` from the DTO's top-level `created_by`, `created_user_role` and `created_at` (`ServiceRequestGetResult.created_*`); blank values are dropped, and the key is absent when all three are blank.
 
+**Form edits on a sent-back SR.** Rehydration normally lets the platform win (`{**existing, **hydrated}`). On a stage in `WorkflowConfig.form_edit_stages` (Work Permit: `WP_ACTION_REQUIRED`, where the tenant edits the form and resubmits), `_keep_form_edits` lays the tenant's unsaved edits over the platform values:
+
+- edits = stored `backend_refs.form_edits` + this turn's `corrected_fields`, minus reserved `_` keys and document keys (`documents`, `document_id`, `fileName`, …);
+- a key whose value the platform now returns is dropped (the edit was saved);
+- the rest are merged into `collected_data` and kept in `backend_refs.form_edits`, which the draft stores as `collected_data._form_edits` (`ConversationStateService.save_checkpoint` / `load`);
+- on any other stage (review hops after resubmission, finished SRs) `form_edits` is cleared and nothing is applied.
+
 Decorations: `review_decorations_service.build_review_decorations` returns `{}` on WP review stages for the actor, and only a View SR chip for non-actors. It does **not** set `promote_preview`: the full "Work Permit Service Request / Submitted" details card duplicates the SR form on the left, and the review card is a `confirmation_card`, which never relied on the swap. Handover (FM/RDD) still promotes the preview.
 
 ### 7.3 Hop RBAC
@@ -802,6 +810,15 @@ if workflow_stage in all_terminal:
 
 `response_generation` yields a plain `message` UI, which the frontend does not show for silent turns (§8.4). The frontend also stops sending these patches (§8.5), so this is defence in depth.
 
+The same guard runs first for a stage in `WorkflowConfig.form_edit_stages` (Work Permit: `WP_ACTION_REQUIRED`):
+
+```python
+if cfg and workflow_stage in cfg.form_edit_stages and _is_background_form_sync(state):
+    return "response_generation"
+```
+
+Here the patches are wanted: sync has already merged them (§7.2), and the reply's `draftFields` echo the edit instead of the status card. Opening the SR or typing a message still goes to `work_permit_status`.
+
 ### 7.12 Status view (no review step waiting)
 
 `_status_view_node(state)` returns `get_workflow_config(active_agent).status_view_node`, or `preview` with no agent. It replaces every hard-coded `preview` route: the sync terminal branch, the sync fallback (unknown stage with `sr_id`), and the supervisor's `PREVIEW_SERVICE_REQUEST` / `CHECK_SERVICE_REQUEST_STATUS` intents. `WP_ACTION_REQUIRED` reaches the node directly through `stage_sync_nodes`.
@@ -929,6 +946,8 @@ export function shouldDropFormPatch(stage: string | null | undefined): boolean {
 ```
 
 The stage is read through a ref so the bridge's memoised callback sees the latest value.
+
+On a Work Permit sent back to the tenant (`WP_ACTION_REQUIRED`) patches are **not** dropped: the tenant edits the form and resubmits, and the chat must follow those edits. The backend keeps them over the platform's saved values until the platform returns them or the SR moves on (`form_edits`, §7.2), so the reply's `draftFields` no longer revert the field on blur.
 
 ### 8.6 Form ↔ chat bridge
 
@@ -1159,6 +1178,7 @@ Go platform: `IssueAISessionToken` adds the `first_name` claim to the AI session
 | Status view card (per-status message, tenant variant, no actions, chip only off the SR page, draft keeps pending confirmation) and `preview_node` labels per workflow | `test_work_permit_status.py` |
 | Review actions, pending inputs, Assign To refusal, PATCH bodies; comment step (button echo prompts instead of submitting, stale form comment ignored, `comment_for` and chips per action, required comment re-asked, approve skip / typed comment, Cancel chip, switching action mid-prompt, `wp_review_comment` read by the payload builder, APPROVED `comment` only when set) | `test_work_permit_review_actions.py` |
 | Pending prompt across turns (save / load round trip then the typed reason confirms Ask for more info, nothing kept once answered, Extend duration kept, prompt from another stage or SR dropped) | `test_wp_pending_prompt_persists.py` |
+| Form edits on a sent-back SR (edit wins over the platform value, kept on the next turn and merged with a second edit, dropped once the platform has it, cleared after resubmission, never applied on a review stage, document keys ignored, save / load round trip, silent patch routes to `response_generation`, opening or typing still shows the status card) | `test_wp_form_edits_kept.py` |
 | Review card contract (summary layout, `details` list with `summaryKey`, exact action list, message ending with the history sentence from `sr_history` / `sr_creator`, no note, chip only off the SR page, non-actor reply) | `test_work_permit_review_card.py` |
 | Summary builder and message; `summaryKey` mappings (Cold, Ops); history sentence (submitted only, submitter + latest step, latest step only, creator fallback, tenant-side roles read Tenant, leasing manager keeps its label, dates never shown, reply to a send-back becomes a resubmission for `RE_EXAMINE` / `UPDATE` / `IN_PROCESS` / `RE_SUBMITTED` / `SUBMITTED` / `SUBMIT`, the SR 341529 sequence, a repeat submission with no send-back is not a step, same-actor shortening, resubmission by someone else, unanswered send-back, a later decision wins, rows not mutated, noise skipped, passive, empty when nothing is known, unknown status, history last with the closing question) | `test_work_permit_review_summary.py` |
 | GET reads `operation_history` and `created_by` / `created_user_role` / `created_at` | `test_platform_api_client.py` |

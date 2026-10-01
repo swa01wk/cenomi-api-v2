@@ -31,6 +31,9 @@ PENDING_REVIEW_REFS: tuple[str, ...] = (
     "wp_pending_sr_id",
     "wp_extension_duration",
 )
+# The requester's unsaved form edits on a form-edit stage (see
+# ``sr_status_sync_node._keep_form_edits``).
+_FORM_EDITS_KEY = "_form_edits"
 
 
 class StateLoadError(RuntimeError):
@@ -91,6 +94,7 @@ class ConversationStateService:
             active_field = raw_collected.pop("_active_field", None)
             sales_refs = raw_collected.pop(self._SALES_REFS_KEY, None)
             pending_review = raw_collected.pop(_PENDING_KEY, None)
+            form_edits = raw_collected.pop(_FORM_EDITS_KEY, None)
 
             result: dict[str, Any] = {
                 "service_category": draft.service_category,
@@ -119,6 +123,8 @@ class ConversationStateService:
                 backend_refs.update(
                     {k: pending_review[k] for k in PENDING_REVIEW_REFS if k in pending_review}
                 )
+            if isinstance(form_edits, dict) and form_edits:
+                backend_refs["form_edits"] = form_edits
             if backend_refs:
                 result["backend_refs"] = backend_refs
             if isinstance(sales_refs, dict) and sales_refs:
@@ -192,6 +198,10 @@ class ConversationStateService:
                 }
             else:
                 raw_collected.pop(_PENDING_KEY, None)
+            if isinstance(refs.get("form_edits"), dict) and refs["form_edits"]:
+                raw_collected[_FORM_EDITS_KEY] = dict(refs["form_edits"])
+            else:
+                raw_collected.pop(_FORM_EDITS_KEY, None)
 
             draft = await self._draft_repo.get_by_session(session_id)
 
