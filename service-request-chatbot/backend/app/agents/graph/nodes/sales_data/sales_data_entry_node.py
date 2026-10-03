@@ -31,6 +31,7 @@ from app.agents.graph.nodes.sales_data.period_utils import (
     parse_asked_period,
 )
 from app.agents.graph.nodes.sales_data.pending_months import extract_lease_code
+from app.agents.services.permission_service import graph_permission_guard
 from app.observability.decorators import trace_node
 
 log = structlog.get_logger(__name__)
@@ -383,6 +384,16 @@ def _upload_prompt_patch(
 @trace_node("sales_data_entry", "AGENT")
 async def sales_data_entry_node(state: ServiceRequestState) -> dict[str, Any]:
     """Route the turn to the correct sales-data sub-flow."""
+    # Front door: SALES_AGENT gates the whole agent, the same permission the
+    # frontend's "Upload with AI" / "Review with AI" buttons check — a user
+    # who free-types "I want to submit sales data" straight into open chat
+    # (bypassing those buttons) must be stopped here, not just at the final
+    # submit/approve call downstream.
+    denied = graph_permission_guard(state, "ENTER_SALES_DATA_AGENT")
+    if denied:
+        log.info("sales_data_entry.permission_denied")
+        return denied
+
     intent: str = state.get("intent") or ""
     action_override: str | None = state.get("action_override")
     workflow_stage: str | None = state.get("workflow_stage")
