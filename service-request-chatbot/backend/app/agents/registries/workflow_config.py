@@ -196,11 +196,42 @@ def _build_work_permit_config() -> WorkflowConfig:
             "Construction Hot Work, Construction Cold Work, Construction Roof Access, "
             "Maintenance Hot Work, Maintenance Cold Work, Maintenance Roof Access, or Operations."
         ),
-        "description": "Ask the user for a brief description of the work to be performed.",
-        "start_date": "Ask the user for the start date of the work permit (YYYY-MM-DD).",
-        "end_date": "Ask the user for the end date of the work permit (YYYY-MM-DD).",
-        "contractor_name": "Ask the user for the name of the contractor performing the work (or say 'none' if not applicable).",
-        "comments": "Ask the user if they have any additional comments or instructions for this work permit request.",
+        "department": "Ask the user which department this work permit is for.",
+        "unit_type": "Ask the user for the unit type (if not already known from the lease).",
+        "owner": "Ask the user for the owner name.",
+        "trade_name": "Ask the user for the trade name.",
+        "responsible_person": "Ask the user who the responsible person for this work is.",
+        "phone": "Ask the user for a contact phone number for this work permit.",
+        "type_work": "Ask the user to describe the type of work to be performed.",
+        "list_equipment": "Ask the user for the list of equipment that will be used.",
+        "work_info": "Ask the user for any additional work information.",
+        "notes": "Ask the user if they have any notes (or say 'none' to skip).",
+        "contractor_name": "Ask the user for the name of the contractor performing the work.",
+        "work_type": "Ask the user to describe the work type.",
+        "work_location": "Ask the user where the work will be performed.",
+        "demand_appendices": "Ask the user for any demand appendices details.",
+        "special_conditions": "Ask the user for any special conditions.",
+        "planneddate": (
+            "Ask the user for the planned work dates and times: start date, start time, "
+            "end date, and end time. Prefer DD/MM/YYYY for dates."
+        ),
+        "workers": (
+            "Ask the user for the worker(s) who will perform the work — at least full name "
+            "(and designation / company or iqama when they provide them)."
+        ),
+        "measureofsafety": (
+            "Ask the user which measure-of-safety items apply "
+            "(fire extinguisher, fire hoses, sprinkler on, etc.)."
+        ),
+        "typeofwork": "Ask the user what type of operations work this is.",
+        "effective_starting": (
+            "Ask the user for the effective starting date range (from and to, DD/MM/YYYY)."
+        ),
+        "firstperiod": "Ask the user for the first time period (from and to, HH:MM).",
+        "secondperiod": "Ask the user for an optional second time period (or say 'none' to skip).",
+        "entry_gate": "Ask the user which entry gate will be used (or say 'none' to skip).",
+        "description": "Ask the user for an optional short description (or say 'none' to skip).",
+        "title": "Ask the user for an optional title (or say 'none' to skip).",
     }
 
     return WorkflowConfig(

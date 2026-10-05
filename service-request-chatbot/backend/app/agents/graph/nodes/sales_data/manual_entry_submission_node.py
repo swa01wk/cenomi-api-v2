@@ -34,6 +34,11 @@ async def manual_entry_submission_node(state: ServiceRequestState) -> dict[str, 
         "sales_amt": float(collected.get("sales_amt", 0)),
     }]
 
+    # submission_error_node is shared with the CSV path (sales_data_api_submission_node)
+    # and defaults its wording to "re-upload your CSV file" — wrong for a
+    # manually-typed row, which has no file at all.
+    backend_refs["submission_source"] = "manual"
+
     denied = graph_permission_guard(state, "SUBMIT_SALES_DATA")
     if denied:
         log.warning("manual_entry_submission.permission_denied")

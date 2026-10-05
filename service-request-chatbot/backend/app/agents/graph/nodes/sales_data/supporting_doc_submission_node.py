@@ -10,6 +10,10 @@ from typing import Any
 
 import structlog
 
+from app.agents.graph.nodes.sales_data.period_utils import (
+    format_year_month,
+    year_month_from_start,
+)
 from app.agents.graph.state import ServiceRequestState
 from app.agents.schemas.sales_data_schema import ASK_UPLOAD_LABELS, STATUS_LABELS, TENANT_RESPONSE_STATUS
 from app.agents.services.permission_service import graph_permission_guard
@@ -87,7 +91,7 @@ async def supporting_doc_submission_node(state: ServiceRequestState) -> dict[str
         result = await client.update_sales_data_status(payload)
     except Exception as exc:
         log.error("supporting_doc_submission.failed", exc_info=True)
-        message = f"⚠️ Update failed: {exc}. Please try again."
+        message = f"Update failed: {exc}. Please try again."
         return {
             "status": "WAITING_FOR_USER",
             "workflow_stage": "AWAITING_DOC_CONFIRM",
@@ -96,7 +100,7 @@ async def supporting_doc_submission_node(state: ServiceRequestState) -> dict[str
         }
 
     if not result.get("success"):
-        message = f"⚠️ Update failed: {result.get('error', 'Unknown error')}."
+        message = f"Update failed: {result.get('error', 'Unknown error')}."
         return {
             "status": "WAITING_FOR_USER",
             "workflow_stage": "AWAITING_DOC_CONFIRM",
@@ -106,9 +110,11 @@ async def supporting_doc_submission_node(state: ServiceRequestState) -> dict[str
 
     label = STATUS_LABELS.get(new_status, new_status)
     ask_label = ASK_UPLOAD_LABELS.get(current_status, "document")
+    ym = year_month_from_start(str(collected.get("sales_period_start") or ""))
+    period = f" ({format_year_month(ym)})" if ym else ""
     message = (
-        f"✅ **{ask_label}** uploaded for lease **{lease_code}**.\n\n"
-        f"Status is now **{label}**. The Sales Data team has been notified."
+        f"Your {ask_label[:1].lower()}{ask_label[1:]} for lease **{lease_code}**{period} "
+        "has been submitted for review — the Sales Data Team has been notified."
     )
     log.info(
         "supporting_doc_submission.success",

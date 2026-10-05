@@ -387,16 +387,17 @@ def validate_start_end_date(
 
 
 def validate_wp_date_range(start_date: Any, end_date: Any) -> ValidationResult:
-    """Work Permit dates: ``start_date`` must not be after ``end_date``.
+    """Work Permit dates: start must not be after end (same-day OK).
 
-    Same-day permits are valid (unlike Handover ``startDate < endDate``).
+    Used for ``planneddate.worktimedate`` / ``completionworkdate`` and the
+    legacy ``start_date`` / ``end_date`` pair when present.
     """
-    start = _parse_date(start_date, "start_date")
-    end = _parse_date(end_date, "end_date")
+    start = _parse_date(start_date, "planneddate")
+    end = _parse_date(end_date, "planneddate")
 
     if start is None and end is None:
         return _result(
-            field="start_date",
+            field="planneddate",
             validation_type="date_range",
             passed=False,
             message="Cannot validate date range: both start and end dates are missing or unparseable.",
@@ -404,24 +405,24 @@ def validate_wp_date_range(start_date: Any, end_date: Any) -> ValidationResult:
         )
     if start is None:
         return _result(
-            field="start_date",
+            field="planneddate",
             validation_type="date_range",
             passed=False,
-            message="Cannot validate date range: start date is missing or unparseable.",
+            message="Cannot validate date range: planned start date is missing or unparseable.",
             blocking=True,
         )
     if end is None:
         return _result(
-            field="end_date",
+            field="planneddate",
             validation_type="date_range",
             passed=False,
-            message="Cannot validate date range: end date is missing or unparseable.",
+            message="Cannot validate date range: planned end date is missing or unparseable.",
             blocking=True,
         )
 
     passed = start <= end
     return _result(
-        field="end_date",
+        field="planneddate",
         validation_type="date_range",
         passed=passed,
         message=(
@@ -745,6 +746,12 @@ class ValidationService:
         # 1. Required fields
         if stage_def:
             required = stage_def.required_fields
+            if workflow_stage == "CREATE_WORK_PERMIT":
+                from app.agents.schemas.work_permit_schema import (
+                    get_create_required_fields as _wp_create_required,
+                )
+
+                required = _wp_create_required(data)
             # A disapproved handover records no dates — the RDD form has no
             # field for them — so they must not be asked for (handled in
             # get_missing_fields) and must not block the submission either.
@@ -764,7 +771,36 @@ class ValidationService:
                         f for f in required if f not in RDD_REJECTED_UNASKED_FIELDS
                     )
             optional: frozenset[str] | None = None
-            if workflow_stage in WP_STAGE_REGISTRY:
+            if workflow_stage == "CREATE_WORK_PERMIT":
+                from app.agents.schemas.work_permit_schema import (
+                    OPTIONAL_FIELDS as _WP_OPTIONAL_FIELDS,
+                    form_spec_for as _wp_form_spec,
+                    is_tenant_field_missing as _wp_field_missing,
+                    resolve_wp_sub_category as _wp_resolve_sub,
+                )
+
+                optional = _WP_OPTIONAL_FIELDS
+                # Nested form widgets need portal emptiness rules, not bare "" checks.
+                spec = _wp_form_spec(_wp_resolve_sub(None, data))
+                field_types = spec.field_types if spec else {}
+                for field_name in required:
+                    if _wp_field_missing(
+                        field_name,
+                        data.get(field_name),
+                        field_type=field_types.get(field_name),
+                        optional=field_name in (optional or frozenset()),
+                    ):
+                        errors.append(
+                            _result(
+                                field=field_name,
+                                validation_type="required",
+                                passed=False,
+                                message=f"Required field '{field_name}' is missing.",
+                                blocking=True,
+                            )
+                        )
+                required = ()  # already handled above
+            elif workflow_stage in WP_STAGE_REGISTRY:
                 from app.agents.schemas.work_permit_schema import (
                     OPTIONAL_FIELDS as _WP_OPTIONAL_FIELDS,
                 )
@@ -840,9 +876,21 @@ class ValidationService:
             if r["status"] == "FAILED":
                 errors.append(r)
 
-        # 3b. Work Permit start_date ≤ end_date (same-day permits are allowed).
-        # Skip when either value already failed format so we don't double-report.
-        if (
+        # 3b. Work Permit planneddate (or legacy start_date/end_date) ordering.
+        planned = data.get("planneddate")
+        if isinstance(planned, dict):
+            start_raw = planned.get("worktimedate")
+            end_raw = planned.get("completionworkdate")
+            if (
+                start_raw
+                and end_raw
+                and _parse_date(start_raw, "planneddate") is not None
+                and _parse_date(end_raw, "planneddate") is not None
+            ):
+                r = validate_wp_date_range(start_raw, end_raw)
+                if r["status"] == "FAILED":
+                    errors.append(r)
+        elif (
             data.get("start_date")
             and data.get("end_date")
             and _parse_date(data["start_date"], "start_date") is not None

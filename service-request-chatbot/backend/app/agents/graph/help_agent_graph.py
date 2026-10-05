@@ -90,7 +90,10 @@ from app.agents.services.notification_intent import (
 )
 
 # ── Work Permit agent nodes (CREATE_WORK_PERMIT workflow) ─────────────────────
-from app.agents.graph.nodes.work_permit.work_permit_entry_node import work_permit_entry_node
+from app.agents.graph.nodes.work_permit.work_permit_entry_node import (
+    WP_DIRECT_SET_CHIP_ACTIONS,
+    work_permit_entry_node,
+)
 from app.agents.graph.nodes.work_permit.work_permit_confirmation_node import work_permit_confirmation_node
 from app.agents.graph.nodes.work_permit.work_permit_payload_builder_node import work_permit_payload_builder_node
 from app.agents.graph.nodes.work_permit.work_permit_api_submission_node import work_permit_api_submission_node
@@ -633,6 +636,8 @@ _DIRECT_SET_CHIP_ACTIONS: frozenset[str] = frozenset(
     }
 )
 
+_WP_DIRECT_SET_CHIP_ACTIONS: frozenset[str] = WP_DIRECT_SET_CHIP_ACTIONS
+
 # Same idea for the RDD_REVIEW stage — rdd_review_entry_node writes
 # ``document_status`` straight into collected_data for these two chips.
 _RDD_DIRECT_SET_CHIP_ACTIONS: frozenset[str] = frozenset(
@@ -823,6 +828,8 @@ def _route_after_work_permit_entry(state: dict[str, Any]) -> str:
     # Mirror fitout/handover: CONFIRMED must win over a stale WAITING_FOR_USER
     # left from the confirmation-card turn.
     if state.get("confirmation_status") == "CONFIRMED":
+        return "merge_state"
+    if state.get("action_override") in _WP_DIRECT_SET_CHIP_ACTIONS:
         return "merge_state"
     if state.get("confirmation_status") == "REJECTED":
         return "field_extraction"

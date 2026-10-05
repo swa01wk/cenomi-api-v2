@@ -74,7 +74,7 @@ async def supporting_doc_confirmation_node(state: ServiceRequestState) -> dict[s
             "workflow_stage": "AWAITING_DOC_CONFIRM",
             "status": "WAITING_FOR_USER",
             "response_message": (
-                "That amount doesn't look right — enter a positive sales figure."
+                "The sales amount must be greater than 0. Please enter a valid amount."
             ),
             "response_ui": {"type": "message", "verbatim": True},
         }
@@ -97,7 +97,7 @@ async def supporting_doc_confirmation_node(state: ServiceRequestState) -> dict[s
         return _resume_upload_after_cancel(
             state,
             collected,
-            "Cancelled — that file was not submitted. Attach a different PDF when you are ready.",
+            "Upload cancelled — the file was not submitted. Attach a different PDF when you are ready.",
         )
 
     if workflow_stage == "AWAITING_DOC_CONFIRM" and user_message:
@@ -117,7 +117,7 @@ async def supporting_doc_confirmation_node(state: ServiceRequestState) -> dict[s
             return _resume_upload_after_cancel(
                 state,
                 collected,
-                "No problem — attach a different file when you are ready.",
+                "Upload cancelled. Attach a different file when you are ready.",
             )
 
     ui = _confirm_ui(collected)
@@ -204,6 +204,8 @@ def _confirm_ui(collected: dict[str, Any], *, comment_missing: bool = False) -> 
             "sales_period_start": start,
             "sales_period_end": end,
             "filename": filename,
+            # Lets the card offer "View document" for the file just uploaded.
+            "document_id": collected.get("document_id"),
             "current_status": current_status,
             "current_status_label": current_label,
             "target_status": target_status,

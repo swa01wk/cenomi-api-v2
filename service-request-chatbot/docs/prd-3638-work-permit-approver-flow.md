@@ -94,6 +94,11 @@ Mapping priority: platform `REJECTED` / `APPROVED` / `ACTIVE` / … → terminal
 Not in WP `flow[]`: HSE, CONTRACTOR, SUB_CONTRACTOR, `REGIONAL_DD_ENGINEER`.  
 `CONTRACTOR` / `SUB_CONTRACTOR` get `CAN_RAISE_WORK_PERMIT_SR` (create sidebar only).
 
+Tenant Company Admin / Primary Tenant Contact create Work Permit via the **portal
+form** (`SERVICE_REQUEST_CREATE` → `POST /v1/service-requests`). They do **not**
+get the AI Assistant / Copilot WP create path (no `VIEW_AI_ASSISTANT` by default;
+chatbot create remains Mall Manager / Admin only).
+
 Approve = caller’s role is in the current IN_PROGRESS `assigned_role` set. `ADMIN` bypasses.
 
 Create remains `CAN_RAISE_WORK_PERMIT_SR` (Mall Manager / Admin in this chatbot).

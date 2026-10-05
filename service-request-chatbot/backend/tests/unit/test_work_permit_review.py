@@ -269,7 +269,7 @@ class TestWpGraphRouting:
 
 
 class TestWpPayload:
-    def _create_data(self) -> dict[str, Any]:
+    def _create_hot_data(self) -> dict[str, Any]:
         return {
             "lease_code": "t0105712",
             "lease_id": 456,
@@ -278,22 +278,200 @@ class TestWpPayload:
             "unit_codes": ["FF050"],
             "mall": "Jawharat Jeddah",
             "brand": "Under Armour",
+            "unit_type": "Retail",
             "work_permit_type": "CONSTRUCTION_HOT",
-            "description": "Hot work",
-            "start_date": "2026-08-20",
-            "end_date": "2026-08-20",
             "contractor_name": "ABC",
+            "phone": "501234567",
+            "planneddate": {
+                "worktimedate": "20/08/2026",
+                "completionworkdate": "20/08/2026",
+                "worktimefrom": "09:00",
+                "worktimeto": "17:00",
+                "completionfrom": "",
+                "completionto": "",
+            },
+            "workers": {
+                "instructor_name": "Ali",
+                "worker": [
+                    {
+                        "name": "Omar",
+                        "designation": "Welder",
+                        "iqama_number": "123",
+                        "document_id": "",
+                        "worker_qualification": "",
+                    }
+                ],
+            },
+            "measureofsafety": {
+                "fire_extinguisher": "yes",
+                "fire_hoses": "",
+                "sprinker_on": "",
+                "volatile_remove": "",
+                "fire_proofcoating": "",
+                "work_hour_organized": "",
+                "equipment_for_carryingout": "",
+                "all_Holes_in_floorandWalls": "",
+            },
+        }
+
+    def _create_cold_data(self) -> dict[str, Any]:
+        return {
+            "lease_code": "t0105712",
+            "lease_id": 456,
+            "property_id": 789,
+            "tenant_profile_id": 1,
+            "unit_codes": ["FF050"],
+            "mall": "Jawharat Jeddah",
+            "brand": "Under Armour",
+            "unit_type": "Retail",
+            "work_permit_type": "CONSTRUCTION_COLD",
+            "department": "Fit-out",
+            "owner": "Owner Co",
+            "trade_name": "UA Trade",
+            "responsible_person": "Sara",
+            "phone": "501234567",
+            "type_work": "Partition install",
+            "list_equipment": "Drill, ladder",
+            "work_info": "Night work",
+            "planneddate": {
+                "worktimedate": "01/08/2026",
+                "completionworkdate": "05/08/2026",
+                "worktimefrom": "08:00",
+                "worktimeto": "16:00",
+                "completionfrom": "",
+                "completionto": "",
+            },
+            "workers": [
+                {
+                    "full_name": "Omar",
+                    "designation": "Tech",
+                    "company_name": "ABC",
+                    "phone": "501111111",
+                    "country_code": "966",
+                }
+            ],
         }
 
     def test_create_payload_is_nested_platform_shape(self) -> None:
-        payload = build_create_work_permit_payload(self._create_data())
+        payload = build_create_work_permit_payload(self._create_hot_data())
         assert payload["service_category"] == "WORK_PERMIT"
         assert payload["sub_category"] == "CONSTRUCTION_HOT"
         assert payload["lease_id"] == 456
         assert "payload" in payload
-        assert payload["payload"]["planneddate"]["worktimedate"] == "20/08/2026"
+        inner = payload["payload"]
+        assert inner["planneddate"]["worktimedate"] == "20/08/2026"
+        assert inner["contractor_name"] == "ABC"
+        assert inner["workers"]["worker"][0]["name"] == "Omar"
+        assert inner["measureofsafety"]["fire_extinguisher"] == "yes"
         assert "workPermitType" not in payload
         assert "serviceCategory" not in payload
+
+    def test_create_cold_payload_matches_form_keys(self) -> None:
+        payload = build_create_work_permit_payload(self._create_cold_data())
+        inner = payload["payload"]
+        assert payload["sub_category"] == "CONSTRUCTION_COLD"
+        assert inner["type_work"] == "Partition install"
+        assert inner["list_equipment"] == "Drill, ladder"
+        assert isinstance(inner["workers"], list)
+        assert inner["workers"][0]["full_name"] == "Omar"
+        assert "measureofsafety" not in inner
+
+    def _create_ops_data(self) -> dict[str, Any]:
+        return {
+            "lease_code": "t0030610",
+            "lease_id": 456,
+            "property_id": 789,
+            "tenant_profile_id": 1038,
+            "unit_codes": ["GF149"],
+            "mall": "Juri Mall",
+            "brand": "Brand Gap",
+            "work_permit_type": "OPERATIONS",
+            "unit_type": "Store",
+            "department": "operations",
+            "phone": "74395749393",
+            "permission_given_to": "Kishan",
+            "typeofwork": {"value": ["construction"], "otheroption": ""},
+            "effective_starting": {
+                "datefrom": "24/09/2026",
+                "dateto": "24/09/2026",
+            },
+            "firstperiod": {"from": "16:00", "to": "17:00"},
+        }
+
+    def test_ops_company_name_is_int_tenant_profile_id(self) -> None:
+        data = self._create_ops_data()
+        assert "company_name" not in data
+        inner = build_create_work_permit_payload(data)["payload"]
+        assert inner["company_name"] == 1038
+        assert isinstance(inner["company_name"], int)
+
+    def test_ops_firstperiod_hhmm_expanded_to_iso(self) -> None:
+        inner = build_create_work_permit_payload(self._create_ops_data())["payload"]
+        period = inner["firstperiod"]
+        assert period["from"] == "2026-09-24T16:00:00.000Z"
+        assert period["to"] == "2026-09-24T17:00:00.000Z"
+        assert period["fromLT"] == "4:00 PM"
+        assert period["toLT"] == "5:00 PM"
+        # to is after from (Go is_not_before_time)
+        assert period["to"] > period["from"]
+
+    def test_ops_empty_secondperiod_stays_empty(self) -> None:
+        data = self._create_ops_data()
+        data["secondperiod"] = {"from": "", "to": ""}
+        inner = build_create_work_permit_payload(data)["payload"]
+        assert inner["secondperiod"] == {"from": "", "to": ""}
+
+    def test_ops_already_iso_period_left_alone(self) -> None:
+        data = self._create_ops_data()
+        data["firstperiod"] = {
+            "from": "2026-09-24T16:00:00.000Z",
+            "to": "2026-09-24T17:00:00.000Z",
+            "fromLT": "4:00 PM",
+            "toLT": "5:00 PM",
+        }
+        inner = build_create_work_permit_payload(data)["payload"]
+        assert inner["firstperiod"]["from"] == "2026-09-24T16:00:00.000Z"
+        assert inner["firstperiod"]["to"] == "2026-09-24T17:00:00.000Z"
+        assert inner["firstperiod"]["fromLT"] == "4:00 PM"
+
+    def test_ops_inner_title_max_50(self) -> None:
+        data = self._create_ops_data()
+        data["title"] = "X" * 80
+        payload = build_create_work_permit_payload(data)
+        # Outer title truncates the chat-collected value.
+        assert len(payload["title"]) == 50
+        assert payload["title"].endswith("…")
+        # Ops form common_keys omit title → lease-code-only fallback (short).
+        assert payload["payload"]["title"] == "Operations – t0030610"
+        assert len(payload["payload"]["title"]) <= 50
+
+    def test_hot_inner_title_truncates_long_user_value(self) -> None:
+        data = self._create_hot_data()
+        data["title"] = "X" * 80
+        payload = build_create_work_permit_payload(data)
+        assert len(payload["title"]) == 50
+        assert payload["title"].endswith("…")
+        assert len(payload["payload"]["title"]) == 50
+        assert payload["payload"]["title"].endswith("…")
+
+    def test_ops_empty_company_name_still_uses_tenant_profile_id(self) -> None:
+        data = self._create_ops_data()
+        data["company_name"] = ""
+        inner = build_create_work_permit_payload(data)["payload"]
+        assert inner["company_name"] == 1038
+        assert isinstance(inner["company_name"], int)
+
+    def test_ops_omits_company_name_without_tenant_profile_id(self) -> None:
+        data = self._create_ops_data()
+        del data["tenant_profile_id"]
+        data["company_name"] = ""
+        inner = build_create_work_permit_payload(data)["payload"]
+        assert "company_name" not in inner
+
+    def test_hot_company_name_is_int_tenant_profile_id(self) -> None:
+        inner = build_create_work_permit_payload(self._create_hot_data())["payload"]
+        assert inner["company_name"] == 1
+        assert isinstance(inner["company_name"], int)
 
     def test_approve_patch_requires_payload(self) -> None:
         body = build_review_work_permit_payload(
@@ -305,6 +483,43 @@ class TestWpPayload:
         assert body["status"] == "APPROVED"
         assert body["payload"] == {"contractor_name": "ABC"}
         assert body["sub_category"] == "CONSTRUCTION_HOT"
+
+    def test_approve_patch_strips_inner_envelope_keys(self) -> None:
+        body = build_review_work_permit_payload(
+            sub_category="OPERATIONS",
+            inner_payload={
+                "category": "WORK_PERMIT",
+                "service_category": "WORK_PERMIT",
+                "lease_id": 999,
+                "lease_code": "L-1",
+                "tenant_profile_id": 1,
+                "property_id": 2,
+                "sub_category": "OPERATIONS",
+                "workflow_version": "v1",
+                "contract_id": "c1",
+                "contractor_name": "ABC",
+                "title": "Ops work",
+            },
+            approve=True,
+            comment="",
+        )
+        assert body["status"] == "APPROVED"
+        assert body["payload"] == {
+            "contractor_name": "ABC",
+            "title": "Ops work",
+        }
+        for key in (
+            "category",
+            "service_category",
+            "lease_id",
+            "lease_code",
+            "tenant_profile_id",
+            "property_id",
+            "sub_category",
+            "workflow_version",
+            "contract_id",
+        ):
+            assert key not in body["payload"]
 
     def test_reject_patch_omits_payload(self) -> None:
         body = build_review_work_permit_payload(
@@ -554,6 +769,11 @@ class TestWpReviewSubmission:
         assert result["status"] == "SUBMITTED"
         assert result["workflow_stage"] == WP_APPROVED
         assert "auto-approved" in result["response_message"].lower()
+        ui = result.get("response_ui") or {}
+        assert ui.get("type") == "message"
+        assert ui.get("message") == result["response_message"]
+        assert ui.get("workflow_complete") is True
+        assert ui.get("workflow_stage") == WP_APPROVED
 
     async def test_create_stays_wp_created_when_post_create_get_fails(self) -> None:
         mock_create = AsyncMock()
@@ -588,10 +808,54 @@ class TestWpReviewSubmission:
         assert result["status"] == "SUBMITTED"
         assert result["workflow_stage"] == WP_CREATED
         assert "auto-approved" not in result["response_message"].lower()
+        ui = result.get("response_ui") or {}
+        assert ui.get("type") == "message"
+        assert ui.get("message") == result["response_message"]
+        assert "10100" in ui["message"]
+        assert ui.get("workflow_complete") is True
+        assert ui.get("workflow_stage") == WP_CREATED
 
+    async def test_review_approve_500_mentions_permit_pdf(self) -> None:
+        mock_patch = AsyncMock()
+        mock_patch.sr_id = None
+        mock_patch.error = "HTTP 500: an internal error occurred"
+        mock_patch.correlation_id = None
+        mock_patch.status_code = 500
+        mock_patch.response_payload = {
+            "success": False,
+            "errors": [{"code": 500, "message": "an internal error occurred"}],
+        }
 
-@pytest.mark.asyncio
-class TestWpStatusSync:
+        state = {
+            "workflow_stage": WP_MM_OPS_REVIEW,
+            "confirmation_status": "CONFIRMED",
+            "validation_errors": [],
+            "backend_refs": {
+                "sr_id": "341518",
+                "wp_action": "approve",
+                "create_payload": {
+                    "status": "APPROVED",
+                    "sub_category": "OPERATIONS",
+                    "payload": {"contractor_name": "ABC"},
+                },
+            },
+            "auth_context": _auth("MALL_MANAGER"),
+        }
+
+        with patch(
+            "app.agents.graph.nodes.work_permit.work_permit_api_submission_node.get_service_request_api_service"
+        ) as factory:
+            svc = AsyncMock()
+            svc.patch_service_request.return_value = mock_patch
+            factory.return_value = svc
+            result = await work_permit_api_submission_node(state)
+
+        assert result["status"] == "FAILED"
+        msg = result.get("response_message") or ""
+        assert "permit PDF" in msg
+        assert "HTTP 500" in msg
+        assert "Unable to submit the work permit request due to an API error" not in msg
+
     async def test_open_hot_sr_sets_dd_review_and_agent(self) -> None:
         result_dto = ServiceRequestGetResult(
             success=True,

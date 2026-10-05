@@ -23,6 +23,8 @@ from app.agents.llm.gateway import get_default_gateway as get_llm_gateway
 from app.agents.prompts.sales_data_manual_entry_prompt import (
     SALES_DATA_MANUAL_ENTRY_SYSTEM_PROMPT,
 )
+from app.agents.graph.nodes.sales_data.manual_entry_parser import parse_manual_entry
+from app.agents.schemas.sales_data_schema import MANUAL_ENTRY_REQUIRED_FIELDS as _REQUIRED
 from app.observability.decorators import trace_node
 
 log = structlog.get_logger(__name__)
@@ -128,60 +130,95 @@ async def manual_entry_extraction_node(state: ServiceRequestState) -> dict[str, 
         return {
             "status": "WAITING_FOR_USER",
             "response_message": (
-                "Please tell me the sales details. For example:\n"
-                '"Sales for August, lease LC-1234, amount SAR 85,000."'
+                "Please share the lease code, month and total sales amount — "
+                'for example: "LC-1234, August 2026, 85,000".'
             ),
         }
 
-    try:
-        gateway = get_llm_gateway()
-        history = state.get("conversation_history") or []
-        messages = [
-            {"role": "system", "content": SALES_DATA_MANUAL_ENTRY_SYSTEM_PROMPT},
-            *history,
-            {"role": "user", "content": user_message},
-        ]
-        response = await gateway.generate(messages=messages, temperature=0.0)
-        raw = response.content.strip()
-        # Strip markdown fences
-        raw = re.sub(r"^```(?:json)?\s*", "", raw)
-        raw = re.sub(r"\s*```$", "", raw)
-        parsed = json.loads(raw)
-        fields = parsed.get("fields", {})
-    except Exception as exc:
-        log.warning("manual_entry_extraction.llm_failed", exc_info=True)
-        fields = {}
+    # ── Deterministic parse first ─────────────────────────────────────────
+    # Reads "t0057323 - aug 2026 - 12280SAR" and friends without the LLM, so a
+    # complete message is never answered with "please provide the lease code".
+    pending_items = collected.get("_pending_items") or backend_refs.get("pending_items") or []
+    parsed_fields = parse_manual_entry(user_message, pending_items=pending_items)
+    rejected_amount = False
+    for key, value in parsed_fields.items():
+        if key == "sales_amt":
+            if value > 0:
+                collected["sales_amt"] = value
+            else:
+                collected.pop("sales_amt", None)
+                rejected_amount = True
+        else:
+            collected[key] = value
 
-    # Apply extracted fields to collected_data
-    updated = False
-    if "lease_code" in fields:
-        val = fields["lease_code"].get("value", "")
+    # ── LLM fallback — only for fields the parser could not find ─────────
+    fields: dict = {}
+    still_missing = [f for f in _REQUIRED if not collected.get(f)]
+    if still_missing and not rejected_amount:
+        try:
+            gateway = get_llm_gateway()
+            history = state.get("conversation_history") or []
+            messages = [
+                {"role": "system", "content": SALES_DATA_MANUAL_ENTRY_SYSTEM_PROMPT},
+                *history,
+                {"role": "user", "content": user_message},
+            ]
+            response = await gateway.generate(messages=messages, temperature=0.0)
+            raw = response.content.strip()
+            # Strip markdown fences
+            raw = re.sub(r"^```(?:json)?\s*", "", raw)
+            raw = re.sub(r"\s*```$", "", raw)
+            fields = json.loads(raw).get("fields", {}) or {}
+        except Exception:
+            log.warning("manual_entry_extraction.llm_failed", exc_info=True)
+            fields = {}
+
+    if "lease_code" in fields and not collected.get("lease_code"):
+        val = (fields["lease_code"] or {}).get("value", "")
         if val:
             collected["lease_code"] = str(val).upper().strip()
-            updated = True
 
-    if "sales_amt" in fields:
-        val = fields["sales_amt"].get("value")
+    if "sales_amt" in fields and not collected.get("sales_amt"):
+        val = (fields["sales_amt"] or {}).get("value")
         if val is not None:
             try:
-                collected["sales_amt"] = float(str(val).replace(",", ""))
-                updated = True
+                amt = float(str(val).replace(",", ""))
             except (ValueError, TypeError):
-                pass
+                amt = None
+            # Zero/negative must not be stored — the missing-field node re-asks.
+            if amt is not None and amt > 0:
+                collected["sales_amt"] = amt
+            elif amt is not None:
+                rejected_amount = True
 
-    if "period_hint" in fields:
-        hint = fields["period_hint"].get("value", "")
+    if "period_hint" in fields and not collected.get("sales_period_start"):
+        hint = (fields["period_hint"] or {}).get("value", "")
         if hint:
             start, end = _resolve_period(hint)
+            log.info(
+                "manual_entry_extraction.period_hint_resolved",
+                hint=hint,
+                start=start,
+                end=end,
+            )
             if start:
                 collected["sales_period_start"] = start
                 collected["sales_period_end"] = end
-                updated = True
+
+    if rejected_amount:
+        collected["_amount_rejected"] = True
+    else:
+        collected.pop("_amount_rejected", None)
 
     log.info(
         "manual_entry_extraction.result",
+        parsed=list(parsed_fields.keys()),
         extracted=list(fields.keys()),
         collected=list(collected.keys()),
+        sales_period_start=collected.get("sales_period_start"),
+        sales_period_end=collected.get("sales_period_end"),
+        lease_code=collected.get("lease_code"),
+        user_message=user_message,
     )
 
     return {

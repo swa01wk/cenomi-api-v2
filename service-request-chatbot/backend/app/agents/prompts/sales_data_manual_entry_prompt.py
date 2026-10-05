@@ -30,6 +30,17 @@ period_hint:
   Examples: 'August', 'Q3', 'month August', 'July 2026', 'last month', '2026-08-01 to 2026-08-31'
   Do NOT convert to dates — return the raw string.
 
+## Users type informally — read it anyway
+
+Fields may come in any order, separated by dashes, commas or nothing, with
+typos and shorthand. All of these are complete entries:
+  "t0057323 - aug 2026 - 12280SAR"  → lease T0057323, period "aug 2026", 12280
+  "57323 sept 26 12.5k"             → period "sept 2026", 12500
+  "for lease T0057323 last month we did SAR 12,280"
+  "SAR12280 t0057323 august"
+Currency may be glued to the number ("12280SAR", "SAR12280"); "k" = thousand,
+"m"/"mn" = million. A spaced dash between fields is a separator, not a minus.
+
 ## Critical rules
 
 - Extract ONLY the fields above. Never invent values.

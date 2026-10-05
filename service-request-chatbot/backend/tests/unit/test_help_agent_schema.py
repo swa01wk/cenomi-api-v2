@@ -251,3 +251,14 @@ class TestWorkPermitRBAC:
     def test_wp_intents_in_all_intents(self) -> None:
         assert "CREATE_WORK_PERMIT_SR" in ALL_INTENTS
         assert "APPROVE_WORK_PERMIT_SR" in ALL_INTENTS
+
+    def test_tenant_company_admins_can_create_wp(self) -> None:
+        for role in ("COMPANY_ADMIN_CENTRAL", "COMPANY_ADMIN", "AUTHORIZED_SIGNATORY"):
+            intents = ROLE_PERMITTED_INTENTS.get(role, frozenset())
+            assert "CREATE_WORK_PERMIT_SR" in intents, role
+            # Sales-data tenant intents must remain.
+            assert "UPLOAD_SALES_DATA" in intents or "CHECK_SALES_DATA_STATUS" in intents, role
+
+    def test_billing_contact_cannot_create_wp(self) -> None:
+        bc = ROLE_PERMITTED_INTENTS.get("BILLING_CONTACT", frozenset())
+        assert "CREATE_WORK_PERMIT_SR" not in bc

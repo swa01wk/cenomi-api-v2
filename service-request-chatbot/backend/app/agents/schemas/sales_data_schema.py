@@ -166,15 +166,15 @@ SALES_DATA_ROLE_INTENTS: dict[str, frozenset[str]] = {
 # ---------------------------------------------------------------------------
 
 STATUS_LABELS: dict[str, str] = {
-    "PENDING":                      "⏳ Pending",
-    "SUBMITTED":                    "✅ Submitted",
-    "APPROVED":                     "✅ Approved",
-    "NEED_REUPLOAD":                "🔄 Needs Re-upload",
-    "NEED_UPLOAD_SUPPORTING_DOCUMENT": "📎 Supporting Document Required",
-    "NEED_UPLOAD_AUDITED_SALES":    "📋 Audited Sales Required",
-    "RE_UPLOADED":                  "✅ Re-uploaded",
-    "UPLOADED_SUPPORTING_DOCUMENT": "✅ Supporting Document Uploaded",
-    "UPLOADED_AUDITED_SALES":       "✅ Audited Sales Uploaded",
+    "PENDING":                      "Pending",
+    "SUBMITTED":                    "Submitted",
+    "APPROVED":                     "Approved",
+    "NEED_REUPLOAD":                "Needs Re-upload",
+    "NEED_UPLOAD_SUPPORTING_DOCUMENT": "Supporting Document Required",
+    "NEED_UPLOAD_AUDITED_SALES":    "Audited Sales Required",
+    "RE_UPLOADED":                  "Re-uploaded",
+    "UPLOADED_SUPPORTING_DOCUMENT": "Supporting Document Uploaded",
+    "UPLOADED_AUDITED_SALES":       "Audited Sales Uploaded",
 }
 
 # Portal admin table (StatusHighlighterSalesData): badge collapses; tooltip is specific.

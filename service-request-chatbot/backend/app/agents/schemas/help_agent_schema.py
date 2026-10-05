@@ -164,6 +164,21 @@ for _role in SALES_DATA_TENANT_PLATFORM_ROLES:
 for _role in SALES_DATA_APPROVER_PLATFORM_ROLES:
     ROLE_PERMITTED_INTENTS[_role] = _SR_READ_INTENTS | _SALES_DATA_ADMIN_INTENTS
 
+# Tenant company admins / authorized signatories may also create Work Permit
+# SRs via chatbot (same CREATE_WORK_PERMIT_SR path as Mall Manager). Keep their
+# sales-data intents from the loop above; union only the WP create intent.
+_TENANT_WORK_PERMIT_CREATE_ROLES: frozenset[str] = frozenset(
+    {
+        "COMPANY_ADMIN_CENTRAL",
+        "COMPANY_ADMIN",
+        "AUTHORIZED_SIGNATORY",
+    }
+)
+for _role in _TENANT_WORK_PERMIT_CREATE_ROLES:
+    ROLE_PERMITTED_INTENTS[_role] = ROLE_PERMITTED_INTENTS.get(
+        _role, _SR_READ_INTENTS
+    ) | frozenset({"CREATE_WORK_PERMIT_SR"})
+
 
 def _rebuild_intents_for_roles() -> None:
     """Rebuild ALL_INTENTS and ADMIN's permitted intents after registry changes.

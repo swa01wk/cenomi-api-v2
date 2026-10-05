@@ -7,16 +7,22 @@ Non-actors on a review hop get a status message only (no Approve/Reject).
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any
 
 from app.agents.graph.state import ServiceRequestState
+from app.agents.schemas.work_permit_form_fields import (
+    FIELD_LABELS as WP_FORM_FIELD_LABELS,
+    form_spec_for,
+)
 from app.agents.schemas.work_permit_schema import (
     STAGE_LABELS,
     WP_REVIEW_STAGES,
     WORK_PERMIT_TYPE_LABELS,
     get_missing_fields,
     in_progress_roles,
+    resolve_wp_sub_category,
 )
 from app.agents.services.permission_service import PermissionService
 from app.observability.decorators import trace_node
@@ -31,34 +37,25 @@ _FIELD_LABELS: dict[str, str] = {
     "mall": "Mall",
     "brand": "Brand",
     "unit_codes": "Unit Codes",
-    "work_permit_type": "Work Permit Type",
-    "description": "Description of Work",
-    "start_date": "Start Date",
-    "end_date": "End Date",
-    "contractor_name": "Contractor Name",
-    "work_location": "Work Location",
-    "work_type": "Work Type",
-    "comments": "Comments",
+    **WP_FORM_FIELD_LABELS,
 }
 
-_EDITABLE_FIELDS: frozenset[str] = frozenset(
-    {"work_permit_type", "description", "start_date", "end_date", "contractor_name", "comments"}
-)
-
-_DISPLAY_FIELDS: tuple[str, ...] = (
+_BASE_DISPLAY: tuple[str, ...] = (
     "lease_code",
     "mall",
     "brand",
     "unit_codes",
     "work_permit_type",
-    "description",
-    "start_date",
-    "end_date",
-    "contractor_name",
-    "work_location",
-    "work_type",
-    "comments",
 )
+
+_EDITABLE_ALWAYS: frozenset[str] = frozenset({"work_permit_type"})
+
+_AI_FIELD_META_KEY = "_ai_field_meta"
+
+_PROVENANCE_HINTS: dict[str, str] = {
+    "template": "Filled in for you — edit if you want different wording.",
+    "ai": "Drafted by the assistant from your answers — please check it.",
+}
 
 _CREATE_MESSAGE = (
     "All required details have been collected. Please review the Work Permit Service "
@@ -96,29 +93,209 @@ def _non_actor_review_message(stage: str, sr_id: str | None) -> str:
     )
 
 
+def _fmt_time(raw: Any) -> str:
+    text = str(raw or "").strip()
+    return text
+
+
+def _summarize_planneddate(value: dict[str, Any]) -> str:
+    start = str(value.get("worktimedate") or "").strip()
+    end = str(value.get("completionworkdate") or "").strip()
+    t_from = _fmt_time(value.get("worktimefrom") or value.get("worktimefromLT"))
+    t_to = _fmt_time(value.get("worktimeto") or value.get("worktimetoLT"))
+    left = start
+    if t_from:
+        left = f"{start} {t_from}".strip()
+    right = end
+    if t_to:
+        right = f"{end} {t_to}".strip()
+    if left and right:
+        return f"{left} → {right}"
+    return left or right or ""
+
+
+def _summarize_workers(value: Any) -> str:
+    if isinstance(value, list):
+        names = [
+            str(row.get("full_name") or "").strip()
+            for row in value
+            if isinstance(row, dict)
+        ]
+        names = [n for n in names if n]
+        return ", ".join(names) if names else ""
+    if isinstance(value, dict):
+        workers = value.get("worker")
+        names: list[str] = []
+        if isinstance(workers, list):
+            for row in workers:
+                if isinstance(row, dict) and str(row.get("name") or "").strip():
+                    names.append(str(row["name"]).strip())
+        instructor = str(value.get("instructor_name") or "").strip()
+        body = ", ".join(names) if names else ""
+        if instructor:
+            return f"{body} (instructor: {instructor})" if body else f"instructor: {instructor}"
+        return body
+    return ""
+
+
+def _summarize_measureofsafety(value: dict[str, Any]) -> str:
+    from app.agents.schemas.work_permit_form_fields import WP_MEASURE_OF_SAFETY_LABELS
+
+    on = [
+        WP_MEASURE_OF_SAFETY_LABELS.get(k, k)
+        for k, v in value.items()
+        if str(v or "").strip()
+    ]
+    return ", ".join(on) if on else ""
+
+
+def _summarize_typeofwork(value: Any) -> str:
+    if isinstance(value, dict):
+        raw = value.get("value")
+        if isinstance(raw, list):
+            primary = ", ".join(str(v).strip() for v in raw if str(v or "").strip())
+        else:
+            primary = str(raw or "").strip()
+        other = str(value.get("otheroption") or "").strip()
+        if primary and other:
+            return f"{primary} ({other})"
+        return primary or other
+    if isinstance(value, list):
+        return ", ".join(str(v).strip() for v in value if str(v or "").strip())
+    return str(value or "").strip()
+
+
+def _summarize_effective_starting(value: dict[str, Any]) -> str:
+    left = str(value.get("datefrom") or "").strip()
+    right = str(value.get("dateto") or "").strip()
+    if left and right:
+        return f"{left} → {right}"
+    return left or right
+
+
+def _summarize_period(value: dict[str, Any]) -> str:
+    left = str(value.get("from") or value.get("fromLT") or "").strip()
+    right = str(value.get("to") or value.get("toLT") or "").strip()
+    if left and right:
+        return f"{left} – {right}"
+    return left or right
+
+
+def _display_value(key: str, raw_val: Any) -> Any:
+    if key == "work_permit_type":
+        return WORK_PERMIT_TYPE_LABELS.get(raw_val, raw_val)
+    if key == "planneddate" and isinstance(raw_val, dict):
+        return _summarize_planneddate(raw_val) or raw_val
+    if key == "workers":
+        summary = _summarize_workers(raw_val)
+        return summary or raw_val
+    if key == "measureofsafety" and isinstance(raw_val, dict):
+        return _summarize_measureofsafety(raw_val) or raw_val
+    if key == "typeofwork":
+        return _summarize_typeofwork(raw_val) or raw_val
+    if key == "effective_starting" and isinstance(raw_val, dict):
+        return _summarize_effective_starting(raw_val) or raw_val
+    if key in {"firstperiod", "secondperiod"} and isinstance(raw_val, dict):
+        return _summarize_period(raw_val) or raw_val
+    if isinstance(raw_val, (dict, list)):
+        try:
+            return json.dumps(raw_val, ensure_ascii=False)
+        except (TypeError, ValueError):
+            return str(raw_val)
+    return raw_val
+
+
+def _display_keys(collected_data: dict[str, Any]) -> tuple[str, ...]:
+    subtype = resolve_wp_sub_category(None, collected_data)
+    spec = form_spec_for(subtype)
+    if spec is None:
+        return _BASE_DISPLAY
+    # Prefer tenant-facing form keys over backend-only common keys.
+    tenant_keys = [
+        k
+        for k in spec.common_keys
+        if k
+        not in {
+            "mall",
+            "brand",
+            "lease",
+            "unit_codes",
+            "company_name",
+            "country_code",
+            "tenant_contact",
+            "lease_brand_mall",
+        }
+    ]
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for key in list(_BASE_DISPLAY) + tenant_keys:
+        if key not in seen:
+            seen.add(key)
+            ordered.append(key)
+    return tuple(ordered)
+
+
+def _provenance_for(
+    field_key: str,
+    raw_value: Any,
+    ai_meta: dict[str, Any],
+) -> dict[str, Any]:
+    """Label a row as generated — unless the user has since changed it."""
+    entry = ai_meta.get(field_key)
+    if not isinstance(entry, dict):
+        return {}
+    if str(entry.get("value") or "") != str(raw_value or ""):
+        return {"source": "user"}
+    source = str(entry.get("source") or "template")
+    row: dict[str, Any] = {"generated": True, "source": source}
+    hint = _PROVENANCE_HINTS.get(source)
+    if hint:
+        row["hint"] = hint
+    confidence = entry.get("confidence")
+    if source != "template" and isinstance(confidence, (int, float)):
+        row["confidence"] = float(confidence)
+    return row
+
+
+def _editable_keys(collected_data: dict[str, Any]) -> frozenset[str]:
+    subtype = resolve_wp_sub_category(None, collected_data)
+    spec = form_spec_for(subtype)
+    if spec is None:
+        return _EDITABLE_ALWAYS | frozenset({"notes", "description", "title"})
+    return _EDITABLE_ALWAYS | frozenset(spec.field_types.keys()) | frozenset(
+        {"notes", "description", "title"}
+    )
+
+
 def _build_confirmation_card(
     collected_data: dict[str, Any],
     *,
     review: bool,
     stage: str,
 ) -> dict[str, Any]:
+    editable = _editable_keys(collected_data)
+    ai_meta: dict[str, Any] = dict(collected_data.get(_AI_FIELD_META_KEY) or {})
+    # Always surface title/description when present (editable + autofill badges).
+    display_keys = list(_display_keys(collected_data))
+    for text_key in ("description", "title"):
+        if text_key not in display_keys and collected_data.get(text_key) not in (
+            None,
+            "",
+        ):
+            display_keys.append(text_key)
     fields: list[dict[str, Any]] = []
-    for key in _DISPLAY_FIELDS:
+    for key in display_keys:
         raw_val = collected_data.get(key)
         if raw_val in (None, "", []):
             continue
-        if key == "work_permit_type":
-            display_val = WORK_PERMIT_TYPE_LABELS.get(raw_val, raw_val)
-        else:
-            display_val = raw_val
-        fields.append(
-            {
-                "key": key,
-                "label": _FIELD_LABELS.get(key, key),
-                "value": display_val,
-                "editable": (not review) and key in _EDITABLE_FIELDS,
-            }
-        )
+        row: dict[str, Any] = {
+            "key": key,
+            "label": _FIELD_LABELS.get(key, key),
+            "value": _display_value(key, raw_val),
+            "editable": (not review) and key in editable,
+        }
+        row.update(_provenance_for(key, raw_val, ai_meta))
+        fields.append(row)
     request_type = "Work Permit Service Request"
     if review:
         request_type = f"Work Permit — {STAGE_LABELS.get(stage, 'Review')}"

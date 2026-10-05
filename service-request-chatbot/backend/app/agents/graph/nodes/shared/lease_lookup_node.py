@@ -267,6 +267,12 @@ def _enrich_collected_data(
     # key to tenant_profile_id.
     if record.company_name and not str(updated.get("company") or "").strip():
         updated["company"] = record.company_name
+    # unit_type: only when the lease row provided it (empty string from API
+    # must not wipe a user-supplied value, and we never invent phone/owner/trade).
+    if str(getattr(record, "unit_type", "") or "").strip() and not str(
+        updated.get("unit_type") or ""
+    ).strip():
+        updated["unit_type"] = str(record.unit_type).strip()
     # New lease selection → user must re-confirm yes/no in chat even if the
     # form already has a radio value synced from a previous pick.
     updated["_approve_radio_confirmed"] = False

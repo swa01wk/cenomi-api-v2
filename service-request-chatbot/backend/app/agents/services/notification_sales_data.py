@@ -215,4 +215,8 @@ def build_sales_data_notification_context(ref: dict[str, Any]) -> dict[str, str]
     key = str(ref.get("key") or ref.get("sub_category") or "").strip()
     if key:
         ctx["key"] = key
+    if raw_message:
+        # Lets the agent tell which request (re-upload / supporting doc /
+        # audited sales) the notification is about when the key is generic.
+        ctx["message"] = raw_message[:500]
     return ctx

@@ -48,9 +48,11 @@ async def sales_data_confirmation_node(state: ServiceRequestState) -> dict[str, 
     filename: str = backend_refs.get("csv_filename", "upload.csv")
 
     if not csv_rows:
+        message = "No rows to review. Please upload your CSV file."
         return {
             "status": "WAITING_FOR_USER",
-            "response_message": "No rows to review. Please upload your CSV file.",
+            "response_message": message,
+            "response_ui": {"type": "message", "verbatim": True, "message": message},
         }
 
     # Build display rows for the table
@@ -75,7 +77,7 @@ async def sales_data_confirmation_node(state: ServiceRequestState) -> dict[str, 
     log.info("sales_data_confirmation.built", row_count=row_count, filename=filename)
 
     message_text = (
-        f"✅ **{row_count} row(s) validated** from **{filename}**.\n\n"
+        f"**{row_count} row(s) validated** from **{filename}**.\n\n"
         "Please review the table below. You can edit the **Sales Amount (SAR)** column "
         "before submitting.\n\n"
         f"*All {row_count} rows will be submitted together — if any row has an error, "
@@ -92,5 +94,8 @@ async def sales_data_confirmation_node(state: ServiceRequestState) -> dict[str, 
             "filename": filename,
             "row_count": row_count,
             "message": message_text,
+            # The "entire batch rejected if any row errors" warning must
+            # reach the user exactly as written every time.
+            "verbatim": True,
         },
     }

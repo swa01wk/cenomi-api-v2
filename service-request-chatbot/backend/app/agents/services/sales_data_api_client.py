@@ -175,24 +175,22 @@ class SalesDataApiClient:
         lease_code: str | list[str] | None = None,
         page: int = 1,
         limit: int = 100,
-        all_my_companies: bool = True,
+        all_my_companies: bool = False,
+        sales_period_start: str | None = None,
+        sales_period_end: str | None = None,
     ) -> list[dict[str, Any]]:
         """Return sales-data rows visible to the authenticated user.
 
         With ``disable_pagination=True`` (Layer 2 validation), all rows are
         returned at once so the agent can check existence and access in one call.
 
-        ``all_my_companies`` (default True) scopes the lookup to every
-        tenant profile the authenticated user belongs to, not just whichever
-        one is "active" in the portal's company switcher at the moment —
-        without it, clicking a notification for a lease under a different
-        one of the user's own companies than the currently active one
-        incorrectly reports "no access", and a CSV upload for that lease
-        fails Layer 2 validation the same way. The AI service is a distinct
-        caller from the main portal UI (which still defaults to
-        active-company-only scoping), so widening this here is safe and
-        matches what a chat assistant helping "this person with their own
-        data" should already do.
+        ``all_my_companies`` (default False) keeps the lookup scoped to the
+        company currently active in the portal's company switcher — the AI
+        session token is minted with that tenant_profile_id, and the
+        frontend re-mints it on a company switch — so the agent only ever
+        lists, validates and submits leases of the active company, the same
+        as the Sales Data pages. Pass True only for a deliberate
+        cross-company lookup.
         """
         resp = await self._get_sales_data_raw(
             disable_pagination=disable_pagination,
@@ -201,6 +199,8 @@ class SalesDataApiClient:
             page=page,
             limit=limit,
             all_my_companies=all_my_companies,
+            sales_period_start=sales_period_start,
+            sales_period_end=sales_period_end,
         )
         return unwrap_sales_data_rows(resp.json())
 
@@ -211,7 +211,9 @@ class SalesDataApiClient:
         lease_code: str | list[str] | None = None,
         page: int = 1,
         limit: int = 10,
-        all_my_companies: bool = True,
+        all_my_companies: bool = False,
+        sales_period_start: str | None = None,
+        sales_period_end: str | None = None,
     ) -> tuple[list[dict[str, Any]], int]:
         """Like get_sales_data, but also returns the real total_count.
 
@@ -227,6 +229,8 @@ class SalesDataApiClient:
             page=page,
             limit=limit,
             all_my_companies=all_my_companies,
+            sales_period_start=sales_period_start,
+            sales_period_end=sales_period_end,
         )
         body = resp.json()
         rows = unwrap_sales_data_rows(body)
@@ -241,6 +245,8 @@ class SalesDataApiClient:
         page: int,
         limit: int,
         all_my_companies: bool,
+        sales_period_start: str | None = None,
+        sales_period_end: str | None = None,
     ) -> httpx.Response:
         params: dict[str, Any] = {"page": page, "limit": limit}
         if disable_pagination:
@@ -255,14 +261,15 @@ class SalesDataApiClient:
             params["lease_code"] = lease_code
         if all_my_companies:
             params["all_my_companies"] = "true"
+        # YYYY-MM-DD; cenomi-api filters start >= from AND end <= to.
+        if sales_period_start:
+            params["sales_period_start"] = sales_period_start
+        if sales_period_end:
+            params["sales_period_end"] = sales_period_end
 
-        # This call regressed from ~200ms to 15-30s+ once all_my_companies=true
-        # started being sent on every request — the first bump to 30s still
-        # wasn't enough margin (observed admin_review_entry taking 30.3s and
-        # hitting it). Bumped again as a stopgap; this masks the symptom, not
-        # the cause — the underlying cenomi-api query still needs to be
-        # optimized (see comment on all_my_companies above). A 45s+ wait is
-        # not acceptable for an interactive chat turn either way.
+        # all_my_companies=true made this call 15-30s+ (vs ~200ms); it is now
+        # off by default, but the timeout stays generous for large
+        # disable_pagination listings.
         async with httpx.AsyncClient(timeout=45.0) as client:
             resp = await client.get(
                 f"{self._base}/api/v1/sales-data",
@@ -561,7 +568,7 @@ def partition_rows_by_lease_access(
         norm_key = (_norm_lease_name(lc), _period_year_month(start))
 
         if _norm_lease_name(lc) not in accessible:
-            no_access.append({**row, "_error": f"You don't have access to lease {lc}."})
+            no_access.append({**row, "_error": f"You don't have access to lease {lc} under your current company."})
             continue
         if norm_key not in pending_index:
             no_pending_row.append(

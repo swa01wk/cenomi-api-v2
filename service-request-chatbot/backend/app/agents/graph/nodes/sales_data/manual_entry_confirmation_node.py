@@ -11,6 +11,10 @@ from typing import Any
 
 import structlog
 
+from app.agents.graph.nodes.sales_data.sales_data_entry_node import (
+    _looks_like_typed_amount,
+    _mentions_lease_code,
+)
 from app.agents.graph.state import ServiceRequestState
 from app.observability.decorators import trace_node
 
@@ -27,6 +31,15 @@ _REJECT_PHRASES: frozenset[str] = frozenset(
 def _contains_phrase(text: str, phrases: frozenset[str]) -> bool:
     lowered = text.lower()
     return any(bool(re.search(r"\b" + re.escape(p) + r"\b", lowered)) for p in phrases)
+
+
+def _looks_like_new_entry(message: str) -> bool:
+    """True when the message is introducing a fresh lease/amount rather than
+    answering yes/no to the pending confirm card — e.g. "i want to submit
+    sales for t0106028 for dec 2024 - 12280 SAR" contains "submit" (a
+    _CONFIRM_PHRASES match) but is actually a brand-new request that should
+    reset state, not a stale-session auto-confirm of the previous lease."""
+    return bool(_mentions_lease_code(message)) and bool(_looks_like_typed_amount(message))
 
 
 @trace_node("manual_entry_confirmation", "AGENT")
@@ -52,11 +65,24 @@ async def manual_entry_confirmation_node(state: ServiceRequestState) -> dict[str
             "confirmation_status": "REJECTED",
             "workflow_stage": "MANUAL_ENTRY",
             "status": "WAITING_FOR_USER",
-            "response_message": "Cancelled. Please provide the correct details.",
+            "response_message": "Submission cancelled — nothing was submitted. What would you like to change: the lease, month or amount?",
+            "response_ui": {"type": "message", "verbatim": True, "message": "Submission cancelled — nothing was submitted. What would you like to change: the lease, month or amount?"},
         }
 
     # ── Text-based confirm ─────────────────────────────────────────────────
-    if workflow_stage == "AWAITING_MANUAL_CONFIRM" and user_message:
+    # sales_data_entry_node (the top-level dispatcher) already recognises a
+    # freshly-typed lease/amount and routes it through manual_entry_extraction
+    # + manual_entry_lease_validation before it ever reaches here, refreshing
+    # `collected` with the new lease. So a message that both matches
+    # _CONFIRM_PHRASES ("...submit...") AND reads as a new entry has already
+    # had its new data merged into `collected` by the time we get here — show
+    # that new card below rather than reading the phrase match as a yes/no
+    # reply to the card already on screen.
+    if (
+        workflow_stage == "AWAITING_MANUAL_CONFIRM"
+        and user_message
+        and not _looks_like_new_entry(user_message)
+    ):
         if _contains_phrase(user_message, _CONFIRM_PHRASES):
             log.info("manual_entry_confirmation.confirmed_by_text")
             return {
@@ -69,8 +95,9 @@ async def manual_entry_confirmation_node(state: ServiceRequestState) -> dict[str
                 "confirmation_status": "REJECTED",
                 "workflow_stage": "MANUAL_ENTRY",
                 "status": "WAITING_FOR_USER",
-                "collected_data": {},
-                "response_message": "No problem — let's start over. Please provide the lease code.",
+                # Keep the entry so "change the amount to 13,000" just works.
+                "response_message": "Submission cancelled — nothing was submitted. What would you like to change: the lease, month or amount?",
+                "response_ui": {"type": "message", "verbatim": True, "message": "Submission cancelled — nothing was submitted. What would you like to change: the lease, month or amount?"},
             }
 
     # ── Show confirmation card ─────────────────────────────────────────────
@@ -85,19 +112,20 @@ async def manual_entry_confirmation_node(state: ServiceRequestState) -> dict[str
     except (ValueError, TypeError):
         amt_display = str(sales_amt)
 
-    brand_line = f"| Brand | **{brand or '—'}** |\n"
-    property_line = f"| Property | **{property_name or '—'}** |\n"
+    # The field/value data is sent as a structured `fields` array (below) for
+    # the card to render as a real table — the bubble text stays short prose
+    # so it doesn't duplicate that table as a raw markdown pipe-table string.
     message = (
-        f"Please confirm the following details before submitting:\n\n"
-        f"| Field | Value |\n"
-        f"|---|---|\n"
-        f"| Lease Code | **{lease_code}** |\n"
-        f"{brand_line}"
-        f"{property_line}"
-        f"| Period | **{start} – {end}** |\n"
-        f"| Sales Amount | **{amt_display}** |\n\n"
+        "Please confirm the following details before submitting.\n\n"
         "Reply **yes** to confirm and submit, or **no** to make changes."
     )
+    fields = [
+        {"key": "lease_code", "label": "Lease Code", "value": lease_code},
+        {"key": "brand", "label": "Brand", "value": brand or "—"},
+        {"key": "property", "label": "Property", "value": property_name or "—"},
+        {"key": "period", "label": "Period", "value": f"{start} – {end}"},
+        {"key": "sales_amt", "label": "Sales Amount", "value": amt_display},
+    ]
 
     return {
         "confirmation_status": "PENDING",
@@ -112,6 +140,7 @@ async def manual_entry_confirmation_node(state: ServiceRequestState) -> dict[str
             "sales_period_start": start,
             "sales_period_end": end,
             "sales_amt": sales_amt,
+            "fields": fields,
             "verbatim": True,
             "message": message,
         },

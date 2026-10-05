@@ -31,6 +31,7 @@ from app.agents.graph.nodes.sales_data.period_utils import (
     parse_asked_period,
 )
 from app.agents.graph.nodes.sales_data.pending_months import extract_lease_code
+from app.agents.services.permission_service import graph_permission_guard
 from app.observability.decorators import trace_node
 
 log = structlog.get_logger(__name__)
@@ -66,10 +67,6 @@ _DOC_KEYWORDS = (
     "reupload a pdf",
     "re-upload pdf",
     "upload a pdf",
-    "upload again",
-    "attach again",
-    "attach a different",
-    "different file",
 )
 _UPLOAD_SWITCH_PHRASES = (
     "upload",
@@ -94,18 +91,179 @@ _PENDING_GATE_STAGES = frozenset({
     "AWAITING_OTHER_MONTHS_REMINDER",
 })
 _AMOUNT_RE = re.compile(
-    r"(?:sar\s*[\d,]+|amount\s*(?:is|:)?\s*[\d,]+|(?:is|:)\s*(?:sar\s*)?[\d,]{3,})",
+    # Bare numbers need 5+ digits (not 4) so a plain year mention ("August
+    # 2026") doesn't get misread as a typed sales amount.
+    # "[\d,]+\s*sar\b" (no \b before "sar") separately covers digits glued
+    # directly to the currency code ("12280SAR") — the trailing \b in the
+    # bare-number branch can't match there since a digit-to-letter run has
+    # no word boundary in between.
+    r"(?:sar\s*[\d,]+|[\d,]+\s*sar\b|amount\s*(?:is|:)?\s*[\d,]+"
+    r"|(?:is|:)\s*(?:sar\s*)?[\d,]{3,}"
+    r"|(?<![a-zA-Z0-9-])\d{5,}(?:\.\d+)?\b)",
     re.I,
 )
 _LEASE_CODE_RE = re.compile(
-    r"\b(?:lc[-\s]?\d{3,}|t\d{6,}|(?:lease)\s+[a-z0-9-]{3,})\b",
+    r"\b(?:lc[-\s]?\d{3,}|t\d{6,}|[a-z]{2,10}(?:[_-][a-z0-9]{2,10}){1,3}"
+    r"|(?:lease)\s+[a-z0-9_-]{3,})\b",
     re.I,
 )
 _EXPLICIT_CSV_PHRASES = ("upload", "csv", "attach")
+# "directly", "manually", "type it" answer the CSV-or-type choice with intent
+# to type — must win over _EXPLICIT_CSV_PHRASES even though "upload" often
+# appears in the same reply ("directly I want to upload", i.e. type it
+# directly rather than via file upload).
+_MANUAL_CHOICE_PHRASES = (
+    "directly",
+    "manually",
+    "type it",
+    "type them",
+    "enter it manually",
+    "not upload",
+    "no file",
+    "without a file",
+    "without csv",
+    "skip the file",
+    "skip the csv",
+)
 _YES_PHRASES = frozenset({
     "yes", "y", "ok", "okay", "proceed", "continue", "confirm", "sure",
 })
 _NO_PHRASES = frozenset({"no", "n", "cancel", "nope", "stop"})
+
+
+_CANCELLED_MESSAGE = "Sales data submission cancelled. What would you like to do next?"
+
+
+
+# ── Stage-independent commands ────────────────────────────────────────────
+# Typed commands that must mean the same thing at every step of the flow.
+# Resolved here, before any stage-specific routing, so "reupload" / "cancel" /
+# "help" never fall into whichever node happens to own the current stage.
+_CANCEL_ONLY_RE = re.compile(
+    r"^\s*(no[, ]*)?(please\s+)?(cancel( it| that| this)?|stop|never\s*mind|nevermind|"
+    r"forget it|exit|quit|abort)\s*[.!]*\s*$",
+    re.I,
+)
+_RESTART_RE = re.compile(r"\b(start over|start again|restart|from scratch|begin again)\b", re.I)
+_HELP_RE = re.compile(
+    r"^\s*(help|help me|what can you do|what are my options|options|menu)\s*[?.!]*\s*$",
+    re.I,
+)
+_REUPLOAD_RE = re.compile(
+    r"\b(re-?\s?upload\w*|upload\w*\s+(?:it\s+|the\s+file\s+|a\s+file\s+|the\s+csv\s+)?again|"
+    r"(?:new|another|different|corrected|fixed|updated)\s+(?:file|csv|sheet)|"
+    r"i(?:'ll| will)\s+upload|let me upload|upload\s+(?:a\s+)?new)\b",
+    re.I,
+)
+_EXPLICIT_DOC_RE = re.compile(r"\b(pdf|supporting|audited|document)\b", re.I)
+_EXPLICIT_CSV_RE = re.compile(
+    r"\b(csv|sales\s+data|sales\s+figures?|template|spreadsheet|excel|sheet)\b", re.I
+)
+_UPLOAD_WORD_RE = re.compile(r"\bupload\w*\b", re.I)
+# Stages whose own node owns a typed "cancel" (keeps the entry / file).
+_OWN_CANCEL_STAGES = frozenset({"AWAITING_MANUAL_CONFIRM", "AWAITING_DOC_CONFIRM",
+                                "AWAITING_PERIOD_MISMATCH_CONFIRM"})
+_START_STAGES = frozenset({None, "", "SALES_DATA_COMPLETE", "STATUS_LOOKUP", "STALE_NOTIFICATION"})
+
+_HELP_MESSAGE_TENANT = (
+    "I can help you with your sales data:\n"
+    "- Upload a CSV file (you can download the template)\n"
+    '- Type your sales figures, for example "t0057323, August 2026, 12,280"\n'
+    "- Check the status of your submissions\n"
+    "- Upload a file the Sales Data Team has requested\n\n"
+    "What would you like to do?"
+)
+_HELP_MESSAGE_ADMIN = (
+    "I can help you review sales data:\n"
+    "- Show the submissions awaiting review\n"
+    '- Approve submissions, for example "Approve t0106013" or "Approve all"\n'
+    "- Request a re-upload, supporting document or audited sales\n\n"
+    "What would you like to do?"
+)
+_REUPLOAD_CSV_MESSAGE = (
+    "Please attach the corrected CSV file. You can download the template "
+    "if you need it."
+)
+
+
+def _resolve_command(message: str, stage: str | None) -> str | None:
+    """"cancel" | "restart" | "help" | "csv_upload" | "doc_upload" | None."""
+    text = (message or "").strip()
+    if not text:
+        return None
+    if _HELP_RE.search(text):
+        return "help"
+    if _RESTART_RE.search(text):
+        return "restart"
+    if _CANCEL_ONLY_RE.search(text) and stage not in _OWN_CANCEL_STAGES:
+        return "cancel"
+    if stage == "AWAITING_PERIOD_MISMATCH_CONFIRM":
+        return None  # its own yes / no / different-file handling
+    wants_upload = bool(_REUPLOAD_RE.search(text) or _UPLOAD_WORD_RE.search(text))
+    if not wants_upload:
+        return None
+    if _EXPLICIT_DOC_RE.search(text):
+        return "doc_upload"
+    in_doc_flow = stage in _DOC_STAGES
+    if in_doc_flow and not _EXPLICIT_CSV_RE.search(text) and not text.lower().startswith("no"):
+        return "doc_upload"
+    if in_doc_flow or _REUPLOAD_RE.search(text) or stage in _START_STAGES:
+        return "csv_upload"
+    return None
+
+
+# The intent each command switches the conversation to.
+_COMMAND_INTENTS = {
+    "restart": "UPLOAD_SALES_DATA",
+    "csv_upload": "UPLOAD_SALES_DATA",
+    "doc_upload": "UPLOAD_SUPPORTING_DOCUMENT",
+}
+
+
+def _command_permitted(state: ServiceRequestState, command: str) -> bool:
+    """Commands must not switch a user into a flow their role cannot use.
+
+    Mid-conversation turns reach this node through session continuity, which
+    skips the supervisor's RBAC gate — so check the same permission table
+    here. Admin review steps never switch into tenant upload flows.
+    """
+    target = _COMMAND_INTENTS.get(command)
+    if target is None:
+        return True  # help / cancel are safe for every role
+    if (state.get("workflow_stage") or "").startswith("ADMIN"):
+        return False
+    auth = state.get("auth_context")
+    if auth is None:
+        return True
+    from app.agents.schemas.help_agent_schema import intents_for_roles
+
+    permitted = intents_for_roles(
+        frozenset(getattr(auth, "roles", None) or ()),
+        bool(getattr(auth, "is_global_admin", False)),
+    )
+    return target in permitted
+
+
+def _clear_file_state(state: ServiceRequestState) -> tuple[dict[str, Any], dict[str, Any]]:
+    refs = dict(state.get("backend_refs") or {})
+    for key in ("csv_session_id", "csv_rows", "csv_rows_all", "csv_filename",
+                "period_mismatch", "doc_session_id", "action_required_rows",
+                "notification_context"):
+        refs.pop(key, None)
+    collected = {
+        k: v for k, v in dict(state.get("collected_data") or {}).items()
+        if k in ("_pending_items", "_asked_period")
+    }
+    return refs, collected
+
+
+def _command_reply(message: str, **extra: Any) -> dict[str, Any]:
+    return {
+        "status": "WAITING_FOR_USER",
+        "response_message": message,
+        "response_ui": {"type": "message", "verbatim": True, "message": message},
+        **extra,
+    }
 
 
 def _looks_like_doc_request(message: str) -> bool:
@@ -131,7 +289,14 @@ def _mentions_lease_code(message: str) -> bool:
 
 def _explicit_csv_request(message: str) -> bool:
     lowered = (message or "").lower()
+    if any(token in lowered for token in _MANUAL_CHOICE_PHRASES):
+        return False
     return any(token in lowered for token in _EXPLICIT_CSV_PHRASES)
+
+
+def _explicit_manual_choice(message: str) -> bool:
+    lowered = (message or "").lower()
+    return any(token in lowered for token in _MANUAL_CHOICE_PHRASES)
 
 
 def _notification_context(state: ServiceRequestState) -> dict[str, Any]:
@@ -178,22 +343,15 @@ def _upload_prompt_patch(
         if period:
             where += f" ({period})"
         message = (
-            f"Great — please upload the sales data file{where}, "
-            "and I'll take it from there.\n\n"
-            "📁 **Upload a CSV** using the drop zone or the Upload CSV button below.\n\n"
-            "✏️ Or **type the amount** — for example: "
-            f'"Sales for {lease} is SAR 85,000."'
+            f"Please upload the sales data file{where}, or type the details — "
+            f'for example: "{lease}, August 2026, 85,000".'
         )
     else:
         message = (
-            "I can help you submit your sales data. You can either:\n\n"
-            "📁 **Upload a CSV file** — download the Cenomi template "
-            "(Brand and Property pre-filled), or upload your existing file "
-            "(`lease_code`, dates, `sales_amt`). Brand and Property are optional.\n\n"
-            "✏️ **Type the details** — for example: "
-            '"My sales for August, lease LC-1234, amount SAR 85,000."\n\n'
-            "Which would you prefer?\n\n"
-            "_Download the CSV template using the button above._"
+            "I can help you submit your sales data. You can upload a CSV file "
+            "(download the template if you need one), or type the details — "
+            'for example: "LC-1234, August 2026, 85,000".\n\n'
+            "Which would you prefer?"
         )
     if asked:
         refs["asked_period"] = asked
@@ -226,6 +384,16 @@ def _upload_prompt_patch(
 @trace_node("sales_data_entry", "AGENT")
 async def sales_data_entry_node(state: ServiceRequestState) -> dict[str, Any]:
     """Route the turn to the correct sales-data sub-flow."""
+    # Front door: SALES_AGENT gates the whole agent, the same permission the
+    # frontend's "Upload with AI" / "Review with AI" buttons check — a user
+    # who free-types "I want to submit sales data" straight into open chat
+    # (bypassing those buttons) must be stopped here, not just at the final
+    # submit/approve call downstream.
+    denied = graph_permission_guard(state, "ENTER_SALES_DATA_AGENT")
+    if denied:
+        log.info("sales_data_entry.permission_denied")
+        return denied
+
     intent: str = state.get("intent") or ""
     action_override: str | None = state.get("action_override")
     workflow_stage: str | None = state.get("workflow_stage")
@@ -247,6 +415,49 @@ async def sales_data_entry_node(state: ServiceRequestState) -> dict[str, Any]:
         action=action_override,
         stage=workflow_stage,
     )
+
+    # ── 00. Stage-independent typed commands ───────────────────────────────
+    if not action_override:
+        command = _resolve_command(state.get("user_message") or "", workflow_stage)
+        if command and not _command_permitted(state, command):
+            log.info("sales_data_entry.command_not_permitted", command=command, stage=workflow_stage)
+            command = None
+        if command:
+            log.info("sales_data_entry.command", command=command, stage=workflow_stage)
+        if command == "help":
+            admin = intent in ("REVIEW_SALES_DATA", "APPROVE_SALES_DATA") or (
+                workflow_stage or ""
+            ).startswith("ADMIN")
+            return _command_reply(_HELP_MESSAGE_ADMIN if admin else _HELP_MESSAGE_TENANT)
+        if command == "cancel":
+            return _command_reply(
+                _CANCELLED_MESSAGE,
+                active_agent=None, intent=None, workflow_stage=None,
+                collected_data={}, backend_refs={},
+            )
+        if command in ("restart", "csv_upload"):
+            refs, collected = _clear_file_state(state)
+            if command == "restart" or workflow_stage in _START_STAGES:
+                # Fresh start: show the pending months with the attach control.
+                return {
+                    "intent": "UPLOAD_SALES_DATA",
+                    "workflow_stage": "PENDING_MONTHS_CHECK",
+                    "status": "IN_PROGRESS",
+                    "backend_refs": refs,
+                    "collected_data": collected,
+                }
+            patch = _upload_prompt_patch(
+                {**state, "backend_refs": refs, "collected_data": collected}
+            )
+            patch["intent"] = "UPLOAD_SALES_DATA"
+            patch["response_message"] = _REUPLOAD_CSV_MESSAGE
+            if isinstance(patch.get("response_ui"), dict):
+                patch["response_ui"] = {
+                    **patch["response_ui"], "message": _REUPLOAD_CSV_MESSAGE, "verbatim": True,
+                }
+            return patch
+        if command == "doc_upload" and workflow_stage not in _DOC_STAGES:
+            intent = "UPLOAD_SUPPORTING_DOCUMENT"
 
     # ── 0. Cancel ──────────────────────────────────────────────────────────
     # Supporting-doc cancel resumes the PDF attach step — do not wipe session.
@@ -272,9 +483,8 @@ async def sales_data_entry_node(state: ServiceRequestState) -> dict[str, Any]:
             "collected_data": {},
             "backend_refs": {},
             "status": "WAITING_FOR_USER",
-            "response_message": (
-                "Sales data submission cancelled. What would you like to do next?"
-            ),
+            "response_message": _CANCELLED_MESSAGE,
+            "response_ui": {"type": "message", "verbatim": True, "message": _CANCELLED_MESSAGE},
         }
 
     # ── 0a2. Approval acknowledgement (informational, terminal) ────────────
@@ -289,8 +499,8 @@ async def sales_data_entry_node(state: ServiceRequestState) -> dict[str, Any]:
         if period:
             where += f" ({period})"
         message = (
-            f"Good news — your sales data{where} has been approved by the "
-            "Sales Data Team. No further action is needed."
+            f"Your sales data{where} has been approved by the Sales Data Team. "
+            "No further action is required."
         )
         return {
             "active_agent": None,
@@ -300,7 +510,7 @@ async def sales_data_entry_node(state: ServiceRequestState) -> dict[str, Any]:
             "backend_refs": {},
             "status": "WAITING_FOR_USER",
             "response_message": message,
-            "response_ui": {"type": "message", "message": message},
+            "response_ui": {"type": "message", "verbatim": True, "message": message},
         }
 
     # ── 0b. CSV month vs the month the tenant asked for ────────────────────
@@ -338,7 +548,7 @@ async def sales_data_entry_node(state: ServiceRequestState) -> dict[str, Any]:
         ):
             log.info("sales_data_entry.period_mismatch_decline")
             message = (
-                f"No problem — please upload the **{asked_label}** file when you are ready."
+                f"Understood. Please upload the **{asked_label}** file when you are ready."
             )
             refs = dict(backend_refs)
             refs.pop("csv_session_id", None)
@@ -466,6 +676,7 @@ async def sales_data_entry_node(state: ServiceRequestState) -> dict[str, Any]:
     # turn came from a notification deep-link (CSV dropzone) or the user
     # explicitly asked to upload a file.
     looks_typed = _looks_like_typed_amount(user_message)
+    wants_manual = _explicit_manual_choice(user_message)
     partial_lease_entry = (
         _mentions_lease_code(user_message)
         and not _notification_context(state)
@@ -478,7 +689,7 @@ async def sales_data_entry_node(state: ServiceRequestState) -> dict[str, Any]:
         or (
             intent == "UPLOAD_SALES_DATA"
             and action_override not in _CSV_UPLOAD_ACTIONS
-            and (looks_typed or partial_lease_entry)
+            and (looks_typed or partial_lease_entry or wants_manual)
         )
     ):
         log.info("sales_data_entry.manual_entry")
