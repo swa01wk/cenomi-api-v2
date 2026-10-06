@@ -1156,12 +1156,17 @@ async def _ask_next_missing_field(state: ServiceRequestState) -> dict[str, Any]:
 
     # Handover schema owns stage-aware missing logic (e.g. conditional document_status).
     # Fitout confirm agents have their own required-field logic driven by sub_category.
+    # General Inquiry uses its own single-stage schema so it never sees handover
+    # fields (e.g. already_handovered) in its user_missing list.
     if (active_agent or "") == "work_permit_agent":
         from app.agents.schemas.work_permit_schema import get_missing_fields as wp_get_missing
         all_missing: list[str] = wp_get_missing(workflow_stage or "CREATE_WORK_PERMIT", collected)
     elif active_agent in _FITOUT_CONFIRM_AGENTS:
         sub_category: str = state.get("sub_category") or ""  # type: ignore[assignment]
         all_missing = fitout_confirm_get_missing_fields(workflow_stage, sub_category, collected)
+    elif (active_agent or "") == "general_inquiry_agent":
+        from app.agents.schemas.general_inquiry_schema import get_missing_fields as gi_get_missing
+        all_missing = gi_get_missing(workflow_stage or "CREATE_SR", collected)
     else:
         all_missing = handover_get_missing_fields(workflow_stage, collected)
 
@@ -1458,6 +1463,13 @@ async def _ask_next_missing_field(state: ServiceRequestState) -> dict[str, Any]:
                 "**Approve with changes** if it needs amendments."
             )
             verbatim_question = True
+
+    # General Inquiry questions are already user-facing. The response LLM is
+    # primed for handover ("Please share a short title for this handover
+    # request"), so leaving these to be rewritten swaps "inquiry" for
+    # "handover" on the title turn. Send the configured question as written.
+    if (active_agent or "") == "general_inquiry_agent" and next_question:
+        verbatim_question = True
 
     # When the next question is driven by a non-required validation error (e.g.
     # date_range), the correction target field may already be in collected_data

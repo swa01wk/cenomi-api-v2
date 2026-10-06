@@ -169,6 +169,21 @@ class ServiceRequestGetResult:
 # ---------------------------------------------------------------------------
 
 
+def _tenant_contact_rows(body: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Pull ``tenant_contacts`` out of the platform list envelope."""
+    if not isinstance(body, dict):
+        return []
+    data = body.get("data") if isinstance(body.get("data"), dict) else body
+    listing = data.get("list") if isinstance(data, dict) else None
+    if isinstance(listing, dict):
+        rows = listing.get("tenant_contacts")
+    elif isinstance(listing, list):
+        rows = listing
+    else:
+        rows = data.get("tenant_contacts") if isinstance(data, dict) else None
+    return [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
+
+
 class ServiceRequestPlatformClient:
     """Authenticated HTTP client for all Cenomi platform API calls.
 
@@ -392,6 +407,40 @@ class ServiceRequestPlatformClient:
                 error=err,
             )
 
+    async def list_tenant_contacts(self, tenant_profile_id: str) -> list[dict[str, Any]]:
+        """GET /tenant-contacts for the company on a General Inquiry.
+
+        Loads lease-level and company-level contacts. Primary contacts are
+        often company-level, so a lease-only query comes back empty.
+        """
+        endpoint = f"{self._base_url}/tenant-contacts"
+        if not self._uses_agentic_bearer("GET", endpoint):
+            await self.ensure_authenticated()
+        rows: list[dict[str, Any]] = []
+        seen: set[tuple[Any, Any]] = set()
+        for company_level in ("false", "true"):
+            result = await self._get(
+                endpoint,
+                params={
+                    "tenant_profile_id": str(tenant_profile_id),
+                    "type": "tenant_contacts",
+                    "is_company_level": company_level,
+                    "page": "1",
+                    "limit": "50",
+                },
+            )
+            if not result.success:
+                continue
+            for row in _tenant_contact_rows(result.response_payload):
+                user = row.get("user_info") if isinstance(row.get("user_info"), dict) else {}
+                role = row.get("role_info") if isinstance(row.get("role_info"), dict) else {}
+                key = (user.get("user_id"), role.get("role_name"))
+                if key in seen:
+                    continue
+                seen.add(key)
+                rows.append(row)
+        return rows
+
     async def patch_service_request(
         self, sr_id: str, payload: dict[str, Any]
     ) -> PlatformCallResult:
@@ -603,6 +652,8 @@ class ServiceRequestPlatformClient:
         path = cls._normalize_path(url)
         m = method.upper()
         if m == "GET" and path.endswith("/leases"):
+            return True
+        if m == "GET" and path.endswith("/tenant-contacts"):
             return True
         if m == "POST" and path.endswith("/service-requests"):
             return True

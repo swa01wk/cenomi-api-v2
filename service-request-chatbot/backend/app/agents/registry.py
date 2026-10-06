@@ -102,6 +102,13 @@ SERVICE_REQUEST_AGENT_REGISTRY: dict[str, dict[str, AgentConfig]] = {
             "schema_key": "work_permit_service_request_schema",
         },
     },
+    "INQUIRY": {
+        "GENERAL": {
+            "agent_name": "general_inquiry_agent",
+            "display_name": "General Inquiry Agent",
+            "schema_key": "general_inquiry_schema",
+        },
+    },
     "SALES_DATA": {
         "BULK_UPLOAD": {
             "agent_name": "sales_data_agent",

@@ -546,6 +546,70 @@ def _build_sales_data_config() -> WorkflowConfig:
     )
 
 
+def _build_general_inquiry_config() -> WorkflowConfig:
+    """Build the ``WorkflowConfig`` for the General Inquiry Agent.
+
+    Single-phase create: tenant or admin raises a free-text question against
+    a lease.  One approver level (Customer Relations Team).  Auto-approved
+    when a Customer Relations Team user creates it.  No multi-phase review.
+    """
+    from app.agents.prompts.general_inquiry_extraction_prompt import (
+        GENERAL_INQUIRY_EXTRACTION_SYSTEM_PROMPT,
+    )
+
+    field_questions: dict[str, str] = {
+        "lease_code": (
+            "Which lease is this inquiry about? "
+            "Please provide the lease code, brand name, or mall name."
+        ),
+        "lease_brand_mall": (
+            "Please provide the lease code, brand name, or mall name for this inquiry."
+        ),
+        "title": "What is the subject of your inquiry? Please provide a short title.",
+        "description": "Please describe your inquiry in detail.",
+        "notes": (
+            "Do you have any additional notes you'd like to add? "
+            "(You can say 'no' or 'skip' to skip.)"
+        ),
+    }
+
+    return WorkflowConfig(
+        agent_name="general_inquiry_agent",
+        extraction_prompt=GENERAL_INQUIRY_EXTRACTION_SYSTEM_PROMPT,
+        field_questions=field_questions,
+        stage_sync_nodes={
+            "GI_CRT_REVIEW": "response_generation",
+            "GI_APPROVED": "response_generation",
+            "GI_REJECTED": "response_generation",
+        },
+        collection_stages=frozenset({"CREATE_SR", "GI_CRT_REVIEW"}),
+        confirmation_nodes={
+            "CREATE_SR": "general_inquiry_confirmation",
+            "GI_CRT_REVIEW": "general_inquiry_confirmation",
+        },
+        terminal_stages=frozenset({"SR_CREATED"}),
+        backend_fields=frozenset(
+            {
+                "tenant_profile_id",
+                "property_id",
+                "brand_id",
+                "lease_id",
+                "contract_id",
+                "unit_codes",
+                "city",
+                "lease_brand_mall",
+                "mall",
+                "brand",
+                "lease",
+            }
+        ),
+        auto_generated_fields=frozenset(),
+        lease_trigger_fields=("lease_code", "company", "lease_brand_mall"),
+        action_intents=frozenset({"CREATE_GENERAL_INQUIRY"}),
+        guided_tour_gate=True,
+    )
+
+
 def _init_registry() -> None:
     """Populate the registry with all built-in workflow configs."""
     rdd_cfg = _build_rdd_config()
@@ -563,6 +627,9 @@ def _init_registry() -> None:
 
     sd_cfg = _build_sales_data_config()
     WORKFLOW_CONFIG_REGISTRY[sd_cfg.agent_name] = sd_cfg
+
+    gi_cfg = _build_general_inquiry_config()
+    WORKFLOW_CONFIG_REGISTRY[gi_cfg.agent_name] = gi_cfg
 
 
 _init_registry()
