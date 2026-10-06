@@ -65,6 +65,11 @@ def _truncate_for_log(value: Any) -> Any:
             return text
     return text[:_MAX_LOG_JSON_CHARS] + "…"
 
+
+def _opt_str(value: Any) -> str | None:
+    text = str(value).strip() if value is not None else ""
+    return text or None
+
 # Top-level SR DTO fields needed for PUT /files and collected_data hydration.
 # Platform keeps these outside nested ``payload`` (see ServiceRequestDTO).
 _SR_TOP_LEVEL_REF_KEYS = (
@@ -158,6 +163,11 @@ class ServiceRequestGetResult:
     service_request_operations: list[dict[str, Any]] = field(default_factory=list)
     payload: dict[str, Any] | None = None
     service_request_attachments: list[dict[str, Any]] = field(default_factory=list)
+    service_request_history: list[dict[str, Any]] = field(default_factory=list)
+    work_permit_extension: dict[str, Any] | None = None
+    created_by: str | None = None
+    created_user_role: str | None = None
+    created_at: str | None = None
     endpoint: str = ""
     status_code: int | None = None
     latency_ms: int = 0
@@ -375,6 +385,17 @@ class ServiceRequestPlatformClient:
             if isinstance(body, dict):
                 data = body.get("data") or {}
 
+            history = (
+                data.get("operation_history")
+                or data.get("service_request_history")
+                or data.get("sr_history")
+                or data.get("history")
+                or []
+            )
+            extension = (
+                data.get("work_permit_extension")
+                or data.get("workPermitExtension")
+            )
             return ServiceRequestGetResult(
                 success=True,
                 sr_id=str(data.get("service_request_id") or sr_id),
@@ -388,6 +409,15 @@ class ServiceRequestPlatformClient:
                 service_request_attachments=list(
                     data.get("service_request_attachments") or []
                 ),
+                service_request_history=(
+                    list(history) if isinstance(history, list) else []
+                ),
+                work_permit_extension=(
+                    extension if isinstance(extension, dict) else None
+                ),
+                created_by=_opt_str(data.get("created_by")),
+                created_user_role=_opt_str(data.get("created_user_role")),
+                created_at=_opt_str(data.get("created_at")),
                 endpoint=endpoint,
                 status_code=response.status_code,
                 latency_ms=latency_ms,
@@ -451,6 +481,22 @@ class ServiceRequestPlatformClient:
         result = await self._patch(endpoint, payload)
         if result.success and result.sr_id is None:
             result.sr_id = self._extract_sr_id(result.response_payload) or sr_id
+        return result
+
+    async def update_work_permit_status(
+        self, payload: dict[str, Any]
+    ) -> PlatformCallResult:
+        """POST /service-requests/work-permit/status — extend / cancel decision."""
+        endpoint = f"{self._base_url}{self._SERVICE_REQUESTS_PATH}/work-permit/status"
+        if not self._uses_agentic_bearer("POST", endpoint):
+            await self.ensure_authenticated()
+        result = await self._post(endpoint, payload)
+        if result.sr_id is None:
+            result.sr_id = (
+                self._extract_sr_id(result.response_payload)
+                or str(payload.get("service_request_id") or "")
+                or None
+            )
         return result
 
     async def submit_report(self, payload: dict[str, Any]) -> PlatformCallResult:

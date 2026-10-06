@@ -169,6 +169,58 @@ class TestGetServiceRequest:
         assert result.error is None
 
     @pytest.mark.asyncio
+    async def test_reads_operation_history_and_creator(self) -> None:
+        """The SR detail GET returns history as ``operation_history``."""
+        client = _make_client()
+        client._access_token = "tok"
+        client._token_acquired_at = time.monotonic()
+        history = [
+            {"status": "CREATED", "operator_name": "Ali Hassan",
+             "operator_role": "PRIMARY_TENANT_CONTACT", "created_at": "2026-09-28T08:00:00Z"},
+            {"status": "APPROVED", "operator_name": "Sara", "operator_role": "DD_ENGINEER"},
+        ]
+        body = {
+            "data": {
+                "status": "IN_PROCESS",
+                "operation_history": history,
+                "created_by": "Ali Hassan",
+                "created_user_role": "PRIMARY_TENANT_CONTACT",
+                "created_at": "2026-09-28T08:00:00Z",
+            }
+        }
+        mock_resp = _mock_response(200, body)
+
+        with patch("httpx.AsyncClient") as mock_httpx:
+            mock_httpx.return_value.__aenter__.return_value.get = AsyncMock(
+                return_value=mock_resp
+            )
+            result = await client.get_service_request("sr-123")
+
+        assert result.service_request_history == history
+        assert result.created_by == "Ali Hassan"
+        assert result.created_user_role == "PRIMARY_TENANT_CONTACT"
+        assert result.created_at == "2026-09-28T08:00:00Z"
+
+    @pytest.mark.asyncio
+    async def test_blank_creator_fields_are_none(self) -> None:
+        client = _make_client()
+        client._access_token = "tok"
+        client._token_acquired_at = time.monotonic()
+        body = {"data": {"status": "IN_PROCESS", "created_by": "  ", "created_user_role": None}}
+        mock_resp = _mock_response(200, body)
+
+        with patch("httpx.AsyncClient") as mock_httpx:
+            mock_httpx.return_value.__aenter__.return_value.get = AsyncMock(
+                return_value=mock_resp
+            )
+            result = await client.get_service_request("sr-123")
+
+        assert result.service_request_history == []
+        assert result.created_by is None
+        assert result.created_user_role is None
+        assert result.created_at is None
+
+    @pytest.mark.asyncio
     async def test_merges_top_level_lease_refs_into_payload(self) -> None:
         """Platform puts lease_id on the SR DTO, not inside nested payload."""
         client = _make_client()

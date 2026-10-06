@@ -80,7 +80,10 @@ export type WorkflowStep = {
 export type ConfirmationField = {
   key: string;
   label: string;
-  value: string | number | boolean | null;
+  /** Machine value — may be a nested widget object for Formik bridges. */
+  value: string | number | boolean | null | Record<string, unknown> | unknown[];
+  /** Human label when `value` is not safe to stringify (nested WP widgets). */
+  display?: string | null;
   editable?: boolean;
   /** When present, the field renders as a <select> dropdown with these values. */
   options?: string[];
@@ -170,9 +173,9 @@ export type ResponseUIDocumentRequirement = {
 export type PreviewField = {
   key: string;
   label: string;
-  /** Machine-readable value — enum codes stay raw so Formik/bridge logic can match them. */
-  value: string | null;
-  /** Human label for `value`, present only when the raw code differs from what a user should read. */
+  /** Machine-readable value — enum codes / nested widgets stay raw for Formik. */
+  value: string | null | Record<string, unknown> | unknown[];
+  /** Human label for `value`, present when the raw value differs from what a user should read. */
   display?: string | null;
 };
 

@@ -123,9 +123,26 @@ def test_lease_picker_purpose_per_agent() -> None:
         lease_picker_purpose({"active_agent": "rdd_trading_confirmation_agent"})
         == "trading_confirm"
     )
+    # Work Permit lists Activated leases (not handover-eligible).
+    assert lease_picker_purpose({"active_agent": "work_permit_agent"}) == "work_permit"
+    assert (
+        lease_picker_purpose({"workflow_stage": "CREATE_WORK_PERMIT"}) == "work_permit"
+    )
     # Handover keeps the handover-eligibility rules — no purpose.
     assert lease_picker_purpose({"active_agent": "rdd_handover_agent"}) is None
     assert lease_picker_purpose({}) is None
+
+
+def test_work_permit_picker_carries_work_permit_purpose() -> None:
+    purpose = lease_picker_purpose(
+        {
+            "active_agent": "work_permit_agent",
+            "workflow_stage": "CREATE_WORK_PERMIT",
+        }
+    )
+    spec = build_create_lease_picker(purpose)["suggestions"]
+    assert spec["filters"]["purpose"] == "work_permit"
+    assert "purpose" not in build_create_lease_picker()["suggestions"]["filters"]
 
 
 def test_the_scoped_picker_is_the_handover_one_plus_a_purpose() -> None:

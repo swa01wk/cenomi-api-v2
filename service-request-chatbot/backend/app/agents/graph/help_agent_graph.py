@@ -95,6 +95,7 @@ from app.agents.graph.nodes.work_permit.work_permit_entry_node import (
     work_permit_entry_node,
 )
 from app.agents.graph.nodes.work_permit.work_permit_confirmation_node import work_permit_confirmation_node
+from app.agents.graph.nodes.work_permit.work_permit_status_node import work_permit_status_node
 from app.agents.graph.nodes.work_permit.work_permit_payload_builder_node import work_permit_payload_builder_node
 from app.agents.graph.nodes.work_permit.work_permit_api_submission_node import work_permit_api_submission_node
 
@@ -388,6 +389,21 @@ def _route_after_load(state: dict[str, Any]) -> str:
     return "supervisor"
 
 
+def _is_background_form_sync(state: dict[str, Any]) -> bool:
+    """True for the form bridge's silent patch: edits only, no message or action."""
+    return bool(
+        (state.get("corrected_fields") or {})
+        and not str(state.get("user_message") or "").strip()
+        and not state.get("action_override")
+    )
+
+
+def _status_view_node(state: dict[str, Any]) -> str:
+    """The active workflow's "show this SR" node (``preview`` unless overridden)."""
+    cfg = get_workflow_config(state.get("active_agent") or "")
+    return cfg.status_view_node if cfg else "preview"
+
+
 def _route_after_sync(state: dict[str, Any]) -> str:
     """After status sync, route to the correct stage entry node.
 
@@ -400,6 +416,10 @@ def _route_after_sync(state: dict[str, Any]) -> str:
 
     # 1. Per-workflow stage → entry node (keyed by active_agent)
     cfg = get_workflow_config(agent)
+    # A form edit on a form-edit stage was merged by sr_status_sync; rebuilding
+    # the status card for it would drop a card into the chat on every blur.
+    if cfg and workflow_stage in cfg.form_edit_stages and _is_background_form_sync(state):
+        return "response_generation"
     if cfg and workflow_stage in cfg.stage_sync_nodes:
         return cfg.stage_sync_nodes[workflow_stage]
 
@@ -408,7 +428,8 @@ def _route_after_sync(state: dict[str, Any]) -> str:
         if workflow_stage in registered_cfg.stage_sync_nodes:
             return registered_cfg.stage_sync_nodes[workflow_stage]
 
-    # 3. Terminal stages → preview when the user is opening an existing SR
+    # 3. Terminal stages → the workflow's status view (``preview`` for
+    # Handover / Fitout) when the user is opening an existing SR
     # (sr_id present in backend_refs — set from the request body when the FE
     # calls openExistingSr). Falling through to supervisor here would classify
     # the "Open SR X" bubble as ASK_HELP and return FAQ content instead of the
@@ -417,17 +438,22 @@ def _route_after_sync(state: dict[str, Any]) -> str:
         s for c in WORKFLOW_CONFIG_REGISTRY.values() for s in c.terminal_stages
     )
     if workflow_stage in all_terminal:
+        # The form re-fetch after a final approve/reject echoes its values back
+        # as a silent patch. It is not an "open SR" request, and preview would
+        # answer it with an unrequested (Handover-labelled) SR card.
+        if _is_background_form_sync(state):
+            return "response_generation"
         backend_refs_terminal = state.get("backend_refs") or {}
         if backend_refs_terminal.get("sr_id"):
-            return "preview"
+            return _status_view_node(state)
         return "supervisor"
 
-    # 4. Fallback: status preview, agent entry, or supervisor (never re-sync)
+    # 4. Fallback: status view, agent entry, or supervisor (never re-sync)
     backend_refs = state.get("backend_refs") or {}
     if backend_refs.get("sync_attempted") and backend_refs.get("sync_error"):
         return "response_generation"
     if backend_refs.get("sr_id"):
-        return "preview"
+        return _status_view_node(state)
     if agent:
         return _AGENT_ENTRY_NODES.get(agent, "handover_entry")
     return "supervisor"
@@ -484,14 +510,10 @@ def _route_after_supervisor(state: dict[str, Any]) -> str:
     if status == "WAITING_FOR_USER":
         return "response_generation"
 
-    # Preview always routes to the dedicated preview node
-    if intent == "PREVIEW_SERVICE_REQUEST":
-        return "preview"
-
-    # CHECK_SERVICE_REQUEST_STATUS — preview after sync when sr_id is present;
-    # otherwise preview_node may GET or show draft.
-    if intent == "CHECK_SERVICE_REQUEST_STATUS":
-        return "preview"
+    # Preview / status checks go to the active workflow's status view node
+    # (``preview`` for Handover / Fitout), which may GET or show the draft.
+    if intent in ("PREVIEW_SERVICE_REQUEST", "CHECK_SERVICE_REQUEST_STATUS"):
+        return _status_view_node(state)
 
     # ── Q&A path ──────────────────────────────────────────────────────────────
     if intent in _FAQ_INTENTS:
@@ -644,7 +666,8 @@ def _route_after_validation(state: dict[str, Any]) -> str:
         # comments (and any other optional-only fields) are asked once before the
         # review card, matching the CREATE_SR (Path A) behavior.
         if (
-            original_stage in ("CREATE_SR", "CREATE_HANDED_OVER_SR")
+            original_stage
+            in ("CREATE_SR", "CREATE_HANDED_OVER_SR", "CREATE_WORK_PERMIT")
             and active_agent not in _FITOUT_AGENTS
             and not already_confirmed
         ):
@@ -1172,6 +1195,7 @@ def build_help_agent_graph():
     # ── Work Permit agent nodes ───────────────────────────────────────────────
     graph.add_node("work_permit_entry", work_permit_entry_node)
     graph.add_node("work_permit_confirmation", work_permit_confirmation_node)
+    graph.add_node("work_permit_status", work_permit_status_node)
     graph.add_node("work_permit_payload_builder", work_permit_payload_builder_node)
     graph.add_node("work_permit_api_submission", work_permit_api_submission_node)
     # ── Fitout Confirm agent nodes ────────────────────────────────────────────
@@ -1254,6 +1278,7 @@ def build_help_agent_graph():
             "fitout_confirm_entry": "fitout_confirm_entry",
             "work_permit_entry": "work_permit_entry",
             "preview": "preview",
+            "work_permit_status": "work_permit_status",
             "supervisor": "supervisor",
             # Sync GET failure sets sync_error and returns response_generation
             # (_route_after_sync); must be registered or LangGraph raises KeyError.
@@ -1269,6 +1294,7 @@ def build_help_agent_graph():
             "sr_status_sync": "sr_status_sync",
             "faq_node": "faq_node",
             "preview": "preview",
+            "work_permit_status": "work_permit_status",
             "registry": "registry",
             "response_generation": "response_generation",
             "notification": "notification",
@@ -1295,6 +1321,7 @@ def build_help_agent_graph():
         },
     )
     graph.add_edge("preview", "response_generation")
+    graph.add_edge("work_permit_status", "response_generation")
     graph.add_conditional_edges(
         "registry",
         _route_after_registry,
