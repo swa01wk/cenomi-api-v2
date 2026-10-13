@@ -20,6 +20,7 @@ Headers — same as `/api/v1/dashboard/assistant-admin`: `x-internal-api-token: 
 |---|---|---|
 | `from`, `to` | all | ISO-8601. Default: trailing 30 days ending now (to the minute). `from` must be before `to`; max 365 days → `422` otherwise |
 | `agent` | all | e.g. `rdd_handover_agent`, `work_permit_agent`, `help_agent` |
+| `tz` | all | Viewer's IANA zone, e.g. `Asia/Riyadh`. Per-day series (`date` keys) are calendar days in this zone. Default `UTC`; unknown zone → `422` |
 | `max_score` | performance | comment feed: only ratings ≤ this (1–5) |
 | `page`, `page_size` | performance (comments), productivity (SR log) | `page_size` ≤ 100, default 20 |
 
