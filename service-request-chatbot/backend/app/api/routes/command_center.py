@@ -28,6 +28,7 @@ import time
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -167,15 +168,38 @@ def _window_query(
     agent: str | None = Query(
         default=None, description="Restrict to one agent, e.g. rdd_handover_agent."
     ),
+    tz: str | None = Query(
+        default=None,
+        description="Viewer's IANA timezone, e.g. Asia/Riyadh. Per-day series are "
+        "bucketed by calendar day in this zone. Default: UTC.",
+    ),
 ) -> AnalyticsFilters:
     start, end = resolve_window(from_date, to_date)
-    return AnalyticsFilters(from_date=start, to_date=end, agent=agent or None)
+    return AnalyticsFilters(
+        from_date=start, to_date=end, agent=agent or None, tz=resolve_tz(tz)
+    )
+
+
+def resolve_tz(tz: str | None) -> str:
+    """Validate an IANA zone name; blank means UTC."""
+    if not tz:
+        return "UTC"
+    try:
+        ZoneInfo(tz)
+    except (ZoneInfoNotFoundError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Unknown timezone '{tz}'.",
+        ) from exc
+    return tz
 
 
 def _previous(filters: AnalyticsFilters) -> AnalyticsFilters:
     assert filters.from_date is not None and filters.to_date is not None
     start, end = previous_window(filters.from_date, filters.to_date)
-    return AnalyticsFilters(from_date=start, to_date=end, agent=filters.agent)
+    return AnalyticsFilters(
+        from_date=start, to_date=end, agent=filters.agent, tz=filters.tz
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -542,4 +566,5 @@ def _key(filters: AnalyticsFilters) -> tuple[Any, ...]:
         filters.from_date.isoformat() if filters.from_date else None,
         filters.to_date.isoformat() if filters.to_date else None,
         filters.agent,
+        filters.tz,
     )

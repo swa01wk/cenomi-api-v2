@@ -65,6 +65,27 @@ def test_previous_window_has_the_same_length_and_abuts() -> None:
     assert prev_end - prev_start == end - start
 
 
+def test_blank_timezone_is_utc() -> None:
+    assert cc.resolve_tz(None) == "UTC"
+    assert cc.resolve_tz("") == "UTC"
+
+
+def test_known_timezone_is_kept() -> None:
+    assert cc.resolve_tz("Asia/Riyadh") == "Asia/Riyadh"
+
+
+@pytest.mark.parametrize("tz", ["Mars/Olympus", "../etc/passwd", "UTC'; DROP TABLE x;--"])
+def test_unknown_timezone_is_rejected(tz: str) -> None:
+    with pytest.raises(HTTPException) as exc:
+        cc.resolve_tz(tz)
+    assert exc.value.status_code == 422
+
+
+def test_previous_window_keeps_the_timezone() -> None:
+    riyadh = AnalyticsFilters(from_date=NOW - timedelta(days=7), to_date=NOW, tz="Asia/Riyadh")
+    assert cc._previous(riyadh).tz == "Asia/Riyadh"
+
+
 # ── Shapes ─────────────────────────────────────────────────────────────────
 
 
@@ -382,6 +403,20 @@ async def test_productivity_reports_ai_share_from_the_platform() -> None:
     assert data["by_function"][0]["function"] == "handover"
 
 
+@pytest.mark.parametrize(
+    "method", ["latency_daily", "thumbs_daily", "answer_trend", "tasks_daily", "daily_series"]
+)
+async def test_daily_series_bucket_by_the_viewers_calendar_day(method: str) -> None:
+    """A KSA custom range starts at 21:00 UTC the day before; grouping by UTC
+    day put the first three hours on a day outside the picked range."""
+    riyadh = AnalyticsFilters(from_date=NOW - timedelta(days=7), to_date=NOW, tz="Asia/Riyadh")
+    session = CompilingSession(row=_zero_row())
+    await getattr(CommandCenterRepository(session), method)(riyadh)
+    assert session.compiled
+    for sql in session.compiled:
+        assert "date_trunc('day', timezone('Asia/Riyadh'," in sql
+
+
 async def test_rows_get_a_display_name() -> None:
     names = {"u-1": "Aisha Khan"}
     with patch.object(cc, "_resolve_user_names", new=AsyncMock(return_value=names)):
@@ -398,6 +433,18 @@ async def test_sections_are_cached_per_window() -> None:
         await cc.command_center_usage(db=AsyncMock(), filters=WINDOW)
         await cc.command_center_usage(db=AsyncMock(), filters=WINDOW)
         await cc.command_center_usage(db=AsyncMock(), filters=SCOPED)
+    assert repo.user_activity.await_count == 2
+
+
+async def test_sections_are_cached_per_timezone() -> None:
+    repo = _stub_repo()
+    riyadh = AnalyticsFilters(from_date=WINDOW.from_date, to_date=WINDOW.to_date, tz="Asia/Riyadh")
+    with (
+        patch.object(cc, "CommandCenterRepository", return_value=repo),
+        patch.object(cc, "_resolve_user_names", new=AsyncMock(return_value={})),
+    ):
+        await cc.command_center_usage(db=AsyncMock(), filters=WINDOW)
+        await cc.command_center_usage(db=AsyncMock(), filters=riyadh)
     assert repo.user_activity.await_count == 2
 
 
