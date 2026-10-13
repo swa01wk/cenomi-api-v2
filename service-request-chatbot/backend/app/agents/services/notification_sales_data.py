@@ -83,8 +83,13 @@ _PERIOD_CORRESPONDING_TO_DATE_RE = re.compile(
     r"corresponding to\s+(\d{1,2})/(\d{1,2})/(\d{4})",
     re.IGNORECASE,
 )
+# The year is optional: cenomi-api's monthly-frequency notifications name
+# only the month ("corresponding to month May"), but the re-upload ones
+# include it ("corresponding to month August 2025"). Capturing it matters —
+# inferring the year for text that states it was resolving "August 2025" to
+# 2026-08, so the admin's own notification looked stale.
 _PERIOD_CORRESPONDING_TO_MONTH_RE = re.compile(
-    r"corresponding to\s+month\s+([A-Za-z]+)",
+    r"corresponding to\s+month\s+([A-Za-z]+)(?:\s+(\d{4}))?",
     re.IGNORECASE,
 )
 _PERIOD_CORRESPONDING_TO_YEAR_RE = re.compile(
@@ -123,8 +128,13 @@ def extract_period_date(text: str | None) -> str | None:
         month_num = _MONTH_NAME_TO_NUM.get(match.group(1).strip().lower())
         if month_num:
             from datetime import date
+
+            stated_year = match.group(2)
+            if stated_year:
+                # The text says which year — never second-guess it.
+                return f"{int(stated_year):04d}-{month_num:02d}"
             today = date.today()
-            # cenomi-api's monthly-frequency case never names a year — the
+            # cenomi-api's monthly-frequency case names no year — the
             # notification is always about the most recent occurrence of
             # that month, i.e. this year unless that month hasn't happened
             # yet this year, in which case it was last year.

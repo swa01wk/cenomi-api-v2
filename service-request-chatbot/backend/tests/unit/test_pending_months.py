@@ -667,3 +667,67 @@ async def test_gate_list_pick_month_reminds_other_months() -> None:
     assert result["workflow_stage"] == "AWAITING_OTHER_MONTHS_REMINDER"
     assert result["response_ui"]["asked_label"] == "August 2026"
     assert result["response_ui"]["other_months"][0]["label"] == "July 2026"
+
+
+@pytest.mark.asyncio
+async def test_gate_refetches_so_a_ui_submission_is_picked_up() -> None:
+    """The listing page beside the chat can submit a month at any time and
+    nothing tells the agent when it does. The gate must re-read rather than
+    reuse its cached snapshot, or it goes on offering months that were
+    already submitted — and tapping one fails."""
+    from app.agents.graph.nodes.sales_data.pending_months_gate_node import (
+        pending_months_gate_node,
+    )
+
+    # Cached from the previous turn: two pending months.
+    stale_cache = [
+        {
+            "lease_code": "LC-3001",
+            "year_month": "2026-08",
+            "label": "August 2026",
+            "sales_period_start": "2026-08-01",
+            "sales_period_end": "2026-08-31",
+            "brand_name": "",
+            "property_name": "",
+        },
+        {
+            "lease_code": "LC-3001",
+            "year_month": "2026-09",
+            "label": "September 2026",
+            "sales_period_start": "2026-09-01",
+            "sales_period_end": "2026-09-30",
+            "brand_name": "",
+            "property_name": "",
+        },
+    ]
+    # Server truth now: August was submitted via the listing page.
+    client = AsyncMock()
+    client.get_sales_data = AsyncMock(
+        return_value=[_row("LC-3001", "2026-09-01", "2026-09-30")]
+    )
+
+    state = _state(user_message="LC-3001")
+    state["workflow_stage"] = "AWAITING_PENDING_MONTHS_CHOICE"
+    state["collected_data"] = {"_pending_items": stale_cache}
+    state["backend_refs"] = {"pending_items": stale_cache}
+
+    with (
+        patch(
+            "app.agents.graph.nodes.sales_data.pending_months_gate_node.get_current_bearer_token",
+            return_value="tok",
+        ),
+        patch(
+            "app.agents.graph.nodes.sales_data.pending_months_gate_node.SalesDataApiClient",
+            return_value=client,
+        ),
+    ):
+        result = await pending_months_gate_node(state)
+
+    # The server was re-read rather than the stale cache being reused.
+    client.get_sales_data.assert_awaited()
+
+    # Only September is left, so the gate goes straight to its upload prompt
+    # instead of listing a month that has already been submitted.
+    items = result["collected_data"]["_pending_items"]
+    assert [i["year_month"] for i in items] == ["2026-09"]
+    assert result["collected_data"]["_asked_period"]["year_month"] == "2026-09"
