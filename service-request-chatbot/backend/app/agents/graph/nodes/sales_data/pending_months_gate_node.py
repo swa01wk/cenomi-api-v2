@@ -391,23 +391,25 @@ async def pending_months_gate_node(state: ServiceRequestState) -> dict[str, Any]
 
     items: list[dict[str, Any]] = []
     cached = collected.get("_pending_items") or refs.get("pending_items")
-    use_cache = (on_list or on_reminder) and isinstance(cached, list) and cached
-    if use_cache:
-        items = cached
-    else:
-        try:
-            token = get_current_bearer_token()
-            client = SalesDataApiClient(bearer_token=token)
-            rows = await client.get_sales_data(disable_pagination=True)
-            items = pending_period_items(rows)
-        except Exception:
-            log.warning("pending_months_gate.fetch_failed", exc_info=True)
-            if isinstance(cached, list) and cached:
-                items = cached
-            else:
-                asked = asked_period_from_state({**state, "backend_refs": refs})
-                lease = _resolve_lease(state, [], asked["year_month"] if asked else None)
-                return _upload_prompt(state, lease=lease, asked=asked)
+    # Always re-read rather than trusting the cached snapshot. The listing
+    # page beside the chat can submit a month at any time, and nothing tells
+    # the agent when it does — so a cached list went on offering months that
+    # were already submitted, and a tap on one failed. The fetch is the same
+    # call the list was built from; the cache stays only as the fallback for
+    # when that call fails.
+    try:
+        token = get_current_bearer_token()
+        client = SalesDataApiClient(bearer_token=token)
+        rows = await client.get_sales_data(disable_pagination=True)
+        items = pending_period_items(rows)
+    except Exception:
+        log.warning("pending_months_gate.fetch_failed", exc_info=True)
+        if isinstance(cached, list) and cached:
+            items = cached
+        else:
+            asked = asked_period_from_state({**state, "backend_refs": refs})
+            lease = _resolve_lease(state, [], asked["year_month"] if asked else None)
+            return _upload_prompt(state, lease=lease, asked=asked)
 
     asked = asked_period_from_state({**state, "backend_refs": refs, "collected_data": collected})
     msg_asked = parse_asked_period(user_message)
