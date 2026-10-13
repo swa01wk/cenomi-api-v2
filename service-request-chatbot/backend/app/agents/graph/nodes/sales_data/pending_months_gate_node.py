@@ -115,34 +115,40 @@ def _upload_prompt(state: ServiceRequestState, *, lease: str, asked: dict[str, s
     return _upload_prompt_patch(patched_state)
 
 
-# Display-only caps for the pending-months chip list — a tenant with many
-# leases and years of PENDING history (observed: one lease alone going back
-# to 2016) rendered as a wall of hundreds of chips. `items` itself (used for
-# every routing decision — other_pending_months, leases_with_month,
-# month_pending_on_lease) stays the FULL, correct dataset; only what gets
-# displayed here is capped, so a lease/month outside the shown window can
-# still be uploaded by name — it just isn't listed as a chip.
+# The pending-months chip list used to be capped here (5 leases, and only
+# months inside the 2 most recent distinct pending months) because a tenant
+# with years of PENDING history — one observed lease goes back to 2016 —
+# rendered as a wall of hundreds of chips. That cap made the rest
+# unreachable from chat: a month outside the window could only be uploaded
+# by typing its lease code from memory.
 #
-# The window is the 2 most recent distinct calendar months that actually
-# appear anywhere in the PENDING dataset (dataset-wide recency), not "today's
-# real-world month" — demo/seeded data rarely has anything pending for the
-# literal current date, and not "each lease's own 2 least-old months" either
-# — a lease with years of backlog must not have its oldest-of-the-recent
-# months shown just because they're that lease's own least-old entries.
-_DISPLAY_MAX_LEASES = 5
-_DISPLAY_MONTH_WINDOW = 2
+# The full set is now sent and PendingMonthsListCard pages through it, so
+# the wall-of-chips problem is solved where it belongs (in the UI) without
+# hiding anything. `items` was, and still is, the complete dataset for every
+# routing decision (other_pending_months, leases_with_month,
+# month_pending_on_lease).
 
 
-def _current_display_window(items: list[dict[str, Any]]) -> set[str]:
-    distinct_months = sorted({item["year_month"] for item in items})
-    return set(distinct_months[-_DISPLAY_MONTH_WINDOW:])
+def _pending_list_payload(
+    items: list[dict[str, Any]],
+    collected: dict,
+    refs: dict,
+    *,
+    scoped_lease: str | None = None,
+) -> dict[str, Any]:
+    """Pending months as clickable chips.
 
+    Every pending lease/month is sent — the card pages through them — rather
+    than truncating to the most recent window. A tenant with a dozen pending
+    leases could otherwise never reach the rest from chat: the months beyond
+    the cap were only reachable by typing a lease code from memory.
 
-def _pending_list_payload(items: list[dict[str, Any]], collected: dict, refs: dict) -> dict[str, Any]:
-    # The chat bubble gets the intro/trailing prose only — the per-lease/month
-    # enumeration is shown once, as chips, by PendingMonthsListCard (below)
-    # rather than repeated in both the bubble and the card.
-    message = format_pending_list_summary()
+    ``scoped_lease`` is set when the user has already named one lease, so the
+    bubble says so instead of repeating the generic "You have pending sales
+    data to submit." — that duplicate tripped the repeat guard in
+    response_generation and the whole turn came back as "I'm not sure what
+    you would like to do next."
+    """
     collected["_pending_items"] = items
     refs["pending_items"] = items
     grouped: dict[str, list[dict[str, str]]] = {}
@@ -151,26 +157,24 @@ def _pending_list_payload(items: list[dict[str, Any]], collected: dict, refs: di
             "label": item["label"],
             "year_month": item["year_month"],
         })
+    for months in grouped.values():
+        months.sort(key=lambda m: m["year_month"])
 
     total_leases = len(grouped)
-    window = _current_display_window(items)
-    # Only leases with at least one month in the 2 most recent distinct
-    # pending months (dataset-wide) are shown at all — a lease whose backlog
-    # is entirely older doesn't belong in this list, not even truncated.
-    windowed = {
-        lease: [m for m in months if m["year_month"] in window]
-        for lease, months in grouped.items()
-    }
-    windowed = {lease: months for lease, months in windowed.items() if months}
-    shown_leases = len(windowed)
-    capped_leases = [
+    leases = [
         {"lease_code": lease, "months": months, "more_months": 0}
-        for lease, months in list(windowed.items())[:_DISPLAY_MAX_LEASES]
+        for lease, months in sorted(grouped.items())
     ]
-    more_leases = max(0, shown_leases - _DISPLAY_MAX_LEASES)
-    # Leases with pending data entirely outside the 2-most-recent-months
-    # window — genuinely older backlog, not "more of what's already shown".
-    older_leases = max(0, total_leases - shown_leases)
+    month_count = len(items)
+
+    if scoped_lease:
+        months_label = "month" if month_count == 1 else "months"
+        message = (
+            f"**{scoped_lease}** has **{month_count}** pending {months_label}. "
+            "Tap the one you want to submit for, or attach a CSV."
+        )
+    else:
+        message = format_pending_list_summary()
 
     return {
         "workflow_stage": "AWAITING_PENDING_MONTHS_CHOICE",
@@ -181,10 +185,15 @@ def _pending_list_payload(items: list[dict[str, Any]], collected: dict, refs: di
         "response_message": message,
         "response_ui": {
             "type": "pending_months_list",
-            "leases": capped_leases,
+            "leases": leases,
             "total_lease_count": total_leases,
-            "more_lease_count": more_leases,
-            "older_lease_count": older_leases,
+            "total_month_count": month_count,
+            "scoped_lease": scoped_lease or None,
+            # Kept at 0 — the card now pages through the full list instead of
+            # the backend truncating it. Retained so an older frontend build
+            # that still reads them renders nothing extra rather than crashing.
+            "more_lease_count": 0,
+            "older_lease_count": 0,
             "show_file_upload": True,
             "show_template_download": True,
             "verbatim": True,
@@ -333,7 +342,7 @@ def _decide(
                 asked=asked_for_lease,
             )
 
-        return _pending_list_payload(scoped, collected, refs)
+        return _pending_list_payload(scoped, collected, refs, scoped_lease=lease)
 
     if not lease:
         matches = leases_with_month(items, asked["year_month"])

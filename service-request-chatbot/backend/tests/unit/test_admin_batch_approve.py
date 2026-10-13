@@ -165,7 +165,9 @@ async def test_review_sales_data_lists_submitted_rows() -> None:
     codes = [r["lease_code"] for r in result["response_ui"]["rows"]]
     assert codes == ["LC-2001", "LC-2002"]
     assert "LC-1001" not in codes
-    assert "Approve LC-2001" in result["response_message"]
+    # The table below carries the Approve / Ask-upload controls, so the
+    # intro no longer spells out typed commands — it just points at it.
+    assert "awaiting review" in result["response_message"]
     assert "3 submissions" in result["response_message"] and "awaiting review" in result["response_message"]
 
     client = AsyncMock()

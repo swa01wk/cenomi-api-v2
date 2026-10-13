@@ -176,7 +176,9 @@ async def test_supporting_doc_prompt_uses_portal_label() -> None:
     assert ui["target_status"] == "UPLOADED_SUPPORTING_DOCUMENT"
     assert ui["ask_label"] == "Supporting document"
     assert "supporting document" in result["response_message"].lower()
-    assert "comment is required" in result["response_message"].lower()
+    # Softened from the blunt "A comment is required" — the note is still
+    # required at submit time, the prompt just says so more gently.
+    assert "short note" in result["response_message"].lower()
     # Card title/button must name THIS request, not a generic "Attach".
     assert ui["title"] == "Supporting document"
     assert ui["cta"] == "Upload supporting document"
@@ -880,3 +882,90 @@ async def test_resolved_notification_uses_the_named_month_in_any_year() -> None:
     message = result["response_message"]
     assert "December 2024" in message
     assert "May 2026" not in message
+
+
+@pytest.mark.asyncio
+async def test_reupload_accepts_a_typed_amount_instead_of_a_file() -> None:
+    """NEED_REUPLOAD asks for corrected sales data, so a typed figure is a
+    complete answer — the tenant should not have to produce a file just to
+    fix a number. Previously this fell through to re-rendering the attach
+    prompt, which tripped the repeat guard and came back as "I'm not sure
+    what you would like to do next"."""
+    from app.agents.graph.nodes.sales_data.sales_data_entry_node import (
+        sales_data_entry_node,
+    )
+
+    result = await sales_data_entry_node({
+        "workflow_stage": "AWAITING_DOC_UPLOAD",
+        "intent": "UPLOAD_SUPPORTING_DOCUMENT",
+        "action_override": None,
+        "user_message": "the corrected amount is 303021",
+        "collected_data": {
+            "current_status": "NEED_REUPLOAD",
+            "lease_code": "t0094842",
+        },
+        "backend_refs": {},
+        "corrected_fields": {},
+    })
+
+    assert result["workflow_stage"] == "AWAITING_DOC_CONFIRM"
+    assert result["collected_data"]["sales_amt"] == 303021.0
+
+
+@pytest.mark.asyncio
+async def test_evidence_ask_types_still_require_a_file() -> None:
+    """A supporting document / audited sales request is for evidence, so a
+    typed amount must not short-circuit it."""
+    from app.agents.graph.nodes.sales_data.sales_data_entry_node import (
+        sales_data_entry_node,
+    )
+
+    for status in ("NEED_UPLOAD_SUPPORTING_DOCUMENT", "NEED_UPLOAD_AUDITED_SALES"):
+        result = await sales_data_entry_node({
+            "workflow_stage": "AWAITING_DOC_UPLOAD",
+            "intent": "UPLOAD_SUPPORTING_DOCUMENT",
+            "action_override": None,
+            "user_message": "the corrected amount is 303021",
+            "collected_data": {"current_status": status, "lease_code": "t0094842"},
+            "backend_refs": {},
+            "corrected_fields": {},
+        })
+        assert result["workflow_stage"] == "AWAITING_DOC_UPLOAD", status
+
+
+@pytest.mark.asyncio
+async def test_amount_only_reupload_submits_without_a_document_id() -> None:
+    from app.agents.graph.nodes.sales_data.supporting_doc_submission_node import (
+        supporting_doc_submission_node,
+    )
+
+    client = AsyncMock()
+    client.update_sales_data_status = AsyncMock(return_value={"success": True})
+    with (
+        patch(
+            "app.agents.graph.nodes.sales_data.supporting_doc_submission_node.get_current_bearer_token",
+            return_value="tok",
+        ),
+        patch(
+            "app.agents.graph.nodes.sales_data.supporting_doc_submission_node.SalesDataApiClient",
+            return_value=client,
+        ),
+    ):
+        result = await supporting_doc_submission_node({
+            "collected_data": {
+                "lease_id": 7,
+                "lease_code": "t0094842",
+                "current_status": "NEED_REUPLOAD",
+                "target_status": "RE_UPLOADED",
+                "sales_period_start": "2025-08-01",
+                "sales_period_end": "2025-08-31",
+                "sales_amt": 303021.0,
+                "comment_text": "Corrected figure",
+            }
+        })
+
+    assert result["status"] == "COMPLETED"
+    payload = client.update_sales_data_status.await_args.args[0]
+    assert payload["sales_amt"] == 303021.0
+    # Not sent at all, rather than sent as null.
+    assert "document_id" not in payload

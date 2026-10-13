@@ -54,11 +54,28 @@ async def manual_entry_confirmation_node(state: ServiceRequestState) -> dict[str
     # ── Action-based confirm ───────────────────────────────────────────────
     if action_override in ("confirm", "confirm_manual_entry"):
         log.info("manual_entry_confirmation.confirmed_by_action")
-        return {
+        patch: dict[str, Any] = {
             "confirmation_status": "CONFIRMED",
             "workflow_stage": "SUBMITTING",
             "status": "IN_PROGRESS",
         }
+        # The confirm card's amount is editable, so a correction typed there
+        # arrives with the confirm action. Without this it was dropped and
+        # the original figure got submitted — the same contract the CSV
+        # review table already uses for its edited rows.
+        corrected: dict = state.get("corrected_fields") or {}
+        if corrected.get("sales_amt") is not None:
+            try:
+                amount = float(corrected["sales_amt"])
+            except (TypeError, ValueError):
+                amount = None
+            if amount is not None and amount > 0:
+                patch["collected_data"] = {**collected, "sales_amt": amount}
+                log.info(
+                    "manual_entry_confirmation.amount_corrected",
+                    sales_amt=amount,
+                )
+        return patch
 
     if action_override in ("cancel", "cancel_manual_entry"):
         return {
@@ -115,16 +132,24 @@ async def manual_entry_confirmation_node(state: ServiceRequestState) -> dict[str
     # The field/value data is sent as a structured `fields` array (below) for
     # the card to render as a real table — the bubble text stays short prose
     # so it doesn't duplicate that table as a raw markdown pipe-table string.
-    message = (
-        "Please confirm the following details before submitting.\n\n"
-        "Reply **yes** to confirm and submit, or **no** to make changes."
-    )
+    # The card below renders Confirm / Cancel buttons, so telling the user to
+    # "Reply yes / no" described controls that aren't the ones in front of
+    # them. Typing still works — this just stops advertising it as the way.
+    message = "Please check these details before I submit them."
     fields = [
         {"key": "lease_code", "label": "Lease Code", "value": lease_code},
         {"key": "brand", "label": "Brand", "value": brand or "—"},
         {"key": "property", "label": "Property", "value": property_name or "—"},
         {"key": "period", "label": "Period", "value": f"{start} – {end}"},
-        {"key": "sales_amt", "label": "Sales Amount", "value": amt_display},
+        # `value` stays the raw number so the card's amount input can bind to
+        # it; `display` carries the formatted "SAR 50,001.00" for the
+        # read-only rendering.
+        {
+            "key": "sales_amt",
+            "label": "Sales Amount",
+            "value": sales_amt,
+            "display": amt_display,
+        },
     ]
 
     return {
