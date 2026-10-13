@@ -45,6 +45,10 @@ _CONFIRM_ACTIONS = frozenset({"CONFIRM_CSV_SUBMISSION", "confirm_csv_submission"
 _CANCEL_ACTIONS = frozenset({"cancel", "cancel_sales_data"})
 _DOC_CANCEL_ACTIONS = frozenset({"cancel_supporting_doc"})
 _DOC_UPLOAD_ACTIONS = frozenset({"doc_uploaded", "upload_supporting_doc"})
+# A pending-month chip click: the user picked one lease+month, so go straight
+# to asking for that month's amount rather than making them type the lease
+# and month they just clicked.
+_PICK_MONTH_ACTIONS = frozenset({"pick_pending_month"})
 _CONFIRM_DOC_ACTIONS = frozenset({"confirm_supporting_doc", "confirm_doc"})
 _DOC_STAGES = frozenset({
     "DOC_SELECT",
@@ -709,6 +713,50 @@ async def sales_data_entry_node(state: ServiceRequestState) -> dict[str, Any]:
             "workflow_stage": "CSV_LAYER1_VALIDATION",
             "status": "IN_PROGRESS",
         }
+
+    # ── 5a. Pending-month chip click ───────────────────────────────────────
+    # The chip carries the lease and month, so skip straight to collecting
+    # the amount for it — manual_entry_missing_field asks for whatever is
+    # still missing, which at this point is only sales_amt.
+    if action_override in _PICK_MONTH_ACTIONS:
+        picked_lease = str(corrected_fields.get("lease_code") or "").strip()
+        picked_ym = str(corrected_fields.get("year_month") or "").strip()[:7]
+        if picked_lease and len(picked_ym) == 7:
+            # parse_asked_period wants prose ("September 2025"), not a bare
+            # year-month, so go through the label the chip itself shows.
+            from app.agents.graph.nodes.sales_data.period_utils import (
+                format_year_month,
+            )
+
+            asked = parse_asked_period(format_year_month(picked_ym))
+            collected["lease_code"] = picked_lease
+            collected["_upload_lease"] = picked_lease
+            if asked:
+                collected["_asked_period"] = asked
+                backend_refs["asked_period"] = asked
+                collected["sales_period_start"] = asked.get("start") or ""
+                collected["sales_period_end"] = asked.get("end") or ""
+            # A fresh pick replaces any half-entered amount from a previous
+            # month, so the confirm card can't show a stale figure.
+            collected.pop("sales_amt", None)
+            collected.pop("_amount_rejected", None)
+            log.info(
+                "sales_data_entry.pick_pending_month",
+                lease_code=picked_lease,
+                year_month=picked_ym,
+            )
+            return {
+                "workflow_stage": "MANUAL_ENTRY",
+                "status": "IN_PROGRESS",
+                "intent": "ENTER_SALES_DATA_MANUAL",
+                "collected_data": collected,
+                "backend_refs": backend_refs,
+            }
+        log.warning(
+            "sales_data_entry.pick_pending_month_incomplete",
+            lease_code=picked_lease,
+            year_month=picked_ym,
+        )
 
     # ── 5b. Pending-month list / other-month reminder ──────────────────────
     # Keep AWAITING_* so the gate can tell list vs reminder vs first check.

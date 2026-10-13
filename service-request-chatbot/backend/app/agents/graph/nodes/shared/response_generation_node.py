@@ -100,9 +100,8 @@ def _is_repeat_of_previous_question(message: str, previous: str) -> bool:
 
 
 _SALES_REPEAT_FALLBACK = (
-    "I'm not sure what you would like to do next. You can continue with the "
-    "current step, or say **upload sales data**, **check my status**, "
-    "**help** or **cancel**."
+    "Sorry, I didn't catch that. You can carry on with the step above, or "
+    "ask me to submit sales data or check your status."
 )
 
 
