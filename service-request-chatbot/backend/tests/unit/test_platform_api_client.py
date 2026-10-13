@@ -489,7 +489,36 @@ class TestUploadFile:
             )
             result = await client.upload_file(b"bytes", self._make_metadata())
 
-        assert result.error == "HTTP 413"
+        assert result.error == "HTTP 413: too large"
+        assert result.document_id is None
+
+    @pytest.mark.asyncio
+    async def test_upload_non_2xx_uses_platform_errors_message(self) -> None:
+        client = _make_client()
+        client._access_token = "tok"
+        client._token_acquired_at = time.monotonic()
+        mock_resp = _mock_response(
+            400,
+            {
+                "success": False,
+                "errors": [
+                    {
+                        "code": 400,
+                        "message": "This lease has expired and cannot be used to upload documents.",
+                    }
+                ],
+            },
+        )
+
+        with patch("httpx.AsyncClient") as mock_httpx:
+            mock_httpx.return_value.__aenter__.return_value.put = AsyncMock(
+                return_value=mock_resp
+            )
+            result = await client.upload_file(b"bytes", self._make_metadata())
+
+        assert result.error == (
+            "HTTP 400: This lease has expired and cannot be used to upload documents."
+        )
         assert result.document_id is None
 
 

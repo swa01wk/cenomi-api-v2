@@ -43,6 +43,9 @@ ACTION_PERMISSION_MAP: dict[str, str] = {
     # ── Work Permit: CREATE stage (Mall Manager / contractor) ─────────────────
     "CREATE_WORK_PERMIT_SR": "CAN_RAISE_WORK_PERMIT_SR",
 
+    # ── General Inquiry: optional attachment (tenant or admin creator) ───────
+    "CREATE_GENERAL_INQUIRY": "CAN_RAISE_GENERAL_INQUIRY",
+
     # ── Work Permit: Read / view ──────────────────────────────────────────────
     "VIEW_WORK_PERMIT_SR": "VIEW_WORK_PERMIT",
 
@@ -185,6 +188,18 @@ for _role in _TENANT_WORK_PERMIT_CREATE_ROLES:
     ROLE_PERMISSION_MAP[_role] = (
         ROLE_PERMISSION_MAP.get(_role, frozenset()) | _TENANT_WP_CREATE_PERMS
     )
+
+# Same roles that may start a General Inquiry may attach its optional file.
+# Tenant contacts do not hold CAN_RAISE_HANDOVER_SR, so the upload route must
+# not reuse the handover action for SR_GEN_INQ.
+from app.agents.schemas.help_agent_schema import ROLE_PERMITTED_INTENTS  # noqa: E402
+
+_GI_CREATE_PERMS = frozenset({"CAN_RAISE_GENERAL_INQUIRY"})
+for _role, _intents in ROLE_PERMITTED_INTENTS.items():
+    if "CREATE_GENERAL_INQUIRY" in _intents:
+        ROLE_PERMISSION_MAP[_role] = (
+            ROLE_PERMISSION_MAP.get(_role, frozenset()) | _GI_CREATE_PERMS
+        )
 
 
 # ---------------------------------------------------------------------------

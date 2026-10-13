@@ -351,6 +351,25 @@ class TestGeneralInquiryEntryNode:
         assert result["confirmation_status"] == "REJECTED"
 
     @pytest.mark.asyncio
+    async def test_uploaded_inquiry_file_continues_past_the_card(self) -> None:
+        collected = _complete_collected()
+        collected["gi_optional_upload_status"] = "awaiting_upload"
+        state = _state(
+            collected_data=collected,
+            user_message=" ",
+            documents=[
+                {
+                    "document_id": "3ad19f54-c7d1-4e29-a046-200000000001",
+                    "document_type_id": "SR_GEN_INQ",
+                }
+            ],
+        )
+        result = await general_inquiry_entry_node(state)
+        assert result["collected_data"]["gi_optional_upload_status"] == "done"
+        assert result["status"] == "IN_PROGRESS"
+        assert result.get("response_ui") == {}
+
+    @pytest.mark.asyncio
     async def test_confirm_submit_action(self) -> None:
         state = _state(action_override="confirm_submit")
         result = await general_inquiry_entry_node(state)
@@ -680,3 +699,25 @@ class TestMissingFieldNodeGI:
         assert ui.get("verbatim") is True
         if active_field == "title":
             assert "inquiry" in msg
+
+
+def test_draft_fields_include_title_as_soon_as_it_is_collected() -> None:
+    """The form boxes read draft_preview, not the later confirmation card."""
+    from app.agents.graph.nodes.general_inquiry.general_inquiry_confirmation_node import (
+        general_inquiry_draft_fields,
+    )
+
+    rows = general_inquiry_draft_fields(
+        {
+            "lease_code": "t0105579",
+            "title": "t4est",
+            "guided_tour": "guided",
+            "gi_optional_upload_status": "awaiting_choice",
+        }
+    )
+    by_key = {row["key"]: row["value"] for row in rows}
+    assert by_key["title"] == "t4est"
+    assert by_key["lease_code"] == "t0105579"
+    assert "guided_tour" not in by_key
+    assert "description" not in by_key
+    assert "gi_optional_upload_status" not in by_key
