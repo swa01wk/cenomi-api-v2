@@ -30,6 +30,28 @@ def _describe(row: dict[str, Any]) -> str:
     return ", ".join(parts)
 
 
+def _submitted_period(rows: list[dict[str, Any]]) -> dict[str, str]:
+    """Widest sales period across the submitted rows, as bare ISO dates.
+
+    The Sales Data listing filters ``sales_period_start >= from`` AND
+    ``sales_period_end <= to``, so the range has to span every row — the
+    earliest start and the latest end — or a multi-month upload would come
+    back partly empty.
+    """
+    starts = sorted(
+        str(r.get("sales_period_start") or "")[:10] for r in rows
+    )
+    ends = sorted(str(r.get("sales_period_end") or "")[:10] for r in rows)
+    starts = [s for s in starts if s]
+    ends = [e for e in ends if e]
+    if not starts or not ends:
+        return {}
+    return {
+        "sales_period_start": starts[0],
+        "sales_period_end": ends[-1],
+    }
+
+
 def _success_message(rows: list[dict[str, Any]]) -> str:
     """One line with the key details — same shape as the handover success."""
     if len(rows) == 1:
@@ -60,6 +82,11 @@ async def submission_success_node(state: ServiceRequestState) -> dict[str, Any]:
             "type": "submission_success",
             "row_count": row_count,
             "lease_codes": sorted({str(r.get("lease_code") or "") for r in submitted_rows} - {""}),
+            # Period actually submitted, so "View Sales Data" can filter the
+            # listing to it. The listing defaults to the last 60 days, which
+            # hides any submission for an older month (e.g. September 2025)
+            # behind "No data found".
+            **_submitted_period(submitted_rows),
             # Without this, response_generation's LLM rewrite still runs even
             # on this terminal status ("use the message as-is but still
             # attempt LLM rewrite for a warmer tone") — producing a different

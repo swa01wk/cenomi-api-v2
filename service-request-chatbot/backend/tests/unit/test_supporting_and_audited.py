@@ -180,7 +180,9 @@ async def test_supporting_doc_prompt_uses_portal_label() -> None:
     # Card title/button must name THIS request, not a generic "Attach".
     assert ui["title"] == "Supporting document"
     assert ui["cta"] == "Upload supporting document"
-    assert ".csv" not in ui["accept"]
+    # CSV is accepted for every ask-type — POS/finance exports are as common
+    # as PDFs as supporting evidence.
+    assert ".csv" in ui["accept"]
 
 
 @pytest.mark.asyncio
@@ -208,7 +210,7 @@ async def test_audited_sales_prompt_uses_portal_label() -> None:
     assert ui["ask_label"] == "Audited sales data"
     assert ui["title"] == "Audited sales data"
     assert ui["cta"] == "Upload audited sales"
-    assert ".csv" not in ui["accept"]
+    assert ".csv" in ui["accept"]
 
 
 @pytest.mark.asyncio
@@ -539,7 +541,7 @@ async def test_admin_request_supporting_document_confirms_ask_upload() -> None:
 
     assert result["workflow_stage"] == "ADMIN_CONFIRM"
     assert result["collected_data"]["admin_action"] == "NEED_UPLOAD_SUPPORTING_DOCUMENT"
-    assert result["response_ui"]["action_label"] == "Request document"
+    assert result["response_ui"]["action_label"] == "Confirm"
 
 
 @pytest.mark.asyncio
@@ -581,7 +583,7 @@ async def test_admin_request_audited_sales_confirms_ask_upload() -> None:
         )
 
     assert result["collected_data"]["admin_action"] == "NEED_UPLOAD_AUDITED_SALES"
-    assert result["response_ui"]["action_label"] == "Request audited sales"
+    assert result["response_ui"]["action_label"] == "Confirm"
 
 
 @pytest.mark.asyncio
@@ -631,7 +633,7 @@ async def test_admin_ui_chosen_action_beats_text_sniffing() -> None:
         )
 
     assert result["collected_data"]["admin_action"] == "NEED_UPLOAD_AUDITED_SALES"
-    assert result["response_ui"]["action_label"] == "Request audited sales"
+    assert result["response_ui"]["action_label"] == "Confirm"
 
 
 @pytest.mark.asyncio

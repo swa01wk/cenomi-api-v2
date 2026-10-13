@@ -62,3 +62,51 @@ def test_no_access_error_names_current_company() -> None:
     )
     assert "current company" in result["no_access"][0]["_error"]
     assert "don't have access" in result["no_access"][0]["_error"]
+
+
+@pytest.mark.asyncio
+async def test_submission_success_carries_the_submitted_period() -> None:
+    """"View Sales Data" must be able to filter the listing to the month that
+    was just submitted — the page otherwise defaults to the last 60 days and
+    shows "No data found" for anything older."""
+    from app.agents.graph.nodes.sales_data.submission_success_node import (
+        submission_success_node,
+    )
+
+    result = await submission_success_node({
+        "backend_refs": {
+            "submitted_rows": [
+                {
+                    "lease_code": "t0094842",
+                    "sales_period_start": "2025-09-01",
+                    "sales_period_end": "2025-09-30",
+                    "sales_amt": 30000.0,
+                },
+                {
+                    "lease_code": "t0094836",
+                    "sales_period_start": "2025-08-01",
+                    "sales_period_end": "2025-08-31",
+                    "sales_amt": 1000.0,
+                },
+            ]
+        }
+    })
+
+    ui = result["response_ui"]
+    # Widest span across both rows, so neither is filtered out.
+    assert ui["sales_period_start"] == "2025-08-01"
+    assert ui["sales_period_end"] == "2025-09-30"
+
+
+@pytest.mark.asyncio
+async def test_submission_success_omits_period_when_rows_lack_dates() -> None:
+    from app.agents.graph.nodes.sales_data.submission_success_node import (
+        submission_success_node,
+    )
+
+    result = await submission_success_node({
+        "backend_refs": {"submitted_rows": [{"lease_code": "t0094842"}]}
+    })
+    ui = result["response_ui"]
+    assert "sales_period_start" not in ui
+    assert "sales_period_end" not in ui

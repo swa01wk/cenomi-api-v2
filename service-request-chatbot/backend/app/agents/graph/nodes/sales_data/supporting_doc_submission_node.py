@@ -136,6 +136,11 @@ async def supporting_doc_submission_node(state: ServiceRequestState) -> dict[str
             "document_id": document_id,
             "filename": collected.get("filename"),
             "ask_label": ask_label,
+            # Lets "View Sales Data" filter the listing to this row's period
+            # instead of the page's default last-60-days window, which hides
+            # anything older behind "No data found".
+            "sales_period_start": str(collected.get("sales_period_start") or "")[:10],
+            "sales_period_end": str(collected.get("sales_period_end") or "")[:10],
             "message": message,
         },
     }
