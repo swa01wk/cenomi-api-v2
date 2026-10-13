@@ -200,10 +200,19 @@ def _prompt_for_file(row: dict[str, Any]) -> dict[str, Any]:
     # (after attaching) shows the full detail as an actual table instead of
     # cramming it into this plain-text prompt.
     admin_note = f' Note from the Sales Data team: *"{comment}"*.' if comment else ""
+    if status == "NEED_REUPLOAD":
+        # Corrected sales data can be given either way — a file, or just the
+        # right figure. Only the evidence ask-types truly need a document.
+        how = (
+            "Attach the corrected file below, or simply type the correct "
+            "amount — either works."
+        )
+    else:
+        how = "Attach the file below."
     message = (
         f"Please attach {copy['prompt_verb']} for lease **{lease_code}** "
         f"({start} – {end}).{amt_str}{admin_note}\n\n"
-        "A comment is required — attach the file below."
+        f"{how} You'll be able to add a short note before it's sent."
     )
     return {
         "workflow_stage": "AWAITING_DOC_UPLOAD",
