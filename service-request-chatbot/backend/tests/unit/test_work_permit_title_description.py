@@ -15,6 +15,7 @@ from app.agents.schemas.work_permit_schema import (
     AUTO_GENERATED_FIELDS,
     WP_AI_FILLED_FIELDS,
     generate_wp_description,
+    generate_wp_notes,
     generate_wp_title,
     get_missing_fields,
     wp_location_label,
@@ -109,7 +110,40 @@ class TestWpTitleDescriptionGenerators:
 
     def test_not_auto_generated_fields(self) -> None:
         assert AUTO_GENERATED_FIELDS == frozenset()
-        assert WP_AI_FILLED_FIELDS == frozenset({"title", "description"})
+        assert WP_AI_FILLED_FIELDS == frozenset({"title", "description", "notes"})
+
+    def test_notes_uses_subtype_and_location(self) -> None:
+        collected = {
+            "work_permit_type": "OPERATIONS",
+            "lease_brand_mall": "t0105712 / UA / Jeddah",
+            "lease_code": "t0105712",
+        }
+        assert generate_wp_notes(collected) == (
+            "Operations work permit for t0105712 / UA / Jeddah."
+        )
+
+    def test_notes_falls_back_to_brand_mall(self) -> None:
+        collected = {
+            "work_permit_type": "OPERATIONS",
+            "brand": "Bershka",
+            "mall": "Jawharat",
+        }
+        assert generate_wp_notes(collected) == (
+            "Operations work permit for Bershka / Jawharat."
+        )
+
+    def test_notes_empty_without_location(self) -> None:
+        assert generate_wp_notes({"work_permit_type": "OPERATIONS"}) == ""
+
+    def test_notes_truncate_at_500(self) -> None:
+        notes = generate_wp_notes(
+            {
+                "work_permit_type": "OPERATIONS",
+                "lease_brand_mall": "X" * 600,
+            }
+        )
+        assert len(notes) == 500
+        assert notes.endswith("…")
 
 
 class TestWpSkipFill:
@@ -140,6 +174,49 @@ class TestWpSkipFill:
         assert collected["description"] == "Operations work permit for LC-1."
         # Skip-fill is deterministic (no short-flow meta unless short-flow ran).
         assert collected.get(_AI_FIELD_META_KEY) in (None, {})
+
+    @pytest.mark.asyncio
+    async def test_skip_fills_notes(self) -> None:
+        state: dict[str, Any] = {
+            "active_agent": "work_permit_agent",
+            "workflow_stage": "CREATE_WORK_PERMIT",
+            "user_message": "none",
+            "collected_data": {
+                "work_permit_type": "OPERATIONS",
+                "_wp_type_confirmed": True,
+                "lease_code": "LC-1",
+                "lease_brand_mall": "LC-1 / Brand / Mall",
+                "notes": "",
+            },
+            "extracted_fields": {},
+            "corrected_fields": {},
+            "active_field": None,
+            "confirmation_status": None,
+        }
+        result = await merge_state_node(state)
+        collected = result.get("collected_data") or {}
+        assert collected["notes"] == "Operations work permit for LC-1 / Brand / Mall."
+
+    @pytest.mark.asyncio
+    async def test_user_notes_not_overwritten(self) -> None:
+        state: dict[str, Any] = {
+            "active_agent": "work_permit_agent",
+            "workflow_stage": "CREATE_WORK_PERMIT",
+            "user_message": "ok",
+            "collected_data": {
+                "work_permit_type": "OPERATIONS",
+                "_wp_type_confirmed": True,
+                "lease_brand_mall": "LC-1 / Brand / Mall",
+                "notes": "Bring extra PPE",
+            },
+            "extracted_fields": {},
+            "corrected_fields": {},
+            "active_field": None,
+            "confirmation_status": None,
+        }
+        result = await merge_state_node(state)
+        collected = result.get("collected_data") or {}
+        assert collected["notes"] == "Bring extra PPE"
 
     @pytest.mark.asyncio
     async def test_none_not_filled_so_bot_can_ask(self) -> None:
@@ -197,6 +274,9 @@ class TestWpSkipFill:
         missing = get_missing_fields("CREATE_WORK_PERMIT", collected)
         assert "description" in missing
         assert "title" in missing
+        assert "entry_gate" in missing
+        assert "secondperiod" in missing
+        assert "notes" in missing
 
     def test_missing_fields_skip_empty_string(self) -> None:
         collected = {
@@ -207,10 +287,16 @@ class TestWpSkipFill:
             "lease_brand_mall": "LC-1 / Brand / Mall",
             "title": "",
             "description": "",
+            "entry_gate": "",
+            "secondperiod": "",
+            "notes": "",
         }
         missing = get_missing_fields("CREATE_WORK_PERMIT", collected)
         assert "description" not in missing
         assert "title" not in missing
+        assert "entry_gate" not in missing
+        assert "secondperiod" not in missing
+        assert "notes" not in missing
 
 
 class TestWpShortFlowAutofill:
@@ -230,6 +316,8 @@ class TestWpShortFlowAutofill:
         missing = get_missing_fields("CREATE_WORK_PERMIT", collected)
         assert "description" not in missing
         assert "title" not in missing
+        assert "notes" not in missing
+        assert "entry_gate" in missing
 
     @pytest.mark.asyncio
     async def test_merge_short_flow_fills_with_template_provenance(self) -> None:
@@ -257,6 +345,10 @@ class TestWpShortFlowAutofill:
         assert collected.get("description") == (
             "Construction – Hot Work work permit for t0105712."
         )
+        assert collected.get("notes") == (
+            "Construction – Hot Work work permit for "
+            "t0105712 / Under Armour / Jawharat Jeddah."
+        )
         meta = collected.get(_AI_FIELD_META_KEY) or {}
         assert meta["title"]["source"] == "template"
         assert meta["description"]["source"] == "template"
@@ -277,6 +369,7 @@ class TestWpShortFlowAutofill:
         )
         assert values["title"] == "Operations – LC-1"
         assert values["description"] == "Operations work permit for LC-1."
+        assert values["notes"] == "Operations work permit for LC-1 / Brand / Mall."
         assert provenance["title"]["source"] == "template"
 
     @pytest.mark.asyncio
@@ -284,9 +377,11 @@ class TestWpShortFlowAutofill:
         collected = {
             "work_permit_type": "OPERATIONS",
             "_wp_type_confirmed": True,
+            "lease_code": "LC-1",
             "lease_brand_mall": "LC-1 / Brand / Mall",
             "title": "User title",
             "description": "User description",
+            "notes": "User notes",
         }
         values, _ = await sr_autofill_service.autofill_text_fields(
             collected, "CREATE_WORK_PERMIT", use_ai=False
@@ -305,6 +400,7 @@ class TestWpShortFlowAutofill:
             "lease_brand_mall": "t0028922 - Brand Bershka - Jawharat Jeddah",
             "title": "Operations – t0028922",
             "description": "Operations work permit for t0028922.",
+            "notes": "Operations work permit for t0028922 - Brand Bershka - Jawharat Jeddah.",
         }
         values, _ = await sr_autofill_service.autofill_text_fields(
             collected, "CREATE_WORK_PERMIT", use_ai=False

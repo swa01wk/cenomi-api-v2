@@ -61,10 +61,21 @@ function StatusBadge({ status }: { status: string }) {
 // ---------------------------------------------------------------------------
 
 function FieldRow({ field }: { field: PreviewField }) {
-  const isEmpty = field.value === null || field.value === undefined || field.value === "";
-  // `display` carries the human label for enum codes (e.g. initiate_handover →
-  // "Initiate Handover"); `value` stays raw for edit round-trips and bridges.
-  const shown = field.display ?? field.value;
+  const rawEmpty =
+    field.value === null || field.value === undefined || field.value === "";
+  const displayEmpty =
+    field.display !== undefined && field.display !== null && field.display === "";
+  const isEmpty = displayEmpty || (rawEmpty && (field.display == null || field.display === ""));
+  // `display` carries the human label for enum codes / nested widgets;
+  // `value` stays raw for edit round-trips and bridges.
+  let shown: string;
+  if (field.display !== undefined && field.display !== null) {
+    shown = field.display;
+  } else if (typeof field.value === "object" && field.value !== null) {
+    shown = "";
+  } else {
+    shown = field.value == null ? "" : String(field.value);
+  }
   return (
     <div className="flex items-start justify-between gap-3 py-2">
       <span className="shrink-0 text-xs font-medium text-zinc-500 dark:text-zinc-400">
@@ -72,12 +83,12 @@ function FieldRow({ field }: { field: PreviewField }) {
       </span>
       <span
         className={`text-right text-xs ${
-          isEmpty
+          isEmpty || !shown
             ? "italic text-zinc-400 dark:text-zinc-600"
             : "text-zinc-800 dark:text-zinc-100"
         }`}
       >
-        {isEmpty ? "—" : shown}
+        {isEmpty || !shown ? "—" : shown}
       </span>
     </div>
   );
@@ -139,7 +150,11 @@ export function SRPreviewCard({ data, onSave }: Props) {
   function startEditing() {
     const initial: Record<string, string> = {};
     for (const f of fields) {
-      initial[f.key] = f.value ?? "";
+      const raw = f.value;
+      initial[f.key] =
+        typeof raw === "object" && raw !== null
+          ? f.display ?? ""
+          : (raw ?? "");
     }
     setPendingEdits(initial);
     setIsEditing(true);

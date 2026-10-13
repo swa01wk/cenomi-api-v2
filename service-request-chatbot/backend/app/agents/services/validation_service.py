@@ -540,6 +540,61 @@ def validate_fitout_confirm_date_order(
     ]
 
 
+def validate_fitout_progress(data: dict[str, Any]) -> list[ValidationResult]:
+    """Rules for the one field a Fitout Progress SR collects.
+
+    * A number in ``[0, 100]`` — the platform's own create/update validator says
+      so (``validateFitoutProgressPayload``), and catching it here turns a 400
+      into a re-asked question.
+    * A value below the percentage already recorded on the lease is flagged but
+      does **not** block: fit-out progress going backwards is usually a typo,
+      occasionally a correction, and only the user knows which.
+
+    A missing value is not this rule's business — ``get_missing_fields`` reports
+    it, and this function stays silent so the user is asked once, not twice.
+    """
+    from app.agents.schemas.fitout_progress_schema import PROGRESS_FIELD
+    from app.agents.services.fitout_progress_suggestions_service import (
+        format_percentage,
+        parse_percentage,
+        recorded_percentage,
+    )
+
+    raw = data.get(PROGRESS_FIELD)
+    if raw is None or str(raw).strip() == "":
+        return []
+
+    value = parse_percentage(raw)
+    if value is None:
+        return [
+            _result(
+                PROGRESS_FIELD,
+                # Listed in _MALFORMED_VALUE_TYPES so the rejected value is
+                # cleared from the draft instead of sitting in the form while
+                # the assistant asks again.
+                "percentage_format",
+                False,
+                f"'{raw}' is not a fit-out progress percentage. "
+                "Give me a number between 0 and 100.",
+            )
+        ]
+
+    recorded = recorded_percentage(data)
+    if recorded is not None and value < recorded:
+        return [
+            _result(
+                PROGRESS_FIELD,
+                "percentage_regression",
+                False,
+                f"{format_percentage(value)}% is lower than the "
+                f"{format_percentage(recorded)}% already recorded on this lease. "
+                "Confirm if that is right, or give me a higher number.",
+                blocking=False,
+            )
+        ]
+    return []
+
+
 def validate_rdd_date_order(data: dict[str, Any]) -> list[ValidationResult]:
     """Validate the RDD date chain ordering.
 

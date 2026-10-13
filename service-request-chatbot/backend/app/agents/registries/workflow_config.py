@@ -81,6 +81,17 @@ class WorkflowConfig:
         field question (see ``guided_tour_service``).  Defaults to True so a
         newly registered workflow inherits it; set False for a flow with
         nothing to collect, where the question would be noise.
+    status_view_node:
+        Graph node that answers "open / show this existing SR" when no review
+        step is waiting on it (terminal stages, sent back, unknown stage).
+        Defaults to the shared ``preview`` node.
+    request_type_label:
+        Human label for this workflow's SR (card header, e.g.
+        "Handover Service Request").
+    form_edit_stages:
+        Stages where the requester edits the platform form directly (e.g. a
+        Work Permit sent back for more information). Status sync keeps the
+        form's unsaved edits over the platform's saved values on these stages.
     """
 
     agent_name: str
@@ -95,6 +106,9 @@ class WorkflowConfig:
     lease_trigger_fields: tuple[str, ...]
     action_intents: frozenset[str]
     guided_tour_gate: bool = True
+    status_view_node: str = "preview"
+    request_type_label: str = "Service Request"
+    form_edit_stages: frozenset[str] = frozenset()
 
 
 # ---------------------------------------------------------------------------
@@ -168,6 +182,7 @@ def _build_rdd_config() -> WorkflowConfig:
                 "CREATE_HANDED_OVER_SR",
             }
         ),
+        request_type_label="Handover Service Request",
     )
 
 
@@ -212,12 +227,17 @@ def _build_work_permit_config() -> WorkflowConfig:
         "demand_appendices": "Ask the user for any demand appendices details.",
         "special_conditions": "Ask the user for any special conditions.",
         "planneddate": (
-            "Ask the user for the planned work dates and times: start date, start time, "
-            "end date, and end time. Prefer DD/MM/YYYY for dates."
+            "Ask the user for planned work dates and the first period times: "
+            "from date, to date, time from, and time to (DD/MM/YYYY, HH:MM). "
+            "Second period times are asked separately and are optional."
+        ),
+        "planned_second_period": (
+            "Ask for an optional second time period (from and to, HH:MM), "
+            "or say 'none' to skip."
         ),
         "workers": (
-            "Ask the user for the worker(s) who will perform the work — at least full name "
-            "(and designation / company or iqama when they provide them)."
+            "Ask the user for each worker: full name, company name, designation, "
+            "phone, and Iqama number. They can add another performer in the same reply."
         ),
         "measureofsafety": (
             "Ask the user which measure-of-safety items apply "
@@ -229,7 +249,10 @@ def _build_work_permit_config() -> WorkflowConfig:
         ),
         "firstperiod": "Ask the user for the first time period (from and to, HH:MM).",
         "secondperiod": "Ask the user for an optional second time period (or say 'none' to skip).",
-        "entry_gate": "Ask the user which entry gate will be used (or say 'none' to skip).",
+        "entry_gate": (
+            "Ask if they want to specify which gate entry/exit is allowed through "
+            "(e.g. Gate 1, Loading bay), or say 'none' to skip."
+        ),
         "description": "Ask the user for an optional short description (or say 'none' to skip).",
         "title": "Ask the user for an optional title (or say 'none' to skip).",
     }
@@ -243,6 +266,7 @@ def _build_work_permit_config() -> WorkflowConfig:
             "WP_FM_REVIEW": "work_permit_entry",
             "WP_MM_REVIEW": "work_permit_entry",
             "WP_MM_OPS_REVIEW": "work_permit_entry",
+            "WP_ACTION_REQUIRED": "work_permit_status",
         },
         collection_stages=frozenset(
             {
@@ -277,6 +301,9 @@ def _build_work_permit_config() -> WorkflowConfig:
         auto_generated_fields=frozenset(),
         lease_trigger_fields=("lease_code", "company", "lease_brand_mall"),
         action_intents=frozenset({"CREATE_WORK_PERMIT_SR", "APPROVE_WORK_PERMIT_SR"}),
+        status_view_node="work_permit_status",
+        request_type_label="Work Permit Service Request",
+        form_edit_stages=frozenset({"WP_ACTION_REQUIRED"}),
     )
 
 
@@ -423,6 +450,47 @@ def _fitout_confirm_backend_fields() -> frozenset[str]:
     )
 
 
+def _build_fitout_progress_config() -> WorkflowConfig:
+    """Build the ``WorkflowConfig`` for the RDD Fitout Progress Agent.
+
+    Handles FITOUT_PROGRESS — one sub-category, one human field, two stages
+    (CREATE_SR → POST, APPROVE_SR → PATCH).
+
+    ``guided_tour_gate`` is left on, like every other workflow. It was off at
+    first — a "shall I walk you through it?" preamble in front of a single
+    question looked like noise — but the form pre-fills that question's field
+    with its own computed default, so "leave the form open and you can type
+    straight into it" is a real choice here, and the answer is what decides
+    whether the field is locked or editable while the assistant asks.
+    """
+    from app.agents.prompts.fitout_progress_extraction_prompt import (
+        FITOUT_PROGRESS_EXTRACTION_SYSTEM_PROMPT,
+        FITOUT_PROGRESS_FIELD_QUESTIONS,
+    )
+    from app.agents.schemas.fitout_progress_schema import (
+        BACKEND_DERIVED_FIELDS as FITOUT_PROGRESS_BACKEND_FIELDS,
+    )
+
+    return WorkflowConfig(
+        agent_name="rdd_fitout_progress_agent",
+        extraction_prompt=FITOUT_PROGRESS_EXTRACTION_SYSTEM_PROMPT,
+        field_questions=dict(FITOUT_PROGRESS_FIELD_QUESTIONS),
+        stage_sync_nodes={"APPROVE_SR": "fitout_progress_entry"},
+        collection_stages=frozenset({"CREATE_SR", "APPROVE_SR"}),
+        confirmation_nodes={
+            "CREATE_SR": "fitout_progress_confirmation",
+            "APPROVE_SR": "fitout_progress_confirmation",
+        },
+        # No CANCELLED: the platform workflow has no cancel action for this
+        # sub-category, so there is no such stage to reach.
+        terminal_stages=frozenset({"SR_CREATED", "SR_APPROVED", "SR_REJECTED"}),
+        backend_fields=FITOUT_PROGRESS_BACKEND_FIELDS,
+        auto_generated_fields=frozenset({"title"}),
+        lease_trigger_fields=("lease_code", "company", "lease_brand_mall"),
+        action_intents=frozenset({"CREATE_FITOUT_PROGRESS", "APPROVE_FITOUT_PROGRESS"}),
+    )
+
+
 def _build_fitout_start_config() -> WorkflowConfig:
     """Build the ``WorkflowConfig`` for the RDD Fitout Start Agent.
 
@@ -451,6 +519,7 @@ def _build_fitout_start_config() -> WorkflowConfig:
         action_intents=frozenset(
             {"CREATE_FITOUT_CONFIRM_FOS", "APPROVE_FITOUT_CONFIRM_FOS"}
         ),
+        request_type_label="Fitout Start Confirmation Service Request",
     )
 
 
@@ -480,6 +549,7 @@ def _build_fitout_end_config() -> WorkflowConfig:
         action_intents=frozenset(
             {"CREATE_FITOUT_CONFIRM_END", "APPROVE_FITOUT_CONFIRM_END"}
         ),
+        request_type_label="Fitout End Confirmation Service Request",
     )
 
 
@@ -509,6 +579,7 @@ def _build_trading_confirm_config() -> WorkflowConfig:
         action_intents=frozenset(
             {"CREATE_FITOUT_CONFIRM_TRADING", "APPROVE_FITOUT_CONFIRM_TRADING"}
         ),
+        request_type_label="Trading Confirmation Service Request",
     )
 
 
@@ -543,6 +614,71 @@ def _build_sales_data_config() -> WorkflowConfig:
             "REVIEW_SALES_DATA",
             "APPROVE_SALES_DATA",
         }),
+        request_type_label="Sales Data Submission",
+    )
+
+
+def _build_general_inquiry_config() -> WorkflowConfig:
+    """Build the ``WorkflowConfig`` for the General Inquiry Agent.
+
+    Single-phase create: tenant or admin raises a free-text question against
+    a lease.  One approver level (Customer Relations Team).  Auto-approved
+    when a Customer Relations Team user creates it.  No multi-phase review.
+    """
+    from app.agents.prompts.general_inquiry_extraction_prompt import (
+        GENERAL_INQUIRY_EXTRACTION_SYSTEM_PROMPT,
+    )
+
+    field_questions: dict[str, str] = {
+        "lease_code": (
+            "Which lease is this inquiry about? "
+            "Please provide the lease code, brand name, or mall name."
+        ),
+        "lease_brand_mall": (
+            "Please provide the lease code, brand name, or mall name for this inquiry."
+        ),
+        "title": "What is the subject of your inquiry? Please provide a short title.",
+        "description": "Please describe your inquiry in detail.",
+        "notes": (
+            "Do you have any additional notes you'd like to add? "
+            "(You can say 'no' or 'skip' to skip.)"
+        ),
+    }
+
+    return WorkflowConfig(
+        agent_name="general_inquiry_agent",
+        extraction_prompt=GENERAL_INQUIRY_EXTRACTION_SYSTEM_PROMPT,
+        field_questions=field_questions,
+        stage_sync_nodes={
+            "GI_CRT_REVIEW": "response_generation",
+            "GI_APPROVED": "response_generation",
+            "GI_REJECTED": "response_generation",
+        },
+        collection_stages=frozenset({"CREATE_SR", "GI_CRT_REVIEW"}),
+        confirmation_nodes={
+            "CREATE_SR": "general_inquiry_confirmation",
+            "GI_CRT_REVIEW": "general_inquiry_confirmation",
+        },
+        terminal_stages=frozenset({"SR_CREATED"}),
+        backend_fields=frozenset(
+            {
+                "tenant_profile_id",
+                "property_id",
+                "brand_id",
+                "lease_id",
+                "contract_id",
+                "unit_codes",
+                "city",
+                "lease_brand_mall",
+                "mall",
+                "brand",
+                "lease",
+            }
+        ),
+        auto_generated_fields=frozenset(),
+        lease_trigger_fields=("lease_code", "company", "lease_brand_mall"),
+        action_intents=frozenset({"CREATE_GENERAL_INQUIRY"}),
+        guided_tour_gate=True,
     )
 
 
@@ -558,11 +694,15 @@ def _init_registry() -> None:
         _build_fitout_start_config(),
         _build_fitout_end_config(),
         _build_trading_confirm_config(),
+        _build_fitout_progress_config(),
     ):
         WORKFLOW_CONFIG_REGISTRY[cfg.agent_name] = cfg
 
     sd_cfg = _build_sales_data_config()
     WORKFLOW_CONFIG_REGISTRY[sd_cfg.agent_name] = sd_cfg
+
+    gi_cfg = _build_general_inquiry_config()
+    WORKFLOW_CONFIG_REGISTRY[gi_cfg.agent_name] = gi_cfg
 
 
 _init_registry()

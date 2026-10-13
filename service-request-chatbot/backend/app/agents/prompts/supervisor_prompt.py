@@ -11,6 +11,7 @@ Intent taxonomy follows the agent taxonomy:
   - rdd_fitout_end_agent         : fitout end confirmation (FIT_OUT_CONFIRM_END)
   - rdd_trading_confirmation_agent : trading confirmation (FIT_OUT_CONFIRM_TRADING)
   - work_permit_agent            : work permit SR creation + subtype review hops
+  - general_inquiry_agent        : general inquiry SR creation (INQUIRY / GENERAL)
 
 ``CONFIDENCE_THRESHOLD`` is the minimum confidence below which the supervisor
 requests clarification instead of routing.
@@ -127,6 +128,27 @@ VALID INTENTS
                 update and approve trading
       NOTE: MALL_MANAGER or OPERATIONS may approve this SR type.
 
+  CREATE_FITOUT_PROGRESS
+      User wants to record HOW FAR ALONG a lease's fitout is, as a percentage
+      (Fitout Progress — sub_category FITOUT_PROGRESS). This is a progress
+      reading on a fitout still under way, not a milestone confirmation.
+      Keywords: fitout progress, fit-out progress, record fitout progress,
+                update fitout progress, fitout percentage, fitout is 80% done,
+                how far along is the fitout, log fitout progress,
+                set fitout progress to 60, "I need to record fit-out progress
+                for <brand>, lease <code>" (the lease-picker chip's wording)
+      NOTE: Distinguish from CREATE_FITOUT_CONFIRM_FOS / _END — those confirm that
+      fitout STARTED or FINISHED on a date. A percentage of completion, or any
+      "% done" phrasing, is this intent.
+      NOTE: Only DD_ENGINEER may create or approve this SR type.
+
+  APPROVE_FITOUT_PROGRESS
+      User wants to approve an existing Fitout Progress SR (FITOUT_PROGRESS),
+      raised by the weekly scheduler or by another role.
+      Keywords: approve fitout progress, approve the progress SR,
+                approve fitout percentage, update and approve fitout progress
+      NOTE: Only DD_ENGINEER may approve this SR type.
+
   CREATE_WORK_PERMIT_SR
       User wants to create a work permit service request for construction,
       maintenance, roof access, or operational work in their unit.
@@ -241,6 +263,22 @@ VALID INTENTS
       NTF- ID or viewing_notification_id with a deictic phrase.
       Routing: target_agent = "notification_agent"
 
+  CREATE_GENERAL_INQUIRY
+      User wants to raise a general inquiry service request — a free-text
+      question directed at mall management about service charges, lease terms,
+      procedures, or any other general topic that requires a formal tracked response.
+      Keywords: general inquiry, raise inquiry, submit inquiry, ask management,
+                service charge question, "I have a question for management",
+                "general question", "raise a question", "inquiry about",
+                "I need to ask about", "general request"
+      Do NOT use this for handover, fitout, work permit, or sales data requests.
+      Do NOT confuse with ASK_HELP — ASK_HELP is for platform how-to questions
+      answered inline; CREATE_GENERAL_INQUIRY raises a formal tracked SR.
+      Routing:
+        service_category = "INQUIRY"
+        sub_category     = "GENERAL"
+        target_agent     = "general_inquiry_agent"
+
   UNKNOWN
       The intent is unclear or ambiguous AND does not fit ASK_HELP.
       Use this ONLY when the message is clearly not a question or an SR action.
@@ -306,6 +344,16 @@ When intent = APPROVE_FITOUT_CONFIRM_TRADING:
     sub_category     = "FIT_OUT_CONFIRM_TRADING"
     target_agent     = "rdd_trading_confirmation_agent"
 
+When intent = CREATE_FITOUT_PROGRESS:
+    service_category = "FIT_OUT_AND_HANDOVER"
+    sub_category     = "FITOUT_PROGRESS"
+    target_agent     = "rdd_fitout_progress_agent"
+
+When intent = APPROVE_FITOUT_PROGRESS:
+    service_category = "FIT_OUT_AND_HANDOVER"
+    sub_category     = "FITOUT_PROGRESS"
+    target_agent     = "rdd_fitout_progress_agent"
+
 When intent = CREATE_WORK_PERMIT_SR:
     service_category = "WORK_PERMIT"
     sub_category     = "WORK_PERMIT"
@@ -345,6 +393,11 @@ When intent = APPROVE_SALES_DATA:
     service_category = "SALES_DATA"
     sub_category     = "ADMIN_REVIEW"
     target_agent     = "sales_data_agent"
+
+When intent = CREATE_GENERAL_INQUIRY:
+    service_category = "INQUIRY"
+    sub_category     = "GENERAL"
+    target_agent     = "general_inquiry_agent"
 
 When intent = CHECK_SERVICE_REQUEST_STATUS:
     service_category = null

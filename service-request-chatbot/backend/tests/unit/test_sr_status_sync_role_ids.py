@@ -300,6 +300,99 @@ async def test_existing_response_message_not_overwritten() -> None:
 
 
 @pytest.mark.asyncio
+async def test_general_inquiry_open_stays_on_crt_review() -> None:
+    """Mall Manager is still the stored L1 role; opening INQUIRY must not become FM review."""
+    ops = [{"assigned_role": 11, "status": "IN_PROGRESS"}]
+    mock_result = _make_result(
+        ops,
+        payload={
+            "category": "INQUIRY",
+            "sub_category": "GENERAL",
+            "title": "Store hours",
+            "description": "What are the mall opening hours?",
+            "lease": "t0031320",
+            "brand": "Brand Moog Phone",
+            "mall": "Salaam Mall - JEDDAH",
+            "city": "Jeddah",
+            "unit_codes": ["GFK19"],
+            "notes": "No additional notes provided for lease t0031320.",
+            "lease_brand_mall": (
+                "t0031320-Brand Moog Phone-Salaam Mall - JEDDAH-"
+                "Arkan Art Trading CO--arabic"
+            ),
+        },
+    )
+    mock_result.status = "IN_PROCESS"
+    with patch(
+        "app.agents.graph.nodes.shared.sr_status_sync_node.get_service_request_api_service",
+        return_value=AsyncMock(get_service_request=AsyncMock(return_value=mock_result)),
+    ):
+        result = await sr_status_sync_node(_base_state(sr_id="8898"))
+
+    assert result["workflow_stage"] == "GI_CRT_REVIEW"
+    assert result["active_agent"] == "general_inquiry_agent"
+    assert result["service_category"] == "INQUIRY"
+    assert result["sub_category"] == "GENERAL"
+    message = result["response_message"]
+    assert "8898" in message
+    assert "Customer Relations Team" in message
+    assert "Store hours" in message
+    assert "Brand Moog Phone" in message
+    assert "handover" not in message.lower()
+    card = result["response_ui"]
+    assert card["type"] == "confirmation_card"
+    assert card["verbatim"] is True
+    assert card["readOnly"] is True
+    assert card["requestType"] == "General Inquiry"
+    assert [item["label"] for item in card["actions"]] == [
+        "Approve",
+        "Reject",
+        "Ask for more info",
+        "Reassign",
+    ]
+    by_key = {field["key"]: field["value"] for field in card["fields"]}
+    assert by_key["company"] == "Arkan Art Trading CO"
+    assert by_key["brand"] == "Brand Moog Phone"
+    assert by_key["mall"] == "Salaam Mall - JEDDAH"
+    assert by_key["lease_code"] == "t0031320"
+    assert by_key["unit"] == "GFK19"
+    assert by_key["title"] == "Store hours"
+    assert by_key["description"] == "What are the mall opening hours?"
+    assert by_key["notes"] == "No additional notes provided for lease t0031320."
+    assert result["backend_refs"]["create_payload"]["service_category"] == "INQUIRY"
+
+
+@pytest.mark.asyncio
+async def test_history_and_creator_stored_in_backend_refs() -> None:
+    ops = [{"assigned_role": "FM_MANAGER", "status": "IN_PROGRESS"}]
+    mock_result = _make_result(ops)
+    mock_result.service_request_history = [
+        {"status": "CREATED", "operator_name": "Ali Hassan"}
+    ]
+    mock_result.created_by = "Ali Hassan"
+    mock_result.created_user_role = "PRIMARY_TENANT_CONTACT"
+    with patch(
+        "app.agents.graph.nodes.shared.sr_status_sync_node.get_service_request_api_service",
+        return_value=AsyncMock(get_service_request=AsyncMock(return_value=mock_result)),
+    ):
+        result = await sr_status_sync_node(_base_state())
+    refs = result["backend_refs"]
+    assert refs["sr_history"] == [{"status": "CREATED", "operator_name": "Ali Hassan"}]
+    assert refs["sr_creator"] == {"name": "Ali Hassan", "role": "PRIMARY_TENANT_CONTACT"}
+
+
+@pytest.mark.asyncio
+async def test_no_creator_fields_leave_no_sr_creator() -> None:
+    ops = [{"assigned_role": "FM_MANAGER", "status": "IN_PROGRESS"}]
+    with patch(
+        "app.agents.graph.nodes.shared.sr_status_sync_node.get_service_request_api_service",
+        return_value=AsyncMock(get_service_request=AsyncMock(return_value=_make_result(ops))),
+    ):
+        result = await sr_status_sync_node(_base_state())
+    assert "sr_creator" not in result["backend_refs"]
+
+
+@pytest.mark.asyncio
 async def test_no_sr_id_returns_empty_dict() -> None:
     state = {
         "session_id": "sess-empty",

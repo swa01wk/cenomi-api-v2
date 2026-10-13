@@ -39,6 +39,7 @@ from app.agents.services.review_decorations_service import (
     MM_OPTIONAL_UPLOAD_STATUS_KEY,
     build_mm_optional_upload_waiting_response,
 )
+from app.agents.services.sr_release import released_backend_refs
 from app.observability.decorators import trace_node
 
 log = structlog.get_logger(__name__)
@@ -779,7 +780,7 @@ async def handover_entry_node(state: ServiceRequestState) -> dict[str, Any]:
                 "validation_errors": [],
                 "selected_lease": None,
                 "lease_matches": [],
-                "backend_refs": {},
+                "backend_refs": released_backend_refs(state),
                 "documents": [],
                 "response_ui": {},
                 "status": "IN_PROGRESS",

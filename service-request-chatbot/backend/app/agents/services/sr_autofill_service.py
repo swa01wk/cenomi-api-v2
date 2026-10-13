@@ -252,7 +252,7 @@ def _wp_target_fields(collected: dict[str, Any]) -> list[str]:
     if not wp_location_label(collected):
         return []
     out: list[str] = []
-    for field in ("description", "title"):
+    for field in ("description", "title", "notes"):
         if field not in WP_AI_FILLED_FIELDS:
             continue
         if wp_text_should_autofill(collected.get(field), collected, kind=field):
@@ -322,6 +322,7 @@ def _build_wp_template_values(
 ) -> dict[str, str]:
     from app.agents.schemas.work_permit_schema import (
         generate_wp_description,
+        generate_wp_notes,
         generate_wp_title,
     )
 
@@ -337,6 +338,10 @@ def _build_wp_template_values(
         text = generate_wp_title(collected)
         if text:
             values["title"] = text
+    if "notes" in wanted:
+        text = generate_wp_notes(collected)
+        if text:
+            values["notes"] = text
     return values
 
 

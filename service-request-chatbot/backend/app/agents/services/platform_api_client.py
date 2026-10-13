@@ -65,6 +65,11 @@ def _truncate_for_log(value: Any) -> Any:
             return text
     return text[:_MAX_LOG_JSON_CHARS] + "…"
 
+
+def _opt_str(value: Any) -> str | None:
+    text = str(value).strip() if value is not None else ""
+    return text or None
+
 # Top-level SR DTO fields needed for PUT /files and collected_data hydration.
 # Platform keeps these outside nested ``payload`` (see ServiceRequestDTO).
 _SR_TOP_LEVEL_REF_KEYS = (
@@ -158,6 +163,11 @@ class ServiceRequestGetResult:
     service_request_operations: list[dict[str, Any]] = field(default_factory=list)
     payload: dict[str, Any] | None = None
     service_request_attachments: list[dict[str, Any]] = field(default_factory=list)
+    service_request_history: list[dict[str, Any]] = field(default_factory=list)
+    work_permit_extension: dict[str, Any] | None = None
+    created_by: str | None = None
+    created_user_role: str | None = None
+    created_at: str | None = None
     endpoint: str = ""
     status_code: int | None = None
     latency_ms: int = 0
@@ -167,6 +177,21 @@ class ServiceRequestGetResult:
 # ---------------------------------------------------------------------------
 # Client
 # ---------------------------------------------------------------------------
+
+
+def _tenant_contact_rows(body: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Pull ``tenant_contacts`` out of the platform list envelope."""
+    if not isinstance(body, dict):
+        return []
+    data = body.get("data") if isinstance(body.get("data"), dict) else body
+    listing = data.get("list") if isinstance(data, dict) else None
+    if isinstance(listing, dict):
+        rows = listing.get("tenant_contacts")
+    elif isinstance(listing, list):
+        rows = listing
+    else:
+        rows = data.get("tenant_contacts") if isinstance(data, dict) else None
+    return [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
 
 
 class ServiceRequestPlatformClient:
@@ -360,6 +385,17 @@ class ServiceRequestPlatformClient:
             if isinstance(body, dict):
                 data = body.get("data") or {}
 
+            history = (
+                data.get("operation_history")
+                or data.get("service_request_history")
+                or data.get("sr_history")
+                or data.get("history")
+                or []
+            )
+            extension = (
+                data.get("work_permit_extension")
+                or data.get("workPermitExtension")
+            )
             return ServiceRequestGetResult(
                 success=True,
                 sr_id=str(data.get("service_request_id") or sr_id),
@@ -373,6 +409,15 @@ class ServiceRequestPlatformClient:
                 service_request_attachments=list(
                     data.get("service_request_attachments") or []
                 ),
+                service_request_history=(
+                    list(history) if isinstance(history, list) else []
+                ),
+                work_permit_extension=(
+                    extension if isinstance(extension, dict) else None
+                ),
+                created_by=_opt_str(data.get("created_by")),
+                created_user_role=_opt_str(data.get("created_user_role")),
+                created_at=_opt_str(data.get("created_at")),
                 endpoint=endpoint,
                 status_code=response.status_code,
                 latency_ms=latency_ms,
@@ -392,6 +437,40 @@ class ServiceRequestPlatformClient:
                 error=err,
             )
 
+    async def list_tenant_contacts(self, tenant_profile_id: str) -> list[dict[str, Any]]:
+        """GET /tenant-contacts for the company on a General Inquiry.
+
+        Loads lease-level and company-level contacts. Primary contacts are
+        often company-level, so a lease-only query comes back empty.
+        """
+        endpoint = f"{self._base_url}/tenant-contacts"
+        if not self._uses_agentic_bearer("GET", endpoint):
+            await self.ensure_authenticated()
+        rows: list[dict[str, Any]] = []
+        seen: set[tuple[Any, Any]] = set()
+        for company_level in ("false", "true"):
+            result = await self._get(
+                endpoint,
+                params={
+                    "tenant_profile_id": str(tenant_profile_id),
+                    "type": "tenant_contacts",
+                    "is_company_level": company_level,
+                    "page": "1",
+                    "limit": "50",
+                },
+            )
+            if not result.success:
+                continue
+            for row in _tenant_contact_rows(result.response_payload):
+                user = row.get("user_info") if isinstance(row.get("user_info"), dict) else {}
+                role = row.get("role_info") if isinstance(row.get("role_info"), dict) else {}
+                key = (user.get("user_id"), role.get("role_name"))
+                if key in seen:
+                    continue
+                seen.add(key)
+                rows.append(row)
+        return rows
+
     async def patch_service_request(
         self, sr_id: str, payload: dict[str, Any]
     ) -> PlatformCallResult:
@@ -402,6 +481,22 @@ class ServiceRequestPlatformClient:
         result = await self._patch(endpoint, payload)
         if result.success and result.sr_id is None:
             result.sr_id = self._extract_sr_id(result.response_payload) or sr_id
+        return result
+
+    async def update_work_permit_status(
+        self, payload: dict[str, Any]
+    ) -> PlatformCallResult:
+        """POST /service-requests/work-permit/status — extend / cancel decision."""
+        endpoint = f"{self._base_url}{self._SERVICE_REQUESTS_PATH}/work-permit/status"
+        if not self._uses_agentic_bearer("POST", endpoint):
+            await self.ensure_authenticated()
+        result = await self._post(endpoint, payload)
+        if result.sr_id is None:
+            result.sr_id = (
+                self._extract_sr_id(result.response_payload)
+                or str(payload.get("service_request_id") or "")
+                or None
+            )
         return result
 
     async def submit_report(self, payload: dict[str, Any]) -> PlatformCallResult:
@@ -463,10 +558,12 @@ class ServiceRequestPlatformClient:
             body = self._parse_body(response)
 
             if response.status_code not in (200, 201):
+                error = self._http_error(response.status_code, body)
                 log.warning(
                     "platform_client.upload_file.non_2xx",
                     status_code=response.status_code,
                     document_type_id=metadata.document_type_id,
+                    error=error,
                 )
                 return FileUploadResult(
                     success=False,
@@ -477,7 +574,7 @@ class ServiceRequestPlatformClient:
                     endpoint=endpoint,
                     status_code=response.status_code,
                     latency_ms=latency_ms,
-                    error=f"HTTP {response.status_code}",
+                    error=error,
                 )
 
             data: dict[str, Any] = {}
@@ -603,6 +700,8 @@ class ServiceRequestPlatformClient:
         path = cls._normalize_path(url)
         m = method.upper()
         if m == "GET" and path.endswith("/leases"):
+            return True
+        if m == "GET" and path.endswith("/tenant-contacts"):
             return True
         if m == "POST" and path.endswith("/service-requests"):
             return True
@@ -779,6 +878,32 @@ class ServiceRequestPlatformClient:
     # ------------------------------------------------------------------
     # Utility helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _http_error(status_code: int, body: dict[str, Any] | None) -> str:
+        """Include the platform message when a call is rejected.
+
+        File upload 400s come back as ``{"errors": [{"message": "..."}]}``.
+        Without that text the chat only shows ``HTTP 400``.
+        """
+        message = ""
+        if isinstance(body, dict):
+            errors = body.get("errors")
+            if isinstance(errors, list):
+                for item in errors:
+                    if isinstance(item, dict):
+                        message = str(item.get("message") or "").strip()
+                        if message:
+                            break
+            if not message:
+                for key in ("message", "detail", "error"):
+                    raw = body.get(key)
+                    if isinstance(raw, str) and raw.strip():
+                        message = raw.strip()
+                        break
+        if message:
+            return f"HTTP {status_code}: {message}"
+        return f"HTTP {status_code}"
 
     @staticmethod
     def _parse_body(response: httpx.Response) -> dict[str, Any] | None:

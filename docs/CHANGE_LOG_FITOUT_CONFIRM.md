@@ -14,6 +14,138 @@ on the chatbot or frontend side.
 
 ---
 
+## 2026-09-27 · Fitout Progress agent (FITOUT_PROGRESS): one question, create + approve
+
+**Repos:** `cenomi-api-v2` (chatbot backend) + `cenomi-api-2` (Go platform — its own
+entry in that repo's `docs/CHANGE_LOG_AI_LEASE_LOOKUP.md`). **No frontend change**:
+the chips are the existing `labeled_options` renderer, the question is a
+`text_question`, and the review card is the existing `confirmation_card`.
+
+**Why:** The `FITOUT_PROGRESS` service request records how far along a lease's
+fit-out is, as a percentage. Its form has nine fields, eight of which are read-only
+lease reference data the backend already knows, so the whole request collapses to
+one question — and the number the form pre-fills can be computed rather than asked
+for. Reference: `service-request-chatbot/docs/fitout-progress-agent.md`; the
+proposal it was built from is `docs/specs/fitout-progress-agent-prd.md`.
+
+### What the flow does
+
+One question after the lease step, with the suggested percentage offered as chips
+and free typing always allowed:
+
+```
+"record fitout progress for t0512099"
+  → "Fit-out started 15 Jan 2026 and is due 30 Jun 2027, so about 48% of the window
+     has elapsed. The lease currently records 38%. How complete is the fit-out today?"
+     [48% · suggested] [25%] [50%] [100% · complete]
+  → tap or type → one-tap review card → recorded
+```
+
+The suggestion mirrors `ComputeFitoutProgressDefault` (Go) and
+`computeFitoutProgressDefault` (web form) exactly — verified differentially against
+the form's own function over 2,088 date combinations, including the
+half-away-from-zero rounding Python's `round` gets wrong.
+
+Approval asks the same question pre-filled from the stored payload, with
+`Approve 65%` / a different percentage / `Reject`. A corrected percentage is approved
+in the same step, which is what the form's *Update and Approve* button does.
+
+### Design decisions worth knowing
+
+- **A create is a recording, not a request.** `AutoApproveFitoutProgressForApproverCreator`
+  approves level 1 inside the platform's create transaction and writes
+  `leases.fitout_progress` there, so the reply says "recorded … the lease now reads 82%"
+  rather than promising a review. The platform's own status wins when the create response
+  carries one; otherwise the caller's role decides, which is exact because create is DD-only.
+- **The review card stays** even though the flow asks one question: the write is
+  irreversible (no cancel, no rewind on this workflow) and the card is the only place an
+  8-instead-of-80 is caught. It is a tap, not a question.
+- **Create is DD_ENGINEER-only**, matching the web form, which hides the sub-category from
+  every other role — the assistant must not offer a path the form refuses.
+- **No cancel, reassign, action-required, attachment or save-only.** Level 1 allows
+  `UPDATE / APPROVE / REJECT`, so each of those is explained locally instead of earning a
+  400 the workflow JSON already predicted.
+- **The approve PATCH echoes the platform's stored payload**, changing only
+  `fitout_progress_percentage` and `comment`; `ValidateEditableFields` refuses anything else.
+- **`_progress_confirmed`** tracks whether *this* user answered the question, so an
+  approver cannot approve a number nobody in the conversation ever saw.
+
+### Files
+
+**New**
+- `backend/app/agents/schemas/fitout_progress_schema.py`
+- `backend/app/agents/services/fitout_progress_suggestions_service.py`
+- `backend/app/agents/prompts/fitout_progress_extraction_prompt.py`
+- `backend/app/agents/graph/nodes/fitout_progress/` — entry, confirmation,
+  payload builder, API submission
+- `backend/tests/unit/test_fitout_progress_{schema,suggestions,parsing,nodes,wiring}.py`
+- `backend/tests/integration/test_fitout_progress_graph.py`
+
+**Registration** — `registry.py`, `registries/workflow_config.py`,
+`schemas/supervisor_schema.py`, `prompts/supervisor_prompt.py`,
+`schemas/help_agent_schema.py`, `graph/help_agent_graph.py`,
+`observability/analytics_constants.py`
+
+**Shared nodes**
+- `shared/missing_field_node.py` — the verbatim question and its chips, the
+  missing-field dispatch, and an exemption from the handover stage-normalisation that
+  was silently rewriting `APPROVE_SR` to `CREATE_SR` (which asked an approver to identify
+  the lease of the SR they already had open)
+- `shared/merge_state_node.py` — sets `_progress_confirmed`
+- `shared/validation_node.py`, `services/validation_service.py` — `validate_fitout_progress`:
+  0-100 blocking, "lower than the recorded percentage" as a non-blocking warning
+- `shared/sr_status_sync_node.py` — stage mapping including `SR_REJECTED`, sub-category
+  inference, `stored_payload`, and naming the agent so `_route_after_sync` is deterministic
+  (both this workflow and the confirmations declare `APPROVE_SR`)
+- `shared/lease_lookup_node.py`, `services/lease_lookup_service.py` — `purpose=fitout_progress`,
+  `LeaseRecord.fitout_progress`, and the `t0512099` fit-out-in-progress mock lease
+- `services/review_decorations_service.py` — `fitout_progress_percentage` / `comment` now
+  survive payload hydration; without them an approver was told their own SR had no
+  percentage recorded
+- `services/resource_picker_decorations.py` — the lease picker's purpose
+
+**Evals** — Tier 6k (`tests/eval/scenarios.py` S84–S88, `run_eval.py`):
+`./run_agent_eval.sh --no-start --tier 6k`.
+
+### Follow-ups from the first live run (same day)
+
+1. **The form's default was answering the question.** The web form computes the same
+   elapsed-time percentage the agent suggests and writes it in as soon as a lease is
+   picked; the form→chat bridge synced it back and `merge_state` counted it as an answer,
+   so `DUMMY-CUST-001` went from the question straight to "Recording fit-out progress at
+   100%" with nobody typing anything. `_progress_confirmed` is now required on **both**
+   stages, and it keys on the turn rather than the channel: a background sync (no message,
+   no action) leaves the value in the draft — form and chat stay in step — and leaves the
+   question owed.
+
+2. **A pending question could be replaced by the next one.** Pre-existing, and not
+   specific to this workflow: with `MILESTONE_PENDING` or `CANCEL_PENDING` open, a form
+   patch was merged *and then carried on through the pipeline*, which asked the
+   guided-tour choice (or the next field, or a validation correction) over the top of the
+   question the user was looking at — chips left under text they no longer matched.
+   Reported on a Fitout Start Confirmation. `_route_after_merge` now merges the patch and
+   stops. Continue / Cancel are `action_override`s and are handled earlier, so answering
+   still works.
+   **Files:** `app/agents/graph/help_agent_graph.py` (`_route_after_merge`,
+   `_PENDING_USER_DECISION`, the `merge_state` edge map).
+
+3. **The guided/open choice is offered here too** — `guided_tour_gate` back at its
+   default. It was off on the grounds that one question needs no tour; but the choice
+   decides whether the pre-filled form field is locked while the assistant asks, which is
+   a real decision in this flow.
+
+### Not done
+
+- **Nothing has run against the live platform** — every test stubs the supervisor LLM,
+  extraction, the lease API and the SR API.
+- **The approve flow has no eval scenario and cannot have one yet**: a DD create
+  auto-approves and a non-DD create is refused, so the harness cannot raise an SR that is
+  waiting for approval. Seed one with `POST /backend_api/test/fitout-progress`.
+- `frontend/tests/e2e/live/scenarios.json` is generated and still holds the older 1–38 set;
+  Tier 6k appears there after the next `npm run generate-scenarios`.
+
+---
+
 ## 2026-08-17 · Correction loops, RDD document status, Path B comments, card/message wording
 
 **Repos:** `cenomi-api-v2` (chatbot backend) + `cenomi-frontend-2` (tenant web)

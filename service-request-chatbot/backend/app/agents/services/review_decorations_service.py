@@ -159,6 +159,12 @@ def payload_to_collected_data(payload: dict[str, Any]) -> dict[str, Any]:
         # Base milestone dates from the lease contract — needed so that
         # missing_field_node can show "original date" on APPROVE_SR.
         "base_fitout_start_date", "base_fitout_end_date", "base_trading_date",
+        # ── Fitout Progress workflow fields ────────────────────────────────────
+        # The percentage the request was raised with, and the note beside it
+        # (singular ``comment`` here — the confirmations use ``comments``).
+        # Without these an approver opened their own SR and was told it had no
+        # percentage recorded, with no "Approve 65%" to tap.
+        "fitout_progress_percentage", "comment",
     ):
         if key in payload and payload[key] not in (None, ""):
             mapped[key] = payload[key]
@@ -783,10 +789,11 @@ def build_review_decorations(state: dict[str, Any]) -> dict[str, Any]:
     stage: str = state.get("workflow_stage") or ""
 
     # Work Permit review: no FM/RDD upload chips — only View SR for non-actors.
+    # No promote_preview: the full details card duplicates the form on the left.
     if stage in WP_REVIEW_STAGES:
         auth: AuthContext | None = state.get("auth_context")  # type: ignore[assignment]
         user_role = backend_refs.get("user_role") or derive_user_role(auth)
-        decorations: dict[str, Any] = {"promote_preview": True}
+        decorations: dict[str, Any] = {}
         if not can_act_in_stage(stage, user_role):
             decorations["suggestions"] = build_view_sr_suggestions(sr_id)
         return decorations

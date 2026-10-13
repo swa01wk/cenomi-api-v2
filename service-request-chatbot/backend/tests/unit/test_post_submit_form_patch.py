@@ -99,7 +99,10 @@ async def test_asking_for_another_sr_still_clears_the_finished_one() -> None:
 
     assert _wiped(result)
     assert result["workflow_stage"] == "CREATE_SR"
-    assert result["backend_refs"] == {}
+    # The finished SR is dropped and released, so the save step clears it and
+    # its documents from the session draft instead of merging them back.
+    assert "sr_id" not in result["backend_refs"]
+    assert result["backend_refs"] == {"released_sr_id": "320996"}
 
 
 @pytest.mark.asyncio
