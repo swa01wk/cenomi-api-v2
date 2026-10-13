@@ -53,6 +53,14 @@ _EDITABLE_FIELDS: frozenset[str] = frozenset(
     {"title", "description", "notes"}
 )
 
+# Sent on draft_preview every turn so the form boxes fill as each answer
+# lands. The confirmation card used to be the first payload that carried
+# these, which left Title and Description empty until the review step.
+_FORM_SYNC_FIELDS: tuple[tuple[str, str], ...] = (
+    ("lease_id", "Lease"),
+    *((key, _FIELD_LABELS[key]) for key in _DISPLAY_FIELDS),
+)
+
 _CONFIRMATION_MESSAGE = (
     "All required details have been collected. Please review your General Inquiry "
     "below and confirm to submit, or let me know if you'd like to change anything."
@@ -77,6 +85,23 @@ _UPLOAD_CARD_MESSAGE = (
 
 _ACCEPT_UPLOAD_ACTIONS = frozenset({"accept_optional_upload"})
 _SKIP_UPLOAD_ACTIONS = frozenset({"skip_optional_upload", "continue_optional_upload"})
+
+
+def general_inquiry_draft_fields(collected: dict[str, Any]) -> list[dict[str, Any]]:
+    """Rows the form bridge writes while the guide is still collecting."""
+    rows: list[dict[str, Any]] = []
+    for key, label in _FORM_SYNC_FIELDS:
+        val = collected.get(key)
+        if val is None or val == "" or val == []:
+            continue
+        if isinstance(val, list):
+            text = ", ".join(str(item) for item in val if item not in (None, ""))
+            if not text:
+                continue
+        else:
+            text = str(val)
+        rows.append({"key": key, "label": label, "value": text})
+    return rows
 
 
 def _uploaded_inquiry_row(documents: list[dict[str, Any]]) -> dict[str, Any]:
@@ -218,10 +243,16 @@ def handle_gi_optional_upload(
         "continue",
         "n",
     }
+    # Saving the file does not send Skip. The card refresh is a blank turn
+    # after the draft already has SR_GEN_INQ, so treat that as the upload
+    # being finished and continue to the review card.
+    uploaded = status == GI_UPLOAD_AWAITING_UPLOAD and bool(
+        _uploaded_inquiry_row(list(state.get("documents") or []))
+    )
     if accepts:
         collected[GI_OPTIONAL_UPLOAD_KEY] = GI_UPLOAD_AWAITING_UPLOAD
         return build_gi_upload_card(state, collected)
-    if skips:
+    if skips or uploaded:
         collected[GI_OPTIONAL_UPLOAD_KEY] = GI_UPLOAD_DONE
         return {
             "collected_data": collected,

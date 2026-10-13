@@ -558,10 +558,12 @@ class ServiceRequestPlatformClient:
             body = self._parse_body(response)
 
             if response.status_code not in (200, 201):
+                error = self._http_error(response.status_code, body)
                 log.warning(
                     "platform_client.upload_file.non_2xx",
                     status_code=response.status_code,
                     document_type_id=metadata.document_type_id,
+                    error=error,
                 )
                 return FileUploadResult(
                     success=False,
@@ -572,7 +574,7 @@ class ServiceRequestPlatformClient:
                     endpoint=endpoint,
                     status_code=response.status_code,
                     latency_ms=latency_ms,
-                    error=f"HTTP {response.status_code}",
+                    error=error,
                 )
 
             data: dict[str, Any] = {}
@@ -876,6 +878,32 @@ class ServiceRequestPlatformClient:
     # ------------------------------------------------------------------
     # Utility helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _http_error(status_code: int, body: dict[str, Any] | None) -> str:
+        """Include the platform message when a call is rejected.
+
+        File upload 400s come back as ``{"errors": [{"message": "..."}]}``.
+        Without that text the chat only shows ``HTTP 400``.
+        """
+        message = ""
+        if isinstance(body, dict):
+            errors = body.get("errors")
+            if isinstance(errors, list):
+                for item in errors:
+                    if isinstance(item, dict):
+                        message = str(item.get("message") or "").strip()
+                        if message:
+                            break
+            if not message:
+                for key in ("message", "detail", "error"):
+                    raw = body.get(key)
+                    if isinstance(raw, str) and raw.strip():
+                        message = raw.strip()
+                        break
+        if message:
+            return f"HTTP {status_code}: {message}"
+        return f"HTTP {status_code}"
 
     @staticmethod
     def _parse_body(response: httpx.Response) -> dict[str, Any] | None:

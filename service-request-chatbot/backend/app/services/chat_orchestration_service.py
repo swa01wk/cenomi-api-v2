@@ -702,18 +702,16 @@ class ChatOrchestrationService:
             for e in (result_state.get("validation_errors") or [])
             if e.get("validation_type") == "date_format" and e.get("field")
         })
-        # Handover-only: the "sr_preview_card" shape below (fixed
-        # requestType="Handover Service Request" + Handover FIELD_LABELS via
-        # _fields_from_collected) is meaningless — and actively misleading —
-        # for any other agent. Observed live: a Sales Data Agent turn
-        # (active_agent="sales_data_agent", collected_data={lease_code: ...}
-        # from the supporting-doc-upload flow) still got a draft_preview
-        # card labelled "Handover Service Request", because this block used
-        # to build one unconditionally whenever collected_data was non-empty.
-        is_handover_agent = result_state.get("active_agent") == "rdd_handover_agent"
-        is_work_permit_agent = result_state.get("active_agent") == "work_permit_agent"
+        # Handover, Work Permit, fit-out, and General Inquiry each publish
+        # their own field rows so the form fills as answers land. Any other
+        # agent must not get the handover card: a Sales Data turn used to,
+        # because this block built one whenever collected_data was non-empty.
+        active_for_preview = result_state.get("active_agent")
+        is_handover_agent = active_for_preview == "rdd_handover_agent"
+        is_work_permit_agent = active_for_preview == "work_permit_agent"
+        is_general_inquiry = active_for_preview == "general_inquiry_agent"
         fitout_preview_fields = _fitout_draft_preview_fields(
-            result_state.get("active_agent"), collected
+            active_for_preview, collected
         )
         draft_preview: dict[str, Any] | None = None
         if is_handover_agent and (collected or cleared_fields):
@@ -760,6 +758,21 @@ class ChatOrchestrationService:
             }
             if cleared_fields:
                 draft_preview["cleared_fields"] = cleared_fields
+        elif is_general_inquiry and collected:
+            from app.agents.graph.nodes.general_inquiry.general_inquiry_confirmation_node import (
+                general_inquiry_draft_fields,
+            )
+
+            fields = general_inquiry_draft_fields(collected)
+            if fields:
+                draft_preview = {
+                    "type": "sr_preview_card",
+                    "requestType": "General Inquiry",
+                    "srId": sr_id,
+                    "status": "SUBMITTED" if sr_id else "DRAFT",
+                    "isSubmitted": bool(sr_id),
+                    "fields": fields,
+                }
 
         # Published on every turn so the form knows whether to lock itself.
         from app.agents.services import guided_tour_service

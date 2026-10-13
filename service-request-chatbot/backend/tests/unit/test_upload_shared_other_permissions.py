@@ -39,6 +39,9 @@ class TestUploadActionsFor:
             "UPLOAD_FM_HANDOVER_DOCUMENT"
         ]
 
+    def test_general_inquiry_file_is_not_a_handover_upload(self) -> None:
+        assert _upload_actions_for("SR_GEN_INQ") == ["CREATE_GENERAL_INQUIRY"]
+
 
 class TestEnsureUploadPermittedOther:
     def test_mm_can_upload_other(self) -> None:
@@ -67,6 +70,15 @@ class TestEnsureUploadPermittedOther:
                 "DR_SR_HANDOVER_REPORT", _auth("CAN_FM_REVIEW_HANDOVER_SR")
             )
         assert exc_info.value.action == "UPLOAD_RDD_HANDOVER_REPORT"
+
+    def test_tenant_can_upload_general_inquiry_file(self) -> None:
+        _ensure_upload_permitted("SR_GEN_INQ", _auth("PRIMARY_TENANT_CONTACT"))
+
+    def test_tenant_without_inquiry_role_cannot_upload_inquiry_file(self) -> None:
+        with pytest.raises(PermissionDeniedError) as exc_info:
+            _ensure_upload_permitted("SR_GEN_INQ", _auth("OPERATION_EXECUTIVES"))
+        assert exc_info.value.action == "CREATE_GENERAL_INQUIRY"
+        assert exc_info.value.required_role == "CAN_RAISE_GENERAL_INQUIRY"
 
     def test_unrelated_role_cannot_upload_other(self) -> None:
         with pytest.raises(PermissionDeniedError) as exc_info:
