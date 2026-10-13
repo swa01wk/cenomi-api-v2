@@ -74,11 +74,21 @@ def test_known_timezone_is_kept() -> None:
     assert cc.resolve_tz("Asia/Riyadh") == "Asia/Riyadh"
 
 
+def test_legacy_zone_name_maps_to_the_current_one() -> None:
+    """Chrome on Indian machines reports Asia/Calcutta; slim Debian images
+    have no such zone, so it used to fail the whole dashboard with a 422."""
+    assert cc.resolve_tz("Asia/Calcutta") == "Asia/Kolkata"
+
+
 @pytest.mark.parametrize("tz", ["Mars/Olympus", "../etc/passwd", "UTC'; DROP TABLE x;--"])
-def test_unknown_timezone_is_rejected(tz: str) -> None:
-    with pytest.raises(HTTPException) as exc:
-        cc.resolve_tz(tz)
-    assert exc.value.status_code == 422
+def test_unknown_timezone_falls_back_to_utc(tz: str) -> None:
+    assert cc.resolve_tz(tz) == "UTC"
+
+
+def test_unknown_timezone_without_system_zones_still_resolves() -> None:
+    """With no zone files on the host, a bad name degrades instead of raising."""
+    with patch.object(cc, "ZoneInfo", side_effect=cc.ZoneInfoNotFoundError("x")):
+        assert cc.resolve_tz("Asia/Riyadh") == "UTC"
 
 
 def test_previous_window_keeps_the_timezone() -> None:
