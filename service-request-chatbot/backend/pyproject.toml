@@ -29,6 +29,9 @@ dependencies = [
     "bcrypt>=4.2.0",
     "python-jose[cryptography]>=3.3.0",
     "litellm>=1.40.0,<2.0.0",
+    # IANA zones for the analytics `tz` param: slim Debian images ship
+    # without legacy names such as Asia/Calcutta, which browsers still send.
+    "tzdata>=2024.1",
 ]
 
 [project.optional-dependencies]

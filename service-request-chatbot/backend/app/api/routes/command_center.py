@@ -171,7 +171,7 @@ def _window_query(
     tz: str | None = Query(
         default=None,
         description="Viewer's IANA timezone, e.g. Asia/Riyadh. Per-day series are "
-        "bucketed by calendar day in this zone. Default: UTC.",
+        "bucketed by calendar day in this zone. Default and unknown: UTC.",
     ),
 ) -> AnalyticsFilters:
     start, end = resolve_window(from_date, to_date)
@@ -180,18 +180,37 @@ def _window_query(
     )
 
 
+# Legacy zone names browsers still report (Chrome on Indian machines sends
+# Asia/Calcutta). Mapped to the current name so Python and Postgres agree.
+_TZ_ALIASES: dict[str, str] = {
+    "Asia/Calcutta": "Asia/Kolkata",
+    "Asia/Katmandu": "Asia/Kathmandu",
+    "Asia/Dacca": "Asia/Dhaka",
+    "Asia/Rangoon": "Asia/Yangon",
+    "Asia/Saigon": "Asia/Ho_Chi_Minh",
+    "Asia/Ulan_Bator": "Asia/Ulaanbaatar",
+    "Asia/Thimbu": "Asia/Thimphu",
+    "Europe/Kiev": "Europe/Kyiv",
+    "America/Buenos_Aires": "America/Argentina/Buenos_Aires",
+    "Atlantic/Faeroe": "Atlantic/Faroe",
+}
+
+
 def resolve_tz(tz: str | None) -> str:
-    """Validate an IANA zone name; blank means UTC."""
+    """The IANA zone to bucket days in; blank or unknown means UTC.
+
+    An unknown zone falls back to UTC rather than failing the request: a
+    browser reporting an odd zone name must not blank the dashboard.
+    """
     if not tz:
         return "UTC"
+    name = _TZ_ALIASES.get(tz, tz)
     try:
-        ZoneInfo(tz)
-    except (ZoneInfoNotFoundError, ValueError) as exc:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=f"Unknown timezone '{tz}'.",
-        ) from exc
-    return tz
+        ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError):
+        log.warning("command_center.unknown_timezone", tz=tz)
+        return "UTC"
+    return name
 
 
 def _previous(filters: AnalyticsFilters) -> AnalyticsFilters:
