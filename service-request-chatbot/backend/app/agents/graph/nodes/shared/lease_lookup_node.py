@@ -341,9 +341,12 @@ async def lease_lookup_node(
                 log.warning("lease_lookup.selected_lease.invalid", error=str(exc))
                 return {
                     "status": "WAITING_FOR_USER",
+                    # response_message is user-facing: it must address the
+                    # user, never instruct the model ("Apologise and ask the
+                    # user to...") — that text was being shown verbatim.
                     "response_message": (
-                        "The selected lease could not be validated due to a data error. "
-                        "Apologise and ask the user to try selecting again or provide the lease code."
+                        "Sorry — I couldn't validate that lease. Please select "
+                        "it again, or type the lease code."
                     ),
                     "response_ui": {
                         "type": "text_question",

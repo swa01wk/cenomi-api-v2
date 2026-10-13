@@ -110,3 +110,68 @@ async def test_submission_success_omits_period_when_rows_lack_dates() -> None:
     ui = result["response_ui"]
     assert "sales_period_start" not in ui
     assert "sales_period_end" not in ui
+
+
+@pytest.mark.asyncio
+async def test_manual_confirm_card_sends_the_raw_amount_for_editing() -> None:
+    """The confirm card's amount input binds to `value`, so it must be the
+    raw number — `display` carries the formatted "SAR 250,000.00"."""
+    from app.agents.graph.nodes.sales_data.manual_entry_confirmation_node import (
+        manual_entry_confirmation_node,
+    )
+
+    result = await manual_entry_confirmation_node({
+        "collected_data": {
+            "lease_code": "t0094836",
+            "sales_period_start": "2025-09-01",
+            "sales_period_end": "2025-09-30",
+            "sales_amt": 250000.0,
+        },
+        "backend_refs": {},
+        "user_message": "",
+    })
+
+    amount = next(
+        f for f in result["response_ui"]["fields"] if f["key"] == "sales_amt"
+    )
+    assert amount["value"] == 250000.0
+    assert amount["display"] == "SAR 250,000.00"
+
+
+@pytest.mark.asyncio
+async def test_manual_confirm_applies_an_amount_edited_on_the_card() -> None:
+    from app.agents.graph.nodes.sales_data.manual_entry_confirmation_node import (
+        manual_entry_confirmation_node,
+    )
+
+    collected = {
+        "lease_code": "t0094836",
+        "sales_period_start": "2025-09-01",
+        "sales_period_end": "2025-09-30",
+        "sales_amt": 250000.0,
+    }
+
+    edited = await manual_entry_confirmation_node({
+        "collected_data": collected,
+        "action_override": "confirm_manual_entry",
+        "corrected_fields": {"sales_amt": 303021.0},
+    })
+    assert edited["workflow_stage"] == "SUBMITTING"
+    assert edited["collected_data"]["sales_amt"] == 303021.0
+
+    # Untouched card: nothing is overwritten.
+    untouched = await manual_entry_confirmation_node({
+        "collected_data": collected,
+        "action_override": "confirm_manual_entry",
+        "corrected_fields": {},
+    })
+    assert untouched["workflow_stage"] == "SUBMITTING"
+    assert "collected_data" not in untouched
+
+    # A nonsense edit is ignored rather than submitted.
+    bad = await manual_entry_confirmation_node({
+        "collected_data": collected,
+        "action_override": "confirm_manual_entry",
+        "corrected_fields": {"sales_amt": "-5"},
+    })
+    assert "collected_data" not in bad

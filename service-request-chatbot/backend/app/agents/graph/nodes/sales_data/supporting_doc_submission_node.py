@@ -40,8 +40,19 @@ async def supporting_doc_submission_node(state: ServiceRequestState) -> dict[str
     end = collected.get("sales_period_end", "")
     comment = (collected.get("comment_text") or "").strip()
 
-    if not lease_id or not document_id:
-        message = "Missing lease or document ID. Please attach the file again."
+    # A NEED_REUPLOAD request asks for corrected sales data, which the tenant
+    # can give as a figure instead of a file — so an amount on its own is a
+    # complete answer there. The evidence ask-types still require the file.
+    amount_only_reupload = (
+        current_status == "NEED_REUPLOAD"
+        and not document_id
+        and collected.get("sales_amt") is not None
+    )
+
+    if not lease_id or (not document_id and not amount_only_reupload):
+        message = (
+            "I'm missing the file for this lease. Please attach it and try again."
+        )
         return {
             "status": "WAITING_FOR_USER",
             "workflow_stage": "AWAITING_DOC_UPLOAD",
@@ -73,9 +84,12 @@ async def supporting_doc_submission_node(state: ServiceRequestState) -> dict[str
         "sales_period_start": start,
         "sales_period_end": end,
         "status": new_status,
-        "document_id": document_id,
         "comment_text": comment,
     }
+    # Omitted entirely on an amount-only correction — sending document_id
+    # as null is not the same as not sending it.
+    if document_id:
+        payload["document_id"] = document_id
     if collected.get("sales_amt") is not None:
         payload["sales_amt"] = collected["sales_amt"]
 
