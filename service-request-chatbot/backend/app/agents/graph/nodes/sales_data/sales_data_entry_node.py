@@ -30,6 +30,7 @@ from app.agents.graph.nodes.sales_data.period_utils import (
     asked_period_from_state,
     parse_asked_period,
 )
+from app.agents.graph.nodes.sales_data.manual_entry_parser import parse_manual_entry
 from app.agents.graph.nodes.sales_data.pending_months import extract_lease_code
 from app.agents.services.permission_service import graph_permission_guard
 from app.observability.decorators import trace_node
@@ -671,6 +672,28 @@ async def sales_data_entry_node(state: ServiceRequestState) -> dict[str, Any]:
         if has_doc_session or action_override in _DOC_UPLOAD_ACTIONS:
             return {"workflow_stage": "DOC_UPLOADING", "status": "IN_PROGRESS"}
         if workflow_stage == "AWAITING_DOC_UPLOAD":
+            # NEED_REUPLOAD asks for corrected *sales data*, so a typed
+            # figure is a valid answer — the tenant shouldn't have to
+            # produce a file just to fix a number. The other two ask-types
+            # want evidence, so only a file will do there.
+            if (
+                collected.get("current_status") == "NEED_REUPLOAD"
+                and _looks_like_typed_amount(user_message)
+            ):
+                parsed = parse_manual_entry(user_message)
+                amount = parsed.get("sales_amt")
+                if amount is not None:
+                    collected["sales_amt"] = amount
+                    log.info(
+                        "sales_data_entry.reupload_typed_amount",
+                        lease_code=collected.get("lease_code"),
+                        amount=amount,
+                    )
+                    return {
+                        "workflow_stage": "AWAITING_DOC_CONFIRM",
+                        "status": "IN_PROGRESS",
+                        "collected_data": collected,
+                    }
             return {"workflow_stage": "AWAITING_DOC_UPLOAD", "status": "IN_PROGRESS"}
         return {"workflow_stage": "DOC_SELECT", "status": "IN_PROGRESS"}
 
