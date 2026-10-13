@@ -347,12 +347,11 @@ def _confirm_patch(
         "NEED_UPLOAD_SUPPORTING_DOCUMENT": "Request a supporting document for",
         "NEED_UPLOAD_AUDITED_SALES": "Request audited sales for",
     }.get(action, ADMIN_ACTION_LABELS.get(action, action))
-    button_label = {
-        "APPROVED": "Approve",
-        "NEED_REUPLOAD": "Request reupload",
-        "NEED_UPLOAD_SUPPORTING_DOCUMENT": "Request document",
-        "NEED_UPLOAD_AUDITED_SALES": "Request audited sales",
-    }.get(action, ADMIN_ACTION_LABELS.get(action, action))
+    # The question above the card already names the action in full ("Request
+    # a re-upload for t0094842 for 2025-09 — SAR 30,000.00?"), so repeating
+    # it on the button ("Request reupload") just said the same thing twice.
+    # A plain Confirm/Cancel pair reads as the answer to that question.
+    button_label = "Confirm"
 
     if len(targets) == 1:
         message = f"{action_verb} {_fmt_target(targets[0])}?{comment_str}{unmatched_str}"

@@ -168,16 +168,15 @@ def _narrow_to_notification(
 def _accept_for_status(status: str) -> str:
     """Allowed file types for the attach control, per Ask Upload type.
 
-    NEED_REUPLOAD asks for a corrected **sales data** file — the same CSV
-    the tenant originally uploaded — so it must accept .csv in addition to
-    the document formats the other two ask-types take. Kept in sync with
-    supporting_doc_upload.py's _ALLOWED_EXTENSIONS (document formats) and
-    the CSV upload path (sales_data_entry_node._CSV_UPLOAD_ACTIONS).
+    CSV is offered for every Ask Upload type: NEED_REUPLOAD asks for a
+    corrected **sales data** file (the same CSV the tenant originally
+    uploaded), and the supporting-document / audited-sales evidence a
+    tenant has to hand is just as often a POS or finance CSV export as a
+    PDF. Kept in sync with supporting_doc_upload.py's _ALLOWED_EXTENSIONS,
+    which in turn mirrors cenomi-api's PUT /files allow-list.
     """
-    doc_types = ".pdf,.png,.jpg,.jpeg,.doc,.xlsx,.zip"
-    if status == "NEED_REUPLOAD":
-        return f".csv,{doc_types}"
-    return doc_types
+    del status  # same set for every ask-type
+    return ".csv,.pdf,.png,.jpg,.jpeg,.doc,.xlsx,.zip"
 
 
 def _prompt_for_file(row: dict[str, Any]) -> dict[str, Any]:
