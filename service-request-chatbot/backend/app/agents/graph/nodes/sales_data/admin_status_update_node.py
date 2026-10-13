@@ -26,6 +26,25 @@ _ACTION_LABELS = {
     "NEED_UPLOAD_AUDITED_SALES": "asked to upload audited sales data",
 }
 
+# Plain sentences for the result bubble. The counted form ("1 submission(s)
+# asked to re-upload sales data: LC-1234.") read like a database log; these
+# say who was told what, in the order a person would say it.
+_RESULT_SENTENCES = {
+    "APPROVED": ("Approved", "the tenant has been notified"),
+    "NEED_REUPLOAD": (
+        "Re-upload requested for",
+        "the tenant has been asked to send corrected sales data",
+    ),
+    "NEED_UPLOAD_SUPPORTING_DOCUMENT": (
+        "Supporting document requested for",
+        "the tenant has been asked to attach one",
+    ),
+    "NEED_UPLOAD_AUDITED_SALES": (
+        "Audited sales data requested for",
+        "the tenant has been asked to attach it",
+    ),
+}
+
 
 def _legacy_targets(collected: dict[str, Any]) -> list[dict[str, Any]]:
     if collected.get("lease_id"):
@@ -91,27 +110,30 @@ async def admin_status_update_node(state: ServiceRequestState) -> dict[str, Any]
     codes_ok = [str(r.get("lease_code") or "") for r in succeeded]
     codes_fail = [str(r.get("lease_code") or "") for r in failed]
 
+    verb, follow_up = _RESULT_SENTENCES.get(
+        action, (f"{label.capitalize()} for", "the tenant has been notified")
+    )
+
     if succeeded and not failed:
         listed = ", ".join(f"**{c}**" for c in codes_ok)
         message = (
-            f"{len(succeeded)} submission(s) {label}: {listed}."
-            + (f'\nComment sent to tenant: "{comment}"' if comment else "")
+            f"{verb} {listed} — {follow_up}."
+            + (f'\n\nYour note to the tenant: "{comment}"' if comment else "")
         )
     elif succeeded and failed:
-        fail_bits = []
-        for r in failed:
-            fail_bits.append(
-                f"**{r.get('lease_code')}** ({r.get('error') or 'unknown error'})"
-            )
+        fail_bits = [
+            f"**{r.get('lease_code')}** ({r.get('error') or 'unknown error'})"
+            for r in failed
+        ]
         message = (
-            f"{len(succeeded)} of {len(results)} submission(s) {label}: "
-            + ", ".join(f"**{c}**" for c in codes_ok)
-            + ".\nNot updated: "
+            f"{verb} " + ", ".join(f"**{c}**" for c in codes_ok)
+            + f" — {follow_up}.\n\nI couldn't update "
             + "; ".join(fail_bits)
+            + "."
         )
     else:
         message = (
-            "The update could not be completed for "
+            "I couldn't update "
             + ", ".join(f"**{c}**" for c in codes_fail)
             + f": {failed[0].get('error') or 'Unknown error'}."
         )

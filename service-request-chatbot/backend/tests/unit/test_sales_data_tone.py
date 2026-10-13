@@ -111,7 +111,7 @@ async def test_sales_agent_never_repeats_the_identical_reply() -> None:
         ],
     })
     assert result["response_message"] != prompt
-    assert "upload sales data" in result["response_message"]
+    assert "submit sales data" in result["response_message"]
     # The card (and its attach control) is kept, only the text changes.
     assert result["response_ui"]["type"] == "supporting_doc_prompt"
 
