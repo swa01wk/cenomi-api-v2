@@ -105,6 +105,7 @@ def test_build_context_parses_message_when_hint_missing() -> None:
         "lease_code": "LC-1001",
         "period_hint": "month August",
         "source": "notification",
+        "message": "Please submit sales data as of month August for X.",
     }
 
 

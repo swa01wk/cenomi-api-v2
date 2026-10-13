@@ -52,6 +52,8 @@ class SupervisorDecision(BaseModel):
         "MARK_NOTIFICATION_READ",
         "OPEN_NOTIFICATION",
         "APPROVE_SALES_DATA",
+        # ── General Inquiry ───────────────────────────────────────────────────
+        "CREATE_GENERAL_INQUIRY",
     ] = Field(description="Classified user intent")
 
     confidence: float = Field(

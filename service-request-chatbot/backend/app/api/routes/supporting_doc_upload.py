@@ -40,8 +40,13 @@ MAX_SIZE_BYTES = 10 * 1024 * 1024  # 10 MB
 # supporting_doc_upload_node, which read as "document upload is failing"
 # with no indication of why. Reject them up front instead, with a message
 # that says which formats are actually accepted.
+# csv is included because a NEED_REUPLOAD request asks for a corrected
+# *sales data* file — the same CSV the tenant originally uploaded — and
+# cenomi-api's PUT /files allow-list accepts it. Without it the attach
+# control offered .csv (per the node's `accept`) and then this endpoint
+# rejected the pick with "Unsupported file type".
 _ALLOWED_EXTENSIONS = frozenset({
-    "pdf", "png", "jpg", "jpeg", "doc", "xlsx", "zip",
+    "pdf", "png", "jpg", "jpeg", "doc", "xlsx", "zip", "csv",
 })
 
 _ALLOWED_CONTENT_TYPES = frozenset({
@@ -53,6 +58,12 @@ _ALLOWED_CONTENT_TYPES = frozenset({
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     "application/zip",
     "application/x-zip-compressed",
+    # Browsers/OSes report .csv inconsistently (Excel-saved files often come
+    # through as vnd.ms-excel, some send no type at all).
+    "text/csv",
+    "application/csv",
+    "text/plain",
+    "application/vnd.ms-excel",
 })
 
 
@@ -103,7 +114,7 @@ async def upload_supporting_doc(
             status_code=400,
             detail=(
                 "Unsupported file type. Please upload one of: PDF, PNG, "
-                "JPG/JPEG, DOC, XLSX, or ZIP."
+                "JPG/JPEG, DOC, XLSX, CSV, or ZIP."
             ),
         )
 

@@ -77,15 +77,15 @@ def test_pending_list_copy_allows_multi_month_file() -> None:
         _row("LC-1001", "2026-07-01", "2026-07-31"),
     ])
     message = format_pending_list_message(items)
-    assert "several PENDING months" in message
+    assert "several pending months" in message
     assert "July 2026" in message
     assert "LC-1001" in message
 
 
 def test_pending_list_summary_omits_lease_and_month_enumeration() -> None:
     message = format_pending_list_summary()
-    assert "PENDING" in message
-    assert "several PENDING months" in message
+    assert "pending sales data" in message
+    assert "several months" in message
     assert "July 2026" not in message
     assert "LC-1001" not in message
 
@@ -103,6 +103,101 @@ def _state(**overrides: Any) -> dict[str, Any]:
         "corrected_fields": {},
         **overrides,
     }
+
+
+@pytest.mark.asyncio
+async def test_gate_sends_every_pending_lease_and_month() -> None:
+    """Nothing is hidden from the pending list.
+
+    This used to cap display at 5 leases and at the 2 most recent distinct
+    months found anywhere in the dataset, to avoid a wall of chips for a
+    tenant with years of backlog. But that made the rest unreachable from
+    chat — a month outside the window could only be uploaded by typing its
+    lease code from memory. The full set is sent now and the card pages
+    through it instead.
+    """
+    from app.agents.graph.nodes.sales_data.pending_months_gate_node import (
+        pending_months_gate_node,
+    )
+
+    # 7 leases, one with years of backlog alongside recent months.
+    rows = [
+        _row("LC-1001", "2016-01-01", "2016-01-31"),
+        _row("LC-1001", "2016-02-01", "2016-02-28"),
+        _row("LC-1001", "2026-07-01", "2026-07-31"),
+        _row("LC-1001", "2026-08-01", "2026-08-31"),
+    ]
+    for i in range(2, 8):  # LC-1002..LC-1007
+        rows.append(_row(f"LC-100{i}", "2026-08-01", "2026-08-31"))
+
+    client = AsyncMock()
+    client.get_sales_data = AsyncMock(return_value=rows)
+    with (
+        patch(
+            "app.agents.graph.nodes.sales_data.pending_months_gate_node.get_current_bearer_token",
+            return_value="tok",
+        ),
+        patch(
+            "app.agents.graph.nodes.sales_data.pending_months_gate_node.SalesDataApiClient",
+            return_value=client,
+        ),
+    ):
+        result = await pending_months_gate_node(
+            _state(user_message="I want to upload my sales data")
+        )
+
+    ui = result["response_ui"]
+    assert ui["total_lease_count"] == 7
+    assert len(ui["leases"]) == 7, "every lease must be sent, not just the first 5"
+    assert ui["total_month_count"] == 10
+    assert ui["more_lease_count"] == 0
+    assert ui["older_lease_count"] == 0
+
+    lc1001 = next(lease for lease in ui["leases"] if lease["lease_code"] == "LC-1001")
+    # The 2016 backlog is kept, in chronological order.
+    assert [m["label"] for m in lc1001["months"]] == [
+        "January 2016",
+        "February 2016",
+        "July 2026",
+        "August 2026",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_gate_keeps_leases_whose_backlog_is_entirely_old() -> None:
+    """A lease with only old pending months must still be listed — it is
+    genuinely overdue, so hiding it was the worst case of the old cap."""
+    from app.agents.graph.nodes.sales_data.pending_months_gate_node import (
+        pending_months_gate_node,
+    )
+
+    rows = [
+        _row("LC-2001", "2023-12-01", "2023-12-31"),  # entirely old backlog
+        _row("LC-2002", "2026-08-01", "2026-08-31"),
+        _row("LC-2002", "2026-09-01", "2026-09-30"),
+    ]
+
+    client = AsyncMock()
+    client.get_sales_data = AsyncMock(return_value=rows)
+    with (
+        patch(
+            "app.agents.graph.nodes.sales_data.pending_months_gate_node.get_current_bearer_token",
+            return_value="tok",
+        ),
+        patch(
+            "app.agents.graph.nodes.sales_data.pending_months_gate_node.SalesDataApiClient",
+            return_value=client,
+        ),
+    ):
+        result = await pending_months_gate_node(
+            _state(user_message="I want to upload my sales data")
+        )
+
+    ui = result["response_ui"]
+    lease_codes = [lease["lease_code"] for lease in ui["leases"]]
+    assert lease_codes == ["LC-2001", "LC-2002"]
+    assert ui["total_lease_count"] == 2
+    assert ui["older_lease_count"] == 0
 
 
 @pytest.mark.asyncio
@@ -470,7 +565,7 @@ async def test_gate_notification_already_submitted_does_not_dump_other_leases() 
         )
     assert "LC-1001" in result["response_message"]
     assert "already been submitted" in result["response_message"]
-    assert "PENDING" in result["response_message"]
+    assert "pending sales data" in result["response_message"]
     # Other leases are still surfaced (useful) via the card's chips — the
     # bubble no longer duplicates the same enumeration in prose.
     assert "LC-1002" not in result["response_message"]

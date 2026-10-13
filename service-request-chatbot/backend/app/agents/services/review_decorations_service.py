@@ -789,10 +789,11 @@ def build_review_decorations(state: dict[str, Any]) -> dict[str, Any]:
     stage: str = state.get("workflow_stage") or ""
 
     # Work Permit review: no FM/RDD upload chips — only View SR for non-actors.
+    # No promote_preview: the full details card duplicates the form on the left.
     if stage in WP_REVIEW_STAGES:
         auth: AuthContext | None = state.get("auth_context")  # type: ignore[assignment]
         user_role = backend_refs.get("user_role") or derive_user_role(auth)
-        decorations: dict[str, Any] = {"promote_preview": True}
+        decorations: dict[str, Any] = {}
         if not can_act_in_stage(stage, user_role):
             decorations["suggestions"] = build_view_sr_suggestions(sr_id)
         return decorations

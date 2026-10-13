@@ -316,6 +316,9 @@ _OPTIONAL_SKIPPABLE_FIELDS: frozenset[str] = frozenset(
         "inspectionTime",
         "inspectionEndTime",
         "delay_reason",
+        "entry_gate",
+        "secondperiod",
+        "planned_second_period",
     }
 )
 
@@ -729,7 +732,7 @@ async def merge_state_node(state: ServiceRequestState) -> dict[str, Any]:
     _CONFIRMED_OPTIONAL_DEFAULTS: dict[str, tuple[str, ...]] = {
         "CREATE_SR": ("description", "notes", "comments"),
         "CREATE_HANDED_OVER_SR": ("comments",),
-        "CREATE_WORK_PERMIT": ("description", "title"),
+        "CREATE_WORK_PERMIT": ("description", "title", "notes", "planned_second_period"),
     }
     if state.get("confirmation_status") == "CONFIRMED":
         # Mark still-unanswered optionals as skipped ("") rather than leaving
@@ -777,12 +780,15 @@ async def merge_state_node(state: ServiceRequestState) -> dict[str, Any]:
             if _was_skipped(collected.get("comments")):
                 collected["comments"] = _generate_comments(_lease_for_text)
 
-    # Work Permit: skip-fill empty title & description (lease-code-only templates).
+    # Work Permit: skip-fill empty title, description & notes (lease-code-only templates).
     if workflow_stage == "CREATE_WORK_PERMIT":
         from app.agents.schemas.work_permit_schema import (
             generate_wp_description,
+            generate_wp_notes,
             generate_wp_title,
             wp_location_label,
+            wp_short_flow_enabled,
+            wp_text_should_autofill,
             wp_text_should_skip_or_refresh,
         )
 
@@ -802,6 +808,18 @@ async def merge_state_node(state: ServiceRequestState) -> dict[str, Any]:
                 text = generate_wp_title(collected)
                 if text:
                     collected["title"] = text
+            # Notes: ask-or-skip on Ops/Cold; fill when skipped or short-flow unset.
+            notes_val = collected.get("notes")
+            notes_should_fill = wp_text_should_skip_or_refresh(
+                notes_val, collected, kind="notes"
+            ) or (
+                wp_short_flow_enabled()
+                and wp_text_should_autofill(notes_val, collected, kind="notes")
+            )
+            if notes_should_fill:
+                text = generate_wp_notes(collected)
+                if text:
+                    collected["notes"] = text
 
     # ── Auto-generate title ────────────────────────────────────────────────────
     # Title generation is branched by workflow stage:
@@ -1180,7 +1198,39 @@ async def merge_state_node(state: ServiceRequestState) -> dict[str, Any]:
     # Title/description fill for WP is Handover-style: skip-fill + short-flow
     # via the blocks above / ``autofill_text_fields`` — not ASAP ``wp_auto``.
 
+    if workflow_stage == "CREATE_WORK_PERMIT":
+        from app.agents.schemas.work_permit_form_fields import (
+            apply_cold_worker_iqama_documents,
+        )
+
+        _sync_cold_planned_second_period(collected)
+        workers = collected.get("workers")
+        if isinstance(workers, list):
+            collected["workers"] = apply_cold_worker_iqama_documents(
+                workers, list(state.get("documents") or [])
+            )
+        patch["collected_data"] = collected
+
     return patch
+
+
+def _sync_cold_planned_second_period(collected: dict[str, Any]) -> None:
+    """Copy optional ``planned_second_period`` times into ``planneddate``."""
+    second = collected.get("planned_second_period")
+    if second is None:
+        return
+    planned = collected.get("planneddate")
+    if not isinstance(planned, dict):
+        planned = {}
+    else:
+        planned = dict(planned)
+    if isinstance(second, dict):
+        planned["completionfrom"] = str(second.get("from") or "").strip()
+        planned["completionto"] = str(second.get("to") or "").strip()
+        for src, dest in (("fromLT", "completionfromLT"), ("toLT", "completiontoLT")):
+            if second.get(src) not in (None, ""):
+                planned[dest] = str(second[src])
+    collected["planneddate"] = planned
 
 
 # Portal Create-with-AI seed labels (FE buildCreateSrSeedMessage) + chip labels.

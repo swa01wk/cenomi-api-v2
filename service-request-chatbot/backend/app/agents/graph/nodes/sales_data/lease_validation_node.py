@@ -46,7 +46,7 @@ logger = logging.getLogger(__name__)
 def _layer2_reupload_payload(errors: list[dict[str, Any]]) -> dict[str, Any]:
     error_lines = [f"• {row.get('lease_code', '')}: {row.get('_error', '')}" for row in errors]
     message = (
-        f"❌ **Lease validation failed** — {len(errors)} row(s) cannot be submitted:\n\n"
+        f"**Lease validation failed** — {len(errors)} row(s) cannot be submitted:\n\n"
         + "\n".join(error_lines)
         + "\n\nPlease correct the file and **upload it again**. "
         "All rows must pass validation before the file can be submitted."
@@ -97,7 +97,7 @@ async def lease_validation_node(state: ServiceRequestState) -> dict[str, Any]:
         return {
             "status": "WAITING_FOR_USER",
             "response_message": (
-                "⚠️ I couldn't reach the sales data service right now. "
+                "I couldn't reach the sales data service right now. "
                 "Please try again in a moment — if the issue persists, contact support."
                 + detail
             ),

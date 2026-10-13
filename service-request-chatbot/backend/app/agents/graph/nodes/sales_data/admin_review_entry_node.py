@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from datetime import date, timedelta
 from typing import Any
 
 import structlog
@@ -78,6 +79,33 @@ def _extract_lease_codes(message: str) -> list[str]:
             seen.add(key)
             found.append(code)
     return found
+
+
+def _review_list_message(
+    rows: list[dict[str, Any]],
+    total_count: int,
+    page: int,
+    scoped_lease: str | None,
+) -> str:
+    """Short, conversational intro to the review table — handover-agent style."""
+    if scoped_lease:
+        noun = "submission" if total_count == 1 else "submissions"
+        intro = f"**{scoped_lease}** has **{total_count} {noun}** awaiting review."
+    else:
+        noun = "submission" if total_count == 1 else "submissions"
+        intro = (
+            f"There {'is' if total_count == 1 else 'are'} **{total_count} {noun}** "
+            f"awaiting review for the sales period {_review_window_label()}."
+        )
+        if total_count > len(rows):
+            first = (page - 1) * _ADMIN_REVIEW_LIST_LIMIT + 1
+            last = first + len(rows) - 1
+            intro += f" Showing {first}–{last}."
+    # The table below already shows an Approve button and an "Ask upload"
+    # dropdown on every row, so explaining the controls ("Use the buttons on
+    # each row, or tell me what to do — for example...") only added noise.
+    # One short line pointing at the table is enough.
+    return f"{intro}\n\nReview them below."
 
 
 def _action_examples(rows: list[dict[str, Any]] | None = None) -> str:
@@ -213,7 +241,13 @@ def _row_matches_period(row: dict[str, Any], start: str | None, end: str | None)
     row_end = str(row.get("sales_period_end") or "")
     if end:
         return row_start == start and row_end == end
-    return row_start == start or row_start.startswith(start[:7])
+    # `start` here is always a full YYYY-MM-DD (the only shape _ISO_DATE_RE
+    # can produce, from _period_from_message) — e.g. the per-row Approve
+    # button's exact sales_period_start. The old `or row_start.startswith
+    # (start[:7])` fallback matched ANY row starting in the same month, so
+    # a lease with two rows both starting in August (a CSV batch submitted
+    # for two different months) both got approved/scoped by one click.
+    return row_start == start
 
 
 def _match_targets(
@@ -310,12 +344,11 @@ def _confirm_patch(
         "NEED_UPLOAD_SUPPORTING_DOCUMENT": "Request a supporting document for",
         "NEED_UPLOAD_AUDITED_SALES": "Request audited sales for",
     }.get(action, ADMIN_ACTION_LABELS.get(action, action))
-    button_label = {
-        "APPROVED": "Approve",
-        "NEED_REUPLOAD": "Request reupload",
-        "NEED_UPLOAD_SUPPORTING_DOCUMENT": "Request document",
-        "NEED_UPLOAD_AUDITED_SALES": "Request audited sales",
-    }.get(action, ADMIN_ACTION_LABELS.get(action, action))
+    # The question above the card already names the action in full ("Request
+    # a re-upload for t0094842 for 2025-09 — SAR 30,000.00?"), so repeating
+    # it on the button ("Request reupload") just said the same thing twice.
+    # A plain Confirm/Cancel pair reads as the answer to that question.
+    button_label = "Confirm"
 
     if len(targets) == 1:
         message = f"{action_verb} {_fmt_target(targets[0])}?{comment_str}{unmatched_str}"
@@ -353,7 +386,21 @@ def _confirm_patch(
     }
 
 
-_ADMIN_REVIEW_LIST_LIMIT = 10
+_ADMIN_REVIEW_LIST_LIMIT = 5
+# Exactly the admin Sales Data page's default filter (adminSalesDataListing:
+# getDateBeforeNDays(60) → today, sent as sales_period_start/_end), so the
+# agent's count always equals the Submitted tab's count for the same filter.
+_ADMIN_REVIEW_WINDOW_DAYS = 60
+
+
+def _review_window(today: date | None = None) -> tuple[str, str]:
+    today = today or date.today()
+    return (today - timedelta(days=_ADMIN_REVIEW_WINDOW_DAYS)).isoformat(), today.isoformat()
+
+
+def _review_window_label(today: date | None = None) -> str:
+    start, end = _review_window(today)
+    return f"{start} to {end}"
 
 
 async def _load_reviewable(
@@ -414,15 +461,33 @@ async def _load_reviewable(
     # actually about to act on every one of them ("approve all"), where a
     # bounded page would silently approve only the first N and leave the
     # rest untouched with no indication anything was skipped.
+    window_start, window_end = _review_window()
     rows = await client.get_sales_data(
         disable_pagination=need_all,
         all_my_companies=False,
         status=",".join(sorted(_REVIEWABLE_STATUSES)),
         limit=_ADMIN_REVIEW_LIST_LIMIT,
+        sales_period_start=window_start,
+        sales_period_end=window_end,
     )
     submitted = _reviewable(rows)
     backend_refs["admin_review_rows"] = submitted
     return submitted
+
+
+def _nothing_pending_reply() -> dict[str, Any]:
+    message = (
+        "There's no pending action to confirm or cancel — it may already have "
+        "been completed. Say **review sales data** to see the current submissions."
+    )
+    return {
+        "workflow_stage": "ADMIN_REVIEW",
+        "collected_data": {},
+        "confirmation_status": None,
+        "status": "WAITING_FOR_USER",
+        "response_message": message,
+        "response_ui": {"type": "message", "verbatim": True, "message": message},
+    }
 
 
 @trace_node("admin_review_entry", "AGENT")
@@ -433,6 +498,14 @@ async def admin_review_entry_node(state: ServiceRequestState) -> dict[str, Any]:
     action_override: str | None = state.get("action_override")
     collected: dict = dict(state.get("collected_data") or {})
     backend_refs: dict = dict(state.get("backend_refs") or {})
+    corrected_fields: dict = dict(state.get("corrected_fields") or {})
+    # A UI-originated choice (the review table's per-row "Ask upload" menu,
+    # which lets the admin pick Reupload / Supporting Document / Audited
+    # Sales explicitly) — takes priority over _deterministic_action's
+    # keyword-sniffing on the accompanying typed message below.
+    ui_admin_action = str(corrected_fields.get("admin_action") or "").strip().upper()
+    if ui_admin_action and ui_admin_action not in _VALID_ADMIN_STATUSES:
+        ui_admin_action = ""
 
     # ── Confirm admin action ───────────────────────────────────────────────
     if action_override in ("confirm_admin_action", "confirm"):
@@ -446,13 +519,22 @@ async def admin_review_entry_node(state: ServiceRequestState) -> dict[str, Any]:
                 "status": "IN_PROGRESS",
             }
 
+        # Stale Confirm from an older card — the action already completed
+        # (admin_status_update clears collected_data) or was never set.
+        if not collected.get("admin_action"):
+            return _nothing_pending_reply()
+
     # ── Cancel ─────────────────────────────────────────────────────────────
     if action_override in ("cancel", "cancel_admin"):
+        if not collected.get("admin_action"):
+            return _nothing_pending_reply()
+        message = "Action cancelled — nothing was changed. What would you like to do next?"
         return {
             "workflow_stage": "ADMIN_REVIEW",
             "collected_data": {},
             "status": "WAITING_FOR_USER",
-            "response_message": "Action cancelled. What would you like to do?",
+            "response_message": message,
+            "response_ui": {"type": "message", "verbatim": True, "message": message},
         }
 
     # ── REVIEW_SALES_DATA — list submissions ───────────────────────────────
@@ -534,6 +616,30 @@ async def admin_review_entry_node(state: ServiceRequestState) -> dict[str, Any]:
                     if not period_rows and rows:
                         notification_period_stale = True
                     rows = period_rows
+                elif len(rows) > 1:
+                    # notification_period_date failed to extract (unexpected
+                    # notification text shape) — a lease with MULTIPLE
+                    # reviewable rows (e.g. a CSV batch submitted for two
+                    # different months) must not silently fall back to
+                    # showing/approving every row for that lease just
+                    # because this one notification's period couldn't be
+                    # parsed. Same "tell the admin plainly" rule as above.
+                    log.warning(
+                        "admin_review_entry.notification_period_unparsed_multi_row",
+                        scoped_lease=scoped_lease,
+                        row_count=len(rows),
+                    )
+                    return {
+                        "status": "WAITING_FOR_USER",
+                        "workflow_stage": "ADMIN_REVIEW",
+                        "response_message": (
+                            f"**{scoped_lease}** has **{len(rows)} submissions** awaiting "
+                            "review and I couldn't tell which month this notification was "
+                            "about. Say \"review sales data\" to see all of them, or name "
+                            "the month directly, e.g. \"review "
+                            f"{scoped_lease} for 2026-08\"."
+                        ),
+                    }
                 total_count = len(rows)
             else:
                 # Bounded page, not disable_pagination=True: "SUBMITTED"
@@ -544,11 +650,14 @@ async def admin_review_entry_node(state: ServiceRequestState) -> dict[str, Any]:
                 # total_count still comes from cenomi-api's own count, so
                 # the displayed "N submissions" figure stays exact even
                 # though only one page of rows is fetched.
+                window_start, window_end = _review_window()
                 rows, total_count = await client.get_sales_data_page(
                     all_my_companies=False,
                     status=",".join(sorted(_REVIEWABLE_STATUSES)),
                     page=page,
                     limit=_ADMIN_REVIEW_LIST_LIMIT,
+                    sales_period_start=window_start,
+                    sales_period_end=window_end,
                 )
         except Exception:
             # Was silently swallowed with no log line — the only signal that
@@ -557,7 +666,7 @@ async def admin_review_entry_node(state: ServiceRequestState) -> dict[str, Any]:
             log.error("admin_review_entry.get_sales_data_failed", exc_info=True)
             return {
                 "status": "WAITING_FOR_USER",
-                "response_message": "⚠️ Could not fetch sales data. Please try again.",
+                "response_message": "I couldn't load the sales data. Please try again in a moment.",
             }
 
         submitted = _reviewable(rows)
@@ -566,13 +675,13 @@ async def admin_review_entry_node(state: ServiceRequestState) -> dict[str, Any]:
                 return {
                     "status": "WAITING_FOR_USER",
                     "workflow_stage": "ADMIN_REVIEW",
-                    "response_message": "That was the last page — no more submissions.",
+                    "response_message": "You are on the last page of submissions.",
                 }
             if is_prev_page:
                 return {
                     "status": "WAITING_FOR_USER",
                     "workflow_stage": "ADMIN_REVIEW",
-                    "response_message": "That was the first page.",
+                    "response_message": "You are on the first page of submissions.",
                 }
             if notification_period_stale:
                 return {
@@ -588,7 +697,7 @@ async def admin_review_entry_node(state: ServiceRequestState) -> dict[str, Any]:
             return {
                 "status": "WAITING_FOR_USER",
                 "workflow_stage": "ADMIN_REVIEW",
-                "response_message": "No submitted sales data awaiting review at this time.",
+                "response_message": "There are no submissions awaiting review at the moment.",
             }
 
         collected["admin_review_page"] = page
@@ -600,17 +709,7 @@ async def admin_review_entry_node(state: ServiceRequestState) -> dict[str, Any]:
         # too was pure duplication (and the "Same as the portal" phrasing
         # was internal jargon, not something to show an admin). The message
         # is just the count plus what actions are available.
-        noun = "submission" if total_count == 1 else "submissions"
-        page_note = (
-            f" (showing the first {len(submitted)} — use the arrows below for more)"
-            if has_more
-            else ""
-        )
-        lines = [
-            f"You have **{total_count} {noun}** awaiting review{page_note}. "
-            "Use the buttons in the table, or just tell me what to do — "
-            "for example " + _action_examples(submitted) + "."
-        ]
+        lines = [_review_list_message(submitted, total_count, page, scoped_lease)]
 
         return {
             "status": "WAITING_FOR_USER",
@@ -648,7 +747,7 @@ async def admin_review_entry_node(state: ServiceRequestState) -> dict[str, Any]:
             }
 
         fields: dict[str, Any] = {}
-        det_action = _deterministic_action(user_message)
+        det_action = ui_admin_action or _deterministic_action(user_message)
         # Real-format codes ("t0106037", from the review table's own Approve
         # button) first — _lease_tokens_from_message only recognises the
         # internal "LC-1234" demo format and bare digit runs, so a real code
@@ -714,7 +813,7 @@ async def admin_review_entry_node(state: ServiceRequestState) -> dict[str, Any]:
             log.error("admin_review_entry.load_reviewable_failed", exc_info=True)
             return {
                 "status": "WAITING_FOR_USER",
-                "response_message": "⚠️ Could not fetch sales data. Please try again.",
+                "response_message": "I couldn't load the sales data. Please try again in a moment.",
             }
 
         unmatched: list[str] = []

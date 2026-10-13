@@ -29,6 +29,11 @@ from typing import Any
 import structlog
 
 from app.agents.graph.state import ServiceRequestState
+from app.agents.services.sales_data_api_client import (
+    SalesDataApiClient,
+    partition_rows_by_lease_access,
+)
+from app.core.request_context import get_current_bearer_token
 from app.observability.decorators import trace_node
 
 log = structlog.get_logger(__name__)
@@ -68,12 +73,22 @@ async def sales_data_payload_builder_node(state: ServiceRequestState) -> dict[st
 
     # Build clean payload — only the fields the backend expects
     payload: list[dict] = []
+    invalid_leases: list[str] = []
     for row in edited_rows:
         amt_raw = row.get("sales_amt")
         try:
-            amt = float(str(amt_raw).replace(",", "")) if amt_raw is not None else 0.0
+            amt = float(str(amt_raw).replace(",", "")) if amt_raw is not None else None
         except (ValueError, TypeError):
-            amt = 0.0
+            amt = None
+
+        # A parse failure/blank was silently coerced to 0.0 here, and a
+        # negative edited-in-the-review-table amount wasn't checked at all —
+        # both submitted straight through to cenomi-api. Reject the whole
+        # batch instead (mirrors csv_validation_node's `amount <= 0` rule)
+        # so the admin never sees a negative/zero sales figure to approve.
+        if amt is None or amt <= 0:
+            invalid_leases.append(str(row.get("lease_code", "")).strip() or "?")
+            continue
 
         payload.append({
             "lease_code": str(row.get("lease_code", "")).strip(),
@@ -81,6 +96,70 @@ async def sales_data_payload_builder_node(state: ServiceRequestState) -> dict[st
             "sales_period_end": str(row.get("sales_period_end", "")).strip(),
             "sales_amt": amt,
         })
+
+    if invalid_leases:
+        log.warning(
+            "sales_data_payload_builder.invalid_amount",
+            leases=invalid_leases,
+        )
+        return {
+            "status": "WAITING_FOR_USER",
+            "response_message": (
+                "**Sales amount must be greater than 0** for: "
+                + ", ".join(f"**{code}**" for code in invalid_leases)
+                + ". Please correct the amount and submit again."
+            ),
+            "workflow_stage": "AWAITING_TABLE_CONFIRM",
+        }
+
+    # Re-check every row still matches a PENDING/NEED_REUPLOAD record right
+    # before POSTing. lease_validation_node (Layer 2) already did this check
+    # once, but that was at review-table build time — the row could have
+    # been edited since, or (more commonly) the underlying record could have
+    # been consumed/changed by another party (approved, re-uploaded elsewhere,
+    # or the pending window closed) in the time between then and Submit.
+    # Without this, the tenant sees the row marked "ready to submit" and only
+    # learns it's stale from a raw 400 after clicking Submit.
+    token = get_current_bearer_token()
+    client = SalesDataApiClient(bearer_token=token)
+    try:
+        backend_rows = await client.get_sales_data(disable_pagination=True)
+    except Exception as exc:
+        log.error("sales_data_payload_builder.revalidate_failed", exc_info=True)
+        return {
+            "status": "WAITING_FOR_USER",
+            "workflow_stage": "AWAITING_TABLE_CONFIRM",
+            "response_message": (
+                "I couldn't re-check your submission against the latest "
+                "records. Please try **Yes, please submit** again in a moment."
+            ),
+        }
+
+    result = partition_rows_by_lease_access(payload, backend_rows)
+    stale = (
+        (result.get("no_access") or [])
+        + (result.get("no_pending_row") or [])
+        + (result.get("identity_mismatch") or [])
+    )
+    if stale:
+        stale_codes = [str(r.get("lease_code", "")).strip() or "?" for r in stale]
+        log.warning(
+            "sales_data_payload_builder.stale_before_submit",
+            leases=stale_codes,
+        )
+        return {
+            "status": "WAITING_FOR_USER",
+            "workflow_stage": "UPLOAD_INTENT",
+            "response_message": (
+                "**This can no longer be submitted** — the Lease Code and "
+                "sales period for "
+                + ", ".join(f"**{code}**" for code in stale_codes)
+                + " no longer match a pending sales record (it may have "
+                "already been submitted, approved, or re-uploaded elsewhere). "
+                "Please check the Sales Data listing page for the current "
+                "status, or re-upload if you still need to submit this data."
+            ),
+        }
 
     backend_refs["submit_payload"] = payload
     log.info("sales_data_payload_builder.built", row_count=len(payload))

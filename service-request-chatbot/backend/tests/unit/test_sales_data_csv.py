@@ -296,3 +296,124 @@ async def test_csv_validation_node_accepts_legacy_four_column_csv() -> None:
     assert row["sales_period_start"] == start_iso
     assert row["brand"] == ""
     assert row["property"] == ""
+
+
+@pytest.mark.asyncio
+async def test_blank_downloaded_template_is_not_treated_as_data() -> None:
+    from app.agents.graph.nodes.sales_data.csv_validation_node import (
+        csv_validation_node,
+    )
+
+    start_dd, end_dd, _, _ = _current_month()
+    text = (
+        PLATFORM_HEADER
+        + f"\nLC-1001,Noon Fashion,Riyadh Park,{start_dd},{end_dd},\n"
+        + f"LC-1002,Noon Fashion,Riyadh Park,{start_dd},{end_dd},\n"
+    )
+    parsed = parse_sales_data_csv(text)
+    store_uploaded_csv("sess-blank-tpl", parsed.rows, "salesdatatemplate.csv", text.encode())
+    result = await csv_validation_node(
+        {
+            "session_id": "sess-blank-tpl",
+            "corrected_fields": {"csv_session_id": "sess-blank-tpl"},
+            "backend_refs": {},
+        }
+    )
+    assert result["workflow_stage"] == "UPLOAD_INTENT"
+    assert "blank template" in result["response_message"]
+    assert "Nothing has been submitted" in result["response_message"]
+    assert result["response_ui"]["verbatim"] is True
+    assert result["response_ui"]["show_file_upload"] is True
+    assert "csv_rows_all" not in (result.get("backend_refs") or {})
+
+    # Re-uploading the same blank template says so instead of repeating.
+    again = await csv_validation_node(
+        {
+            "session_id": "sess-blank-tpl",
+            "corrected_fields": {"csv_session_id": "sess-blank-tpl"},
+            "backend_refs": {},
+            "conversation_history": [
+                {"role": "assistant", "content": result["response_message"]},
+            ],
+        }
+    )
+    assert "still has no sales amounts filled in" in again["response_message"]
+
+
+@pytest.mark.asyncio
+async def test_partially_filled_csv_still_asks_for_missing_amounts() -> None:
+    from app.agents.graph.nodes.sales_data.csv_validation_node import (
+        csv_validation_node,
+    )
+
+    start_dd, end_dd, _, _ = _current_month()
+    text = (
+        PLATFORM_HEADER
+        + f"\nLC-1001,Noon Fashion,Riyadh Park,{start_dd},{end_dd},85000\n"
+        + f"LC-1002,Noon Fashion,Riyadh Park,{start_dd},{end_dd},\n"
+    )
+    parsed = parse_sales_data_csv(text)
+    store_uploaded_csv("sess-partial", parsed.rows, "partial.csv", text.encode())
+    result = await csv_validation_node(
+        {
+            "session_id": "sess-partial",
+            "corrected_fields": {"csv_session_id": "sess-partial"},
+            "backend_refs": {},
+        }
+    )
+    assert result["workflow_stage"] == "CSV_CORRECTION"
+    assert "LC-1002" in result["response_message"]
+
+
+@pytest.mark.asyncio
+async def test_csv_reports_every_problem_in_one_pass() -> None:
+    """Reported file: foreign lease + negative amount + blank amount + one good row."""
+    from unittest.mock import AsyncMock, patch
+
+    from app.agents.graph.nodes.sales_data.csv_validation_node import (
+        csv_validation_node,
+    )
+
+    text = (
+        PLATFORM_HEADER
+        + "\nt0111654,Brand Blooming,Haifa Mall,01-08-2026,31-08-2026,10000"
+        + "\nt0092927,Brand Blooming,Makkah Mall,01-08-2026,31-08-2026,200000"
+        + "\nt0088828,Brand Blooming,Nakheel Mall Dammam,01-08-2026,31-08-2026,-123"
+        + "\nt0112235,Brand Blooming,Tala Mall,01-08-2026,31-08-2026,\n"
+    )
+
+    def _pending(code: str, mall: str) -> dict:
+        return {
+            "lease_code": code, "lease_id": hash(code) % 1000, "status": "PENDING",
+            "sales_period_start": "2026-08-01", "sales_period_end": "2026-08-31",
+            "brand_name": "Brand Blooming", "property_name": mall,
+        }
+
+    backend = [
+        _pending("t0092927", "Makkah Mall"),
+        _pending("t0088828", "Nakheel Mall Dammam"),
+        _pending("t0112235", "Tala Mall"),
+    ]
+    client = AsyncMock()
+    client.get_sales_data = AsyncMock(return_value=backend)
+    parsed = parse_sales_data_csv(text)
+    store_uploaded_csv("sess-mixed", parsed.rows, "salesdatatemplate.csv", text.encode())
+    base = "app.agents.graph.nodes.sales_data.csv_validation_node"
+    with patch(f"{base}.SalesDataApiClient", return_value=client), patch(
+        f"{base}.get_current_bearer_token", return_value="tok"
+    ):
+        result = await csv_validation_node({
+            "session_id": "sess-mixed",
+            "corrected_fields": {"csv_session_id": "sess-mixed"},
+            "backend_refs": {},
+        })
+
+    message = result["response_message"]
+    assert "3 rows need attention" in message
+    assert "**t0111654** is not linked to your current company" in message
+    assert "**t0088828**: the sales amount (-123) must be greater than 0" in message
+    assert "**t0112235**: the sales amount is missing" in message
+    assert "Ready to submit: **t0092927**" in message
+    # A lease problem cannot be fixed by typing amounts — re-upload.
+    assert result["workflow_stage"] == "UPLOAD_INTENT"
+    assert "Nothing has been submitted" in message

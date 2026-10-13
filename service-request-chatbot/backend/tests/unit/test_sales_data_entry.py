@@ -337,7 +337,9 @@ async def test_acknowledge_approval_without_lease_code_still_terminal() -> None:
 
 
 @pytest.mark.asyncio
-async def test_upload_again_routes_to_doc_flow() -> None:
+async def test_upload_again_without_doc_context_restarts_sales_upload() -> None:
+    # Generic "upload again" means the sales data the user was working on —
+    # a document only when in a document step or when the message says so.
     from app.agents.graph.nodes.sales_data.sales_data_entry_node import (
         sales_data_entry_node,
     )
@@ -348,7 +350,7 @@ async def test_upload_again_routes_to_doc_flow() -> None:
             user_message="i want to upload again",
         )
     )
-    assert result["workflow_stage"] == "DOC_SELECT"
+    assert result["workflow_stage"] == "PENDING_MONTHS_CHECK"
     assert result["status"] == "IN_PROGRESS"
 
 

@@ -48,9 +48,11 @@ async def sales_data_confirmation_node(state: ServiceRequestState) -> dict[str, 
     filename: str = backend_refs.get("csv_filename", "upload.csv")
 
     if not csv_rows:
+        message = "No rows to review. Please upload your CSV file."
         return {
             "status": "WAITING_FOR_USER",
-            "response_message": "No rows to review. Please upload your CSV file.",
+            "response_message": message,
+            "response_ui": {"type": "message", "verbatim": True, "message": message},
         }
 
     # Build display rows for the table
@@ -74,12 +76,16 @@ async def sales_data_confirmation_node(state: ServiceRequestState) -> dict[str, 
     row_count = len(display_rows)
     log.info("sales_data_confirmation.built", row_count=row_count, filename=filename)
 
+    # Tenant-facing copy: no batch/rejection mechanics. The old trailing
+    # "*All N rows will be submitted together — if any row has an error, the
+    # entire batch will be rejected.*" read as developer notes, not guidance
+    # for the person uploading; errors are reported per row anyway if the
+    # submit fails, so warning about it up front only caused doubt.
+    rows_label = "row" if row_count == 1 else "rows"
     message_text = (
-        f"✅ **{row_count} row(s) validated** from **{filename}**.\n\n"
-        "Please review the table below. You can edit the **Sales Amount (SAR)** column "
-        "before submitting.\n\n"
-        f"*All {row_count} rows will be submitted together — if any row has an error, "
-        "the entire batch will be rejected.*"
+        f"**{filename}** is ready to submit — **{row_count} {rows_label}**.\n\n"
+        "Review the details below. You can edit the **Sales Amount (SAR)** "
+        "before submitting."
     )
 
     return {
@@ -92,5 +98,9 @@ async def sales_data_confirmation_node(state: ServiceRequestState) -> dict[str, 
             "filename": filename,
             "row_count": row_count,
             "message": message_text,
+            # Deterministic wording — the filename and row count must reach
+            # the user unparaphrased, and an LLM rewrite reintroduced
+            # "Good news!"-style variance on every re-render.
+            "verbatim": True,
         },
     }

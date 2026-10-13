@@ -20,7 +20,12 @@ def finalize_response_ui(
     deco = decorations or {}
 
     if deco.get("suggestions") and not result.get("suggestions"):
-        if result.get("type") not in ("confirmation_card",):
+        # Create confirmation cards keep Confirm/Cancel only (no footer chips).
+        # Review confirmation cards may already carry prompt ``suggestions`` on
+        # the card itself; decorations fill in when the card omitted them.
+        if result.get("type") == "confirmation_card" and result.get("confirmAction"):
+            pass
+        else:
             result["suggestions"] = deco["suggestions"]
 
     doc_req = deco.get("document_requirement")

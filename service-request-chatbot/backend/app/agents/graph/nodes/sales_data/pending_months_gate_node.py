@@ -115,19 +115,67 @@ def _upload_prompt(state: ServiceRequestState, *, lease: str, asked: dict[str, s
     return _upload_prompt_patch(patched_state)
 
 
-def _pending_list_payload(items: list[dict[str, Any]], collected: dict, refs: dict) -> dict[str, Any]:
-    # The chat bubble gets the intro/trailing prose only — the per-lease/month
-    # enumeration is shown once, as chips, by PendingMonthsListCard (below)
-    # rather than repeated in both the bubble and the card.
-    message = format_pending_list_summary()
+# The pending-months chip list used to be capped here (5 leases, and only
+# months inside the 2 most recent distinct pending months) because a tenant
+# with years of PENDING history — one observed lease goes back to 2016 —
+# rendered as a wall of hundreds of chips. That cap made the rest
+# unreachable from chat: a month outside the window could only be uploaded
+# by typing its lease code from memory.
+#
+# The full set is now sent and PendingMonthsListCard pages through it, so
+# the wall-of-chips problem is solved where it belongs (in the UI) without
+# hiding anything. `items` was, and still is, the complete dataset for every
+# routing decision (other_pending_months, leases_with_month,
+# month_pending_on_lease).
+
+
+def _pending_list_payload(
+    items: list[dict[str, Any]],
+    collected: dict,
+    refs: dict,
+    *,
+    scoped_lease: str | None = None,
+) -> dict[str, Any]:
+    """Pending months as clickable chips.
+
+    Every pending lease/month is sent — the card pages through them — rather
+    than truncating to the most recent window. A tenant with a dozen pending
+    leases could otherwise never reach the rest from chat: the months beyond
+    the cap were only reachable by typing a lease code from memory.
+
+    ``scoped_lease`` is set when the user has already named one lease, so the
+    bubble says so instead of repeating the generic "You have pending sales
+    data to submit." — that duplicate tripped the repeat guard in
+    response_generation and the whole turn came back as "I'm not sure what
+    you would like to do next."
+    """
     collected["_pending_items"] = items
     refs["pending_items"] = items
-    grouped = {}
+    grouped: dict[str, list[dict[str, str]]] = {}
     for item in items:
         grouped.setdefault(item["lease_code"], []).append({
             "label": item["label"],
             "year_month": item["year_month"],
         })
+    for months in grouped.values():
+        months.sort(key=lambda m: m["year_month"])
+
+    total_leases = len(grouped)
+    leases = [
+        {"lease_code": lease, "months": months, "more_months": 0}
+        for lease, months in sorted(grouped.items())
+    ]
+    month_count = len(items)
+
+    if scoped_lease:
+        months_label = "month" if month_count == 1 else "months"
+        message = (
+            f"**{scoped_lease}** has **{month_count}** pending {months_label}. "
+            "Tap the one you want to submit for, or attach a CSV."
+        )
+    else:
+        message = format_pending_list_summary()
+
     return {
         "workflow_stage": "AWAITING_PENDING_MONTHS_CHOICE",
         "status": "WAITING_FOR_USER",
@@ -137,10 +185,15 @@ def _pending_list_payload(items: list[dict[str, Any]], collected: dict, refs: di
         "response_message": message,
         "response_ui": {
             "type": "pending_months_list",
-            "leases": [
-                {"lease_code": lease, "months": months}
-                for lease, months in grouped.items()
-            ],
+            "leases": leases,
+            "total_lease_count": total_leases,
+            "total_month_count": month_count,
+            "scoped_lease": scoped_lease or None,
+            # Kept at 0 — the card now pages through the full list instead of
+            # the backend truncating it. Retained so an older frontend build
+            # that still reads them renders nothing extra rather than crashing.
+            "more_lease_count": 0,
+            "older_lease_count": 0,
             "show_file_upload": True,
             "show_template_download": True,
             "verbatim": True,
@@ -202,8 +255,8 @@ def _lease_already_submitted_payload(
     telling the tenant this one is already done.
     """
     note = (
-        f"✅ **{lease}** has no pending sales data right now — "
-        "it looks like it's already been submitted.\n\n"
+        f"**{lease}** has no pending sales data at the moment — "
+        "it appears to have already been submitted.\n\n"
     )
     if others:
         payload = _pending_list_payload(others, collected, refs)
@@ -289,7 +342,7 @@ def _decide(
                 asked=asked_for_lease,
             )
 
-        return _pending_list_payload(scoped, collected, refs)
+        return _pending_list_payload(scoped, collected, refs, scoped_lease=lease)
 
     if not lease:
         matches = leases_with_month(items, asked["year_month"])

@@ -15,6 +15,11 @@ from typing import Any
 
 import structlog
 
+from app.agents.graph.nodes.sales_data.period_utils import (
+    format_year_month,
+    parse_asked_period,
+    year_month_from_start,
+)
 from app.agents.graph.state import ServiceRequestState
 from app.agents.schemas.sales_data_schema import (
     ASK_UPLOAD_COPY,
@@ -32,7 +37,8 @@ from app.observability.decorators import trace_node
 
 log = structlog.get_logger(__name__)
 
-_LEASE_RE = re.compile(r"\bLC[-_]?\d+\b", re.IGNORECASE)
+# LC-1234 (demo) and real platform codes like t0106013 (letters + 5+ digits).
+_LEASE_RE = re.compile(r"\b(?:LC[-_]?\d+|[A-Z]{1,3}\d{5,})\b", re.IGNORECASE)
 _ISO_DATE_RE = re.compile(r"\b(20\d{2}-\d{2}-\d{2})\b")
 
 
@@ -92,6 +98,87 @@ def _requested_need_status(text: str) -> str | None:
     return None
 
 
+_NEED_STATUSES = (
+    "NEED_UPLOAD_SUPPORTING_DOCUMENT",
+    "NEED_UPLOAD_AUDITED_SALES",
+    "NEED_REUPLOAD",
+)
+
+
+def _notification_need_status(notification: dict[str, Any]) -> str | None:
+    """Which request the notification is about — from its key, else its text."""
+    key = str(notification.get("key") or "").strip().upper()
+    for status in _NEED_STATUSES:
+        if key.endswith(status):
+            return status
+    return _requested_need_status(str(notification.get("message") or ""))
+
+
+def _notification_period_prefix(notification: dict[str, Any]) -> str | None:
+    """"2026-09" (or a bare year) the notification names, if any."""
+    period_date = str(notification.get("period_date") or "").strip()
+    if period_date:
+        return period_date
+    hint = str(notification.get("period_hint") or "").strip()
+    asked = parse_asked_period(hint) if hint else None
+    return (asked or {}).get("year_month")
+
+
+def _rows_in_notification_period(
+    rows: list[dict[str, Any]], notification: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """Rows in the month the notification names.
+
+    Notification text often names only the month ("for the month December"),
+    so a guessed year can miss the real row (December 2024). Match the exact
+    year-month first, then the same month in any year, most recent first.
+    """
+    prefix = _notification_period_prefix(notification)
+    if not prefix:
+        return []
+    exact = [r for r in rows if str(r.get("sales_period_start") or "").startswith(prefix)]
+    if exact or len(prefix) < 7:
+        return exact
+    month = prefix[5:7]
+    same_month = [
+        r for r in rows if str(r.get("sales_period_start") or "")[5:7] == month
+    ]
+    return sorted(
+        same_month, key=lambda r: str(r.get("sales_period_start") or ""), reverse=True
+    )
+
+
+def _narrow_to_notification(
+    rows: list[dict[str, Any]], notification: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """Keep only the row(s) this notification is about.
+
+    A lease can have several open requests (e.g. August re-upload and
+    September supporting document); opening the September notification must
+    not list the August one.
+    """
+    narrowed = _rows_in_notification_period(rows, notification) or rows
+    kind = _notification_need_status(notification)
+    if kind:
+        by_kind = [r for r in narrowed if r.get("status") == kind]
+        narrowed = by_kind or narrowed
+    return narrowed
+
+
+def _accept_for_status(status: str) -> str:
+    """Allowed file types for the attach control, per Ask Upload type.
+
+    CSV is offered for every Ask Upload type: NEED_REUPLOAD asks for a
+    corrected **sales data** file (the same CSV the tenant originally
+    uploaded), and the supporting-document / audited-sales evidence a
+    tenant has to hand is just as often a POS or finance CSV export as a
+    PDF. Kept in sync with supporting_doc_upload.py's _ALLOWED_EXTENSIONS,
+    which in turn mirrors cenomi-api's PUT /files allow-list.
+    """
+    del status  # same set for every ask-type
+    return ".csv,.pdf,.png,.jpg,.jpeg,.doc,.xlsx,.zip"
+
+
 def _prompt_for_file(row: dict[str, Any]) -> dict[str, Any]:
     lease_code = row.get("lease_code", "")
     start = row.get("sales_period_start", "")
@@ -113,10 +200,19 @@ def _prompt_for_file(row: dict[str, Any]) -> dict[str, Any]:
     # (after attaching) shows the full detail as an actual table instead of
     # cramming it into this plain-text prompt.
     admin_note = f' Note from the Sales Data team: *"{comment}"*.' if comment else ""
+    if status == "NEED_REUPLOAD":
+        # Corrected sales data can be given either way — a file, or just the
+        # right figure. Only the evidence ask-types truly need a document.
+        how = (
+            "Attach the corrected file below, or simply type the correct "
+            "amount — either works."
+        )
+    else:
+        how = "Attach the file below."
     message = (
         f"Please attach {copy['prompt_verb']} for lease **{lease_code}** "
         f"({start} – {end}).{amt_str}{admin_note}\n\n"
-        "A comment is required — attach the file below."
+        f"{how} You'll be able to add a short note before it's sent."
     )
     return {
         "workflow_stage": "AWAITING_DOC_UPLOAD",
@@ -132,15 +228,23 @@ def _prompt_for_file(row: dict[str, Any]) -> dict[str, Any]:
             "current_status": status,
             "target_status": target,
             "ask_label": ask_label,
+            # Card title and attach-button label — so the tenant sees "Upload
+            # supporting document" / "Upload audited sales" / "Re-upload
+            # sales data" instead of one generic "Attach" for all three.
+            "title": copy["title"],
+            "cta": copy["cta"],
             "sales_amt": amt,
             "comment_text": comment or None,
             "show_file_upload": True,
-            # Kept in sync with supporting_doc_upload.py's _ALLOWED_EXTENSIONS,
-            # which mirrors the live cenomi-api PUT /files allow-list — picking
-            # a format outside this set (e.g. GIF/WEBP/TIFF, which "image/*"
-            # alone would otherwise let through) used to cache fine here and
-            # only fail once forwarded to the real backend.
-            "accept": ".pdf,.png,.jpg,.jpeg,.doc,.xlsx,.zip",
+            # Document formats for NEED_UPLOAD_SUPPORTING_DOCUMENT and
+            # NEED_UPLOAD_AUDITED_SALES; NEED_REUPLOAD (a corrected sales
+            # data file) also accepts .csv. Kept in sync with
+            # supporting_doc_upload.py's _ALLOWED_EXTENSIONS, which mirrors
+            # the live cenomi-api PUT /files allow-list — picking a format
+            # outside this set (e.g. GIF/WEBP/TIFF, which "image/*" alone
+            # would otherwise let through) used to cache fine here and only
+            # fail once forwarded to the real backend.
+            "accept": _accept_for_status(status),
             "message": message,
         },
     }
@@ -194,26 +298,13 @@ def _upload_failure_retry(
 
 
 def _list_rows_prompt(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    # The supporting_doc_select card lists each request as a clickable
+    # option, so the bubble only asks the question (no duplicated list).
     lines = [
-        "I found these submissions that need a file from you "
-        "(sales data, supporting document, or audited sales). "
-        "Which lease should I attach the file to?\n",
+        f"{len(rows)} submissions are waiting for a file from you. "
+        "Which one would you like to upload for?"
     ]
-    ui_rows = []
-    for row in rows:
-        lc = row.get("lease_code", "?")
-        status = row.get("status", "")
-        label = STATUS_LABELS.get(status, status)
-        ask_label = ASK_UPLOAD_LABELS.get(status, "")
-        period = f"{row.get('sales_period_start', '')} – {row.get('sales_period_end', '')}"
-        ask_bit = f" — {ask_label}" if ask_label else ""
-        lines.append(f"  • **{lc}** ({period}){ask_bit} — {label}")
-        ui_rows.append(row)
-    example = next((str(r.get("lease_code") or "") for r in rows if r.get("lease_code")), "")
-    if example:
-        lines.append(f"\nReply with the lease code (e.g. {example}), then attach the PDF.")
-    else:
-        lines.append("\nReply with the lease code, then attach the PDF.")
+    ui_rows = list(rows)
     message = "\n".join(lines)
     return {
         "workflow_stage": "DOC_SELECT",
@@ -228,6 +319,45 @@ def _list_rows_prompt(rows: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _notification_lease_resolved(
+    lease_code: str, lease_rows: list[dict[str, Any]], notification: dict[str, Any]
+) -> dict[str, Any]:
+    """The notification's lease has no open file request any more."""
+    by_start = sorted(lease_rows, key=lambda r: str(r.get("sales_period_start") or ""))
+    in_period = _rows_in_notification_period(by_start, notification)
+    row = in_period[0] if in_period else (by_start[-1] if by_start else None)
+    if row is not None and row.get("lease_code"):
+        lease_code = str(row["lease_code"])
+
+    if row is None:
+        message = (
+            f"Lease **{lease_code}** isn't linked to your current company. "
+            "If it belongs to another of your companies, switch to that "
+            "company and try again; otherwise, please check the lease code."
+        )
+    else:
+        ym = year_month_from_start(str(row.get("sales_period_start") or ""))
+        period = f" for **{format_year_month(ym)}**" if ym else ""
+        status = str(row.get("status") or "")
+        label = STATUS_LABELS.get(status, status or "unknown")
+        message = (
+            f"No action is needed for this notification. Lease **{lease_code}**"
+            f"{period} is already **{label}**.\n\n"
+            "If you meant a different lease, please share the lease code."
+        )
+    return {
+        "workflow_stage": "STALE_NOTIFICATION",
+        "status": "WAITING_FOR_USER",
+        "response_message": message,
+        "response_ui": {
+            "type": "stale_notification",
+            "verbatim": True,
+            "show_listing_link": True,
+            "message": message,
+        },
+    }
+
+
 @trace_node("supporting_doc_upload", "AGENT")
 async def supporting_doc_upload_node(state: ServiceRequestState) -> dict[str, Any]:
     """Select the target NEED_* row and upload the cached file via PUT /files."""
@@ -237,13 +367,16 @@ async def supporting_doc_upload_node(state: ServiceRequestState) -> dict[str, An
     user_message: str = state.get("user_message") or ""
 
     notification = corrected_fields.get("notification_context") or {}
+    lease_from_notification = False
     if isinstance(notification, dict):
         if notification.get("lease_code") and not collected.get("lease_code"):
             collected["lease_code"] = _normalise_lease(str(notification["lease_code"]))
+            lease_from_notification = True
 
     lease_from_msg = _lease_from_text(user_message)
     if lease_from_msg:
         collected["lease_code"] = lease_from_msg
+        lease_from_notification = False
 
     comment_hint = (corrected_fields.get("comment_text") or "").strip()
     if comment_hint:
@@ -257,7 +390,7 @@ async def supporting_doc_upload_node(state: ServiceRequestState) -> dict[str, An
             rows = await client.get_sales_data(disable_pagination=True)
         except Exception:
             log.error("supporting_doc_upload.list_failed", exc_info=True)
-            message = "⚠️ I couldn't load your sales data right now. Please try again."
+            message = "I couldn't load your sales data right now. Please try again."
             return {
                 "status": "WAITING_FOR_USER",
                 "response_message": message,
@@ -273,6 +406,17 @@ async def supporting_doc_upload_node(state: ServiceRequestState) -> dict[str, An
             matching_kind = [r for r in action_rows if r.get("status") == wanted_kind]
             if matching_kind:
                 action_rows = matching_kind
+        if not action_rows and lease_from_notification and collected.get("lease_code"):
+            wanted_n = _normalise_lease(str(collected["lease_code"]))
+            return _notification_lease_resolved(
+                str(collected["lease_code"]),
+                [
+                    r
+                    for r in rows
+                    if _normalise_lease(str(r.get("lease_code", ""))) == wanted_n
+                ],
+                notification,
+            )
         if not action_rows:
             message = (
                 "I couldn't find any submissions that need a file from you. "
@@ -319,6 +463,22 @@ async def supporting_doc_upload_node(state: ServiceRequestState) -> dict[str, An
                         and str(r.get("sales_period_end") or "") == end
                     ]
                 matches = period_matches or matches
+            elif lease_from_notification and len(matches) > 1:
+                matches = _narrow_to_notification(matches, notification)
+            if not matches and lease_from_notification:
+                # Opened from a notification whose request has since been
+                # handled (e.g. re-upload requested, then approved). Report
+                # THIS lease's current status — listing other leases here
+                # made it look like the notification was about them.
+                return _notification_lease_resolved(
+                    str(wanted),
+                    [
+                        r
+                        for r in rows
+                        if _normalise_lease(str(r.get("lease_code", ""))) == wanted_n
+                    ],
+                    notification,
+                )
             if not matches:
                 listed = _list_rows_prompt(action_rows)
                 listed["response_message"] = (
@@ -410,7 +570,7 @@ async def supporting_doc_upload_node(state: ServiceRequestState) -> dict[str, An
             collected,
             backend_refs,
             doc_session_id,
-            f"⚠️ The file upload failed ({exc}). Please attach the file again.",
+            f"The file upload failed ({exc}). Please attach the file again.",
         )
 
     document_id = _document_id_from_upload(result)
@@ -425,7 +585,7 @@ async def supporting_doc_upload_node(state: ServiceRequestState) -> dict[str, An
             collected,
             backend_refs,
             doc_session_id,
-            "⚠️ The file server did not return a document ID. Please attach the file again.",
+            "The file server did not return a document ID. Please attach the file again.",
         )
 
     collected["document_id"] = document_id

@@ -137,6 +137,28 @@ async def validation_node(state: ServiceRequestState) -> dict[str, Any]:
         ]
         # 0-100, and a flag (not a block) when the number goes backwards.
         validation_errors.extend(validate_fitout_progress(collected_data))
+    elif active_agent == "general_inquiry_agent":
+        # GI has its own single-stage schema. Running the handover STAGE_REGISTRY
+        # validation would generate required-field errors for already_handovered,
+        # startDate, endDate, inspection_done_by, etc. — none of which belong to GI.
+        # Those errors would propagate into response_generation_node and cause the LLM
+        # to ask the user for handover-specific information ("whether the handover has
+        # been completed…") even though this is a General Inquiry session.
+        from app.agents.schemas.general_inquiry_schema import (
+            get_missing_fields as gi_get_missing,
+            OPTIONAL_FIELDS as _GI_OPTIONAL,
+        )
+        missing_gi = gi_get_missing(workflow_stage or "CREATE_SR", collected_data)
+        validation_errors = [
+            {
+                "field": f,
+                "validation_type": "required",
+                "status": "FAILED",
+                "message": f"Required field '{f}' is missing.",
+                "blocking": f not in _GI_OPTIONAL,
+            }
+            for f in missing_gi
+        ]
     else:
         validation_errors = _validation_service.validate_draft(
             data=collected_data,
@@ -214,6 +236,10 @@ async def validation_node(state: ServiceRequestState) -> dict[str, Any]:
             )
         elif active_agent == "work_permit_agent":
             from app.agents.schemas.work_permit_schema import (
+                OPTIONAL_FIELDS as _OPTIONAL,
+            )
+        elif active_agent == "general_inquiry_agent":
+            from app.agents.schemas.general_inquiry_schema import (
                 OPTIONAL_FIELDS as _OPTIONAL,
             )
         else:

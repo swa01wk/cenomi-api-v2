@@ -890,7 +890,10 @@ class TestSalesDataRbac:
         from app.agents.graph.nodes.supervisor_node import _sales_data_shortcut
 
         assert _sales_data_shortcut("review sales data", ["TENANT_CSV_UPLOADER"]) is None
-        assert _sales_data_shortcut("show submitted sales", ["TENANT_CSV_UPLOADER"]) is None
+        # A tenant asking about their own submissions gets their status — never
+        # the admin review queue.
+        result = _sales_data_shortcut("show submitted sales", ["TENANT_CSV_UPLOADER"])
+        assert (result or {}).get("intent") != "REVIEW_SALES_DATA"
 
     def test_notification_submit_shortcuts_to_upload_not_status(self) -> None:
         from app.agents.graph.nodes.supervisor_node import _sales_data_shortcut
@@ -992,7 +995,7 @@ class TestSalesDataRbac:
 
         assert result["status"] == "WAITING_FOR_USER"
         assert result["intent"] == "REVIEW_SALES_DATA"
-        assert "couldn't match that to a sales data action" in result["response_message"]
+        assert result["response_message"].startswith("I can help with your sales data")
         assert "does not permit" not in result["response_message"]
         assert "service request" not in result["response_message"].lower()
         assert result.get("active_agent") is None
@@ -1030,7 +1033,7 @@ class TestSalesDataRbac:
 
         assert result["status"] == "WAITING_FOR_USER"
         assert result["intent"] == "PREVIEW_SERVICE_REQUEST"
-        assert "couldn't match that to a sales data action" in result["response_message"]
+        assert result["response_message"].startswith("I can help with your sales data")
         assert "upload a CSV" in result["response_message"]
         assert "service request" not in result["response_message"].lower()
         assert result.get("response_ui", {}).get("verbatim") is True

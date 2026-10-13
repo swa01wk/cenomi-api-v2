@@ -26,6 +26,25 @@ _ACTION_LABELS = {
     "NEED_UPLOAD_AUDITED_SALES": "asked to upload audited sales data",
 }
 
+# Plain sentences for the result bubble. The counted form ("1 submission(s)
+# asked to re-upload sales data: LC-1234.") read like a database log; these
+# say who was told what, in the order a person would say it.
+_RESULT_SENTENCES = {
+    "APPROVED": ("Approved", "the tenant has been notified"),
+    "NEED_REUPLOAD": (
+        "Re-upload requested for",
+        "the tenant has been asked to send corrected sales data",
+    ),
+    "NEED_UPLOAD_SUPPORTING_DOCUMENT": (
+        "Supporting document requested for",
+        "the tenant has been asked to attach one",
+    ),
+    "NEED_UPLOAD_AUDITED_SALES": (
+        "Audited sales data requested for",
+        "the tenant has been asked to attach it",
+    ),
+}
+
 
 def _legacy_targets(collected: dict[str, Any]) -> list[dict[str, Any]]:
     if collected.get("lease_id"):
@@ -52,7 +71,7 @@ async def admin_status_update_node(state: ServiceRequestState) -> dict[str, Any]
     if not action or not targets:
         return {
             "status": "WAITING_FOR_USER",
-            "response_message": "Missing lease ID or action. Please try again.",
+            "response_message": "I couldn't identify the submission to update. Please select it again from the review list.",
         }
 
     payloads: list[dict[str, Any]] = []
@@ -73,7 +92,7 @@ async def admin_status_update_node(state: ServiceRequestState) -> dict[str, Any]
     if not payloads:
         return {
             "status": "WAITING_FOR_USER",
-            "response_message": "Missing lease ID or action. Please try again.",
+            "response_message": "I couldn't identify the submission to update. Please select it again from the review list.",
         }
 
     denied = graph_permission_guard(state, "APPROVE_SALES_DATA")
@@ -91,27 +110,30 @@ async def admin_status_update_node(state: ServiceRequestState) -> dict[str, Any]
     codes_ok = [str(r.get("lease_code") or "") for r in succeeded]
     codes_fail = [str(r.get("lease_code") or "") for r in failed]
 
+    verb, follow_up = _RESULT_SENTENCES.get(
+        action, (f"{label.capitalize()} for", "the tenant has been notified")
+    )
+
     if succeeded and not failed:
         listed = ", ".join(f"**{c}**" for c in codes_ok)
         message = (
-            f"✅ {len(succeeded)} submission(s) **{label}** successfully: {listed}."
-            + (f'\nComment sent to tenant: "{comment}"' if comment else "")
+            f"{verb} {listed} — {follow_up}."
+            + (f'\n\nYour note to the tenant: "{comment}"' if comment else "")
         )
     elif succeeded and failed:
-        fail_bits = []
-        for r in failed:
-            fail_bits.append(
-                f"**{r.get('lease_code')}** ({r.get('error') or 'unknown error'})"
-            )
+        fail_bits = [
+            f"**{r.get('lease_code')}** ({r.get('error') or 'unknown error'})"
+            for r in failed
+        ]
         message = (
-            f"⚠️ Partial update — {label} **{len(succeeded)}** of {len(results)}: "
-            + ", ".join(f"**{c}**" for c in codes_ok)
-            + ".\nFailed: "
+            f"{verb} " + ", ".join(f"**{c}**" for c in codes_ok)
+            + f" — {follow_up}.\n\nI couldn't update "
             + "; ".join(fail_bits)
+            + "."
         )
     else:
         message = (
-            "⚠️ Update failed for "
+            "I couldn't update "
             + ", ".join(f"**{c}**" for c in codes_fail)
             + f": {failed[0].get('error') or 'Unknown error'}."
         )
@@ -142,5 +164,9 @@ async def admin_status_update_node(state: ServiceRequestState) -> dict[str, Any]
             "succeeded": len(succeeded),
             "failed": len(failed),
             "message": message,
+            # Precise, exact-count wording matters here (partial vs full
+            # success, which leases failed and why) — the LLM rewrite would
+            # otherwise vary or soften it on every turn.
+            "verbatim": True,
         },
     }

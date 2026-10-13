@@ -28,12 +28,15 @@ import pytest
 
 from app.agents.services.lease_lookup_service import (
     AbstractLeaseLookupService,
+    HttpGiLeaseLookupService,
     HttpLeaseLookupService,
     LeaseRecord,
     LeaseLookupQuery,
     LeaseLookupResult,
+    MockGiLeaseLookupService,
     MockLeaseLookupService,
     _MOCK_RECORDS,
+    get_gi_lease_lookup_service,
     get_lease_lookup_service,
 )
 from app.core.request_context import reset_current_auth_context, set_current_auth_context
@@ -821,3 +824,42 @@ class TestGetLeaseLookupServiceFactory:
 
     def test_mock_records_are_pre_populated(self) -> None:
         assert len(_MOCK_RECORDS) >= 3
+
+
+class TestGiLeaseLookupService:
+    def test_http_path_is_the_general_inquiry_endpoint(self) -> None:
+        assert HttpGiLeaseLookupService._ENDPOINT_PATH == "/general-inquiry/leases"
+
+    def test_params_drop_purpose_and_property_scope(self) -> None:
+        svc = HttpGiLeaseLookupService.__new__(HttpGiLeaseLookupService)
+        params = svc._build_params(
+            LeaseLookupQuery(
+                lease_code="t0105712",
+                purpose="fitout_confirm",
+                property_ids=[3041],
+            )
+        )
+        assert params == {"lease_code": "t0105712"}
+
+    def test_factory_returns_http_when_base_url_set(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "app.agents.services.lease_lookup_service.settings",
+            MagicMock(
+                lease_tenant_api_base_url="http://api.example.com",
+                lease_lookup_use_mock=False,
+            ),
+        )
+        svc = get_gi_lease_lookup_service()
+        assert isinstance(svc, HttpGiLeaseLookupService)
+
+    def test_factory_returns_mock_when_no_base_url(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "app.agents.services.lease_lookup_service.settings",
+            MagicMock(lease_tenant_api_base_url=None),
+        )
+        svc = get_gi_lease_lookup_service()
+        assert isinstance(svc, MockGiLeaseLookupService)

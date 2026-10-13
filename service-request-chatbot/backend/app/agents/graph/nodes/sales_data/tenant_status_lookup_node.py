@@ -29,21 +29,25 @@ async def tenant_status_lookup_node(state: ServiceRequestState) -> dict[str, Any
         rows = await client.get_sales_data(disable_pagination=True)
     except Exception:
         log.error("tenant_status_lookup.failed", exc_info=True)
+        message = (
+            "I couldn't retrieve your sales data status right now. "
+            "Please try again in a moment or visit the Sales Data listing page."
+        )
         return {
             "status": "WAITING_FOR_USER",
-            "response_message": (
-                "⚠️ I couldn't retrieve your sales data status right now. "
-                "Please try again in a moment or visit the Sales Data listing page."
-            ),
+            "response_message": message,
+            "response_ui": {"type": "message", "verbatim": True, "message": message},
         }
 
     if not rows:
+        message = (
+            "No sales data submissions found for your account. "
+            "Would you like to submit data now?"
+        )
         return {
             "status": "WAITING_FOR_USER",
-            "response_message": (
-                "No sales data submissions found for your account. "
-                "Would you like to submit data now?"
-            ),
+            "response_message": message,
+            "response_ui": {"type": "message", "verbatim": True, "message": message},
         }
 
     # Group by status
@@ -93,7 +97,7 @@ async def tenant_status_lookup_node(state: ServiceRequestState) -> dict[str, Any
         bits = []
         if pending:
             bits.append(
-                f"{len(pending)} pending CSV/manual submission(s)"
+                f"{len(pending)} pending sales data submission(s)"
             )
         if docs:
             bits.append(
@@ -101,7 +105,7 @@ async def tenant_status_lookup_node(state: ServiceRequestState) -> dict[str, Any
                 "(sales data, supporting document, or audited sales)"
             )
         lines.append(
-            f"🔔 **{len(action_required)} submission(s) require your attention:** "
+            f"**{len(action_required)} submission(s) require your attention:** "
             + "; ".join(bits)
             + "."
         )
@@ -118,5 +122,7 @@ async def tenant_status_lookup_node(state: ServiceRequestState) -> dict[str, Any
             "rows": rows,
             "grouped": {k: len(v) for k, v in grouped.items()},
             "message": message,
+            # Exact counts/amounts/lease codes must reach the user unaltered.
+            "verbatim": True,
         },
     }

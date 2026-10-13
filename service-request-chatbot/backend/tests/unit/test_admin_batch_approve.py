@@ -95,6 +95,43 @@ def test_match_targets_filters_same_lease_by_period() -> None:
     assert matched[0]["sales_amt"] == 4000
 
 
+def test_match_targets_single_date_does_not_match_whole_month() -> None:
+    """The per-row Approve button (SalesDataAdminCards.tsx) sends only
+    sales_period_start ("Approve LC-1001 for 2026-08-01") — no end date.
+    Regression guard: a lease with two rows both starting in August (a CSV
+    batch submitted for two different months) must approve only the ONE row
+    matching that exact start date, not every row starting in that month.
+    """
+    rows = [
+        {
+            "lease_id": 1,
+            "lease_code": "LC-1001",
+            "status": "SUBMITTED",
+            "sales_period_start": "2026-08-01",
+            "sales_period_end": "2026-08-31",
+            "sales_amt": 1000,
+        },
+        {
+            "lease_id": 1,
+            "lease_code": "LC-1001",
+            "status": "SUBMITTED",
+            "sales_period_start": "2026-08-15",
+            "sales_period_end": "2026-09-14",
+            "sales_amt": 2000,
+        },
+    ]
+    matched, unmatched = _match_targets(
+        ["LC-1001"],
+        rows,
+        period_start="2026-08-01",
+        period_end=None,
+    )
+    assert unmatched == []
+    assert len(matched) == 1
+    assert matched[0]["sales_period_start"] == "2026-08-01"
+    assert matched[0]["sales_amt"] == 1000
+
+
 def test_select_all_and_mixed_actions() -> None:
     assert _select_all("Approve all")
     assert _select_all("approve both of those")
@@ -128,7 +165,9 @@ async def test_review_sales_data_lists_submitted_rows() -> None:
     codes = [r["lease_code"] for r in result["response_ui"]["rows"]]
     assert codes == ["LC-2001", "LC-2002"]
     assert "LC-1001" not in codes
-    assert "Approve LC-2001" in result["response_message"]
+    # The table below carries the Approve / Ask-upload controls, so the
+    # intro no longer spells out typed commands — it just points at it.
+    assert "awaiting review" in result["response_message"]
     assert "3 submissions" in result["response_message"] and "awaiting review" in result["response_message"]
 
     client = AsyncMock()
@@ -291,6 +330,64 @@ async def test_notification_stale_period_reports_clearly_not_whole_history() -> 
 
     assert "response_ui" not in result
     assert "no longer awaiting review" in result["response_message"]
+
+
+@pytest.mark.asyncio
+async def test_notification_unparsed_period_with_multi_row_lease_asks_instead_of_showing_all() -> None:
+    """A CSV batch submitted for two different months on the same lease, with
+    a notification whose period text doesn't match any of extract_period_date's
+    known shapes: notification_period_date comes back empty, so `if
+    notification_period_date:` never fires — this must not silently fall
+    through to showing/approving BOTH months just because one notification's
+    period text couldn't be parsed.
+    """
+    rows = [
+        {
+            "lease_id": 10,
+            "lease_code": "t0106099",
+            "status": "SUBMITTED",
+            "sales_period_start": "2026-07-01",
+            "sales_period_end": "2026-07-31",
+            "sales_amt": 1000.0,
+        },
+        {
+            "lease_id": 10,
+            "lease_code": "t0106099",
+            "status": "SUBMITTED",
+            "sales_period_start": "2026-08-01",
+            "sales_period_end": "2026-08-31",
+            "sales_amt": 2000.0,
+        },
+    ]
+    client = AsyncMock()
+    client.get_sales_data = AsyncMock(return_value=rows)
+    with (
+        patch(
+            "app.agents.graph.nodes.sales_data.admin_review_entry_node.get_current_bearer_token",
+            return_value="tok",
+        ),
+        patch(
+            "app.agents.graph.nodes.sales_data.admin_review_entry_node.SalesDataApiClient",
+            return_value=client,
+        ),
+    ):
+        result = await admin_review_entry_node(
+            _state(
+                intent="REVIEW_SALES_DATA",
+                user_message="",
+                backend_refs={
+                    "notification_context": {
+                        "lease_code": "t0106099",
+                        # No period_date at all — simulates extract_period_date
+                        # returning None for an unrecognised notification shape.
+                    }
+                },
+            )
+        )
+
+    assert "response_ui" not in result
+    assert "2 submissions" in result["response_message"]
+    assert "t0106099" in result["response_message"]
 
 
 @pytest.mark.asyncio
@@ -468,3 +565,39 @@ async def test_review_list_includes_uploaded_supporting_and_audited() -> None:
     assert "3 submissions" in result["response_message"] and "awaiting review" in result["response_message"]
     assert any(r.get("property_name") == "Riyadh Park" for r in ui_rows)
     assert any(r.get("company_name") == "Centrepoint Co" for r in ui_rows)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("override", ["confirm_admin_action", "cancel_admin"])
+async def test_stale_confirm_or_cancel_after_completion_is_a_no_op(override) -> None:
+    from app.agents.graph.nodes.sales_data.admin_review_entry_node import (
+        admin_review_entry_node,
+    )
+
+    result = await admin_review_entry_node(
+        {
+            "intent": "REVIEW_SALES_DATA",
+            "user_message": "",
+            "action_override": override,
+            "collected_data": {},
+            "backend_refs": {},
+            "corrected_fields": {},
+        }
+    )
+    assert result.get("workflow_stage") == "ADMIN_REVIEW"
+    assert "no pending action" in result["response_message"]
+    assert result["response_ui"]["verbatim"] is True
+    assert result.get("confirmation_status") is None
+
+
+def test_review_window_matches_the_admin_page_filter() -> None:
+    from datetime import date
+
+    from app.agents.graph.nodes.sales_data.admin_review_entry_node import (
+        _review_window,
+        _review_window_label,
+    )
+
+    # Same as the page: getDateBeforeNDays(60) → today.
+    assert _review_window(date(2026, 9, 29)) == ("2026-07-31", "2026-09-29")
+    assert _review_window_label(date(2026, 9, 29)) == "2026-07-31 to 2026-09-29"

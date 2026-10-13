@@ -22,6 +22,7 @@ from app.agents.schemas.work_permit_schema import (
     in_progress_roles,
     map_wp_operations_to_stage,
 )
+from app.agents.services.conversation_state_service import PENDING_REVIEW_REFS
 from app.agents.services.permission_service import PermissionDeniedError, PermissionService
 from app.agents.services.service_request_api_service import get_service_request_api_service
 from app.observability.analytics_constants import (
@@ -40,6 +41,16 @@ logger = logging.getLogger(__name__)
 @trace_node("work_permit_api_submission", "TOOL")
 async def work_permit_api_submission_node(state: ServiceRequestState) -> dict[str, Any]:
     """Submit the Work Permit create POST or review PATCH."""
+    out = await _submit(state)
+    if (state.get("workflow_stage") or "") in WP_REVIEW_STAGES:
+        # The review turn's decorations (promote_preview, review chips) are
+        # still in state; left there, finalize swaps this reply — success or
+        # refusal — for the full SR preview card.
+        out["response_decorations"] = {}
+    return out
+
+
+async def _submit(state: ServiceRequestState) -> dict[str, Any]:
     workflow_stage: str = state.get("workflow_stage") or ""
     is_review = workflow_stage in WP_REVIEW_STAGES
     backend_refs: dict[str, Any] = dict(state.get("backend_refs") or {})
@@ -103,7 +114,17 @@ async def work_permit_api_submission_node(state: ServiceRequestState) -> dict[st
 
     # ── 4. API call ────────────────────────────────────────────────────────
     svc = get_service_request_api_service()
-    if is_review:
+    submit_mode = str(backend_refs.get("wp_submit_mode") or "patch")
+    if is_review and submit_mode == "work_permit_status":
+        result = await svc.update_work_permit_status(payload)
+        await record_sr_api_call(
+            state,
+            tool_name="service_request_api.work_permit.status",
+            tool_type=TOOL_TYPE_SR_PATCH,
+            request_payload=payload,
+            result=result,
+        )
+    elif is_review:
         sr_id = backend_refs.get("sr_id", "")
         result = await svc.patch_service_request(sr_id, payload)
         await record_sr_api_call(
@@ -173,7 +194,13 @@ async def work_permit_api_submission_node(state: ServiceRequestState) -> dict[st
             flow=FLOW_WORK_PERMIT,
             stage=workflow_stage,
         )
-        return await _review_result(svc, backend_refs, payload, result.sr_id)
+        out = await _review_result(svc, backend_refs, payload, result.sr_id)
+        # The decision is spent; the next hop must collect its own comment.
+        refs = out.get("backend_refs")
+        if isinstance(refs, dict):
+            for key in ("wp_review_comment", "wp_action", *PENDING_REVIEW_REFS):
+                refs.pop(key, None)
+        return out
 
     return await _create_result(svc, backend_refs, payload, result.sr_id)
 
@@ -236,8 +263,10 @@ async def _review_result(
     payload: dict[str, Any],
     sr_id: str,
 ) -> dict[str, Any]:
-    """Map PATCH outcome to the next chatbot stage (GET when possible)."""
+    """Map PATCH / status outcome to the next chatbot stage (GET when possible)."""
     submitted = (payload.get("status") or "").upper()
+    wp_action = str(backend_refs.get("wp_action") or "")
+
     if submitted == "REJECTED":
         msg = f"Work Permit SR **{sr_id}** has been rejected."
         return {
@@ -252,6 +281,58 @@ async def _review_result(
                 "message": msg,
                 "workflow_complete": True,
                 "workflow_stage": WP_REJECTED,
+            },
+        }
+
+    if submitted == "ACTION_REQUIRED" or wp_action == "action_required":
+        msg = (
+            f"I've asked for more information on Work Permit SR **{sr_id}**. "
+            "The requester will be notified."
+        )
+        return {
+            "backend_refs": backend_refs,
+            "status": "SUBMITTED",
+            "workflow_stage": WP_CREATED,
+            "confirmation_status": None,
+            "confirmation_required": False,
+            "response_message": msg,
+            "response_ui": {
+                "type": "message",
+                "message": msg,
+                "stage_complete": True,
+                "workflow_stage": WP_CREATED,
+            },
+        }
+
+    if submitted == "REASSIGN_TO" or wp_action == "assign_to":
+        role = str(payload.get("assign_to") or backend_refs.get("wp_assign_to") or "another reviewer")
+        msg = f"Work Permit SR **{sr_id}** has been assigned to **{role}**."
+        return {
+            "backend_refs": backend_refs,
+            "status": "SUBMITTED",
+            "confirmation_status": None,
+            "confirmation_required": False,
+            "response_message": msg,
+            "response_ui": {
+                "type": "message",
+                "message": msg,
+                "stage_complete": True,
+            },
+        }
+
+    if submitted in {"EXTEND", "CANCEL"} or wp_action in {"extend", "cancel_permit"}:
+        verb = "extension approved" if submitted == "EXTEND" or wp_action == "extend" else "cancellation confirmed"
+        msg = f"Work Permit SR **{sr_id}** — {verb}."
+        return {
+            "backend_refs": backend_refs,
+            "status": "SUBMITTED",
+            "confirmation_status": None,
+            "confirmation_required": False,
+            "response_message": msg,
+            "response_ui": {
+                "type": "message",
+                "message": msg,
+                "stage_complete": True,
             },
         }
 
@@ -286,8 +367,6 @@ async def _review_result(
             "workflow_stage": next_stage,
             "confirmation_status": None,
             "confirmation_required": False,
-            # Keep agent so reopen/sync stays on WP; clear confirmation so the
-            # next hop card is only built for roles that can act (see confirmation).
             "active_agent": "work_permit_agent",
             "response_message": msg,
             "response_ui": {

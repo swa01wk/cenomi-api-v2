@@ -11,6 +11,7 @@ Intent taxonomy follows the agent taxonomy:
   - rdd_fitout_end_agent         : fitout end confirmation (FIT_OUT_CONFIRM_END)
   - rdd_trading_confirmation_agent : trading confirmation (FIT_OUT_CONFIRM_TRADING)
   - work_permit_agent            : work permit SR creation + subtype review hops
+  - general_inquiry_agent        : general inquiry SR creation (INQUIRY / GENERAL)
 
 ``CONFIDENCE_THRESHOLD`` is the minimum confidence below which the supervisor
 requests clarification instead of routing.
@@ -262,6 +263,22 @@ VALID INTENTS
       NTF- ID or viewing_notification_id with a deictic phrase.
       Routing: target_agent = "notification_agent"
 
+  CREATE_GENERAL_INQUIRY
+      User wants to raise a general inquiry service request — a free-text
+      question directed at mall management about service charges, lease terms,
+      procedures, or any other general topic that requires a formal tracked response.
+      Keywords: general inquiry, raise inquiry, submit inquiry, ask management,
+                service charge question, "I have a question for management",
+                "general question", "raise a question", "inquiry about",
+                "I need to ask about", "general request"
+      Do NOT use this for handover, fitout, work permit, or sales data requests.
+      Do NOT confuse with ASK_HELP — ASK_HELP is for platform how-to questions
+      answered inline; CREATE_GENERAL_INQUIRY raises a formal tracked SR.
+      Routing:
+        service_category = "INQUIRY"
+        sub_category     = "GENERAL"
+        target_agent     = "general_inquiry_agent"
+
   UNKNOWN
       The intent is unclear or ambiguous AND does not fit ASK_HELP.
       Use this ONLY when the message is clearly not a question or an SR action.
@@ -376,6 +393,11 @@ When intent = APPROVE_SALES_DATA:
     service_category = "SALES_DATA"
     sub_category     = "ADMIN_REVIEW"
     target_agent     = "sales_data_agent"
+
+When intent = CREATE_GENERAL_INQUIRY:
+    service_category = "INQUIRY"
+    sub_category     = "GENERAL"
+    target_agent     = "general_inquiry_agent"
 
 When intent = CHECK_SERVICE_REQUEST_STATUS:
     service_category = null

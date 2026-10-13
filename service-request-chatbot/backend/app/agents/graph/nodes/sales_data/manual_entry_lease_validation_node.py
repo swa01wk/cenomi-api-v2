@@ -10,6 +10,10 @@ from typing import Any
 
 import structlog
 
+from app.agents.graph.nodes.sales_data.period_utils import (
+    format_year_month,
+    year_month_from_start,
+)
 from app.agents.graph.state import ServiceRequestState
 from app.agents.services.sales_data_api_client import (
     SalesDataApiClient,
@@ -19,6 +23,44 @@ from app.core.request_context import get_current_bearer_token
 from app.observability.decorators import trace_node
 
 log = structlog.get_logger(__name__)
+
+_OPEN_STATUSES = ("PENDING", "NEED_REUPLOAD")
+_MAX_SUGGESTIONS = 3
+
+
+def _norm(code: str) -> str:
+    return str(code or "").replace("-", "").replace(" ", "").upper()
+
+
+def _reply(message: str, collected: dict) -> dict[str, Any]:
+    """Keep what the user already gave; the next reply only has to fix one thing."""
+    return {
+        "workflow_stage": "MANUAL_ENTRY",
+        "status": "WAITING_FOR_USER",
+        "collected_data": collected,
+        "response_message": message,
+        "response_ui": {"type": "message", "verbatim": True, "message": message},
+    }
+
+
+def _open_months(rows: list[dict[str, Any]], lease_code: str) -> list[str]:
+    months = {
+        ym
+        for r in rows
+        if _norm(r.get("lease_code")) == _norm(lease_code)
+        and str(r.get("status") or "").upper() in _OPEN_STATUSES
+        and (ym := year_month_from_start(str(r.get("sales_period_start") or "")))
+    }
+    return sorted(months)
+
+
+def _open_leases(rows: list[dict[str, Any]]) -> list[str]:
+    seen: list[str] = []
+    for r in rows:
+        code = str(r.get("lease_code") or "")
+        if code and code not in seen and str(r.get("status") or "").upper() in _OPEN_STATUSES:
+            seen.append(code)
+    return seen[:_MAX_SUGGESTIONS]
 
 
 @trace_node("manual_entry_lease_validation", "AGENT")
@@ -51,13 +93,12 @@ async def manual_entry_lease_validation_node(state: ServiceRequestState) -> dict
         # failure doesn't all collapse into the same unhelpful generic message.
         detail = f" _(Dev detail: {type(exc).__name__}: {exc})_" if is_dev else ""
         log.error("manual_entry_lease_validation.get_failed", api_url=api_url, error=str(exc))
-        return {
-            "status": "WAITING_FOR_USER",
-            "response_message": (
-                "⚠️ I couldn't reach the sales data service right now. "
-                "Please try again in a moment." + detail
-            ),
-        }
+        return _reply(
+            "I couldn't reach the sales data service, so nothing has been "
+            "submitted. Your details are saved; please say **try again** in a "
+            "moment." + detail,
+            collected,
+        )
 
     row = {"lease_code": lease_code, "sales_period_start": start, "sales_period_end": end}
     result = partition_rows_by_lease_access([row], backend_rows)
@@ -67,26 +108,40 @@ async def manual_entry_lease_validation_node(state: ServiceRequestState) -> dict
     valid = result["valid"]
 
     if no_access:
-        return {
-            "workflow_stage": "MANUAL_ENTRY",
-            "status": "WAITING_FOR_USER",
-            "response_message": (
-                f"❌ You don't have access to lease **{lease_code}**. "
-                "Please check the lease code or contact your property manager."
-            ),
-        }
+        collected.pop("lease_code", None)
+        suggestions = _open_leases(backend_rows)
+        message = f"Lease **{lease_code}** isn't linked to your current company."
+        if suggestions:
+            message += (
+                " Leases with pending sales data include "
+                + ", ".join(f"**{c}**" for c in suggestions)
+                + ". Which lease is this for?"
+            )
+        else:
+            message += " Please check the lease code and share it again."
+        return _reply(message, collected)
 
     if no_pending:
-        return {
-            "workflow_stage": "MANUAL_ENTRY",
-            "status": "WAITING_FOR_USER",
-            "response_message": (
-                f"⚠️ No pending submission found for lease **{lease_code}** "
-                f"in the period {start} – {end}.\n\n"
-                "This data may have already been submitted, or the period may not match "
-                "your template. Please check the Sales Data listing page."
-            ),
-        }
+        asked = year_month_from_start(start)
+        asked_label = format_year_month(asked) if asked else f"{start} – {end}"
+        open_months = _open_months(backend_rows, lease_code)
+        collected.pop("sales_period_start", None)
+        collected.pop("sales_period_end", None)
+        if open_months:
+            labels = ", ".join(f"**{format_year_month(m)}**" for m in open_months[-4:])
+            message = (
+                f"Lease **{lease_code}** has no pending submission for **{asked_label}**; "
+                "it may already have been submitted. "
+                f"Pending months for this lease: {labels}. Which month is this for?"
+            )
+        else:
+            message = (
+                f"Lease **{lease_code}** has no pending sales data at the moment, so "
+                f"there is nothing to submit for **{asked_label}**. If you meant a "
+                "different lease, please share the lease code."
+            )
+            collected.pop("lease_code", None)
+        return _reply(message, collected)
 
     # Valid — enrich with lease_id from backend row
     enriched = valid[0]
