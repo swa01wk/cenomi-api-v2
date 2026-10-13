@@ -61,6 +61,7 @@ from tests.eval.scenarios import (
     TIER6H_TRADING_HAPPY,
     TIER6I_TRADING_EDGE,
     TIER6J_TRADING_BATTLE,
+    TIER6K_PROGRESS,
     TIER8_SCENARIOS,
     TIER9_SCENARIOS,
     TIER9_NOTIFICATION_SCENARIOS,
@@ -84,6 +85,8 @@ _TIER_MAP: dict[int | str, list[Scenario]] = {
     "6h": TIER6H_TRADING_HAPPY,
     "6i": TIER6I_TRADING_EDGE,
     "6j": TIER6J_TRADING_BATTLE,
+    # Fitout Progress — create side only; the approve side needs a seeded SR.
+    "6k": TIER6K_PROGRESS,
     8: TIER8_SCENARIOS,
     # Work Permit create / RBAC (item 3638). ``./run_agent_eval.sh --tier 9``.
     9: TIER9_SCENARIOS,

@@ -712,6 +712,9 @@ class ChatOrchestrationService:
         # to build one unconditionally whenever collected_data was non-empty.
         is_handover_agent = result_state.get("active_agent") == "rdd_handover_agent"
         is_work_permit_agent = result_state.get("active_agent") == "work_permit_agent"
+        fitout_preview_fields = _fitout_draft_preview_fields(
+            result_state.get("active_agent"), collected
+        )
         draft_preview: dict[str, Any] | None = None
         if is_handover_agent and (collected or cleared_fields):
             from app.agents.graph.nodes.handover.preview_node import _fields_from_collected
@@ -737,6 +740,23 @@ class ChatOrchestrationService:
                 "status": "SUBMITTED" if sr_id else "DRAFT",
                 "isSubmitted": bool(sr_id),
                 "fields": wp_draft_fields_from_collected(collected),
+            }
+            if cleared_fields:
+                draft_preview["cleared_fields"] = cleared_fields
+        elif fitout_preview_fields:
+            # The fit-out agents never had a draft_preview, and it is the only
+            # channel that carries the chat's fields to the browser — the form
+            # sync applies what it merges. A lease picked from the chip still
+            # filled the form, because the frontend merges that row itself; a
+            # lease the user *typed* reached the backend and stopped there, so
+            # company / brand / mall stayed blank on all four fit-out forms.
+            draft_preview = {
+                "type": "sr_preview_card",
+                "requestType": "Fitout Service Request",
+                "srId": sr_id,
+                "status": "SUBMITTED" if sr_id else "DRAFT",
+                "isSubmitted": bool(sr_id),
+                "fields": fitout_preview_fields,
             }
             if cleared_fields:
                 draft_preview["cleared_fields"] = cleared_fields
@@ -912,3 +932,64 @@ def parse_session_id(session_id: str | None) -> UUID | None:
     except ValueError:
         log.warning("chat.invalid_session_id_ignored", raw=session_id)
         return None
+
+
+# ── Fit-out draft preview ────────────────────────────────────────────────────
+
+_FITOUT_AGENTS_WITH_PREVIEW: frozenset[str] = frozenset(
+    {
+        "rdd_fitout_start_agent",
+        "rdd_fitout_end_agent",
+        "rdd_trading_confirmation_agent",
+        "rdd_fitout_progress_agent",
+    }
+)
+
+# The lease block every fit-out form shows, plus the ids it submits with. The
+# ids land in hidden fields, never a display box: the browser writes
+# tenant_profile_id into ``company_name`` (the form's id field, as on handover)
+# while these forms display the name from ``company``.
+_FITOUT_LEASE_PREVIEW_KEYS: tuple[tuple[str, str], ...] = (
+    ("lease_brand_mall", "Lease"),
+    ("lease_code", "Lease Code"),
+    ("company", "Company Name"),
+    ("brand", "Brand Name"),
+    ("mall", "Mall Name"),
+    # The ids the form submits with. A tapped lease chip brings them in its
+    # lease card; a typed lease code has no card, so without these the form
+    # kept the names only and Submit on it failed with "should provide a valid
+    # tenant profile id" (Fitout Progress, open-form mode).
+    ("tenant_profile_id", "Tenant Profile Id"),
+    ("lease_id", "Lease Id"),
+    ("contract_id", "Contract Id"),
+    ("property_id", "Property Id"),
+    ("brand_id", "Brand Id"),
+)
+
+# Fitout Progress's own fields. Limited to this agent on purpose: the three
+# confirmations already sync their dates and yes/no radios another way, and
+# adding them here would change behaviour nobody reported as broken.
+_FITOUT_PROGRESS_PREVIEW_KEYS: tuple[tuple[str, str], ...] = (
+    ("fitout_start_date", "Actual Fitout Start Date"),
+    ("fitout_end_date", "Original Fitout End Date"),
+    ("fitout_progress_percentage", "Fitout Progress %"),
+    ("comment", "Comments"),
+)
+
+
+def _fitout_draft_preview_fields(
+    active_agent: Any, collected: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """Rows the browser merges into the draft for a fit-out agent's form."""
+    if active_agent not in _FITOUT_AGENTS_WITH_PREVIEW or not collected:
+        return []
+    keys = list(_FITOUT_LEASE_PREVIEW_KEYS)
+    if active_agent == "rdd_fitout_progress_agent":
+        keys.extend(_FITOUT_PROGRESS_PREVIEW_KEYS)
+    rows: list[dict[str, Any]] = []
+    for key, label in keys:
+        value = collected.get(key)
+        if value is None or value == "" or value == []:
+            continue
+        rows.append({"key": key, "label": label, "value": value})
+    return rows

@@ -72,6 +72,11 @@ class LeaseRecord(BaseModel):
     actual_fitout_start_date: str = ""
     actual_fitout_end_date: str = ""
     actual_trading_date: str = ""
+    # Percentage currently recorded on the lease (``leases.fitout_progress``),
+    # as a plain number string; empty when none is recorded. The Fitout Progress
+    # agent shows it as context and floors its suggestion with it — progress
+    # does not go backwards.
+    fitout_progress: str = ""
 
     @model_validator(mode="before")
     @classmethod
@@ -468,6 +473,31 @@ _MOCK_LEASES: list[dict[str, Any]] = [
         "city": "Jeddah",
         "company_name": "Nike Saudi Arabia LLC",
         "lease_brand_mall": "t0301144 - Nike - Mall of Arabia",
+    },
+    {
+        # Fit-out under way: a started, unended window with a percentage already
+        # recorded, which is what the Fitout Progress flow needs to show its
+        # suggestion and its floor. Kept as its own lease rather than added to
+        # t0105712, whose bare milestone dates the FOS/END/TRADING prompts read.
+        # The window is wide on purpose — the elapsed percentage moves with the
+        # calendar, so eval assertions check for a question, never a number.
+        "lease_code": "t0512099",
+        "lease_id": 90218,
+        "contract_id": 90218,
+        "brand": "Levi's",
+        "brand_id": 401,
+        "mall": "Mall of Dhahran",
+        "property_id": 5107,
+        "tenant_profile_id": 318,
+        "unit_codes": ["GF018"],
+        "contracted_area": 260,
+        "city": "Dhahran",
+        "company_name": "Levi Strauss Arabia Ltd",
+        "lease_brand_mall": "t0512099 - Levi's - Mall of Dhahran",
+        "actual_shop_handover_date": "2026-01-05",
+        "actual_fitout_start_date": "2026-01-15",
+        "base_fitout_end_date": "2027-06-30",
+        "fitout_progress": "38",
     },
     {
         "lease_code": "t0419977",

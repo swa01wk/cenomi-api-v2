@@ -58,6 +58,11 @@ SERVICE_REQUEST_AGENT_REGISTRY: dict[str, dict[str, AgentConfig]] = {
             "display_name": "RDD Trading Confirmation Agent",
             "schema_key": "fitout_confirm_schema",
         },
+        "FITOUT_PROGRESS": {
+            "agent_name": "rdd_fitout_progress_agent",
+            "display_name": "RDD Fitout Progress Agent",
+            "schema_key": "fitout_progress_schema",
+        },
     },
     "WORK_PERMIT": {
         # Legacy registry key used by supervisor CREATE before subtype is known.

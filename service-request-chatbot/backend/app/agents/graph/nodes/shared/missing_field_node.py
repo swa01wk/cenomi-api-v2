@@ -27,6 +27,10 @@ from app.agents.registries.workflow_config import get_workflow_config
 from app.agents.schemas.fitout_confirm_schema import (
     get_missing_fields as fitout_confirm_get_missing_fields,
 )
+from app.agents.schemas.fitout_progress_schema import (
+    PROGRESS_FIELD as FITOUT_PROGRESS_FIELD,
+    get_missing_fields as fitout_progress_get_missing_fields,
+)
 from app.agents.schemas.handover_schema import (
     HANDED_OVER_FIELD_GROUP,
     INSPECTION_FIELD_GROUP,
@@ -40,6 +44,10 @@ from app.agents.schemas.handover_schema import (
 )
 from app.agents.services import guided_tour_service
 from app.agents.services.display_formatters import format_field_display_value
+from app.agents.services.fitout_progress_suggestions_service import (
+    build_fitout_progress_decorations,
+    build_progress_question,
+)
 from app.agents.services.inspection_suggestions_service import (
     build_inspection_decorations,
     parse_date as _parse_inspection_date,
@@ -220,6 +228,8 @@ def _carry_sr_decorations(
             carried[key] = value
     return carried
 
+
+FITOUT_PROGRESS_AGENT = "rdd_fitout_progress_agent"
 
 _FITOUT_CONFIRM_AGENTS: frozenset[str] = frozenset({
     "rdd_fitout_start_agent",
@@ -1153,8 +1163,15 @@ async def _ask_next_missing_field(state: ServiceRequestState) -> dict[str, Any]:
     workflow_cfg = get_workflow_config(active_agent)
 
     # Gracefully degrade if an unrecognised stage arrives — but only for agents
-    # that use the handover STAGE_REGISTRY (fitout agents have their own stages).
-    if active_agent not in _FITOUT_CONFIRM_AGENTS and workflow_stage not in STAGE_REGISTRY:
+    # that use the handover STAGE_REGISTRY (the fit-out agents have their own
+    # stages). Fitout progress must be exempt for the same reason: its
+    # APPROVE_SR is not in that registry, and rewriting it to CREATE_SR asked
+    # the approver to identify the lease of the SR they already had open.
+    if (
+        active_agent not in _FITOUT_CONFIRM_AGENTS
+        and active_agent != FITOUT_PROGRESS_AGENT
+        and workflow_stage not in STAGE_REGISTRY
+    ):
         workflow_stage = "CREATE_SR"
 
     field_questions: dict[str, str] = (
@@ -1260,6 +1277,14 @@ async def _ask_next_missing_field(state: ServiceRequestState) -> dict[str, Any]:
             "correction_pending_field": None,
         }
         decorations = _CORRECTION_FIELD_DECORATIONS.get(correction_pending_field)
+        if correction_pending_field == FITOUT_PROGRESS_FIELD:
+            # Computed from the lease's own fit-out window, so it cannot live in
+            # the static table above — and a correction re-ask has to offer the
+            # same chips as the first ask, or the user loses the suggestion
+            # precisely when they are trying to change the number.
+            decorations = build_fitout_progress_decorations(
+                collected, stage=workflow_stage or "CREATE_SR"
+            )
         if decorations:
             correction_update["response_decorations"] = decorations
         return correction_update
@@ -1279,6 +1304,10 @@ async def _ask_next_missing_field(state: ServiceRequestState) -> dict[str, Any]:
     elif active_agent in _FITOUT_CONFIRM_AGENTS:
         sub_category: str = state.get("sub_category") or ""  # type: ignore[assignment]
         all_missing = fitout_confirm_get_missing_fields(workflow_stage, sub_category, collected)
+    elif active_agent == FITOUT_PROGRESS_AGENT:
+        all_missing = fitout_progress_get_missing_fields(
+            workflow_stage or "CREATE_SR", collected
+        )
     elif (active_agent or "") == "general_inquiry_agent":
         from app.agents.schemas.general_inquiry_schema import get_missing_fields as gi_get_missing
         all_missing = gi_get_missing(workflow_stage or "CREATE_SR", collected)
@@ -1584,6 +1613,22 @@ async def _ask_next_missing_field(state: ServiceRequestState) -> dict[str, Any]:
             )
             verbatim_question = True
 
+        # Fitout progress asks one thing, and the question carries the fit-out
+        # window and the elapsed-time suggestion the chips below offer. Built
+        # here rather than left to the LLM rewrite for the same reason as the
+        # status question above: field_questions holds an instruction *about*
+        # asking, and when that rewrite does not land the chips render with no
+        # question above them.
+        elif (
+            active_agent == FITOUT_PROGRESS_AGENT
+            and next_field == FITOUT_PROGRESS_FIELD
+        ):
+            next_question = build_progress_question(
+                collected,
+                stage=workflow_stage or "CREATE_SR",
+                sr_id=str((state.get("backend_refs") or {}).get("sr_id") or "") or None,
+            )
+            verbatim_question = True
     # General Inquiry questions are already user-facing. The response LLM is
     # primed for handover ("Please share a short title for this handover
     # request"), so leaving these to be rewritten swaps "inquiry" for
@@ -1698,6 +1743,14 @@ async def _ask_next_missing_field(state: ServiceRequestState) -> dict[str, Any]:
                     ],
                 }
             }
+        elif next_field == FITOUT_PROGRESS_FIELD:
+            # Value-only chips: the number arrives as the user's own message and
+            # ``active_field`` binds it to this field, which is the same path a
+            # typed percentage takes (fitout_progress_entry_node resolves both
+            # without an extraction round-trip).
+            updates["response_decorations"] = build_fitout_progress_decorations(
+                collected, stage=workflow_stage or "CREATE_SR"
+            )
         elif next_field in (
             "fitout_start_done",
             "fitout_complete_done",

@@ -450,6 +450,47 @@ def _fitout_confirm_backend_fields() -> frozenset[str]:
     )
 
 
+def _build_fitout_progress_config() -> WorkflowConfig:
+    """Build the ``WorkflowConfig`` for the RDD Fitout Progress Agent.
+
+    Handles FITOUT_PROGRESS — one sub-category, one human field, two stages
+    (CREATE_SR → POST, APPROVE_SR → PATCH).
+
+    ``guided_tour_gate`` is left on, like every other workflow. It was off at
+    first — a "shall I walk you through it?" preamble in front of a single
+    question looked like noise — but the form pre-fills that question's field
+    with its own computed default, so "leave the form open and you can type
+    straight into it" is a real choice here, and the answer is what decides
+    whether the field is locked or editable while the assistant asks.
+    """
+    from app.agents.prompts.fitout_progress_extraction_prompt import (
+        FITOUT_PROGRESS_EXTRACTION_SYSTEM_PROMPT,
+        FITOUT_PROGRESS_FIELD_QUESTIONS,
+    )
+    from app.agents.schemas.fitout_progress_schema import (
+        BACKEND_DERIVED_FIELDS as FITOUT_PROGRESS_BACKEND_FIELDS,
+    )
+
+    return WorkflowConfig(
+        agent_name="rdd_fitout_progress_agent",
+        extraction_prompt=FITOUT_PROGRESS_EXTRACTION_SYSTEM_PROMPT,
+        field_questions=dict(FITOUT_PROGRESS_FIELD_QUESTIONS),
+        stage_sync_nodes={"APPROVE_SR": "fitout_progress_entry"},
+        collection_stages=frozenset({"CREATE_SR", "APPROVE_SR"}),
+        confirmation_nodes={
+            "CREATE_SR": "fitout_progress_confirmation",
+            "APPROVE_SR": "fitout_progress_confirmation",
+        },
+        # No CANCELLED: the platform workflow has no cancel action for this
+        # sub-category, so there is no such stage to reach.
+        terminal_stages=frozenset({"SR_CREATED", "SR_APPROVED", "SR_REJECTED"}),
+        backend_fields=FITOUT_PROGRESS_BACKEND_FIELDS,
+        auto_generated_fields=frozenset({"title"}),
+        lease_trigger_fields=("lease_code", "company", "lease_brand_mall"),
+        action_intents=frozenset({"CREATE_FITOUT_PROGRESS", "APPROVE_FITOUT_PROGRESS"}),
+    )
+
+
 def _build_fitout_start_config() -> WorkflowConfig:
     """Build the ``WorkflowConfig`` for the RDD Fitout Start Agent.
 
@@ -653,6 +694,7 @@ def _init_registry() -> None:
         _build_fitout_start_config(),
         _build_fitout_end_config(),
         _build_trading_confirm_config(),
+        _build_fitout_progress_config(),
     ):
         WORKFLOW_CONFIG_REGISTRY[cfg.agent_name] = cfg
 

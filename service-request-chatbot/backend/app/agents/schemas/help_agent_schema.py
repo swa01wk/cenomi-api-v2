@@ -129,6 +129,10 @@ ROLE_PERMITTED_INTENTS: dict[str, frozenset[str]] = {
             "CREATE_FITOUT_CONFIRM_END",
             "APPROVE_FITOUT_CONFIRM_FOS",
             "APPROVE_FITOUT_CONFIRM_END",
+            # Fitout Progress is DD-only on both sides: the web form hides the
+            # sub-category from every other role.
+            "CREATE_FITOUT_PROGRESS",
+            "APPROVE_FITOUT_PROGRESS",
             "APPROVE_WORK_PERMIT_SR",
             "CREATE_GENERAL_INQUIRY",
         }

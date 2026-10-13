@@ -75,6 +75,9 @@ _LEASE_ENRICHMENT_FIELDS: frozenset[str] = frozenset(
         "actual_fitout_start_date",
         "actual_fitout_end_date",
         "actual_trading_date",
+        # Recorded fit-out percentage — context and suggestion floor for the
+        # Fitout Progress agent, display-only for everyone else.
+        "fitout_progress",
     }
 )
 
@@ -441,6 +444,9 @@ async def lease_lookup_node(
         "rdd_fitout_start_agent": "fitout_confirm",
         "rdd_fitout_end_agent": "fitout_end",
         "rdd_trading_confirmation_agent": "trading_confirm",
+        # Fitout progress reports on a fitout still in flight, so its rule is
+        # started-and-not-ended rather than a single prior milestone.
+        "rdd_fitout_progress_agent": "fitout_progress",
     }
     active_agent: str | None = state.get("active_agent")
     purpose: str | None = _LEASE_LOOKUP_PURPOSE_BY_AGENT.get(active_agent or "")

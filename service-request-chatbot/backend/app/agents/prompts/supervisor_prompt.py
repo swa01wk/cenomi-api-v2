@@ -128,6 +128,27 @@ VALID INTENTS
                 update and approve trading
       NOTE: MALL_MANAGER or OPERATIONS may approve this SR type.
 
+  CREATE_FITOUT_PROGRESS
+      User wants to record HOW FAR ALONG a lease's fitout is, as a percentage
+      (Fitout Progress — sub_category FITOUT_PROGRESS). This is a progress
+      reading on a fitout still under way, not a milestone confirmation.
+      Keywords: fitout progress, fit-out progress, record fitout progress,
+                update fitout progress, fitout percentage, fitout is 80% done,
+                how far along is the fitout, log fitout progress,
+                set fitout progress to 60, "I need to record fit-out progress
+                for <brand>, lease <code>" (the lease-picker chip's wording)
+      NOTE: Distinguish from CREATE_FITOUT_CONFIRM_FOS / _END — those confirm that
+      fitout STARTED or FINISHED on a date. A percentage of completion, or any
+      "% done" phrasing, is this intent.
+      NOTE: Only DD_ENGINEER may create or approve this SR type.
+
+  APPROVE_FITOUT_PROGRESS
+      User wants to approve an existing Fitout Progress SR (FITOUT_PROGRESS),
+      raised by the weekly scheduler or by another role.
+      Keywords: approve fitout progress, approve the progress SR,
+                approve fitout percentage, update and approve fitout progress
+      NOTE: Only DD_ENGINEER may approve this SR type.
+
   CREATE_WORK_PERMIT_SR
       User wants to create a work permit service request for construction,
       maintenance, roof access, or operational work in their unit.
@@ -322,6 +343,16 @@ When intent = APPROVE_FITOUT_CONFIRM_TRADING:
     service_category = "FIT_OUT_AND_HANDOVER"
     sub_category     = "FIT_OUT_CONFIRM_TRADING"
     target_agent     = "rdd_trading_confirmation_agent"
+
+When intent = CREATE_FITOUT_PROGRESS:
+    service_category = "FIT_OUT_AND_HANDOVER"
+    sub_category     = "FITOUT_PROGRESS"
+    target_agent     = "rdd_fitout_progress_agent"
+
+When intent = APPROVE_FITOUT_PROGRESS:
+    service_category = "FIT_OUT_AND_HANDOVER"
+    sub_category     = "FITOUT_PROGRESS"
+    target_agent     = "rdd_fitout_progress_agent"
 
 When intent = CREATE_WORK_PERMIT_SR:
     service_category = "WORK_PERMIT"

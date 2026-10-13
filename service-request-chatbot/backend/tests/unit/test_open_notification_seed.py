@@ -29,6 +29,8 @@ def test_fitout_sub_categories_map_to_fitout_agents() -> None:
         "FIT_OUT_CONFIRM_FOS": "rdd_fitout_start_agent",
         "FIT_OUT_CONFIRM_END": "rdd_fitout_end_agent",
         "FIT_OUT_CONFIRM_TRADING": "rdd_trading_confirmation_agent",
+        # The weekly progress review opens straight into its approval flow.
+        "FITOUT_PROGRESS": "rdd_fitout_progress_agent",
     }
     for sub, agent in expected.items():
         seed = build_open_notification_seed(

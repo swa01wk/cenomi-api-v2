@@ -43,6 +43,7 @@ from app.agents.services.action_resolver import (
 )
 from app.agents.services.conversation_state_service import PENDING_REVIEW_REFS
 from app.agents.services.permission_service import PermissionService
+from app.agents.services.sr_release import released_backend_refs
 from app.observability.decorators import trace_node
 from app.types.chat import AuthContext
 
@@ -722,7 +723,8 @@ async def _work_permit_entry(state: ServiceRequestState) -> dict[str, Any]:
             "validation_errors": [],
             "selected_lease": None,
             "lease_matches": [],
-            "backend_refs": {},
+            "backend_refs": released_backend_refs(state),
+            "documents": [],
             "response_ui": {},
             "status": "IN_PROGRESS",
         }

@@ -40,12 +40,14 @@ The system hosts **three named agents** within a single LangGraph graph:
 | **Help Agent** | *(supervisor)* | Intent classification · FAQ Q&A with hybrid RAG (Azure AI Search) · Routes SR intents to registered agents · RBAC enforcement |
 | **RDD Agent** | `rdd_handover_agent` | Full RDD Handover SR lifecycle — Path A (CREATE_SR → FM_REVIEW → RDD_REVIEW) + Path B (Already Trading fast-path) + FOS / END / TRADING sub-categories |
 | **Work Permit Agent** | `work_permit_agent` | Single-stage Work Permit SR creation |
+| **Fitout Progress Agent** | `rdd_fitout_progress_agent` | Records a lease's fit-out completion percentage — one question, create + approve |
 
 | Focused doc | What it covers |
 |---|---|
 | [`architecture.md`](architecture.md) | High-level system architecture, Frontend/Backend contract, DB schema |
 | [`help-agent-pipeline.md`](help-agent-pipeline.md) | Help Agent design — all workflows, RBAC, lifecycle, FAQ RAG, API reference |
 | [`rdd-handover-agent.md`](rdd-handover-agent.md) | RDD agent lifecycle — Path A (3-phase) and Path B (Already Trading fast-path) |
+| [`fitout-progress-agent.md`](fitout-progress-agent.md) | Fitout Progress agent — the one-question percentage flow, its suggestion arithmetic, create + approve |
 | [`handover-workflow.md`](handover-workflow.md) | CREATE_SR / FM_REVIEW / RDD_REVIEW stage definitions, payload shapes, validation rules |
 | [`observability.md`](observability.md) | TraceManager, trace hierarchy, state diffs, redaction, Admin UI |
 | [`security-guardrails.md`](security-guardrails.md) | Injection guard, field protection, confirmation enforcement, permission checks |

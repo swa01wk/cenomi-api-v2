@@ -58,6 +58,8 @@ LEASE_PICKER_PURPOSE_BY_AGENT: dict[str, str] = {
     "rdd_fitout_start_agent": "fitout_confirm",
     "rdd_fitout_end_agent": "fitout_end",
     "rdd_trading_confirmation_agent": "trading_confirm",
+    # Fitout progress lists fit-outs under way: started, and not yet ended.
+    "rdd_fitout_progress_agent": "fitout_progress",
     "work_permit_agent": "work_permit",
 }
 
@@ -127,11 +129,12 @@ def lease_picker_purpose(state: dict[str, Any]) -> str | None:
 def should_browse_leases(state: dict[str, Any]) -> bool:
     """True when a CREATE turn should offer lease browse chips.
 
-    Handover, Work Permit create, General Inquiry, and the three fitout
-    confirmations each get a list. ``lease_picker_purpose`` carries the
-    platform rule (handover has none; WP uses ``work_permit``; fitout uses
-    milestone purposes). General Inquiry uses ``gi_leases``
-    (GET /general-inquiry/leases).
+    Handover, Work Permit create, General Inquiry, the three fitout
+    confirmations and fitout progress each get a list.
+    ``lease_picker_purpose`` carries the platform rule (handover has none;
+    WP uses ``work_permit``; fitout confirmations use milestone purposes;
+    fitout progress uses ``fitout_progress``). General Inquiry uses
+    ``gi_leases`` (GET /general-inquiry/leases).
     """
     from app.core.config import settings
 

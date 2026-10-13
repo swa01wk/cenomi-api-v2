@@ -266,6 +266,21 @@ def _has_inline_value(message: str, after_index: int) -> bool:
     return bool(_INLINE_VALUE_RE.search(message[after_index:]))
 
 
+def draft_has_content(collected_data: dict[str, Any] | None) -> bool:
+    """True when the draft holds something a correction could revisit.
+
+    Keys beginning with an underscore are session bookkeeping — the guided-tour
+    choice, the "user answered this in chat" flags — not values the user gave,
+    so a draft carrying only those is still empty for this purpose.
+    """
+    if not collected_data:
+        return False
+    return any(
+        not key.startswith("_") and value not in (None, "", [], {})
+        for key, value in collected_data.items()
+    )
+
+
 def detect_correction_intent(
     user_message: str,
     collected_data: dict[str, Any] | None,
@@ -292,6 +307,10 @@ def detect_correction_intent(
     field like ``title``) has no stored value yet, but "I want to edit the
     title" is still a valid redirect. The ``active_field`` check above is
     what prevents this from misfiring on the field currently being collected.
+    Whether a correction is *appropriate* is the caller's call: this function
+    only reads the sentence. ``field_extraction_node`` requires a conversation
+    to be under way — an active field, or something already collected — before
+    it acts on the answer (see ``draft_has_content``).
 
     *workflow_stage* selects the synonym table (see
     ``_STAGE_SYNONYM_OVERRIDES``) so a phrase resolves to the key the current
