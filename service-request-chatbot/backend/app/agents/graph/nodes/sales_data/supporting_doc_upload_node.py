@@ -30,6 +30,7 @@ from app.agents.schemas.sales_data_schema import (
     TENANT_RESPONSE_STATUS,
 )
 from app.agents.services.permission_service import graph_permission_guard
+from app.agents.services.sales_data_csv import parse_sales_data_csv
 from app.agents.services.sales_data_api_client import SalesDataApiClient
 from app.api.routes.supporting_doc_upload import get_uploaded_doc, pop_uploaded_doc
 from app.core.request_context import get_current_bearer_token
@@ -248,6 +249,99 @@ def _prompt_for_file(row: dict[str, Any]) -> dict[str, Any]:
             "message": message,
         },
     }
+
+
+# Sentinel: the row this conversation was working on is no longer waiting
+# for a file. Distinct from None, which means "couldn't check, carry on".
+_ROW_GONE = object()
+
+
+async def _refresh_resolved_row(collected: dict[str, Any]) -> Any:
+    """Re-read the row already resolved in this session.
+
+    Returns the fields to merge when it is still actionable, ``_ROW_GONE``
+    when it is not, or ``None`` when the lookup fails — a backend blip must
+    not strand a user mid-upload, so the caller carries on with what it has.
+    """
+    lease_code = str(collected.get("lease_code") or "").strip()
+    if not lease_code:
+        return None
+    try:
+        client = SalesDataApiClient(bearer_token=get_current_bearer_token())
+        rows = await client.get_sales_data(
+            disable_pagination=True, lease_code=lease_code
+        )
+    except Exception:
+        log.warning("supporting_doc_upload.refresh_failed", exc_info=True)
+        return None
+
+    wanted_lease = _normalise_lease(lease_code)
+    wanted_start = str(collected.get("sales_period_start") or "")
+    match = None
+    for row in rows:
+        if _normalise_lease(str(row.get("lease_code") or "")) != wanted_lease:
+            continue
+        if wanted_start and str(row.get("sales_period_start") or "") != wanted_start:
+            continue
+        match = row
+        break
+    if match is None:
+        return None  # couldn't find it — don't claim it's gone
+    if match.get("status") not in TENANT_ACTION_STATUSES:
+        return _ROW_GONE
+    return {
+        "current_status": match.get("status"),
+        "sales_amt": match.get("sales_amt"),
+        "admin_comment": match.get("comment_text"),
+    }
+
+
+def _amount_from_csv(
+    raw: bytes,
+    filename: str,
+    *,
+    lease_code: str,
+    period_start: str,
+) -> float | None:
+    """Corrected sales amount from a re-uploaded CSV, or None.
+
+    Only the row for this lease and period counts — a tenant may re-upload a
+    file covering several months, and taking the first row would write
+    another month's figure onto this one. Returns None for a non-CSV, an
+    unparseable file, or no matching row, so the caller keeps the existing
+    amount rather than guessing.
+    """
+    if not filename.lower().endswith(".csv"):
+        return None
+    try:
+        text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        try:
+            text = raw.decode("latin-1")
+        except Exception:
+            return None
+    try:
+        parsed = parse_sales_data_csv(text)
+    except Exception:
+        log.warning("supporting_doc_upload.csv_parse_failed", exc_info=True)
+        return None
+    if parsed.missing_headers or not parsed.rows:
+        return None
+
+    wanted_lease = _normalise_lease(lease_code).casefold()
+    wanted_month = str(period_start)[:7]
+    for row in parsed.rows:
+        row_lease = _normalise_lease(str(row.get("lease_code") or "")).casefold()
+        if wanted_lease and row_lease != wanted_lease:
+            continue
+        if wanted_month and str(row.get("sales_period_start") or "")[:7] != wanted_month:
+            continue
+        try:
+            amount = float(str(row.get("sales_amt") or "").replace(",", "").strip())
+        except (TypeError, ValueError):
+            return None
+        return amount if amount > 0 else None
+    return None
 
 
 def _upload_failure_retry(
@@ -508,6 +602,36 @@ async def supporting_doc_upload_node(state: ServiceRequestState) -> dict[str, An
                 "admin_comment": row.get("comment_text"),
             }
         )
+    else:
+        # Lease already resolved earlier in the conversation — re-read it
+        # before acting. The listing page beside the chat (or the Sales Data
+        # team) can handle the same row at any time, and nothing tells the
+        # agent when that happens, so it went on asking for a file for a row
+        # that had already moved on.
+        refreshed = await _refresh_resolved_row(collected)
+        if refreshed is _ROW_GONE:
+            lease = str(collected.get("lease_code") or "")
+            message = (
+                f"**{lease}** no longer needs a file — it looks like it was "
+                "handled already. Check the Sales Data page for its current "
+                "status."
+            )
+            log.info("supporting_doc_upload.row_no_longer_actionable", lease_code=lease)
+            return {
+                "status": "WAITING_FOR_USER",
+                "workflow_stage": "SALES_DATA_COMPLETE",
+                "collected_data": {},
+                "response_message": message,
+                "response_ui": {
+                    "type": "stale_notification",
+                    "message": message,
+                    "verbatim": True,
+                    "show_listing_link": True,
+                    "lease_codes": [lease] if lease else [],
+                },
+            }
+        if isinstance(refreshed, dict):
+            collected.update(refreshed)
 
     # ── Retrieve cached file ───────────────────────────────────────────────
     doc_session_id: str | None = (
@@ -542,6 +666,25 @@ async def supporting_doc_upload_node(state: ServiceRequestState) -> dict[str, An
     filename = cached["filename"]
     content_type = cached.get("content_type") or "application/octet-stream"
     raw: bytes = cached["raw"]
+
+    # A NEED_REUPLOAD CSV carries the corrected figure, so read it instead of
+    # carrying the old platform amount forward — the confirm card was showing
+    # the figure being replaced (observed: file said 785,000, card said
+    # 789,458) and that stale value was what got submitted.
+    if current_status == "NEED_REUPLOAD":
+        csv_amount = _amount_from_csv(
+            raw,
+            filename,
+            lease_code=str(collected.get("lease_code") or ""),
+            period_start=str(collected.get("sales_period_start") or ""),
+        )
+        if csv_amount is not None:
+            log.info(
+                "supporting_doc_upload.amount_from_csv",
+                lease_code=collected.get("lease_code"),
+                sales_amt=csv_amount,
+            )
+            collected["sales_amt"] = csv_amount
 
     denied = graph_permission_guard(state, "SUBMIT_SALES_DATA_SUPPORTING_DOC")
     if denied:
