@@ -171,6 +171,13 @@ _SALES_REPEAT_FALLBACK = (
     "ask me to submit sales data or check your status."
 )
 
+# Steps where the user is part-way through entering one month's figure.
+_AMOUNT_ENTRY_STAGES = frozenset({"MANUAL_ENTRY", "AWAITING_MANUAL_CONFIRM"})
+_SALES_AMOUNT_STEP_FALLBACK = (
+    "Sorry, I didn't catch that. Type the sales amount for this month "
+    '(for example 85000), or say "change the lease" to pick a different one.'
+)
+
 
 @trace_node("response_generation", "AGENT")
 async def response_generation_node(state: ServiceRequestState) -> dict[str, Any]:
@@ -226,7 +233,14 @@ async def response_generation_node(state: ServiceRequestState) -> dict[str, Any]
         ):
             # Replace only the text — the card under it (attach control,
             # review table, confirm buttons) must stay so the user can act.
-            current_message = _SALES_REPEAT_FALLBACK
+            # Mid-entry the generic fallback was a dead end ("ask me to
+            # submit sales data" while already submitting), so name the way
+            # out of this particular step instead.
+            stage = state.get("workflow_stage") or ""
+            if stage in _AMOUNT_ENTRY_STAGES:
+                current_message = _SALES_AMOUNT_STEP_FALLBACK
+            else:
+                current_message = _SALES_REPEAT_FALLBACK
             current_ui = (
                 {**current_ui, "message": current_message}
                 if current_ui
