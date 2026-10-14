@@ -23,6 +23,7 @@ import structlog
 
 from app.agents.graph.nodes.general_inquiry.general_inquiry_confirmation_node import (
     handle_gi_optional_upload,
+    handle_gi_title_review,
 )
 from app.agents.graph.state import ServiceRequestState
 from app.observability.decorators import trace_node
@@ -223,6 +224,19 @@ async def general_inquiry_entry_node(state: ServiceRequestState) -> dict[str, An
             )
         if pending:
             return {}
+
+    # Yes keeps the generated title. No asks the user to write both.
+    # An empty follow-up (the form syncing the old title) stays on that question.
+    title_gate = handle_gi_title_review(
+        state, user_message=raw_message, action=action
+    )
+    if title_gate is not None:
+        return title_gate
+
+    collected_now = dict(state.get("collected_data") or {})
+    if collected_now.get("gi_title_just_asked"):
+        collected_now["gi_title_just_asked"] = False
+        updates["collected_data"] = collected_now
 
     # Optional document. Upload shows the card; Skip continues to confirmation.
     upload_gate = handle_gi_optional_upload(

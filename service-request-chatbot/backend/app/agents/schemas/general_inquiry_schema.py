@@ -174,7 +174,13 @@ def title_and_description_from_selection(
 
 
 def apply_lease_title_and_description(collected: dict[str, Any]) -> dict[str, Any]:
-    """Fill an empty title and description from the selected lease."""
+    """Fill an empty title and description from the selected lease.
+
+    A "No" on the title check means the user is writing both fields. Do not
+    put the generated text back.
+    """
+    if str(collected.get("gi_title_review_status") or "") == "custom":
+        return collected
     generated = title_and_description_from_selection(collected)
     if not generated:
         return collected

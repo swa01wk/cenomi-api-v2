@@ -694,10 +694,18 @@ def _route_after_validation(state: dict[str, Any]) -> str:
     elif active_agent == "general_inquiry_agent":
         from app.agents.schemas.general_inquiry_schema import get_missing_fields as gi_missing
         still_missing = gi_missing(original_stage, collected)
-        # Once the lease is chosen, title and description are filled from it
-        # and the next step is the document upload. Do not stop to ask.
+        # Once the lease is chosen, title and description are filled from it.
+        # The user confirms them before the document upload. "No" is the only
+        # case that stops to ask for a title, then a description.
         if original_stage == "CREATE_SR" and collected.get("lease_id"):
-            still_missing = []
+            if str(collected.get("gi_title_review_status") or "") == "custom":
+                still_missing = [
+                    name
+                    for name in ("title", "description")
+                    if not str(collected.get(name) or "").strip()
+                ]
+            else:
+                still_missing = []
     else:
         from app.agents.schemas.handover_schema import get_missing_fields as rdd_missing
         still_missing = rdd_missing(original_stage, collected)
@@ -1080,6 +1088,10 @@ def _route_after_general_inquiry_entry(state: dict[str, Any]) -> str:
     if state.get("confirmation_status") == "REJECTED":
         return "field_extraction"
     if state.get("status") == "CANCELLED":
+        return "response_generation"
+    # "No" on the title check asks for a title on this same turn. The answer
+    # arrives on the next turn; only the ask itself should stop here.
+    if (state.get("collected_data") or {}).get("gi_title_just_asked"):
         return "response_generation"
     # Chip selection carries the lease id. Merge keeps it, then lease lookup
     # resolves the row the same way a handover chip does.

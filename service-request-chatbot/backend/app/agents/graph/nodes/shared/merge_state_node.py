@@ -483,7 +483,16 @@ async def merge_state_node(state: ServiceRequestState) -> dict[str, Any]:
     # corrected_fields come directly from the user's UI interaction, so they
     # are treated as maximum-confidence updates and bypass the normal threshold.
     # Backend-protected fields are still guarded.
-    corrected: dict[str, Any] = state.get("corrected_fields") or {}  # type: ignore[assignment]
+    corrected: dict[str, Any] = dict(state.get("corrected_fields") or {})
+    # While the user is writing their own General Inquiry title and
+    # description, the form still holds the generated text. A sync of those
+    # boxes is not the answer and must not skip the questions.
+    if (
+        (state.get("active_agent") or "") == "general_inquiry_agent"
+        and str(collected.get("gi_title_review_status") or "") == "custom"
+    ):
+        corrected.pop("title", None)
+        corrected.pop("description", None)
     active_field_this_turn: str = str(state.get("active_field") or "")
     for field_name, value in corrected.items():
         if field_name in BACKEND_PROTECTED_FIELDS:
@@ -536,6 +545,7 @@ async def merge_state_node(state: ServiceRequestState) -> dict[str, Any]:
     # does not ask for the other one next.
     if (
         (state.get("active_agent") or "") == "general_inquiry_agent"
+        and str(collected.get("gi_title_review_status") or "") != "custom"
         and (not collected.get("title") or not collected.get("description"))
     ):
         from app.agents.schemas.general_inquiry_schema import (
