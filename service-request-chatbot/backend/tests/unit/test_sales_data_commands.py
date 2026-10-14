@@ -145,3 +145,53 @@ async def test_help_and_cancel_work_for_admins_too(message) -> None:
         _with_roles(_state(message, "ADMIN_REVIEW", intent="REVIEW_SALES_DATA"), "SALES_DATA_TEAM")
     )
     assert result["response_ui"]["verbatim"] is True
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "sorry, I want to change the lease",
+        "I want a different lease",
+        "wrong month",
+        "the month is wrong",
+        "switch to another lease",
+    ],
+)
+@pytest.mark.asyncio
+async def test_change_lease_or_month_reopens_the_pending_list(message) -> None:
+    """Asking to change the lease/month must re-open the pending list.
+
+    Reported from UAT: this changed nothing, so the node re-emitted the same
+    "what is the amount?" question, the repeat guard saw a duplicate reply
+    and answered "Sorry, I didn't catch that" — with no way to actually
+    change the lease.
+    """
+    state = _state(message, "MANUAL_ENTRY")
+    state["collected_data"] = {
+        "lease_code": "t0094836",
+        "_upload_lease": "t0094836",
+        "sales_period_start": "2025-09-01",
+        "sales_period_end": "2025-09-30",
+        "sales_amt": 250000.0,
+    }
+    result = await sales_data_entry_node(state)
+
+    assert result["workflow_stage"] == "PENDING_MONTHS_CHECK"
+    # The old pick is cleared so the list is a genuinely fresh choice.
+    collected = result["collected_data"]
+    for key in ("lease_code", "_upload_lease", "sales_amt", "sales_period_start"):
+        assert key not in collected, key
+
+
+@pytest.mark.parametrize(
+    "message",
+    ["t0108275", "change to t0108275", "250000", "the corrected amount is 303021"],
+)
+def test_messages_carrying_data_are_not_treated_as_change_requests(message) -> None:
+    """A message that names the new lease (or an amount) must fall through to
+    the parser — re-listing would throw away what the user just typed."""
+    from app.agents.graph.nodes.sales_data.sales_data_entry_node import (
+        _resolve_command,
+    )
+
+    assert _resolve_command(message, "MANUAL_ENTRY") != "change_target"

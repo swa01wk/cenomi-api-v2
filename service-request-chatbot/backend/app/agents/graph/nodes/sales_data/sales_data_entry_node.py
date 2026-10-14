@@ -150,6 +150,15 @@ _CANCEL_ONLY_RE = re.compile(
     re.I,
 )
 _RESTART_RE = re.compile(r"\b(start over|start again|restart|from scratch|begin again)\b", re.I)
+# "sorry, I want to change the lease" / "wrong month, pick another one".
+# Without this the turn changed nothing, so the node re-emitted the same
+# "which amount?" question, the repeat guard saw a duplicate and answered
+# with a fallback that offered no way to actually change it.
+_CHANGE_TARGET_RE = re.compile(
+    r"\b(?:change|switch|different|wrong|another|other)\b[^.?!]*\b(lease|month|period)\b"
+    r"|\b(lease|month|period)\b[^.?!]*\b(?:is\s+)?(?:wrong|incorrect)\b",
+    re.I,
+)
 _HELP_RE = re.compile(
     r"^\s*(help|help me|what can you do|what are my options|options|menu)\s*[?.!]*\s*$",
     re.I,
@@ -202,6 +211,10 @@ def _resolve_command(message: str, stage: str | None) -> str | None:
         return "restart"
     if _CANCEL_ONLY_RE.search(text) and stage not in _OWN_CANCEL_STAGES:
         return "cancel"
+    # Only when no lease code is named — "change to t0108275" already carries
+    # the answer, so the parser should take it rather than re-listing.
+    if _CHANGE_TARGET_RE.search(text) and not _LEASE_CODE_RE.search(text):
+        return "change_target"
     if stage == "AWAITING_PERIOD_MISMATCH_CONFIRM":
         return None  # its own yes / no / different-file handling
     wants_upload = bool(_REUPLOAD_RE.search(text) or _UPLOAD_WORD_RE.search(text))
@@ -221,6 +234,9 @@ def _resolve_command(message: str, stage: str | None) -> str | None:
 _COMMAND_INTENTS = {
     "restart": "UPLOAD_SALES_DATA",
     "csv_upload": "UPLOAD_SALES_DATA",
+    # Re-opens the pending-months list, i.e. the tenant upload flow — so it
+    # needs the same role check as the commands above, not a free pass.
+    "change_target": "UPLOAD_SALES_DATA",
     "doc_upload": "UPLOAD_SUPPORTING_DOCUMENT",
 }
 
@@ -440,6 +456,29 @@ async def sales_data_entry_node(state: ServiceRequestState) -> dict[str, Any]:
                 active_agent=None, intent=None, workflow_stage=None,
                 collected_data={}, backend_refs={},
             )
+        if command == "change_target":
+            # Drop what was picked and show the pending list again, so the
+            # user can tap a different lease/month instead of being told the
+            # assistant didn't understand.
+            refs = dict(backend_refs)
+            refs.pop("asked_period", None)
+            kept = {
+                k: v
+                for k, v in collected.items()
+                if k not in {
+                    "lease_code", "_upload_lease", "_asked_period",
+                    "sales_period_start", "sales_period_end",
+                    "sales_amt", "_amount_rejected",
+                }
+            }
+            log.info("sales_data_entry.change_target", stage=workflow_stage)
+            return {
+                "intent": "UPLOAD_SALES_DATA",
+                "workflow_stage": "PENDING_MONTHS_CHECK",
+                "status": "IN_PROGRESS",
+                "collected_data": kept,
+                "backend_refs": refs,
+            }
         if command in ("restart", "csv_upload"):
             refs, collected = _clear_file_state(state)
             if command == "restart" or workflow_stage in _START_STAGES:

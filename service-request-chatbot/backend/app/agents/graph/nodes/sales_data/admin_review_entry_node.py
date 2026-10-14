@@ -423,14 +423,13 @@ async def _load_reviewable(
     """
     cached = backend_refs.get("admin_review_rows")
     if lease_codes:
-        if isinstance(cached, list) and cached:
-            wanted = {c.strip().lower() for c in lease_codes if c}
-            from_cache = [
-                r for r in _reviewable(cached)
-                if str(r.get("lease_code", "")).strip().lower() in wanted
-            ]
-            if from_cache:
-                return from_cache
+        # Deliberately NOT served from the cache: the lease_code query below
+        # is exact and cheap, and a status can change from outside this
+        # conversation at any moment (the tenant re-uploads, or someone acts
+        # on the listing page beside the chat). Answering a named lease from
+        # a snapshot meant approving against figures that had already moved
+        # on. The cache is still used for the broad listing path below,
+        # where re-reading everything is expensive.
         token = get_current_bearer_token()
         client = SalesDataApiClient(bearer_token=token)
         rows = await client.get_sales_data(
