@@ -664,9 +664,28 @@ async def field_extraction_node(state: ServiceRequestState) -> dict[str, Any]:
     gateway = get_default_gateway()
     service = FieldExtractionService(gateway=gateway)
 
+    extract_message = user_message
+    if active_agent == "general_inquiry_agent" and conversation_history:
+        # "Guide me" is not the inquiry. The topic is usually in an earlier
+        # user turn, and the extractor only sees the current message unless
+        # we hand those turns over.
+        prior = [
+            str(turn.get("content") or "").strip()
+            for turn in conversation_history
+            if turn.get("role") == "user"
+            and str(turn.get("content") or "").strip()
+            and str(turn.get("content") or "").strip() != user_message.strip()
+        ]
+        if prior:
+            extract_message = (
+                "Earlier user messages:\n"
+                + "\n".join(prior[-4:])
+                + f"\n\nCurrent user message: {user_message}"
+            )
+
     llm_wall_start = time.monotonic()
     result, meta = await service.extract(
-        user_message,
+        extract_message,
         workflow_stage,
         recent_history=conversation_history[-4:] if conversation_history else None,
         missing_fields=extraction_hint,

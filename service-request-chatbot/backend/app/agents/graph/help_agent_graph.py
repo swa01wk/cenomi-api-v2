@@ -337,7 +337,7 @@ def _route_after_load(state: dict[str, Any]) -> str:
     })
     action = state.get("action_override") or ""
     _GI_REVIEW_ACTIONS: frozenset[str] = frozenset(
-        {"confirm_approve_gi", "reject_gi", "ask_more_info_gi", "reassign_gi"}
+        {"confirm_approve_gi", "reject_gi", "ask_more_info_gi", "reassign_gi", "add_comment_gi"}
     )
     # Pending lives on collected_data: backend_refs is restored as sr_id only,
     # so a reject comment typed on the next turn would otherwise miss this
@@ -694,6 +694,10 @@ def _route_after_validation(state: dict[str, Any]) -> str:
     elif active_agent == "general_inquiry_agent":
         from app.agents.schemas.general_inquiry_schema import get_missing_fields as gi_missing
         still_missing = gi_missing(original_stage, collected)
+        # Once the lease is chosen, title and description are filled from it
+        # and the next step is the document upload. Do not stop to ask.
+        if original_stage == "CREATE_SR" and collected.get("lease_id"):
+            still_missing = []
     else:
         from app.agents.schemas.handover_schema import get_missing_fields as rdd_missing
         still_missing = rdd_missing(original_stage, collected)

@@ -19,7 +19,11 @@ import logging
 from typing import Any
 
 from app.agents.graph.state import ServiceRequestState
-from app.agents.schemas.general_inquiry_schema import OPTIONAL_FIELDS, get_missing_fields
+from app.agents.schemas.general_inquiry_schema import (
+    OPTIONAL_FIELDS,
+    apply_lease_title_and_description,
+    get_missing_fields,
+)
 from app.agents.services.display_formatters import format_field_display_value
 from app.observability.decorators import trace_node
 
@@ -320,7 +324,9 @@ async def general_inquiry_confirmation_node(state: ServiceRequestState) -> dict[
         if not extracted and not corrected:
             return {}
 
-    collected_data: dict[str, Any] = state.get("collected_data") or {}
+    collected_data: dict[str, Any] = apply_lease_title_and_description(
+        dict(state.get("collected_data") or {})
+    )
     workflow_stage: str = state.get("workflow_stage") or "CREATE_SR"
 
     missing = get_missing_fields(workflow_stage, collected_data)
@@ -334,19 +340,14 @@ async def general_inquiry_confirmation_node(state: ServiceRequestState) -> dict[
         )
         return {}
 
-    # Optional document, after the required answers and before the review card.
-    # Skip does not block submit. The choice is remembered on the draft.
+    # Document upload is the next step after the lease is chosen. Title and
+    # description are already filled from that lease. Skip does not block submit.
     if (
         workflow_stage == "CREATE_SR"
         and str(collected_data.get(GI_OPTIONAL_UPLOAD_KEY) or "") != GI_UPLOAD_DONE
     ):
-        logger.info("general_inquiry_confirmation: optional document step")
-        if (
-            str(collected_data.get(GI_OPTIONAL_UPLOAD_KEY) or "")
-            == GI_UPLOAD_AWAITING_UPLOAD
-        ):
-            return build_gi_upload_card(state, collected_data)
-        return build_gi_upload_offer(collected_data)
+        logger.info("general_inquiry_confirmation: document upload")
+        return build_gi_upload_card(state, collected_data)
 
     logger.info(
         "general_inquiry_confirmation: all required fields present — generating card"

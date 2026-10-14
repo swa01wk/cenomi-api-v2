@@ -13,6 +13,7 @@ Document type: ``SR_GEN_INQ`` — optional at create and resubmit.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field as dc_field
 from typing import Any, Final, Literal
 
@@ -42,7 +43,8 @@ CREATE_SR_STAGE = StageDefinition(
     stage="CREATE_SR",
     role="ANY",  # both tenant and admin can create
     required_fields=(
-        # Backend-derived (from lease lookup)
+        # Backend-derived (from lease lookup). Title and description are
+        # written from the selected lease and brand, not asked.
         "tenant_profile_id",
         "property_id",
         "lease_code",
@@ -55,9 +57,6 @@ CREATE_SR_STAGE = StageDefinition(
         "contract_id",
         "unit_codes",
         "city",
-        # User-provided
-        "title",
-        "description",
     ),
 )
 
@@ -94,7 +93,7 @@ BACKEND_FIELDS: frozenset[str] = frozenset(
     }
 )
 
-AUTO_GENERATED_FIELDS: frozenset[str] = frozenset()
+AUTO_GENERATED_FIELDS: frozenset[str] = frozenset({"title", "description"})
 
 OPTIONAL_FIELDS: frozenset[str] = frozenset({"notes"})
 
@@ -127,3 +126,85 @@ def get_missing_fields(stage: str, collected: dict[str, Any]) -> list[str]:
     if not stage_def:
         return []
     return [f for f in stage_def.required_fields if not collected.get(f)]
+
+
+# Seed the lease picker sends. It names the lease, not the inquiry.
+_GI_SEED_RE = re.compile(
+    r"^i want to create a general inquiry service request\b",
+    re.IGNORECASE,
+)
+_GI_TOPIC_RE = re.compile(
+    r"\b(about|regarding|because|issue|problem|question)\b|\?",
+    re.IGNORECASE,
+)
+_GI_CONTROL_RE = re.compile(
+    r"^(guide me|leave the form open|yes|no|ok|okay|sure|yep|yeah|yup)\.?$",
+    re.IGNORECASE,
+)
+
+
+def title_and_description_from_selection(
+    collected: dict[str, Any],
+) -> tuple[str, str] | None:
+    """Subject and description taken from the lease the user picked.
+
+    Nothing else is asked. Brand, mall and lease code are enough.
+    """
+    brand = str(collected.get("brand") or "").strip()
+    mall = str(collected.get("mall") or "").strip()
+    lease = str(collected.get("lease_code") or collected.get("lease") or "").strip()
+    if not brand and not lease:
+        return None
+    subject = brand or lease
+    title_parts = ["General Inquiry", subject]
+    if mall:
+        title_parts.append(mall)
+    title = " - ".join(title_parts)
+    if brand and mall and lease:
+        description = f"General Inquiry for {brand} at {mall}, lease {lease}."
+    elif brand and mall:
+        description = f"General Inquiry for {brand} at {mall}."
+    elif brand and lease:
+        description = f"General Inquiry for {brand}, lease {lease}."
+    elif brand:
+        description = f"General Inquiry for {brand}."
+    else:
+        description = f"General Inquiry for lease {lease}."
+    return title, description
+
+
+def apply_lease_title_and_description(collected: dict[str, Any]) -> dict[str, Any]:
+    """Fill an empty title and description from the selected lease."""
+    generated = title_and_description_from_selection(collected)
+    if not generated:
+        return collected
+    title, description = generated
+    if not str(collected.get("title") or "").strip():
+        collected["title"] = title
+    if not str(collected.get("description") or "").strip():
+        collected["description"] = description
+    return collected
+
+
+def infer_title_and_description(messages: list[str]) -> tuple[str, str] | None:
+    """Title and description from the latest message that states the inquiry.
+
+    The user types the intent once. That text is both the subject and the
+    description. Guided-tour answers and the plain "create a General Inquiry"
+    seed have no topic to copy, so they are skipped. A later real message
+    wins over an earlier one.
+    """
+    chosen = ""
+    for raw in messages:
+        text = " ".join(str(raw or "").split())
+        if not text or _GI_CONTROL_RE.match(text):
+            continue
+        if _GI_SEED_RE.match(text) and not _GI_TOPIC_RE.search(text):
+            continue
+        if re.fullmatch(r"t\d+", text, flags=re.IGNORECASE):
+            continue
+        chosen = text
+    if not chosen:
+        return None
+    title = " ".join(chosen.split()[:12]).rstrip(".,;:")
+    return title, chosen

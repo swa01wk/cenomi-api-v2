@@ -679,7 +679,21 @@ class ChatOrchestrationService:
         fm_status: str | None = final_backend_refs.get("fm_status")
         # faq_sources already extracted in step 9 above
 
-        if graph_status in ("SUBMITTED", "COMPLETED"):
+        response_message = str(result_state.get("response_message") or "")
+        lowered_message = response_message.lower()
+        # These review writes stay on GI_CRT_REVIEW with WAITING_FOR_USER
+        # (the reviewer keeps the card). The portal reloads Approval Status
+        # only when action_result is success, so a reassignment would otherwise
+        # leave Customer Relations stuck on Pending.
+        review_written = result_state.get("workflow_stage") == "GI_CRT_REVIEW" and any(
+            phrase in lowered_message
+            for phrase in (
+                "comment has been added",
+                "has been reassigned",
+                "asked for more information",
+            )
+        )
+        if graph_status in ("SUBMITTED", "COMPLETED") or review_written:
             action_result: str | None = "success"
         elif graph_status == "FAILED":
             action_result = "failed"

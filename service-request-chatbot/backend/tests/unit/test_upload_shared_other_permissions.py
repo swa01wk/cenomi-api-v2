@@ -5,7 +5,11 @@ from __future__ import annotations
 import pytest
 
 from app.agents.services.permission_service import PermissionDeniedError
-from app.api.routes.upload import _ensure_upload_permitted, _upload_actions_for
+from app.api.routes.upload import (
+    _ensure_upload_permitted,
+    _upload_actions_for,
+    _upload_failure,
+)
 from app.types.chat import AuthContext
 
 
@@ -84,3 +88,18 @@ class TestEnsureUploadPermittedOther:
         with pytest.raises(PermissionDeniedError) as exc_info:
             _ensure_upload_permitted("SR_HANDOVER_OTHER", _auth("VIEW_FIT_OUT_HANDOVER"))
         assert exc_info.value.action == "UPLOAD_SHARED_HANDOVER_DOCUMENT"
+
+
+class TestUploadFailureMessage:
+    def test_expired_lease_tells_the_user_to_choose_another(self) -> None:
+        status_code, detail = _upload_failure(
+            "HTTP 400: This lease has expired and cannot be used to upload documents."
+        )
+        assert status_code == 400
+        assert "has not ended" in detail
+        assert "contact support" not in detail
+
+    def test_other_platform_errors_stay_retryable(self) -> None:
+        status_code, detail = _upload_failure("HTTP 500")
+        assert status_code == 502
+        assert "HTTP 500" in detail

@@ -43,8 +43,16 @@ VALID INTENTS
   ASK_HELP
       User is asking a question about the platform, workflows, roles, documents,
       or procedures. Not an action — they want information or guidance.
+      Also use ASK_HELP for simple factual questions that can be answered from
+      knowledge without opening a formal service request:
+        - Mall operating hours, parking, facilities, events
+        - "What is the mall opening time?", "Where is the food court?"
+        - General how-to questions about the platform
       Examples: "How do I submit a service request?", "What documents do I need?",
-                "What is FM review?", "Who is the DD Engineer?", "Hi", greetings.
+                "What is FM review?", "Who is the DD Engineer?", "Hi", greetings,
+                "What time does the mall open?", "What is the mall address?".
+      For questions that need a formal written response from management
+      (billing disputes, lease-specific queries, compliance), use CREATE_GENERAL_INQUIRY.
       Do NOT use ASK_HELP for sales-data questions about pending/submitted records
       ("what data are pending?", "show pending sales") — those are
       REVIEW_SALES_DATA (admin) or CHECK_SALES_DATA_STATUS (tenant).
@@ -266,14 +274,22 @@ VALID INTENTS
   CREATE_GENERAL_INQUIRY
       User wants to raise a general inquiry service request — a free-text
       question directed at mall management about service charges, lease terms,
-      procedures, or any other general topic that requires a formal tracked response.
+      procedures, or any other general topic that requires a **formal, tracked
+      response from mall management** (not an inline AI answer).
+      Use this when:
+        - The user explicitly says "raise", "submit", "create", "file" an inquiry/request.
+        - The user has a complaint or question that needs a written response from management.
+        - The topic is business-specific (service charges, lease terms, fit-out queries,
+          billing disputes, compliance questions) where an SR audit trail is needed.
       Keywords: general inquiry, raise inquiry, submit inquiry, ask management,
                 service charge question, "I have a question for management",
                 "general question", "raise a question", "inquiry about",
                 "I need to ask about", "general request"
-      Do NOT use this for handover, fitout, work permit, or sales data requests.
-      Do NOT confuse with ASK_HELP — ASK_HELP is for platform how-to questions
-      answered inline; CREATE_GENERAL_INQUIRY raises a formal tracked SR.
+      Do NOT use this for:
+        - Simple factual questions answerable from knowledge (mall hours, parking, etc.)
+          — use ASK_HELP for those.
+        - Handover, fitout, work permit, or sales data requests.
+        - Questions that can be answered inline without a formal SR.
       Routing:
         service_category = "INQUIRY"
         sub_category     = "GENERAL"

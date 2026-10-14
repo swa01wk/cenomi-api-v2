@@ -530,6 +530,34 @@ async def merge_state_node(state: ServiceRequestState) -> dict[str, Any]:
 
     guided_tour_service.apply_answer(collected, dict(state))
 
+    # General Inquiry: one typed intent is both the subject and the
+    # description. Fill whichever of those is still empty, including the
+    # turn that is answering the title or description question, so the bot
+    # does not ask for the other one next.
+    if (
+        (state.get("active_agent") or "") == "general_inquiry_agent"
+        and (not collected.get("title") or not collected.get("description"))
+    ):
+        from app.agents.schemas.general_inquiry_schema import (
+            infer_title_and_description,
+        )
+
+        texts = [
+            str(turn.get("content") or "")
+            for turn in (state.get("conversation_history") or [])
+            if isinstance(turn, dict) and turn.get("role") == "user"
+        ]
+        current = str(state.get("user_message") or "").strip()
+        if current and current not in texts:
+            texts.append(current)
+        inferred = infer_title_and_description(texts)
+        if inferred:
+            title, description = inferred
+            if not collected.get("title"):
+                collected["title"] = title
+            if not collected.get("description"):
+                collected["description"] = description
+
     # The form's date-and-time picker is one control, and changing only its
     # clock arrives as the LT display string alone ("15/09/2026 2:00 PM").
     # That is the user's newest word on the field, so it has to set the stored

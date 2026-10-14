@@ -173,6 +173,18 @@ class AbstractServiceRequestAPIService(ABC):
     async def get_service_request(self, sr_id: str) -> ServiceRequestGetResult:
         """GET an existing SR by ID (status sync)."""
 
+    async def post_comment(
+        self,
+        sr_id: str,
+        comment_text: str,
+        sub_category: str = "GENERAL",
+    ) -> ServiceRequestCreationResult:
+        """POST /comments — add a free-text comment to an existing SR.
+
+        Default raises — HTTP and mock adapters override.
+        """
+        raise NotImplementedError("post_comment")
+
     @abstractmethod
     async def patch_service_request(
         self,
@@ -276,6 +288,41 @@ class HttpServiceRequestAPIService(AbstractServiceRequestAPIService):
     async def get_service_request(self, sr_id: str) -> ServiceRequestGetResult:
         """GET /service-requests/{sr_id}."""
         return await self._client.get_service_request(sr_id)
+
+    async def post_comment(
+        self,
+        sr_id: str,
+        comment_text: str,
+        sub_category: str = "GENERAL",
+    ) -> ServiceRequestCreationResult:
+        """POST /comments — add a comment to an existing SR."""
+        wall_start = time.monotonic()
+        result = await self._client.post_comment(sr_id, comment_text, sub_category)
+        latency_ms = result.latency_ms or int((time.monotonic() - wall_start) * 1000)
+        if not result.success:
+            log.warning(
+                "sr_api.post_comment.failed",
+                sr_id=sr_id,
+                status_code=result.status_code,
+                error=result.error,
+            )
+            return ServiceRequestCreationResult(
+                sr_id=None,
+                endpoint=result.endpoint,
+                request_payload={},
+                response_payload=result.response_payload,
+                latency_ms=latency_ms,
+                status_code=result.status_code,
+                error=result.error or f"HTTP {result.status_code}",
+            )
+        return ServiceRequestCreationResult(
+            sr_id=sr_id,
+            endpoint=result.endpoint,
+            request_payload={},
+            response_payload=result.response_payload,
+            latency_ms=latency_ms,
+            status_code=result.status_code,
+        )
 
     async def patch_service_request(
         self,
@@ -593,6 +640,33 @@ class MockServiceRequestAPIService(AbstractServiceRequestAPIService):
             endpoint=f"{self._MOCK_ENDPOINT_BASE}/{sr_id}",
             status_code=200,
             latency_ms=self._latency_ms,
+        )
+
+    async def post_comment(
+        self,
+        sr_id: str,
+        comment_text: str,
+        sub_category: str = "GENERAL",
+    ) -> ServiceRequestCreationResult:
+        endpoint = f"{self._MOCK_ENDPOINT_BASE}/comments"
+        if self._force_error:
+            sc = self._force_status_code or 500
+            return ServiceRequestCreationResult(
+                sr_id=sr_id,
+                endpoint=endpoint,
+                request_payload={},
+                response_payload=None,
+                latency_ms=self._latency_ms,
+                status_code=sc,
+                error=self._force_error,
+            )
+        return ServiceRequestCreationResult(
+            sr_id=sr_id,
+            endpoint=endpoint,
+            request_payload={},
+            response_payload={"success": True},
+            latency_ms=self._latency_ms,
+            status_code=201,
         )
 
     async def patch_service_request(

@@ -675,10 +675,11 @@ def _build_general_inquiry_config() -> WorkflowConfig:
                 "lease",
             }
         ),
-        auto_generated_fields=frozenset(),
+        auto_generated_fields=frozenset({"title", "description"}),
         lease_trigger_fields=("lease_code", "company", "lease_brand_mall"),
         action_intents=frozenset({"CREATE_GENERAL_INQUIRY"}),
-        guided_tour_gate=True,
+        # Lease, then the document. No guide, title, or description question.
+        guided_tour_gate=False,
     )
 
 
