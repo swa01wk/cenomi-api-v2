@@ -651,3 +651,58 @@ async def test_named_lease_is_reread_not_served_from_a_stale_cache() -> None:
 
     client.get_sales_data.assert_awaited()
     assert rows[0]["sales_amt"] == 999999.0, "must use the freshly read row"
+
+
+@pytest.mark.asyncio
+async def test_admin_result_carries_the_tab_and_period_for_view_sales_data() -> None:
+    """After approving, the admin needs a way through to the row.
+
+    The chat rendered nothing at all for admin_action_success, so there was
+    no "View Sales Data" button, and the listing stayed on the tab the row
+    had just left — showing "No data found in selected date range".
+    """
+    from app.agents.graph.nodes.sales_data.admin_status_update_node import (
+        admin_status_update_node,
+    )
+
+    client = AsyncMock()
+    client.update_sales_data_statuses = AsyncMock(
+        return_value=[{"lease_code": "t0108264", "success": True}]
+    )
+    targets = [{
+        "lease_id": 4,
+        "lease_code": "t0108264",
+        "sales_period_start": "2025-09-01",
+        "sales_period_end": "2025-09-30",
+    }]
+
+    with (
+        patch(
+            "app.agents.graph.nodes.sales_data.admin_status_update_node.get_current_bearer_token",
+            return_value="tok",
+        ),
+        patch(
+            "app.agents.graph.nodes.sales_data.admin_status_update_node.SalesDataApiClient",
+            return_value=client,
+        ),
+    ):
+        approved = await admin_status_update_node({
+            "collected_data": {"admin_action": "APPROVED", "admin_targets": targets},
+            "backend_refs": {},
+        })
+        asked = await admin_status_update_node({
+            "collected_data": {
+                "admin_action": "NEED_REUPLOAD",
+                "admin_targets": targets,
+            },
+            "backend_refs": {},
+        })
+
+    ui = approved["response_ui"]
+    assert ui["listing_section"] == "Approved"
+    assert ui["sales_period_start"] == "2025-09-01"
+    assert ui["sales_period_end"] == "2025-09-30"
+    assert ui["lease_codes"] == ["t0108264"]
+
+    # An ask-upload sends it back to the tenant, so Pending is the right tab.
+    assert asked["response_ui"]["listing_section"] == "Pending"
