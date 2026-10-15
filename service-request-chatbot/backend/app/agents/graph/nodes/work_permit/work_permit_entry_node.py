@@ -23,7 +23,14 @@ from typing import Any
 
 import structlog
 
+from app.agents.graph.nodes.work_permit.work_permit_confirmation_node import (
+    build_wp_review_card_suggestions,
+)
+from app.agents.graph.nodes.work_permit.work_permit_review_context import (
+    build_wp_review_context,
+)
 from app.agents.graph.state import ServiceRequestState
+from app.agents.services.work_permit_review_summary import compose_wp_history_sentence
 from app.agents.schemas.work_permit_schema import (
     STAGE_LABELS,
     WP_REVIEW_STAGES,
@@ -154,36 +161,60 @@ def _deny_review_action(state: ServiceRequestState, workflow_stage: str) -> dict
 
 
 def _legal_action_ids(state: ServiceRequestState, workflow_stage: str) -> frozenset[str]:
-    auth: AuthContext | None = state.get("auth_context")  # type: ignore[assignment]
-    backend_refs: dict[str, Any] = dict(state.get("backend_refs") or {})
-    user_roles: frozenset[str] = frozenset()
-    is_admin = False
-    if auth is not None:
-        user_roles = frozenset(str(r).upper() for r in auth.roles)
-        is_admin = bool(auth.is_global_admin) or "ADMIN" in user_roles
-    history_raw = backend_refs.get("sr_history") or []
-    history = tuple(h for h in history_raw if isinstance(h, dict))
-    assign_raw = backend_refs.get("assign_to_options") or []
-    assign_opts = tuple(
-        {"label": str(o.get("label") or ""), "value": str(o.get("value") or "")}
-        for o in assign_raw
-        if isinstance(o, dict) and str(o.get("value") or "").strip()
-    )
-    ext = backend_refs.get("work_permit_extension")
-    ctx = ServiceRequestContext(
-        sr_type="WORK_PERMIT",
-        subtype=str(state.get("sub_category") or "") or None,
-        workflow_stage=workflow_stage,
-        assigned_roles=frozenset(in_progress_roles(backend_refs.get("sr_operations"))),
-        user_roles=user_roles,
-        platform_status=str(backend_refs.get("platform_sr_status") or "") or None,
-        request_history=history,
-        work_permit_extension=ext if isinstance(ext, dict) else None,
-        assign_to_options=assign_opts,
-        is_actor=True,
-        is_admin=is_admin,
-    )
+    ctx = build_wp_review_context(state, workflow_stage=workflow_stage)
     return frozenset(a.id for a in resolve_actions(ctx))
+
+
+_QUESTION_RE = re.compile(
+    r"\?\s*$|^(who|what|when|where|which|why|how|is|are|was|were|does|do|did|"
+    r"can|could|will|would|has|have|tell\s+me|explain)\b",
+    re.IGNORECASE,
+)
+
+
+def _review_actions_line(state: ServiceRequestState, workflow_stage: str) -> str:
+    """The reviewer's real options, never create wording ("yes", "confirm and submit")."""
+    ctx = build_wp_review_context(state, workflow_stage=workflow_stage)
+    labels = [f"**{a.label}**" for a in resolve_actions(ctx)]
+    if not labels:
+        return "Ask me anything about this request."
+    joined = labels[0] if len(labels) == 1 else f"{', '.join(labels[:-1])}, or {labels[-1]}"
+    return (
+        f"You can {joined} this Work Permit using the buttons below, "
+        "or ask me anything about the request."
+    )
+
+
+def _review_fallback(
+    state: ServiceRequestState, workflow_stage: str, user_message: str
+) -> dict[str, Any]:
+    """Unmatched message on an open review: answer a question, else list the actions.
+
+    Keeps the review chips on the reply (the widget replaces the chip footer
+    every turn) and never touches the pending confirmation.
+    """
+    ctx = build_wp_review_context(state, workflow_stage=workflow_stage)
+    decorations = {"suggestions": build_wp_review_card_suggestions(state, subtype=ctx.subtype)}
+    actions_line = _review_actions_line(state, workflow_stage)
+    if _QUESTION_RE.search(user_message.strip()):
+        backend_refs: dict[str, Any] = dict(state.get("backend_refs") or {})
+        history = compose_wp_history_sentence(
+            backend_refs.get("sr_history"), backend_refs.get("sr_creator")
+        )
+        hint = "Answer the reviewer's question about this Work Permit from the request details."
+        if history:
+            hint += f" Request history: {history}"
+        return {
+            "status": "WAITING_FOR_USER",
+            "response_message": f"{hint} Close with: {actions_line}",
+            "response_decorations": decorations,
+        }
+    return {
+        "status": "WAITING_FOR_USER",
+        "response_message": actions_line,
+        "response_ui": {"type": "message", "message": actions_line, "verbatim": True},
+        "response_decorations": decorations,
+    }
 
 
 def _normalize_review_action(action_override: str | None) -> str | None:
@@ -222,10 +253,6 @@ _ACTION_ECHOES: frozenset[str] = frozenset(
         "Cancel permit",
     )
 )
-_SKIP_COMMENT_VALUE = "approve without comment"
-_SKIP_COMMENT_PHRASES: frozenset[str] = frozenset(
-    {_SKIP_COMMENT_VALUE, "without comment", "no comment", "skip", "no", "none"}
-)
 _CANCEL_PROMPT_PHRASES: frozenset[str] = frozenset(
     {"cancel", "never mind", "nevermind", "stop"}
 )
@@ -236,8 +263,8 @@ _COMMENT_PROMPTS: dict[str, tuple[str, str, str, bool]] = {
     "approve": (
         WP_ACTION_APPROVE,
         "Approve",
-        "I'll approve this permit. Would you like to add a comment? It's optional.",
-        False,
+        "I'll approve this permit. What comment should I include?",
+        True,
     ),
     "action_required": (
         WP_ACTION_MORE_INFO,
@@ -262,20 +289,16 @@ def _reply_text(user_message: str) -> str:
 
 def _ask_for_comment(state: ServiceRequestState, action_key: str) -> dict[str, Any]:
     action_id, label, prompt, required = _COMMENT_PROMPTS[action_key]
-    options = [_CANCEL_CHIP]
     comment_for: dict[str, Any] = {
         "action_id": action_id,
         "label": label,
         "required": required,
     }
-    if not required:
-        options = [{"label": "Approve without comment", "value": _SKIP_COMMENT_VALUE}, _CANCEL_CHIP]
-        comment_for["skip_value"] = _SKIP_COMMENT_VALUE
     return _ask_for_input(
         state,
         pending=action_key,
         message=prompt,
-        suggestions={"kind": "labeled_options", "options": options},
+        suggestions={"kind": "labeled_options", "options": [_CANCEL_CHIP]},
         ui_extra={"comment_for": comment_for, "verbatim": True},
     )
 
@@ -429,16 +452,10 @@ def _begin_or_complete_review_action(
     if resuming and reply.casefold() in _CANCEL_PROMPT_PHRASES:
         return _cancel_pending_prompt(state)
 
-    if action_key in {"reject", "action_required"}:
+    if action_key in {"approve", "reject", "action_required"}:
         if not reply:
             return _ask_for_comment(state, action_key)
         return _confirmed(backend_refs, action_key=action_key, comment=reply)
-
-    if action_key == "approve":
-        if not resuming or not reply:
-            return _ask_for_comment(state, action_key)
-        comment = "" if reply.casefold() in _SKIP_COMMENT_PHRASES else reply
-        return _confirmed(backend_refs, action_key="approve", comment=comment)
 
     if action_key == "assign_to":
         role = str(
@@ -693,16 +710,13 @@ async def _work_permit_entry(state: ServiceRequestState) -> dict[str, Any]:
                 "response_message": "No problem — what would you like to change?",
             }
 
+        if is_review:
+            return _review_fallback(state, workflow_stage, user_message)
         return {
             "status": "WAITING_FOR_USER",
             "response_message": (
                 "Please reply with 'yes' to confirm and submit, "
                 "or tell me what you'd like to change."
-                + (
-                    " You can also approve, ask for more info, assign, or reject."
-                    if is_review
-                    else ""
-                )
             ),
         }
 
@@ -735,6 +749,24 @@ async def _work_permit_entry(state: ServiceRequestState) -> dict[str, Any]:
             "response_message": (
                 "Open an existing Work Permit from your inbox to review and approve it."
             ),
+        }
+
+    # An open SR whose hop status sync could not map must not become a new
+    # create on top of the permit the user is reviewing.
+    if not workflow_stage and backend_refs.get("sr_id"):
+        log.warning(
+            "work_permit_entry.unmapped_open_sr",
+            sr_id=backend_refs.get("sr_id"),
+            in_progress_roles=sorted(in_progress_roles(backend_refs.get("sr_operations"))),
+        )
+        return {
+            "status": "WAITING_FOR_USER",
+            "response_message": (
+                f"I couldn't determine which review step Work Permit "
+                f"{backend_refs.get('sr_id')} is on, so I can't act on it here. "
+                "Please use the actions on the service request page."
+            ),
+            "response_ui": {"type": "message"},
         }
 
     # First create turn — initialize workflow stage.

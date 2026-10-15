@@ -31,6 +31,9 @@ import logging
 import re
 from typing import Any
 
+from app.agents.graph.nodes.work_permit.work_permit_review_context import (
+    build_wp_review_context,
+)
 from app.agents.graph.state import ServiceRequestState
 from app.agents.llm.gateway import get_default_gateway
 from app.agents.prompts.response_generation_prompt import (
@@ -38,6 +41,10 @@ from app.agents.prompts.response_generation_prompt import (
     build_document_refs,
     build_response_generation_context,
     document_file_names,
+)
+from app.agents.services.work_permit_review_summary import (
+    WpDetailRow,
+    build_wp_review_details,
 )
 from app.observability.decorators import trace_node
 from app.observability.llm_capture import capture_complete_json
@@ -166,6 +173,29 @@ def _details_card(
     return card
 
 
+def _wp_readable_rows(
+    state: ServiceRequestState,
+) -> tuple[list[WpDetailRow] | None, str | None]:
+    """Work Permit rows as people read them (no raw codes), plus the request type.
+
+    Submitted requests only: a draft's create prompts rely on the raw fields
+    (e.g. confirming a just-collected contact number the rows omit).
+    """
+    if state.get("active_agent") != "work_permit_agent":
+        return None, None
+    if not (state.get("backend_refs") or {}).get("sr_id"):
+        return None, None
+    collected: dict[str, Any] = state.get("collected_data") or {}
+    if not collected:
+        return None, None
+    ctx = build_wp_review_context(
+        state, workflow_stage=str(state.get("workflow_stage") or "CREATE_WORK_PERMIT")
+    )
+    rows = build_wp_review_details(collected, subtype=ctx.subtype)
+    permit = next((r["value"] for r in rows if r.get("key") == "work_permit_type"), "")
+    return rows, f"Work Permit — {permit}" if permit else "Work Permit"
+
+
 _SALES_REPEAT_FALLBACK = (
     "I'm not sure what you would like to do next. You can continue with the "
     "current step, or say **upload sales data**, **check my status**, "
@@ -292,7 +322,10 @@ async def response_generation_node(state: ServiceRequestState) -> dict[str, Any]
         or _FALLBACK_RESPONSE
     )
 
+    readable_rows, request_type = _wp_readable_rows(state)
     user_content = build_response_generation_context(
+        readable_rows=readable_rows,
+        request_type=request_type,
         user_message=user_message,
         response_intent=response_intent,
         workflow_stage=state.get("workflow_stage"),

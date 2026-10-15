@@ -137,26 +137,38 @@ async def test_review_card_details_list_every_filled_field() -> None:
     ui = out["response_ui"]
     details = {d["key"]: d for d in ui["details"]}
     assert list(details) == [
-        "mall",
         "brand",
+        "mall",
         "unit_codes",
+        "lease_code",
         "work_permit_type",
+        "schedule_dates",
+        "schedule_time",
         "phone",
         "contractor_name",
-        "planneddate",
-        "workers",
-        "measureofsafety",
+        "measureofsafety.fire_extinguisher",
+        "workers.1",
     ]
+    assert details["lease_code"]["value"] == "L-1"
     assert details["unit_codes"]["value"] == "GF001"
-    assert details["phone"] == {"key": "phone", "label": "Phone", "value": "0500000000"}
+    assert details["phone"] == {
+        "key": "phone",
+        "label": "Phone",
+        "value": "0500000000",
+        "section": "work",
+    }
     assert details["work_permit_type"]["value"] == "Construction – Hot Work"
-    assert details["planneddate"]["value"] == "25/09/2026 09:00 → 25/09/2026 17:00"
-    assert details["workers"]["value"] == "Ali"
-    assert details["measureofsafety"]["value"] == "Fire extinguisher"
+    assert details["schedule_dates"]["value"] == "25/09/2026"
+    assert details["schedule_time"]["value"] == "09:00 – 17:00"
+    assert details["workers.1"]["value"] == "Ali"
+    assert details["measureofsafety.fire_extinguisher"]["label"] == "Fire extinguisher"
+    assert details["measureofsafety.fire_extinguisher"]["value"] == "Yes"
     assert len(ui["details"]) > len(ui["summary"])
-    assert details["planneddate"]["summaryKey"] == "schedule"
+    assert details["schedule_dates"]["summaryKey"] == "schedule"
     assert details["unit_codes"]["summaryKey"] == "unit"
     assert "summaryKey" not in details["contractor_name"]
+    # Plumbing keys stay hidden.
+    assert not {"country_code", "tenant_contact", "lease_brand_mall"} & set(details)
 
 
 @pytest.mark.asyncio
@@ -188,7 +200,7 @@ async def test_review_message_names_the_latest_action_from_history() -> None:
         "**Ali** (Tenant) submitted this request, and "
         "**Sara** (DD Engineer) approved it. What would you like to do?"
     )
-    assert message.index("pending your **FM review**") < message.index("**Ali**")
+    assert message.index("pending **FM review**") < message.index("**Ali**")
 
 
 @pytest.mark.asyncio
@@ -218,9 +230,9 @@ async def test_ops_review_card_details_format_schedule_and_labels() -> None:
     details = {d["key"]: d["value"] for d in out["response_ui"]["details"]}
     assert details["department"] == "Operations"
     assert details["typeofwork"] == "Construction"
-    assert details["effective_starting"] == "28/09/2026 → 30/09/2026"
-    assert details["firstperiod"] == "03:51 AM – 04:51 AM"
-    assert "secondperiod" not in details
+    assert details["schedule_dates"] == "28/09/2026 – 30/09/2026"
+    assert details["schedule_time"] == "03:51 AM – 04:51 AM"
+    assert "schedule_second_period" not in details
 
 
 @pytest.mark.asyncio
@@ -236,15 +248,17 @@ async def test_review_message_is_deterministic_and_bolded() -> None:
 
 
 @pytest.mark.asyncio
-async def test_off_sr_page_offers_open_full_request_chip() -> None:
+async def test_off_sr_page_offers_full_request_and_navigation_chips() -> None:
     out = await work_permit_confirmation_node(_ops_state())
     ui = out["response_ui"]
     assert "note" not in ui
-    chip = next(
-        o for o in ui["suggestions"]["options"] if o["label"] == "Open full request"
-    )
-    assert chip["action"] == "view_service_request"
-    assert chip["value"] == "341524"
+    options = {o["label"]: o for o in ui["suggestions"]["options"]}
+    assert options["Open full request"] == {
+        "label": "Open full request",
+        "value": "Show the full request",
+    }
+    assert options["Go to request page"]["action"] == "view_service_request"
+    assert options["Go to request page"]["value"] == "341524"
 
 
 @pytest.mark.asyncio
@@ -254,7 +268,8 @@ async def test_on_sr_page_has_no_note_and_no_navigation_chip() -> None:
     )
     ui = out["response_ui"]
     assert "note" not in ui
-    assert "Open full request" not in _chip_labels(ui)
+    assert "Open full request" in _chip_labels(ui)
+    assert "Go to request page" not in _chip_labels(ui)
     assert ui["details"]
 
 
@@ -306,21 +321,21 @@ async def test_non_actor_gets_fixed_message_not_card() -> None:
         "You don't have an action on this step."
     )
     assert out["response_message"] == ui["message"]
-    assert out["response_decorations"] == {}
+    assert out["response_decorations"] == {"suggestions": ui["suggestions"]}
 
 
 @pytest.mark.asyncio
-async def test_non_actor_on_sr_page_has_no_chip() -> None:
+async def test_non_actor_on_sr_page_has_no_navigation_chip() -> None:
     out = await work_permit_confirmation_node(
         _non_actor_state(msp_context={"current_sr_id": "341527"})
     )
-    assert "suggestions" not in out["response_ui"]
+    assert _chip_labels(out["response_ui"]) == ["Open full request"]
 
 
 @pytest.mark.asyncio
 async def test_non_actor_off_sr_page_offers_open_full_request() -> None:
     out = await work_permit_confirmation_node(_non_actor_state())
-    assert _chip_labels(out["response_ui"]) == ["Open full request"]
+    assert _chip_labels(out["response_ui"]) == ["Open full request", "Go to request page"]
 
 
 @pytest.mark.asyncio
@@ -335,7 +350,7 @@ async def test_non_actor_reply_is_not_swapped_for_details_card() -> None:
         response_message=out["response_message"],
     )
     assert final["type"] == "message"
-    assert "suggestions" not in final
+    assert _chip_labels(final) == ["Open full request"]
 
 
 def test_create_card_still_confirm_cancel() -> None:

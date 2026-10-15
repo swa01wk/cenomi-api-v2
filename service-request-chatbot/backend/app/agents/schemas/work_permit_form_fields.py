@@ -1017,7 +1017,6 @@ _WP_DRAFT_EXTRA_KEYS: Final[tuple[str, ...]] = (
     "mall",
     "brand",
     "city",
-    "company",
     "company_name",
     "lease_brand_mall",
     "contracted_area",
@@ -1103,6 +1102,37 @@ def summarize_planneddate(value: dict[str, Any]) -> str:
     return primary
 
 
+_ARABIC_CHAR_RE = re.compile(r"[\u0600-\u06FF]")
+
+
+def wp_english_part(value: Any) -> str:
+    """English half of a bilingual portal option (``"Yes - نعم"`` → ``"Yes"``)."""
+    text = str(value or "").strip()
+    if " - " not in text:
+        return text
+    left, right = text.split(" - ", 1)
+    if _ARABIC_CHAR_RE.search(right) and not _ARABIC_CHAR_RE.search(left):
+        return left.strip()
+    return text
+
+
+_AFFIRMATIVE: Final[frozenset[str]] = frozenset({"yes", "true", "on", "1"})
+_NEGATIVE: Final[frozenset[str]] = frozenset({"no", "false", "off", "0"})
+
+
+def wp_safety_answer(value: Any) -> str:
+    """``"Yes"`` / ``"No"`` for a safety checklist answer, else its English text."""
+    if isinstance(value, bool):
+        return "Yes" if value else "No"
+    text = wp_english_part(value)
+    first_word = re.split(r"[\s\-–,.]+", text.casefold(), maxsplit=1)[0]
+    if first_word in _AFFIRMATIVE:
+        return "Yes"
+    if first_word in _NEGATIVE:
+        return "No"
+    return text
+
+
 def summarize_list_workers(value: Any) -> str:
     """Human label for cold ``listWorker`` rows."""
     if not isinstance(value, list):
@@ -1149,7 +1179,7 @@ def format_wp_field_display(key: str, value: Any) -> str:
         on = [
             WP_MEASURE_OF_SAFETY_LABELS.get(k, k)
             for k, v in value.items()
-            if str(v or "").strip()
+            if wp_safety_answer(v) == "Yes"
         ]
         return ", ".join(on) if on else ""
     return ""

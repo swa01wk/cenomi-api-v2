@@ -34,6 +34,7 @@ from app.agents.services.lease_lookup_service import (
     LeaseLookupQuery,
     get_gi_lease_lookup_service,
     get_lease_lookup_service,
+    normalise_lease_code,
 )
 from app.agents.services.resource_picker_decorations import (
     build_create_lease_picker,
@@ -279,12 +280,14 @@ def _enrich_collected_data(
     # to lease_code so confirmation and submission flows can reference it by
     # that key without any further user input.
     updated["lease"] = record.lease_code
-    # Search-trigger alias used by missing_field_node. Copy the display name
-    # from the lease so we never re-ask for tenant/company after a hit.
+    # Search-trigger alias used by missing_field_node. The lease's company name
+    # replaces whatever the user searched with, and ``company_lease_code`` marks
+    # it as verified for this lease (the Work Permit summary shows only that).
     # Do not write this into ``company_name`` — the classic form binds that
     # key to tenant_profile_id.
-    if record.company_name and not str(updated.get("company") or "").strip():
+    if record.company_name:
         updated["company"] = record.company_name
+        updated["company_lease_code"] = normalise_lease_code(record.lease_code)
     # unit_type: only when the lease row provided it (empty string from API
     # must not wipe a user-supplied value, and we never invent phone/owner/trade).
     if str(getattr(record, "unit_type", "") or "").strip() and not str(
@@ -415,11 +418,9 @@ async def lease_lookup_node(
         # Fall through to Path B with collected["lease_code"] set from fallback_code
 
     # ── Path B: no lease yet selected — run lookup ────────────────────────────
-    # Normalise lease_code: strip whitespace and lowercase so that inputs like
-    # "T0105712" or "t0 105712" match the canonical lowercase codes in the DB.
-    raw_lease_code: str | None = collected.get("lease_code")
+    # "T0105712" or "t0 105712" must match the canonical lowercase codes in the DB.
     normalised_lease_code: str | None = (
-        raw_lease_code.strip().lower().replace(" ", "") if raw_lease_code else None
+        normalise_lease_code(collected.get("lease_code")) or None
     )
 
     # Forward the user's property scope so the HTTP adapter can restrict the

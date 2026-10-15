@@ -96,34 +96,27 @@ async def test_button_click_echo_prompts_instead_of_submitting(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("action", "pending", "label", "required"),
+    ("action", "pending", "label"),
     [
-        ("reject_wp", "reject", "Reject", True),
-        ("ask_more_info_wp", "action_required", "Ask for more info", True),
-        ("confirm_approve_wp", "approve", "Approve", False),
+        ("reject_wp", "reject", "Reject"),
+        ("ask_more_info_wp", "action_required", "Ask for more info"),
+        ("confirm_approve_wp", "approve", "Approve"),
     ],
 )
-async def test_prompt_carries_comment_for(
-    action: str, pending: str, label: str, required: bool
-) -> None:
+async def test_prompt_carries_comment_for(action: str, pending: str, label: str) -> None:
     out = await work_permit_entry_node(_review_state(action_override=action))
     ui = out["response_ui"]
     assert out["backend_refs"]["wp_pending_action"] == pending
     assert ui["verbatim"] is True
     assert ui["comment_for"]["action_id"] == action
     assert ui["comment_for"]["label"] == label
-    assert ui["comment_for"]["required"] is required
-    chips = [o["label"] for o in ui["suggestions"]["options"]]
-    if required:
-        assert chips == ["Cancel"]
-        assert "skip_value" not in ui["comment_for"]
-    else:
-        assert chips == ["Approve without comment", "Cancel"]
-        assert ui["comment_for"]["skip_value"] == "approve without comment"
+    assert ui["comment_for"]["required"] is True
+    assert "skip_value" not in ui["comment_for"]
+    assert [o["label"] for o in ui["suggestions"]["options"]] == ["Cancel"]
 
 
 @pytest.mark.asyncio
-async def test_typed_approve_prompts_for_optional_comment() -> None:
+async def test_typed_approve_prompts_for_comment() -> None:
     out = await work_permit_entry_node(_review_state(user_message="approve"))
     assert out["backend_refs"]["wp_pending_action"] == "approve"
     assert "wp_review_comment" not in out["backend_refs"]
@@ -144,7 +137,7 @@ async def test_pending_reason_completes_reject() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("pending", ["reject", "action_required"])
+@pytest.mark.parametrize("pending", ["approve", "reject", "action_required"])
 async def test_required_comment_re_asks_on_empty_reply(pending: str) -> None:
     out = await work_permit_entry_node(
         _review_state(user_message="  ", backend_refs=_pending_refs(pending))
@@ -155,26 +148,25 @@ async def test_required_comment_re_asks_on_empty_reply(pending: str) -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("reply", ["approve without comment", "Skip", "no comment"])
-async def test_approve_skip_submits_without_comment(reply: str) -> None:
+async def test_approve_with_typed_comment() -> None:
     out = await work_permit_entry_node(
         _review_state(
-            user_message=reply,
+            user_message="All good, proceed",
             backend_refs=_pending_refs("approve", wp_review_comment="old"),
         )
     )
     assert out["confirmation_status"] == "CONFIRMED"
     assert out["backend_refs"]["wp_action"] == "approve"
-    assert "wp_review_comment" not in out["backend_refs"]
+    assert out["backend_refs"]["wp_review_comment"] == "All good, proceed"
 
 
 @pytest.mark.asyncio
-async def test_approve_with_typed_comment() -> None:
+async def test_approve_skip_phrase_is_kept_as_the_comment() -> None:
     out = await work_permit_entry_node(
-        _review_state(user_message="All good, proceed", backend_refs=_pending_refs("approve"))
+        _review_state(user_message="Skip", backend_refs=_pending_refs("approve"))
     )
     assert out["confirmation_status"] == "CONFIRMED"
-    assert out["backend_refs"]["wp_review_comment"] == "All good, proceed"
+    assert out["backend_refs"]["wp_review_comment"] == "Skip"
 
 
 @pytest.mark.asyncio
@@ -247,6 +239,35 @@ def test_payload_approve_sends_comment_only_when_set() -> None:
     body = build_review_work_permit_payload(**kwargs, action="approve", comment="Fine")
     assert body["status"] == "APPROVED"
     assert body["comment"] == "Fine"
+
+
+@pytest.mark.parametrize("action", ["approve", "action_required"])
+@pytest.mark.parametrize(
+    ("stored", "expected"),
+    [("4821", 4821), (4821, 4821), ("Acme LLC", None), ("", None)],
+)
+def test_review_payload_company_name_is_int_or_absent(
+    action: str, stored: object, expected: int | None
+) -> None:
+    body = build_review_work_permit_payload(
+        sub_category="CONSTRUCTION_COLD",
+        inner_payload={
+            "mall": "M",
+            "company_name": stored,
+            "tenant_profile_id": "4821",
+            "contract_id": "77",
+            "property_id": "9",
+        },
+        action=action,
+        comment="Checked",
+    )
+    payload = body["payload"]
+    assert payload.get("company_name") == expected
+    if expected is None:
+        assert "company_name" not in payload
+    for key in ("tenant_profile_id", "contract_id", "property_id"):
+        assert key not in payload
+    assert body["comment"] == "Checked"
 
 
 @pytest.mark.asyncio
