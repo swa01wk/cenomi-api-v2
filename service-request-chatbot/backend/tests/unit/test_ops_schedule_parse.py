@@ -74,6 +74,24 @@ class TestExtractEffectiveStarting:
         )
         assert got == {"datefrom": "23/09/2026", "dateto": "24/09/2026"}
 
+    def test_day_month_each_side_range(self) -> None:
+        got = _extract_effective_starting(
+            "24 sep to 28 sep", today=date(2026, 9, 1)
+        )
+        assert got == {"datefrom": "24/09/2026", "dateto": "28/09/2026"}
+
+    def test_day_month_each_side_full_month_name(self) -> None:
+        got = _extract_effective_starting(
+            "24 september to 28 september", today=date(2026, 9, 1)
+        )
+        assert got == {"datefrom": "24/09/2026", "dateto": "28/09/2026"}
+
+    def test_day_month_each_side_cross_month(self) -> None:
+        got = _extract_effective_starting(
+            "24 sep to 2 oct", today=date(2026, 9, 1)
+        )
+        assert got == {"datefrom": "24/09/2026", "dateto": "02/10/2026"}
+
     def test_day_month_range_with_year(self) -> None:
         got = _extract_effective_starting(
             "23-24 september 2027", today=date(2026, 1, 1)
@@ -145,6 +163,79 @@ class TestOpsScheduleRescue:
         assert _parse_extracted_value(extracted["firstperiod"]) == {
             "from": "14:00",
             "to": "15:00",
+        }
+
+    async def test_each_side_range_when_llm_empty(self) -> None:
+        state: dict[str, Any] = {
+            "user_message": "24 sep to 28 sep",
+            "workflow_stage": "CREATE_WORK_PERMIT",
+            "active_agent": "work_permit_agent",
+            "active_field": "effective_starting",
+            "missing_fields": ["effective_starting", "firstperiod"],
+            "response_ui": {
+                "type": "text_question",
+                "field": "effective_starting",
+                "fields": ["effective_starting", "firstperiod"],
+            },
+            "collected_data": {"work_permit_type": "Operations"},
+            "conversation_history": [],
+            "session_id": "test",
+        }
+        result = await _run_extraction(state)
+        extracted = result.get("extracted_fields") or {}
+        assert _parse_extracted_value(extracted["effective_starting"]) == {
+            "datefrom": "24/09/2026",
+            "dateto": "28/09/2026",
+        }
+
+    async def test_overrides_llm_collapsed_equal_dates(self) -> None:
+        """LLM set both ends to the start day; deterministic range must win."""
+        state: dict[str, Any] = {
+            "user_message": "24 sep to 28 sep",
+            "workflow_stage": "CREATE_WORK_PERMIT",
+            "active_agent": "work_permit_agent",
+            "active_field": "effective_starting",
+            "missing_fields": ["effective_starting"],
+            "response_ui": {
+                "type": "text_question",
+                "field": "effective_starting",
+                "fields": ["effective_starting"],
+            },
+            "collected_data": {"work_permit_type": "Operations"},
+            "conversation_history": [],
+            "session_id": "test",
+        }
+        llm_collapsed = {
+            "summary": "",
+            "fields": {
+                "effective_starting": {
+                    "value": json.dumps(
+                        {
+                            "datefrom": "24/09/2026",
+                            "dateto": "24/09/2026",
+                        }
+                    ),
+                    "confidence": 0.9,
+                },
+            },
+        }
+        with (
+            patch(
+                "app.agents.graph.nodes.shared.field_extraction_node.get_default_gateway",
+                return_value=_make_gateway_mock(llm_collapsed),
+            ),
+            patch(
+                "app.agents.graph.nodes.shared.field_extraction_node._extract_effective_starting",
+                side_effect=lambda msg, today=None: _extract_effective_starting(
+                    msg, today=date(2026, 9, 1)
+                ),
+            ),
+        ):
+            result = await field_extraction_node(state)
+        extracted = result.get("extracted_fields") or {}
+        assert _parse_extracted_value(extracted["effective_starting"]) == {
+            "datefrom": "24/09/2026",
+            "dateto": "28/09/2026",
         }
 
     async def test_ordinal_combined_fills_both(self) -> None:
@@ -277,3 +368,84 @@ class TestScheduleRemapGuard:
         out = _remap_extracted_to_active_field(extracted, "firstperiod")
         assert "effective_starting" in out
         assert "firstperiod" not in out
+
+
+@pytest.mark.asyncio
+class TestOpsOptionalSkip:
+    async def test_none_skips_secondperiod(self) -> None:
+        state: dict[str, Any] = {
+            "user_message": "none",
+            "workflow_stage": "CREATE_WORK_PERMIT",
+            "active_agent": "work_permit_agent",
+            "active_field": "secondperiod",
+            "missing_fields": ["secondperiod", "entry_gate"],
+            "response_ui": {
+                "type": "text_question",
+                "field": "secondperiod",
+                "fields": ["secondperiod"],
+            },
+            "collected_data": {
+                "work_permit_type": "Operations",
+                "_wp_type_confirmed": True,
+                "firstperiod": {"from": "15:00", "to": "17:00"},
+            },
+            "conversation_history": [],
+            "session_id": "test",
+        }
+        result = await _run_extraction(state)
+        extracted = result.get("extracted_fields") or {}
+        assert _parse_extracted_value(extracted["secondperiod"]) == {
+            "from": "",
+            "to": "",
+        }
+
+        from app.agents.graph.nodes.shared.merge_state_node import merge_state_node
+        from app.agents.schemas.work_permit_schema import get_missing_fields
+
+        merged = await merge_state_node(
+            {
+                **state,
+                "extracted_fields": extracted,
+                "corrected_fields": {},
+                "confirmation_status": None,
+            }
+        )
+        collected = merged.get("collected_data") or {}
+        assert collected.get("secondperiod") is not None
+        missing = get_missing_fields("CREATE_WORK_PERMIT", collected)
+        assert "secondperiod" not in missing
+
+    async def test_none_skips_entry_gate(self) -> None:
+        state: dict[str, Any] = {
+            "user_message": "none",
+            "workflow_stage": "CREATE_WORK_PERMIT",
+            "active_agent": "work_permit_agent",
+            "active_field": "entry_gate",
+            "missing_fields": ["entry_gate"],
+            "response_ui": {"type": "text_question", "field": "entry_gate"},
+            "collected_data": {
+                "work_permit_type": "Operations",
+                "_wp_type_confirmed": True,
+            },
+            "conversation_history": [],
+            "session_id": "test",
+        }
+        result = await _run_extraction(state)
+        extracted = result.get("extracted_fields") or {}
+        assert _parse_extracted_value(extracted["entry_gate"]) == ""
+
+        from app.agents.graph.nodes.shared.merge_state_node import merge_state_node
+        from app.agents.schemas.work_permit_schema import get_missing_fields
+
+        merged = await merge_state_node(
+            {
+                **state,
+                "extracted_fields": extracted,
+                "corrected_fields": {},
+                "confirmation_status": None,
+            }
+        )
+        collected = merged.get("collected_data") or {}
+        assert collected.get("entry_gate") == ""
+        missing = get_missing_fields("CREATE_WORK_PERMIT", collected)
+        assert "entry_gate" not in missing

@@ -547,6 +547,12 @@ EXTRACTABLE_FIELDS: frozenset[str] = frozenset(
         "planned_trading_date",
         # Optional shared field
         "delay_reason",
+        # Fitout Progress fields. Without these the extractor silently dropped
+        # the percentage: "update fitout progress t0112745 30%" came back from
+        # the model with both fields and left validation with only the lease.
+        # ``comment`` is singular on this form (the others use ``comments``).
+        "fitout_progress_percentage",
+        "comment",
         # Work Permit fields — FieldExtractionService still validates against this set.
         "work_permit_type",
         "start_date",

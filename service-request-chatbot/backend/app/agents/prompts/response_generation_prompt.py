@@ -5,6 +5,8 @@ Every other node sets machine-readable signals; this node turns those signals
 into a natural, context-aware message for the user.
 """
 
+from typing import Any
+
 # ---------------------------------------------------------------------------
 # Field name → human-readable label mapping (never expose raw field keys)
 # ---------------------------------------------------------------------------
@@ -138,15 +140,115 @@ TONE AND STYLE RULES
   verbatim at the end of your reply — do not remove or paraphrase them.
 
 ════════════════════════════════════════════════════════
+DETAILS CARD — OPTIONAL
+════════════════════════════════════════════════════════
+
+You may show stored details as a card instead of writing them into the sentence.
+- Add a "card" only when the user asks to see, list, or review stored details
+  that read better as label/value rows than as a sentence — e.g. a list of
+  people, a schedule, or a group of related fields from DATA COLLECTED SO FAR.
+- Never add a card when asking a question, confirming, reporting an error,
+  answering with a single value, or when a UI component (other than "message")
+  is already being shown.
+- "title": a short heading, e.g. "Workers (2)" or "Schedule".
+- "fields": label/value pairs whose values are copied from DATA COLLECTED SO FAR,
+  as plain text. For several items (e.g. people), repeat the same labels for
+  each item in turn.
+- "files": only documents listed under AVAILABLE DOCUMENTS, referenced by their
+  doc_N handle with a short label. Never invent a handle.
+- With a card, "message" is one short sentence introducing it; do not repeat the
+  card's data in the message.
+- Never put a doc_N handle or any ID in "message" or in a field value.
+
+════════════════════════════════════════════════════════
 OUTPUT FORMAT — STRICT
 ════════════════════════════════════════════════════════
 
-Return ONLY a JSON object with exactly one key:
+Return ONLY a JSON object with a "message" key and, only when a card helps, a "card" key:
 
   {"message": "<your natural language response here>"}
 
-Do NOT include markdown, extra keys, or any text outside the JSON object.
+  {"message": "<one short sentence>",
+   "card": {"title": "<heading>",
+            "fields": [{"label": "<label>", "value": "<value>"}],
+            "files": [{"label": "<label>", "ref": "doc_1"}]}}
+
+Do NOT include markdown, other keys, or any text outside the JSON object.
 """.strip()
+
+
+_DOCUMENT_ID_KEYS = frozenset({"document_id", "documentId"})
+
+
+def _document_ids(value: Any) -> list[str]:
+    """Every document id at any depth, in first-seen order."""
+    found: list[str] = []
+    if isinstance(value, dict):
+        for k, v in value.items():
+            if k in _DOCUMENT_ID_KEYS:
+                if str(v or "").strip():
+                    found.append(str(v).strip())
+            else:
+                found += _document_ids(v)
+    elif isinstance(value, list):
+        for v in value:
+            found += _document_ids(v)
+    return found
+
+
+def build_document_refs(
+    documents: list[dict] | None, collected_data: dict | None
+) -> dict[str, str]:
+    """Real document id → ``doc_N`` handle; the LLM only ever sees the handle."""
+    refs: dict[str, str] = {}
+    for doc_id in _document_ids(documents or []) + _document_ids(collected_data or {}):
+        refs.setdefault(doc_id, f"doc_{len(refs) + 1}")
+    return refs
+
+
+def document_file_names(documents: list[dict] | None) -> dict[str, str]:
+    """Real document id → its file name, for rows that have one."""
+    names: dict[str, str] = {}
+    for doc in documents or []:
+        if not isinstance(doc, dict):
+            continue
+        doc_id = str(doc.get("document_id") or doc.get("documentId") or "").strip()
+        name = str(
+            doc.get("file_name") or doc.get("fileName") or doc.get("document_name") or ""
+        ).strip()
+        if doc_id and name:
+            names[doc_id] = name
+    return names
+
+
+def _with_document_refs(value: Any, doc_refs: dict[str, str]) -> Any:
+    """Document ids at any depth become their ``doc_N`` handle (dropped when unknown)."""
+    if isinstance(value, dict):
+        out: dict[str, Any] = {}
+        for k, v in value.items():
+            if k in _DOCUMENT_ID_KEYS:
+                ref = doc_refs.get(str(v or "").strip())
+                if ref:
+                    out["document"] = ref
+                continue
+            out[k] = _with_document_refs(v, doc_refs)
+        return out
+    if isinstance(value, list):
+        return [_with_document_refs(v, doc_refs) for v in value]
+    return value
+
+
+def _readable(value: Any) -> str:
+    """Nested rows as "key: value, key: value; …" rather than a Python repr."""
+    if isinstance(value, dict):
+        return ", ".join(
+            f"{k}: {shown}" for k, v in value.items() if (shown := _readable(v))
+        )
+    if isinstance(value, list):
+        parts = [shown for v in value if (shown := _readable(v))]
+        sep = "; " if any(isinstance(v, (dict, list)) for v in value) else ", "
+        return sep.join(parts)
+    return "" if value is None else str(value).strip()
 
 
 def build_response_generation_context(
@@ -162,9 +264,12 @@ def build_response_generation_context(
     response_ui_type: str | None,
     conversation_history: list[dict],
     asking_field: str | None = None,
+    doc_refs: dict[str, str] | None = None,
+    documents: list[dict] | None = None,
 ) -> str:
     """Build the user-content string sent to the LLM for response generation."""
 
+    doc_refs = doc_refs or {}
     lines: list[str] = []
 
     # ── 1. What the system determined needs to be communicated ──────────────
@@ -226,12 +331,21 @@ def build_response_generation_context(
             if k in _non_user_fields:
                 continue
             label = FIELD_LABELS.get(k, k)
-            readable_data[label] = str(v) if not isinstance(v, list) else ", ".join(str(i) for i in v)
+            shown = _readable(_with_document_refs(v, doc_refs))
+            if shown:
+                readable_data[label] = shown
         if readable_data:
             lines.append("## DATA COLLECTED SO FAR")
             for label, val in readable_data.items():
                 lines.append(f"- {label}: {val}")
             lines.append("")
+
+    if doc_refs:
+        names = document_file_names(documents)
+        lines.append("## AVAILABLE DOCUMENTS")
+        for doc_id, ref in doc_refs.items():
+            lines.append(f"- {ref}: {names.get(doc_id) or 'Document'}")
+        lines.append("")
 
     # ── 4. Still missing ─────────────────────────────────────────────────────
     # Suppress missing fields when there are blocking validation errors so the
@@ -295,7 +409,9 @@ def build_response_generation_context(
 
     lines.append(
         "Now write a single natural reply for the assistant. "
-        "Respond ONLY with: {\"message\": \"<your reply>\"}"
+        "Respond ONLY with the JSON object from OUTPUT FORMAT: "
+        "{\"message\": \"<your reply>\"}, plus a \"card\" only when the user "
+        "asked to see stored details that read better as rows."
     )
 
     return "\n".join(lines)

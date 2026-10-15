@@ -28,6 +28,7 @@ import time
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -167,15 +168,57 @@ def _window_query(
     agent: str | None = Query(
         default=None, description="Restrict to one agent, e.g. rdd_handover_agent."
     ),
+    tz: str | None = Query(
+        default=None,
+        description="Viewer's IANA timezone, e.g. Asia/Riyadh. Per-day series are "
+        "bucketed by calendar day in this zone. Default and unknown: UTC.",
+    ),
 ) -> AnalyticsFilters:
     start, end = resolve_window(from_date, to_date)
-    return AnalyticsFilters(from_date=start, to_date=end, agent=agent or None)
+    return AnalyticsFilters(
+        from_date=start, to_date=end, agent=agent or None, tz=resolve_tz(tz)
+    )
+
+
+# Legacy zone names browsers still report (Chrome on Indian machines sends
+# Asia/Calcutta). Mapped to the current name so Python and Postgres agree.
+_TZ_ALIASES: dict[str, str] = {
+    "Asia/Calcutta": "Asia/Kolkata",
+    "Asia/Katmandu": "Asia/Kathmandu",
+    "Asia/Dacca": "Asia/Dhaka",
+    "Asia/Rangoon": "Asia/Yangon",
+    "Asia/Saigon": "Asia/Ho_Chi_Minh",
+    "Asia/Ulan_Bator": "Asia/Ulaanbaatar",
+    "Asia/Thimbu": "Asia/Thimphu",
+    "Europe/Kiev": "Europe/Kyiv",
+    "America/Buenos_Aires": "America/Argentina/Buenos_Aires",
+    "Atlantic/Faeroe": "Atlantic/Faroe",
+}
+
+
+def resolve_tz(tz: str | None) -> str:
+    """The IANA zone to bucket days in; blank or unknown means UTC.
+
+    An unknown zone falls back to UTC rather than failing the request: a
+    browser reporting an odd zone name must not blank the dashboard.
+    """
+    if not tz:
+        return "UTC"
+    name = _TZ_ALIASES.get(tz, tz)
+    try:
+        ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError):
+        log.warning("command_center.unknown_timezone", tz=tz)
+        return "UTC"
+    return name
 
 
 def _previous(filters: AnalyticsFilters) -> AnalyticsFilters:
     assert filters.from_date is not None and filters.to_date is not None
     start, end = previous_window(filters.from_date, filters.to_date)
-    return AnalyticsFilters(from_date=start, to_date=end, agent=filters.agent)
+    return AnalyticsFilters(
+        from_date=start, to_date=end, agent=filters.agent, tz=filters.tz
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -542,4 +585,5 @@ def _key(filters: AnalyticsFilters) -> tuple[Any, ...]:
         filters.from_date.isoformat() if filters.from_date else None,
         filters.to_date.isoformat() if filters.to_date else None,
         filters.agent,
+        filters.tz,
     )

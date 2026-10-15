@@ -36,6 +36,9 @@ TIER STRUCTURE
                     + S241  RDD correction vs stale WAITING_FOR_USER routing
   (Tier 4/5/6 live in lifecycle_scenarios.py)
   Tier 8  FitoutConfirm Core+Edge — S70–S82: FIT_OUT_CONFIRM_FOS/END/TRADING
+  Tier 6k FitoutProgress — S84–S88: FITOUT_PROGRESS one-question create,
+                    validation, RBAC and unsupported-action guardrails
+                    (approve side: see the tier header above S84)
   Tier 9  Work Permit create/RBAC — S240–S244 (lifecycle hops L240–L245)
                     (flat WP IDs overlap TIER2 S240–S244; run via --tier 9)
   notif   Notification agent — S250–S255: inbox listing, NL filters,
@@ -66,6 +69,9 @@ Mock lease data
   t0208831  Nike          Riyadh Park       Riyadh  GF101/102  680 sqm
   t0301144  Nike          Mall of Arabia    Jeddah  LG220      510 sqm
   t0419977  Zara          Dubai Festival City Dubai  UF301      900 sqm
+  t0512099  Levi's        Mall of Dhahran   Dhahran GF018      260 sqm
+            fit-out under way (started 15/01/2026, due 30/06/2027, records 38%)
+            — the Fitout Progress fixture
 """
 
 from __future__ import annotations
@@ -4347,6 +4353,157 @@ _S83 = Scenario(
 
 
 # =============================================================================
+# TIER 6k — FITOUT PROGRESS (S84–S88)
+# =============================================================================
+#
+# One question, one field. Lease t0512099 is the fit-out-in-progress fixture:
+# its window started and has not ended, and it already records 38%, so the
+# suggestion and the floor both have something to work with. The elapsed
+# percentage moves with the calendar, so nothing here asserts a number — only
+# that the question is asked, and that the value the user gives is what lands.
+#
+# The approval side has no flat or lifecycle scenario, and cannot have one yet:
+# a DD create is auto-approved inside the platform's create transaction, and a
+# non-DD create is refused by the agent (the web form hides the sub-category
+# from every other role), so the harness has no way to produce an SR that is
+# waiting for approval. Seed one with
+# ``POST /backend_api/test/fitout-progress`` and open it by hand; the flow
+# itself is covered deterministically by
+# ``tests/integration/test_fitout_progress_graph.py``.
+
+_S84 = Scenario(
+    id=84,
+    name="fitout_progress_happy_path",
+    goal=(
+        "FITOUT_PROGRESS: lease resolved → the one percentage question → "
+        "review card → recorded (auto-approved, because the creator is the "
+        "approver)"
+    ),
+    tier=6,
+    user_email="sara@cenomi.com",  # DD_ENGINEER — the only role offered this SR
+    turns=[
+        Turn(
+            message="record fitout progress for t0512099",
+            note=(
+                "Lease resolves; the only question is the percentage, and it "
+                "carries the fit-out window plus the elapsed-time suggestion"
+            ),
+            expect_keywords=["percentage", "complete", "fit-out", "fitout"],
+        ),
+        Turn(
+            message="82",
+            note="A bare percentage — the same message a chip tap sends",
+            expect_ui_type="confirmation_card",
+            expect_field_value={"Fitout Progress %": "82"},
+        ),
+        Turn(
+            message="Confirm",
+            action="confirm",
+            note=(
+                "Recorded. A DD create is approved in the platform's create "
+                "transaction, so the reply must not promise a review step"
+            ),
+            expect_keywords=["recorded", "approved", "82"],
+        ),
+    ],
+    tags=["fitout-progress", "happy-path", "one-question", "tier6k"],
+)
+
+_S85 = Scenario(
+    id=85,
+    name="fitout_progress_one_shot",
+    goal="Lease and percentage in one sentence → straight to the review card",
+    tier=6,
+    user_email="sara@cenomi.com",
+    turns=[
+        Turn(
+            message="fitout for t0512099 is 82% done",
+            note="Nothing left to ask — the card appears on the first turn",
+            expect_ui_type="confirmation_card",
+            expect_field_value={"Fitout Progress %": "82"},
+        ),
+    ],
+    tags=["fitout-progress", "one-shot", "packed-answer", "tier6k"],
+)
+
+_S86 = Scenario(
+    id=86,
+    name="fitout_progress_out_of_range_re_asked",
+    goal=(
+        "120% is refused locally and the question comes back — the platform "
+        "never sees it (validateFitoutProgressPayload would answer 400)"
+    ),
+    tier=6,
+    user_email="sara@cenomi.com",
+    turns=[
+        Turn(
+            message="fitout progress for t0512099 is 120%",
+            note="Out of range: no card, and the rejected value is cleared",
+            expect_no_submit=True,
+            expect_keywords=["between 0 and 100", "percentage", "number"],
+        ),
+        Turn(
+            message="sorry, 95",
+            note="The corrected value is accepted and reaches the card",
+            expect_ui_type="confirmation_card",
+            expect_field_value={"Fitout Progress %": "95"},
+        ),
+    ],
+    tags=["fitout-progress", "validation", "out-of-range", "tier6k"],
+)
+
+_S87 = Scenario(
+    id=87,
+    name="fitout_progress_role_denied",
+    goal=(
+        "A Mall Manager is refused at the workflow boundary, before any lease "
+        "lookup — the web form hides this sub-category from their role"
+    ),
+    tier=6,
+    user_email="aisha@cenomi.com",  # MALL_MANAGER
+    turns=[
+        Turn(
+            message="record fitout progress for t0512099",
+            note="Refused, with the role that does record it named",
+            expect_no_submit=True,
+            expect_keywords=["role", "RDD", "not available", "isn't available"],
+        ),
+    ],
+    tags=["fitout-progress", "rbac", "role-denied", "tier6k"],
+)
+
+_S88 = Scenario(
+    id=88,
+    name="fitout_progress_unsupported_actions",
+    goal=(
+        "Actions this workflow has no step for are explained, not attempted: "
+        "level 1 allows UPDATE / APPROVE / REJECT only"
+    ),
+    tier=6,
+    user_email="sara@cenomi.com",
+    turns=[
+        Turn(
+            message="record fitout progress for t0512099",
+            note="Question asked",
+        ),
+        Turn(
+            message="can I attach the site photos?",
+            note="No attachments on this sub-category — explained, not refused by the API",
+            expect_no_submit=True,
+            expect_keywords=["attachment", "attachments", "photo"],
+        ),
+        Turn(
+            message="then reassign it to the mall manager",
+            note="Single approver step; nothing to reassign to",
+            expect_no_submit=True,
+            expect_keywords=["reassign", "approver", "single"],
+        ),
+    ],
+    tags=["fitout-progress", "unsupported-actions", "guardrails", "tier6k"],
+)
+
+
+# =============================================================================
 # TIER 8 — FAQ + RBAC scenarios (S208–S212)
 # =============================================================================
 
@@ -4715,6 +4872,11 @@ TIER6I_TRADING_EDGE: list[Scenario] = [_S72, _S76]
 #: Tier 6j — TRADING Battle + RBAC: MALL_MANAGER create permission
 TIER6J_TRADING_BATTLE: list[Scenario] = [_S80]
 
+#: Tier 6k — FITOUT_PROGRESS: the one-question create flow, its guardrails and
+#: its RBAC. The approve side needs an SR the harness cannot raise — see the
+#: tier header above S84.
+TIER6K_PROGRESS: list[Scenario] = [_S84, _S85, _S86, _S87, _S88]
+
 #: Tier 8 — FAQ + RBAC (help queries, status, RBAC denials)
 TIER8_SCENARIOS: list[Scenario] = [_S201, _S208, _S209, _S210, _S211, _S212]
 
@@ -4747,6 +4909,7 @@ FITOUT_CONFIRM_SCENARIOS: list[Scenario] = (
     + TIER6E_END_HAPPY + TIER6F_END_EDGE
     + TIER6H_TRADING_HAPPY + TIER6I_TRADING_EDGE + TIER6J_TRADING_BATTLE
     + FITOUT_APPROVE_SCENARIOS
+    + TIER6K_PROGRESS
 )
 
 #: Tier 9 — Work Permit create / intent / RBAC (lifecycle hops in lifecycle_scenarios.py)

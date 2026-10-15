@@ -245,6 +245,7 @@ class TestWorkPermitValidation:
             "notes": "",
             "description": "",
             "title": "",
+            "planned_second_period": {"from": "", "to": ""},
             "planneddate": {
                 "worktimedate": "01/08/2026",
                 "completionworkdate": "05/08/2026",
@@ -260,6 +261,8 @@ class TestWorkPermitValidation:
                     "company_name": "ABC",
                     "phone": "501111111",
                     "country_code": "966",
+                    "iqama_number": "2345678901",
+                    "document_id": "doc-iqama-1",
                 }
             ],
         }

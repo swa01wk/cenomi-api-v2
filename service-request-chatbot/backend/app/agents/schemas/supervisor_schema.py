@@ -36,6 +36,8 @@ class SupervisorDecision(BaseModel):
         "APPROVE_FITOUT_CONFIRM_FOS",
         "APPROVE_FITOUT_CONFIRM_END",
         "APPROVE_FITOUT_CONFIRM_TRADING",
+        "CREATE_FITOUT_PROGRESS",
+        "APPROVE_FITOUT_PROGRESS",
         # ── Ceiling Inspection (Open / Close) ─────────────────────────────────
         "CREATE_CEILING_INSPECTION_SR",
         "REVIEW_CEILING_INSPECTION_SR",
@@ -55,6 +57,8 @@ class SupervisorDecision(BaseModel):
         "MARK_NOTIFICATION_READ",
         "OPEN_NOTIFICATION",
         "APPROVE_SALES_DATA",
+        # ── General Inquiry ───────────────────────────────────────────────────
+        "CREATE_GENERAL_INQUIRY",
     ] = Field(description="Classified user intent")
 
     confidence: float = Field(

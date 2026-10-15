@@ -35,7 +35,9 @@ from app.agents.graph.state import ServiceRequestState
 from app.agents.llm.gateway import get_default_gateway
 from app.agents.prompts.response_generation_prompt import (
     RESPONSE_GENERATION_SYSTEM_PROMPT,
+    build_document_refs,
     build_response_generation_context,
+    document_file_names,
 )
 from app.observability.decorators import trace_node
 from app.observability.llm_capture import capture_complete_json
@@ -102,10 +104,71 @@ def _is_repeat_of_previous_question(message: str, previous: str) -> bool:
     return ratio >= _REPEAT_SIMILARITY_THRESHOLD
 
 
+_UUID = re.compile(
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.IGNORECASE
+)
+_DOC_REF = re.compile(r"\bdoc_\d+\b")
+
+
+def _card_text(value: Any) -> str:
+    """Plain card text, or "" when it is missing or carries an id/handle."""
+    if not isinstance(value, (str, int, float)) or isinstance(value, bool):
+        return ""
+    text = str(value).strip()
+    return "" if _UUID.search(text) or _DOC_REF.search(text) else text
+
+
+def _details_card(
+    raw: Any,
+    doc_refs: dict[str, str],
+    file_names: dict[str, str],
+) -> dict[str, Any] | None:
+    """The model's optional ``card`` as a ``details_card``, or None when unusable.
+
+    Values the model wrote are kept only as plain text; files resolve from the
+    ``doc_N`` handles it was shown back to real document ids it never saw.
+    """
+    if not isinstance(raw, dict):
+        return None
+    fields = [
+        {"label": label, "value": value}
+        for item in raw.get("fields") or []
+        if isinstance(item, dict)
+        and (label := _card_text(item.get("label")))
+        and (value := _card_text(item.get("value")))
+    ]
+    ids_by_ref = {ref: doc_id for doc_id, ref in doc_refs.items()}
+    files: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for item in raw.get("files") or []:
+        if not isinstance(item, dict):
+            continue
+        doc_id = ids_by_ref.get(str(item.get("ref") or "").strip())
+        if not doc_id or doc_id in seen:
+            continue
+        seen.add(doc_id)
+        file_name = file_names.get(doc_id) or "Document"
+        files.append(
+            {
+                "label": _card_text(item.get("label")) or file_name,
+                "fileName": file_name,
+                "documentId": doc_id,
+            }
+        )
+    if not fields and not files:
+        return None
+    card: dict[str, Any] = {"type": "details_card", "fields": fields}
+    title = _card_text(raw.get("title"))
+    if title:
+        card["title"] = title
+    if files:
+        card["files"] = files
+    return card
+
+
 _SALES_REPEAT_FALLBACK = (
-    "I'm not sure what you would like to do next. You can continue with the "
-    "current step, or say **upload sales data**, **check my status**, "
-    "**help** or **cancel**."
+    "Sorry, I didn't catch that. You can carry on with the step above, or "
+    "ask me to submit sales data or check your status."
 )
 
 
@@ -146,7 +209,21 @@ async def response_generation_node(state: ServiceRequestState) -> dict[str, Any]
             ),
             "",
         )
-        if previous.strip() == current_message.strip() and (state.get("user_message") or "").strip():
+        # A file upload or button click is a new answer the user gave, not
+        # a typed message the agent failed to understand — re-uploading the
+        # same broken file must get the same fix-and-re-upload reply.
+        acted = bool(
+            state.get("action_override")
+            or any(
+                (state.get("corrected_fields") or {}).get(key)
+                for key in ("csv_session_id", "doc_session_id")
+            )
+        )
+        if (
+            not acted
+            and previous.strip() == current_message.strip()
+            and (state.get("user_message") or "").strip()
+        ):
             # Replace only the text — the card under it (attach control,
             # review table, confirm buttons) must stay so the user can act.
             current_message = _SALES_REPEAT_FALLBACK
@@ -200,6 +277,8 @@ async def response_generation_node(state: ServiceRequestState) -> dict[str, Any]
     validation_errors: list[dict] = state.get("validation_errors") or []
     conversation_history: list[dict] = state.get("conversation_history") or []  # type: ignore[typeddict-item]
     user_message: str = state.get("user_message") or ""
+    documents: list[dict] = state.get("documents") or []  # type: ignore[assignment]
+    doc_refs = build_document_refs(documents, collected_data)
 
     # Nodes that emit a UI payload without a response_message (e.g. the
     # pre-submission upload gate) still carry user-facing text inside that
@@ -224,10 +303,13 @@ async def response_generation_node(state: ServiceRequestState) -> dict[str, Any]
         response_ui_type=current_ui.get("type") if current_ui else None,
         conversation_history=conversation_history,
         asking_field=current_ui.get("field") if current_ui else None,
+        doc_refs=doc_refs,
+        documents=documents,
     )
 
     # ── Call the LLM ────────────────────────────────────────────────────────
     llm_message: str | None = None
+    llm_card: dict[str, Any] | None = None
     in_tokens = out_tokens = llm_ms = 0
     gateway = get_default_gateway()
     try:
@@ -236,6 +318,12 @@ async def response_generation_node(state: ServiceRequestState) -> dict[str, Any]
             user_message=user_content,
         )
         llm_message = parsed.get("message") or None
+        # A card only stands in for plain text; a card a node already planned
+        # (confirmation, review, question) is the contract for this turn.
+        if not current_ui or current_ui.get("type") == "message":
+            llm_card = _details_card(
+                parsed.get("card"), doc_refs, document_file_names(documents)
+            )
         await capture_complete_json(
             state,
             run_name="response_generation_llm_call",
@@ -244,7 +332,18 @@ async def response_generation_node(state: ServiceRequestState) -> dict[str, Any]
             input_tokens=in_tokens,
             output_tokens=out_tokens,
             latency_ms=llm_ms,
-            structured_output={"message": (llm_message or "")[:500]},
+            structured_output={
+                "message": (llm_message or "")[:500],
+                "card": (
+                    {
+                        "title": llm_card.get("title"),
+                        "fields": len(llm_card["fields"]),
+                        "files": len(llm_card.get("files") or []),
+                    }
+                    if llm_card
+                    else None
+                ),
+            },
             parse_success=bool(llm_message),
         )
         if llm_message:
@@ -329,7 +428,9 @@ async def response_generation_node(state: ServiceRequestState) -> dict[str, Any]
 
     # ── Merge LLM message into structured UI when present ───────────────────
     updated_ui: dict[str, Any] | None = None
-    if current_ui:
+    if llm_card:
+        updated_ui = {**llm_card, "message": final_message}
+    elif current_ui:
         updated_ui = {**current_ui, "message": final_message}
 
     # ── Build output ────────────────────────────────────────────────────────

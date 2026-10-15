@@ -42,6 +42,7 @@ from app.agents.services.review_decorations_service import (
     merge_decorations,
     payload_to_collected_data,
 )
+from app.agents.registries.workflow_config import get_workflow_config
 from app.agents.schemas.ceiling_schema import (
     AGENT_NAME as CEILING_AGENT_NAME,
     CEILING_SUB_CATEGORIES,
@@ -76,6 +77,12 @@ _FITOUT_CONFIRM_SUB_CATEGORIES: frozenset[str] = frozenset({
     "FIT_OUT_CONFIRM_TRADING",
 })
 
+# Fitout progress also has a single approval step, but it can end REJECTED as
+# well as APPROVED — REJECT is in its allowed_actions — so it needs its own
+# mapping rather than the confirmations' "terminal means approved".
+_FITOUT_PROGRESS_SUB_CATEGORY = "FITOUT_PROGRESS"
+_FITOUT_PROGRESS_AGENT = "rdd_fitout_progress_agent"
+
 # Map fitout sub-category → active_agent name for re-hydrating the agent on open-SR.
 _FITOUT_SUB_CATEGORY_AGENTS: dict[str, str] = {
     "FIT_OUT_CONFIRM_FOS": "rdd_fitout_start_agent",
@@ -107,6 +114,17 @@ def _map_operations_to_stage(
     Work Permit must run before the Handover DD/FM mapping: a WP
     ``DD_ENGINEER IN_PROGRESS`` is ``WP_DD_REVIEW``, not ``RDD_REVIEW``.
     """
+    # General Inquiry is reviewed by Customer Relations Team. The live workflow
+    # row may still assign level 1 to Mall Manager (role 11), which the handover
+    # mapper treats as FM_REVIEW. Opening that SR must stay on the inquiry path.
+    if _is_general_inquiry(category, sub_category):
+        status = (platform_status or "").upper()
+        if status in {"APPROVED", "CLOSED"}:
+            return "GI_APPROVED"
+        if status == "REJECTED":
+            return "GI_REJECTED"
+        return "GI_CRT_REVIEW"
+
     if is_work_permit_category(category, sub_category):
         return map_wp_operations_to_stage(
             operations,
@@ -115,15 +133,27 @@ def _map_operations_to_stage(
             current_stage=current_stage,
         )
 
+    # Path B early exit: HANDED_OVER + APPROVED → terminal
+    if sub_category == "HANDED_OVER" and (platform_status or "").upper() == "APPROVED":
+        return "SR_COMPLETED"
+
+    # Fitout progress: single approval step, two ways to finish.
+    if sub_category == _FITOUT_PROGRESS_SUB_CATEGORY:
+        status = (platform_status or "").upper()
+        if status == "REJECTED":
+            return "SR_REJECTED"
+        if status in _TERMINAL_STATUSES:
+            return "SR_APPROVED"
+        for op in operations:
+            if (op.get("status") or "").upper() == "IN_PROGRESS":
+                return "APPROVE_SR"
+        return current_stage
+
     # Open / Close Ceiling: DD_ENGINEER (L1) → FM_MANAGER (L2) → tenant. Must
     # run before the Handover DD/FM mapping, which would read a DD_ENGINEER
     # IN_PROGRESS operation as RDD_REVIEW.
     if sub_category in CEILING_SUB_CATEGORIES:
         return map_ceiling_operations_to_stage(operations, platform_status, current_stage)
-
-    # Path B early exit: HANDED_OVER + APPROVED → terminal
-    if sub_category == "HANDED_OVER" and (platform_status or "").upper() == "APPROVED":
-        return "SR_COMPLETED"
 
     # Fitout confirm early exit: single approval step — any in-progress → APPROVE_SR,
     # terminal → SR_APPROVED.
@@ -159,6 +189,13 @@ def _map_operations_to_stage(
         return "SR_COMPLETED"
 
     return current_stage
+
+
+def _is_general_inquiry(category: str | None, sub_category: str | None) -> bool:
+    """True for INQUIRY / GENERAL, including a missing sub-category."""
+    if (category or "").upper() != "INQUIRY":
+        return False
+    return (sub_category or "GENERAL").upper() in {"", "GENERAL"}
 
 
 def _attachments_to_documents(attachments: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -255,6 +292,66 @@ def _apply_document_refs(
     )
     if rdd_report:
         backend_refs["rdd_document_id"] = str(rdd_report["document_id"])
+
+
+# Owned by the documents path (upload / delete), never kept as a form edit.
+_NON_FORM_EDIT_KEYS: frozenset[str] = frozenset(
+    {
+        "documents",
+        "document_id",
+        "document_type_id",
+        "documents_ids",
+        "document_ids",
+        "document_saved",
+        "deleted_document_ids",
+        "fileName",
+        "file_name",
+        "filename",
+    }
+)
+
+
+def _keep_form_edits(
+    state: ServiceRequestState,
+    updates: dict[str, Any],
+    backend_refs: dict[str, Any],
+    *,
+    hydrated: dict[str, Any],
+    stage: str | None,
+    agent: str | None,
+) -> None:
+    """Keep the requester's unsaved form edits over the platform's saved values.
+
+    On a form-edit stage (a Work Permit sent back to the tenant) the form bridge
+    patches each edit to the chat, but every turn rehydrates from the platform,
+    whose values predate the edit; the reply then wrote them back over the form.
+    An edit leaves ``form_edits`` once the platform returns the same value, and
+    all of them go once the SR leaves the stage (resubmitted).
+    """
+    cfg = get_workflow_config(agent)
+    if cfg is None or stage not in cfg.form_edit_stages:
+        backend_refs.pop("form_edits", None)
+        return
+    stored = backend_refs.get("form_edits")
+    edits = {
+        **(stored if isinstance(stored, dict) else {}),
+        **(state.get("corrected_fields") or {}),
+    }
+    edits = {
+        key: value
+        for key, value in edits.items()
+        if not key.startswith("_")
+        and key not in _NON_FORM_EDIT_KEYS
+        and (key not in hydrated or hydrated[key] != value)
+    }
+    if not edits:
+        backend_refs.pop("form_edits", None)
+        return
+    base = updates.get("collected_data")
+    if base is None:
+        base = dict(state.get("collected_data") or {})
+    updates["collected_data"] = {**base, **edits}
+    backend_refs["form_edits"] = edits
 
 
 @trace_node("sr_status_sync", "TOOL")
@@ -365,6 +462,8 @@ async def sr_status_sync_node(state: ServiceRequestState) -> dict[str, Any]:
             sr_sub_category = "FIT_OUT_CONFIRM_END"
         elif "trading_done" in payload_tmp:
             sr_sub_category = "FIT_OUT_CONFIRM_TRADING"
+        elif "fitout_progress_percentage" in payload_tmp:
+            sr_sub_category = _FITOUT_PROGRESS_SUB_CATEGORY
 
     new_stage = _map_operations_to_stage(
         operations,
@@ -387,6 +486,23 @@ async def sr_status_sync_node(state: ServiceRequestState) -> dict[str, Any]:
 
     backend_refs["platform_sr_status"] = platform_status
     backend_refs["sr_operations"] = operations
+    history = list(getattr(result, "service_request_history", None) or [])
+    if history:
+        backend_refs["sr_history"] = history
+    creator = {
+        key: value
+        for key, value in (
+            ("name", getattr(result, "created_by", None)),
+            ("role", getattr(result, "created_user_role", None)),
+            ("created_at", getattr(result, "created_at", None)),
+        )
+        if isinstance(value, str) and value.strip()
+    }
+    if creator:
+        backend_refs["sr_creator"] = creator
+    extension = getattr(result, "work_permit_extension", None)
+    if isinstance(extension, dict):
+        backend_refs["work_permit_extension"] = extension
 
     auth = state.get("auth_context")
     user_role = derive_user_role(auth)
@@ -426,25 +542,39 @@ async def sr_status_sync_node(state: ServiceRequestState) -> dict[str, Any]:
 
     payload: dict[str, Any] = getattr(result, "payload", None) or {}
     wp_sr = is_work_permit_category(sr_category, sr_sub_category)
+    gi_sr = _is_general_inquiry(sr_category, sr_sub_category)
+    hydrated: dict[str, Any] = {}
     if payload:
         # Snapshot for builders (open-existing path never ran create payload builder).
         inner = dict(payload)
         wp_sub = resolve_wp_sub_category(sr_sub_category, inner) if wp_sr else None
+        if wp_sr:
+            snapshot_category = "WORK_PERMIT"
+            snapshot_sub = wp_sub
+        elif gi_sr:
+            snapshot_category = "INQUIRY"
+            snapshot_sub = "GENERAL"
+        else:
+            snapshot_category = "FIT_OUT_AND_HANDOVER"
+            snapshot_sub = sr_sub_category or inner.get("sub_category") or "HANDOVER"
         backend_refs["create_payload"] = {
             "payload": inner,
             "title": inner.get("title") or "",
             "tenant_profile_id": inner.get("tenant_profile_id"),
             "property_id": inner.get("property_id"),
-            "service_category": "WORK_PERMIT" if wp_sr else "FIT_OUT_AND_HANDOVER",
-            "sub_category": (
-                wp_sub
-                if wp_sr
-                else (sr_sub_category or inner.get("sub_category") or "HANDOVER")
-            ),
+            "service_category": snapshot_category,
+            "sub_category": snapshot_sub,
             "lease_code": inner.get("lease_code") or inner.get("lease") or "",
             "lease_id": inner.get("lease_id") or inner.get("contract_id"),
             "service_request_id": sr_id,
         }
+        if (sr_sub_category or "") == _FITOUT_PROGRESS_SUB_CATEGORY:
+            # The approve PATCH must echo this payload back key for key —
+            # ValidateEditableFields refuses any change outside
+            # [fitout_progress_percentage, comment] — so keep the platform's own
+            # copy rather than one rebuilt from collected_data.
+            backend_refs["stored_payload"] = dict(payload)
+
         existing_collected: dict[str, Any] = dict(state.get("collected_data") or {})
         hydrated = payload_to_collected_data(payload)
         if hydrated:
@@ -453,12 +583,24 @@ async def sr_status_sync_node(state: ServiceRequestState) -> dict[str, Any]:
             # (and cleared actual dates) back to the original yes/actual values.
             if (
                 effective_stage == "APPROVE_SR"
-                and (sr_sub_category or "") in _FITOUT_CONFIRM_SUB_CATEGORIES
+                and (
+                    (sr_sub_category or "") in _FITOUT_CONFIRM_SUB_CATEGORIES
+                    or (sr_sub_category or "") == _FITOUT_PROGRESS_SUB_CATEGORY
+                )
                 and existing_collected
             ):
                 updates["collected_data"] = {**hydrated, **existing_collected}
             else:
                 updates["collected_data"] = {**existing_collected, **hydrated}
+
+    _keep_form_edits(
+        state,
+        updates,
+        backend_refs,
+        hydrated=hydrated,
+        stage=effective_stage,
+        agent="work_permit_agent" if wp_sr else state.get("active_agent"),
+    )
 
     # Ensure active_agent for review routing when opening existing SR.
     if wp_sr:
@@ -466,6 +608,10 @@ async def sr_status_sync_node(state: ServiceRequestState) -> dict[str, Any]:
         updates["service_category"] = "WORK_PERMIT"
         if sr_sub_category:
             updates["sub_category"] = sr_sub_category
+    elif gi_sr:
+        updates["active_agent"] = "general_inquiry_agent"
+        updates["service_category"] = "INQUIRY"
+        updates["sub_category"] = "GENERAL"
     elif sr_sub_category in CEILING_SUB_CATEGORIES:
         # Always, like Work Permit: a session that was on another agent must
         # not reopen a ceiling inspection as a handover.
@@ -477,6 +623,17 @@ async def sr_status_sync_node(state: ServiceRequestState) -> dict[str, Any]:
             updates["active_agent"] = "rdd_handover_agent"
             updates["service_category"] = "FIT_OUT_AND_HANDOVER"
             updates["sub_category"] = sr_sub_category or "HANDOVER"
+        elif (
+            effective_stage == "APPROVE_SR"
+            and sr_sub_category == _FITOUT_PROGRESS_SUB_CATEGORY
+        ):
+            # Both this workflow and the fitout confirmations declare APPROVE_SR
+            # in stage_sync_nodes, so _route_after_sync's "scan every config"
+            # fallback could pick either. Naming the agent is what makes the
+            # routing deterministic.
+            updates["active_agent"] = _FITOUT_PROGRESS_AGENT
+            updates["service_category"] = "FIT_OUT_AND_HANDOVER"
+            updates["sub_category"] = sr_sub_category
         elif effective_stage == "APPROVE_SR" and sr_sub_category in _FITOUT_CONFIRM_SUB_CATEGORIES:
             # Restore the fitout confirm agent so _route_after_sync uses the correct
             # stage_sync_nodes and validation/missing-field nodes behave correctly.
@@ -490,14 +647,39 @@ async def sr_status_sync_node(state: ServiceRequestState) -> dict[str, Any]:
     # The ceiling review node builds its own upload card and chips; the
     # handover review decorations would add Save Progress / Approve Review.
     is_ceiling_sr = sr_sub_category in CEILING_SUB_CATEGORIES
-    review_deco = None if is_ceiling_sr else build_review_decorations(merged_state)
+    review_deco = (
+        None if (is_ceiling_sr or gi_sr) else build_review_decorations(merged_state)
+    )
     if review_deco:
         updates["response_decorations"] = merge_decorations(
             state.get("response_decorations"),
             review_deco,
         )
 
-    if not state.get("response_message") and sr_id and effective_stage in (
+    if not state.get("response_message") and sr_id and effective_stage == "GI_CRT_REVIEW":
+        from app.agents.services.general_inquiry_review_summary import (
+            build_gi_review_card,
+        )
+
+        collected = updates.get("collected_data") or payload_to_collected_data(payload)
+        card = build_gi_review_card(
+            collected,
+            sr_id=str(sr_id),
+            lease_label=payload.get("lease_brand_mall"),
+        )
+        updates["response_message"] = card["message"]
+        updates["response_ui"] = {**card, "verbatim": True}
+    elif not state.get("response_message") and sr_id and effective_stage in (
+        "GI_APPROVED",
+        "GI_REJECTED",
+    ):
+        if effective_stage == "GI_APPROVED":
+            lead = f"General Inquiry SR **{sr_id}** is approved."
+        else:
+            lead = f"General Inquiry SR **{sr_id}** was rejected."
+        updates["response_message"] = lead
+        updates["response_ui"] = {"type": "message", "verbatim": True}
+    elif not state.get("response_message") and sr_id and effective_stage in (
         "FM_REVIEW",
         "RDD_REVIEW",
         "APPROVE_SR",
@@ -518,6 +700,16 @@ async def sr_status_sync_node(state: ServiceRequestState) -> dict[str, Any]:
                     f"Opening Work Permit SR **{sr_id}** ({label}). "
                     "Review the details below, then approve or reject this hop."
                 )
+        elif (
+            effective_stage == "APPROVE_SR"
+            and sr_sub_category == _FITOUT_PROGRESS_SUB_CATEGORY
+        ):
+            # Usually replaced in the same turn by the percentage question, which
+            # says the same thing with the number in it; this is what speaks when
+            # the flow has nothing to ask.
+            updates["response_message"] = (
+                f"Opening Fitout Progress SR **{sr_id}** for approval."
+            )
         elif effective_stage == "APPROVE_SR" and sr_sub_category in _FITOUT_CONFIRM_SUB_CATEGORIES:
             _FITOUT_OPEN_LABELS = {
                 "FIT_OUT_CONFIRM_FOS": "Fitout Start Confirmation",

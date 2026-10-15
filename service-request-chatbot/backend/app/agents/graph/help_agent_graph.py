@@ -97,6 +97,7 @@ from app.agents.graph.nodes.work_permit.work_permit_entry_node import (
     work_permit_entry_node,
 )
 from app.agents.graph.nodes.work_permit.work_permit_confirmation_node import work_permit_confirmation_node
+from app.agents.graph.nodes.work_permit.work_permit_status_node import work_permit_status_node
 from app.agents.graph.nodes.work_permit.work_permit_payload_builder_node import work_permit_payload_builder_node
 from app.agents.graph.nodes.work_permit.work_permit_api_submission_node import work_permit_api_submission_node
 
@@ -108,6 +109,10 @@ from app.agents.graph.nodes.fitout_confirm.fitout_confirm_entry_node import fito
 from app.agents.graph.nodes.fitout_confirm.fitout_confirm_confirmation_node import fitout_confirm_confirmation_node
 from app.agents.graph.nodes.fitout_confirm.fitout_confirm_payload_builder_node import fitout_confirm_payload_builder_node
 from app.agents.graph.nodes.fitout_confirm.fitout_confirm_api_submission_node import fitout_confirm_api_submission_node
+from app.agents.graph.nodes.fitout_progress.fitout_progress_entry_node import fitout_progress_entry_node
+from app.agents.graph.nodes.fitout_progress.fitout_progress_confirmation_node import fitout_progress_confirmation_node
+from app.agents.graph.nodes.fitout_progress.fitout_progress_payload_builder_node import fitout_progress_payload_builder_node
+from app.agents.graph.nodes.fitout_progress.fitout_progress_api_submission_node import fitout_progress_api_submission_node
 
 # ── Ceiling Inspection agent nodes (OPEN_ / CLOSE_CEILING_INSPECTION) ─────────
 from app.agents.graph.nodes.ceiling.ceiling_entry_node import ceiling_entry_node
@@ -168,14 +173,32 @@ from app.agents.graph.nodes.handover.fm_api_submission_node import fm_api_submis
 from app.agents.graph.nodes.handover.rdd_api_submission_node import rdd_api_submission_node
 from app.agents.graph.state import ServiceRequestGraphState
 
+# ── General Inquiry agent nodes ───────────────────────────────────────────────
+from app.agents.graph.nodes.general_inquiry.general_inquiry_entry_node import (
+    general_inquiry_entry_node,
+)
+from app.agents.graph.nodes.general_inquiry.general_inquiry_confirmation_node import (
+    general_inquiry_confirmation_node,
+)
+from app.agents.graph.nodes.general_inquiry.general_inquiry_payload_builder_node import (
+    general_inquiry_payload_builder_node,
+)
+from app.agents.graph.nodes.general_inquiry.general_inquiry_api_submission_node import (
+    general_inquiry_api_submission_node,
+)
+
 # ── Hoisted from routing-function bodies (previously re-imported on every
 # turn — Python caches the module either way, but hiding dependencies inside
 # hot functions is unconventional). Aliased because all three OPTIONAL_FIELDS
 # symbols share the same name across schema modules.
 from app.agents.services.help_interrupt_service import detect_help_interrupt
 from app.agents.schemas.fitout_confirm_schema import OPTIONAL_FIELDS as FITOUT_OPTIONAL_FIELDS
+from app.agents.schemas.fitout_progress_schema import (
+    OPTIONAL_FIELDS as FITOUT_PROGRESS_OPTIONAL_FIELDS,
+)
 from app.agents.schemas.work_permit_schema import OPTIONAL_FIELDS as WP_OPTIONAL_FIELDS
 from app.agents.schemas.handover_schema import OPTIONAL_FIELDS as HANDOVER_OPTIONAL_FIELDS
+from app.agents.schemas.general_inquiry_schema import OPTIONAL_FIELDS as GI_OPTIONAL_FIELDS
 from app.agents.schemas.ceiling_schema import (
     AGENT_NAME as CEILING_AGENT_NAME,
     OPTIONAL_FIELDS as CEILING_OPTIONAL_FIELDS,
@@ -191,8 +214,10 @@ _AGENT_ENTRY_NODES: dict[str, str] = {
     "rdd_fitout_start_agent": "fitout_confirm_entry",
     "rdd_fitout_end_agent": "fitout_confirm_entry",
     "rdd_trading_confirmation_agent": "fitout_confirm_entry",
+    "rdd_fitout_progress_agent": "fitout_progress_entry",
     "rdd_ceiling_inspection_agent": "ceiling_entry",
     "sales_data_agent": "sales_data_entry",
+    "general_inquiry_agent": "general_inquiry_entry",
 }
 
 _CEILING_AGENT = CEILING_AGENT_NAME
@@ -215,6 +240,7 @@ _CREATE_NEW_SR_INTENTS: frozenset[str] = frozenset(
         "CREATE_FITOUT_CONFIRM_FOS",
         "CREATE_FITOUT_CONFIRM_END",
         "CREATE_FITOUT_CONFIRM_TRADING",
+        "CREATE_FITOUT_PROGRESS",
         "CREATE_CEILING_INSPECTION_SR",
         # Sales data intents never open an existing platform SR
         "UPLOAD_SALES_DATA",
@@ -223,6 +249,8 @@ _CREATE_NEW_SR_INTENTS: frozenset[str] = frozenset(
         "UPLOAD_SUPPORTING_DOCUMENT",
         "REVIEW_SALES_DATA",
         "APPROVE_SALES_DATA",
+        # General Inquiry is always a new SR (no multi-phase review)
+        "CREATE_GENERAL_INQUIRY",
     }
 )
 
@@ -231,6 +259,11 @@ _CREATE_NEW_SR_INTENTS: frozenset[str] = frozenset(
 _FITOUT_AGENTS: frozenset[str] = frozenset(
     {"rdd_fitout_start_agent", "rdd_fitout_end_agent", "rdd_trading_confirmation_agent"}
 )
+
+# Fitout progress is its own workflow: one field, its own schema, its own nodes.
+# Deliberately not folded into _FITOUT_AGENTS — that set means "shares the
+# fitout confirmation schema and confirmation path", which this does not.
+FITOUT_PROGRESS_AGENT = "rdd_fitout_progress_agent"
 
 
 def _should_open_existing_sr(state: dict[str, Any]) -> bool:
@@ -270,7 +303,7 @@ def _should_open_existing_sr(state: dict[str, Any]) -> bool:
 # routed to the supervisor, classified as an approve intent, and RBAC-denied
 # instead of being stored as the comment.
 _FREE_TEXT_ANSWER_FIELDS: frozenset[str] = frozenset(
-    {"title", "description", "notes", "comments"}
+    {"title", "description", "notes", "comments", "review_comment"}
 )
 
 
@@ -324,6 +357,21 @@ def _route_after_load(state: dict[str, Any]) -> str:
         "confirm_cancel_sr", "decline_cancel_sr",
     })
     action = state.get("action_override") or ""
+    _GI_REVIEW_ACTIONS: frozenset[str] = frozenset(
+        {"confirm_approve_gi", "reject_gi", "ask_more_info_gi", "reassign_gi"}
+    )
+    # Pending lives on collected_data: backend_refs is restored as sr_id only,
+    # so a reject comment typed on the next turn would otherwise miss this
+    # branch, reopen the review card, and never PATCH.
+    pending_review = str(
+        (state.get("backend_refs") or {}).get("gi_pending_action")
+        or (state.get("collected_data") or {}).get("gi_pending_action")
+        or ""
+    )
+    if action in _GI_REVIEW_ACTIONS or (
+        pending_review and (state.get("user_message") or "").strip()
+    ):
+        return "general_inquiry_entry"
     if action in _CANCEL_BYPASS_ACTIONS and sr_id:
         agent = state.get("active_agent") or ""
         return _AGENT_ENTRY_NODES.get(agent, "handover_entry")
@@ -376,6 +424,21 @@ def _route_after_load(state: dict[str, Any]) -> str:
     return "supervisor"
 
 
+def _is_background_form_sync(state: dict[str, Any]) -> bool:
+    """True for the form bridge's silent patch: edits only, no message or action."""
+    return bool(
+        (state.get("corrected_fields") or {})
+        and not str(state.get("user_message") or "").strip()
+        and not state.get("action_override")
+    )
+
+
+def _status_view_node(state: dict[str, Any]) -> str:
+    """The active workflow's "show this SR" node (``preview`` unless overridden)."""
+    cfg = get_workflow_config(state.get("active_agent") or "")
+    return cfg.status_view_node if cfg else "preview"
+
+
 def _route_after_sync(state: dict[str, Any]) -> str:
     """After status sync, route to the correct stage entry node.
 
@@ -388,6 +451,10 @@ def _route_after_sync(state: dict[str, Any]) -> str:
 
     # 1. Per-workflow stage → entry node (keyed by active_agent)
     cfg = get_workflow_config(agent)
+    # A form edit on a form-edit stage was merged by sr_status_sync; rebuilding
+    # the status card for it would drop a card into the chat on every blur.
+    if cfg and workflow_stage in cfg.form_edit_stages and _is_background_form_sync(state):
+        return "response_generation"
     if cfg and workflow_stage in cfg.stage_sync_nodes:
         return cfg.stage_sync_nodes[workflow_stage]
 
@@ -396,7 +463,8 @@ def _route_after_sync(state: dict[str, Any]) -> str:
         if workflow_stage in registered_cfg.stage_sync_nodes:
             return registered_cfg.stage_sync_nodes[workflow_stage]
 
-    # 3. Terminal stages → preview when the user is opening an existing SR
+    # 3. Terminal stages → the workflow's status view (``preview`` for
+    # Handover / Fitout) when the user is opening an existing SR
     # (sr_id present in backend_refs — set from the request body when the FE
     # calls openExistingSr). Falling through to supervisor here would classify
     # the "Open SR X" bubble as ASK_HELP and return FAQ content instead of the
@@ -405,17 +473,22 @@ def _route_after_sync(state: dict[str, Any]) -> str:
         s for c in WORKFLOW_CONFIG_REGISTRY.values() for s in c.terminal_stages
     )
     if workflow_stage in all_terminal:
+        # The form re-fetch after a final approve/reject echoes its values back
+        # as a silent patch. It is not an "open SR" request, and preview would
+        # answer it with an unrequested (Handover-labelled) SR card.
+        if _is_background_form_sync(state):
+            return "response_generation"
         backend_refs_terminal = state.get("backend_refs") or {}
         if backend_refs_terminal.get("sr_id"):
-            return "preview"
+            return _status_view_node(state)
         return "supervisor"
 
-    # 4. Fallback: status preview, agent entry, or supervisor (never re-sync)
+    # 4. Fallback: status view, agent entry, or supervisor (never re-sync)
     backend_refs = state.get("backend_refs") or {}
     if backend_refs.get("sync_attempted") and backend_refs.get("sync_error"):
         return "response_generation"
     if backend_refs.get("sr_id"):
-        return "preview"
+        return _status_view_node(state)
     if agent:
         return _AGENT_ENTRY_NODES.get(agent, "handover_entry")
     return "supervisor"
@@ -472,14 +545,10 @@ def _route_after_supervisor(state: dict[str, Any]) -> str:
     if status == "WAITING_FOR_USER":
         return "response_generation"
 
-    # Preview always routes to the dedicated preview node
-    if intent == "PREVIEW_SERVICE_REQUEST":
-        return "preview"
-
-    # CHECK_SERVICE_REQUEST_STATUS — preview after sync when sr_id is present;
-    # otherwise preview_node may GET or show draft.
-    if intent == "CHECK_SERVICE_REQUEST_STATUS":
-        return "preview"
+    # Preview / status checks go to the active workflow's status view node
+    # (``preview`` for Handover / Fitout), which may GET or show the draft.
+    if intent in ("PREVIEW_SERVICE_REQUEST", "CHECK_SERVICE_REQUEST_STATUS"):
+        return _status_view_node(state)
 
     # ── Q&A path ──────────────────────────────────────────────────────────────
     if intent in _FAQ_INTENTS:
@@ -501,7 +570,41 @@ def _route_after_registry(state: dict[str, Any]) -> str:
     return _AGENT_ENTRY_NODES.get(agent or "", "handover_entry")
 
 
+# Gates where the assistant has asked a question and is holding the flow until
+# the user answers it — the milestone "continue or pick a different lease?" and
+# the cancel confirmation. Both are answered with a chip or a word, and both are
+# set by an entry node.
+_PENDING_USER_DECISION: frozenset[str] = frozenset(
+    {"MILESTONE_PENDING", "CANCEL_PENDING"}
+)
+
+
 def _route_after_merge(state: dict[str, Any]) -> str:
+    # A form patch that arrives while one of those questions is open must be
+    # merged — the draft and the form have to stay in step — but it must not
+    # carry on into the pipeline, because everything downstream asks something:
+    # the guided-tour choice, the next missing field, a validation correction.
+    # Whatever it asked replaced the question the user was already looking at,
+    # and the chips under it no longer matched the text above them.
+    #
+    # Reported live: picking a lease whose fit-out start was already confirmed
+    # showed "…already confirmed on 12/10/2026. Continue and revise, or pick a
+    # different lease?" and then, with no user turn in between, "Before we start
+    # — would you like me to guide you through the form?". The Continue / Cancel
+    # chips were still on screen with a different question above them.
+    #
+    # The user's own answer is unaffected: Continue and Cancel arrive as
+    # action_overrides, which the entry routers handle before this point.
+    #
+    # A lease selection is let through because it is itself an answer to
+    # "…or pick a different lease?". No UI offers that today — the milestone
+    # message replaces the picker, leaving Continue and Cancel — so the branch
+    # is a guard rather than a path, and it is deliberately untested.
+    if (
+        state.get("confirmation_status") in _PENDING_USER_DECISION
+        and not state.get("selected_lease")
+    ):
+        return "response_generation"
     if state.get("selected_lease"):
         return "lease_lookup"
     # Review / approve stages: lease was resolved at create time.
@@ -514,6 +617,7 @@ def _route_after_merge(state: dict[str, Any]) -> str:
         "WP_FM_REVIEW",
         "WP_MM_REVIEW",
         "WP_MM_OPS_REVIEW",
+        "GI_CRT_REVIEW",
     ):
         return "validation"
     collected = state.get("collected_data") or {}
@@ -538,10 +642,14 @@ def _route_after_validation(state: dict[str, Any]) -> str:
     OPTIONAL_FIELDS = (
         FITOUT_OPTIONAL_FIELDS
         if active_agent_for_optional in _FITOUT_AGENTS
+        else FITOUT_PROGRESS_OPTIONAL_FIELDS
+        if active_agent_for_optional == FITOUT_PROGRESS_AGENT
         else CEILING_OPTIONAL_FIELDS
         if active_agent_for_optional == _CEILING_AGENT
         else WP_OPTIONAL_FIELDS
         if active_agent_for_optional == "work_permit_agent"
+        else GI_OPTIONAL_FIELDS
+        if active_agent_for_optional == "general_inquiry_agent"
         else HANDOVER_OPTIONAL_FIELDS
     )
 
@@ -601,6 +709,14 @@ def _route_after_validation(state: dict[str, Any]) -> str:
         from app.agents.schemas.fitout_confirm_schema import get_missing_fields as fc_missing
         sub_cat = state.get("sub_category") or ""
         still_missing = fc_missing(original_stage, sub_cat, collected)
+    elif active_agent == FITOUT_PROGRESS_AGENT:
+        from app.agents.schemas.fitout_progress_schema import (
+            get_missing_fields as fp_missing,
+        )
+        still_missing = fp_missing(original_stage, collected)
+    elif active_agent == "general_inquiry_agent":
+        from app.agents.schemas.general_inquiry_schema import get_missing_fields as gi_missing
+        still_missing = gi_missing(original_stage, collected)
     elif active_agent == _CEILING_AGENT:
         from app.agents.schemas.ceiling_schema import get_missing_fields as ceiling_missing
         still_missing = ceiling_missing(original_stage, state.get("sub_category"), collected)
@@ -631,7 +747,8 @@ def _route_after_validation(state: dict[str, Any]) -> str:
         # comments (and any other optional-only fields) are asked once before the
         # review card, matching the CREATE_SR (Path A) behavior.
         if (
-            original_stage in ("CREATE_SR", "CREATE_HANDED_OVER_SR")
+            original_stage
+            in ("CREATE_SR", "CREATE_HANDED_OVER_SR", "CREATE_WORK_PERMIT")
             and active_agent not in _FITOUT_AGENTS
             and not already_confirmed
         ):
@@ -915,6 +1032,93 @@ def _route_after_fitout_confirm_confirmation(state: dict[str, Any]) -> str:
     return "response_generation"
 
 
+def _route_after_fitout_progress_entry(state: dict[str, Any]) -> str:
+    """Route out of fitout_progress_entry.
+
+    ``confirmation_status`` is tested before the stale ``WAITING_FOR_USER`` left
+    by the turn that rendered the card, exactly as the other entry routers do:
+    testing status first short-circuits to response_generation and re-emits the
+    previous question instead of submitting.
+
+    A percentage the entry node already resolved (typed or tapped) arrives with
+    ``corrected_fields`` set and goes straight to merge_state — extraction has
+    nothing left to do with it, and sending it there risks the LLM re-reading a
+    bare number as some other field.
+    """
+    if state.get("confirmation_status") == "CONFIRMED":
+        return "merge_state"
+    if state.get("corrected_fields"):
+        return "merge_state"
+    # A rejection just armed by the entry node: "reject" is a decision, not a
+    # field value, so there is nothing for extraction to read out of it.
+    if (
+        (state.get("backend_refs") or {}).get("fitout_progress_action") == "reject"
+        and state.get("confirmation_status") is None
+    ):
+        return "merge_state"
+    if state.get("confirmation_status") == "REJECTED":
+        return "field_extraction"
+    # Every question saves WAITING_FOR_USER, so it is present on the turn that
+    # carries the answer. Short-circuiting it to response_generation swallowed
+    # the answer: typing the lease code instead of tapping the chip was
+    # re-asked, because response_generation cannot write collected_data.
+    # ``_waiting_short_circuit_target`` is the shared reading of that state —
+    # it lets an answer to the open field, and a correction, through.
+    if state.get("status") == "WAITING_FOR_USER":
+        return _waiting_short_circuit_target(state)
+    return _form_patch_target(state) or "field_extraction"
+
+
+def _route_after_fitout_progress_confirmation(state: dict[str, Any]) -> str:
+    if state.get("confirmation_status") == "CONFIRMED":
+        return "fitout_progress_payload_builder"
+    return "response_generation"
+
+
+# ---------------------------------------------------------------------------
+# General Inquiry Agent routing
+# ---------------------------------------------------------------------------
+
+
+def _route_after_general_inquiry_entry(state: dict[str, Any]) -> str:
+    """Route after the general_inquiry_entry_node.
+
+    A lease chip or a typed lease code arrives while status is still
+    WAITING_FOR_USER from the question that asked for it. Sending that turn
+    straight to response_generation skips lease lookup, so the model only
+    talks about the code. Handover runs the same reply through extraction
+    and lease lookup first.
+    """
+    if state.get("confirmation_status") == "CONFIRMED":
+        return "merge_state"
+    if state.get("response_message") and (
+        (state.get("workflow_stage") or "") == "GI_CRT_REVIEW"
+        or (state.get("backend_refs") or {}).get("gi_pending_action")
+        or (state.get("collected_data") or {}).get("gi_pending_action")
+    ):
+        return "response_generation"
+    if _guided_tour_service.has_pending_answer(state):
+        return "merge_state"
+    if state.get("confirmation_status") == "REJECTED":
+        return "field_extraction"
+    if state.get("status") == "CANCELLED":
+        return "response_generation"
+    # Chip selection carries the lease id. Merge keeps it, then lease lookup
+    # resolves the row the same way a handover chip does.
+    if state.get("selected_lease"):
+        return "merge_state"
+    if state.get("status") == "WAITING_FOR_USER":
+        return _waiting_short_circuit_target(state)
+    return _form_patch_target(state) or "field_extraction"
+
+
+def _route_after_general_inquiry_confirmation(state: dict[str, Any]) -> str:
+    """Route after the general_inquiry_confirmation_node."""
+    if state.get("confirmation_status") == "CONFIRMED":
+        return "general_inquiry_payload_builder"
+    return "response_generation"
+
+
 # ---------------------------------------------------------------------------
 # Ceiling Inspection routing
 # ---------------------------------------------------------------------------
@@ -1147,6 +1351,7 @@ def build_help_agent_graph():
     # ── Work Permit agent nodes ───────────────────────────────────────────────
     graph.add_node("work_permit_entry", work_permit_entry_node)
     graph.add_node("work_permit_confirmation", work_permit_confirmation_node)
+    graph.add_node("work_permit_status", work_permit_status_node)
     graph.add_node("work_permit_payload_builder", work_permit_payload_builder_node)
     graph.add_node("work_permit_api_submission", work_permit_api_submission_node)
     # ── Fitout Confirm agent nodes ────────────────────────────────────────────
@@ -1154,6 +1359,15 @@ def build_help_agent_graph():
     graph.add_node("fitout_confirm_confirmation", fitout_confirm_confirmation_node)
     graph.add_node("fitout_confirm_payload_builder", fitout_confirm_payload_builder_node)
     graph.add_node("fitout_confirm_api_submission", fitout_confirm_api_submission_node)
+    graph.add_node("fitout_progress_entry", fitout_progress_entry_node)
+    graph.add_node("fitout_progress_confirmation", fitout_progress_confirmation_node)
+    graph.add_node("fitout_progress_payload_builder", fitout_progress_payload_builder_node)
+    graph.add_node("fitout_progress_api_submission", fitout_progress_api_submission_node)
+    # ── General Inquiry agent nodes ───────────────────────────────────────────
+    graph.add_node("general_inquiry_entry", general_inquiry_entry_node)
+    graph.add_node("general_inquiry_confirmation", general_inquiry_confirmation_node)
+    graph.add_node("general_inquiry_payload_builder", general_inquiry_payload_builder_node)
+    graph.add_node("general_inquiry_api_submission", general_inquiry_api_submission_node)
     # Ceiling Inspection agent nodes
     graph.add_node("ceiling_entry", ceiling_entry_node)
     graph.add_node("ceiling_confirmation", ceiling_confirmation_node)
@@ -1207,8 +1421,10 @@ def build_help_agent_graph():
             "handover_entry": "handover_entry",
             "work_permit_entry": "work_permit_entry",
             "fitout_confirm_entry": "fitout_confirm_entry",
+            "fitout_progress_entry": "fitout_progress_entry",
             "ceiling_entry": "ceiling_entry",
             "sales_data_entry": "sales_data_entry",
+            "general_inquiry_entry": "general_inquiry_entry",
             # Help question asked mid-collection — answered without disturbing
             # the draft (see detect_help_interrupt).
             "faq_node": "faq_node",
@@ -1230,11 +1446,13 @@ def build_help_agent_graph():
             "fm_review_entry": "fm_review_entry",
             "rdd_review_entry": "rdd_review_entry",
             "fitout_confirm_entry": "fitout_confirm_entry",
+            "fitout_progress_entry": "fitout_progress_entry",
             "ceiling_entry": "ceiling_entry",
             "work_permit_entry": "work_permit_entry",
             "ceiling_review_entry": "ceiling_review_entry",
             "ceiling_ack_entry": "ceiling_ack_entry",
             "preview": "preview",
+            "work_permit_status": "work_permit_status",
             "supervisor": "supervisor",
             # Sync GET failure sets sync_error and returns response_generation
             # (_route_after_sync); must be registered or LangGraph raises KeyError.
@@ -1250,6 +1468,7 @@ def build_help_agent_graph():
             "sr_status_sync": "sr_status_sync",
             "faq_node": "faq_node",
             "preview": "preview",
+            "work_permit_status": "work_permit_status",
             "registry": "registry",
             "response_generation": "response_generation",
             "notification": "notification",
@@ -1276,6 +1495,7 @@ def build_help_agent_graph():
         },
     )
     graph.add_edge("preview", "response_generation")
+    graph.add_edge("work_permit_status", "response_generation")
     graph.add_conditional_edges(
         "registry",
         _route_after_registry,
@@ -1283,8 +1503,10 @@ def build_help_agent_graph():
             "handover_entry": "handover_entry",
             "work_permit_entry": "work_permit_entry",
             "fitout_confirm_entry": "fitout_confirm_entry",
+            "fitout_progress_entry": "fitout_progress_entry",
             "ceiling_entry": "ceiling_entry",
             "sales_data_entry": "sales_data_entry",
+            "general_inquiry_entry": "general_inquiry_entry",
             "response_generation": "response_generation",
         },
     )
@@ -1323,7 +1545,13 @@ def build_help_agent_graph():
     graph.add_conditional_edges(
         "merge_state",
         _route_after_merge,
-        {"lease_lookup": "lease_lookup", "validation": "validation"},
+        {
+            "lease_lookup": "lease_lookup",
+            "validation": "validation",
+            # A patch merged while a pending question is on screen stops here:
+            # everything past validation asks something of its own.
+            "response_generation": "response_generation",
+        },
     )
     graph.add_conditional_edges(
         "lease_lookup",
@@ -1353,6 +1581,28 @@ def build_help_agent_graph():
         },
     )
 
+    # ── Fitout Progress entry ─────────────────────────────────────────────────
+    graph.add_conditional_edges(
+        "fitout_progress_entry",
+        _route_after_fitout_progress_entry,
+        {
+            "field_extraction": "field_extraction",
+            "merge_state": "merge_state",
+            "response_generation": "response_generation",
+        },
+    )
+
+    # ── General Inquiry entry ─────────────────────────────────────────────────
+    graph.add_conditional_edges(
+        "general_inquiry_entry",
+        _route_after_general_inquiry_entry,
+        {
+            "field_extraction": "field_extraction",
+            "merge_state": "merge_state",
+            "response_generation": "response_generation",
+        },
+    )
+
     # ── Validation → confirmation ─────────────────────────────────────────────
     graph.add_conditional_edges(
         "validation",
@@ -1364,6 +1614,8 @@ def build_help_agent_graph():
             "rdd_confirmation": "rdd_confirmation",
             "work_permit_confirmation": "work_permit_confirmation",
             "fitout_confirm_confirmation": "fitout_confirm_confirmation",
+            "fitout_progress_confirmation": "fitout_progress_confirmation",
+            "general_inquiry_confirmation": "general_inquiry_confirmation",
             "ceiling_confirmation": "ceiling_confirmation",
             "response_generation": "response_generation",
         },
@@ -1405,6 +1657,23 @@ def build_help_agent_graph():
             "response_generation": "response_generation",
         },
     )
+    graph.add_conditional_edges(
+        "general_inquiry_confirmation",
+        _route_after_general_inquiry_confirmation,
+        {
+            "general_inquiry_payload_builder": "general_inquiry_payload_builder",
+            "response_generation": "response_generation",
+        },
+    )
+
+    graph.add_conditional_edges(
+        "fitout_progress_confirmation",
+        _route_after_fitout_progress_confirmation,
+        {
+            "fitout_progress_payload_builder": "fitout_progress_payload_builder",
+            "response_generation": "response_generation",
+        },
+    )
 
     # ── Submission pipelines ──────────────────────────────────────────────────
     graph.add_edge("payload_builder", "api_submission")
@@ -1417,6 +1686,10 @@ def build_help_agent_graph():
     graph.add_edge("work_permit_api_submission", "response_generation")
     graph.add_edge("fitout_confirm_payload_builder", "fitout_confirm_api_submission")
     graph.add_edge("fitout_confirm_api_submission", "response_generation")
+    graph.add_edge("fitout_progress_payload_builder", "fitout_progress_api_submission")
+    graph.add_edge("fitout_progress_api_submission", "response_generation")
+    graph.add_edge("general_inquiry_payload_builder", "general_inquiry_api_submission")
+    graph.add_edge("general_inquiry_api_submission", "response_generation")
 
     # ── Ceiling Inspection ────────────────────────────────────────────────────
     graph.add_conditional_edges(

@@ -50,6 +50,27 @@ LIVE_STAGES = [
 ]
 
 
+# Every tool name the agents record (grep "service_request_api." in app/).
+# A missing entry falls back to the dotted name's last segment, so the
+# dashboard showed a bare "Create" or "Review".
+RECORDED_TOOLS = [
+    "lease_tenant_api", "document_upload_api", "notification_inbox_api.fetch",
+    "service_request_api.create_service_request",
+    "service_request_api.fm.patch_approve",
+    "service_request_api.fm.patch_save_progress",
+    "service_request_api.rdd.submit_report",
+    "service_request_api.fitout_confirm.create",
+    "service_request_api.fitout_confirm.update",
+    "service_request_api.fitout_progress.create",
+    "service_request_api.fitout_progress.update",
+    "service_request_api.general_inquiry.create",
+    "service_request_api.general_inquiry.review",
+    "service_request_api.work_permit.create",
+    "service_request_api.work_permit.review",
+    "service_request_api.work_permit.status",
+]
+
+
 def _is_readable(label: str) -> bool:
     """A label a person can read: no snake_case, no dotted identifier."""
     return "_" not in label and "." not in label and label[:1].isupper()
@@ -101,3 +122,9 @@ def test_missing_values_do_not_render_as_empty() -> None:
     assert tool_label(None) == "Unknown service"
     assert prompt_label(None) == "Unnamed prompt"
     assert stage_label(None) == "Not started"
+
+
+@pytest.mark.parametrize("name", RECORDED_TOOLS)
+def test_every_recorded_tool_has_a_descriptive_label(name: str) -> None:
+    label = tool_label(name)
+    assert _is_readable(label) and len(label.split()) >= 2, (name, label)

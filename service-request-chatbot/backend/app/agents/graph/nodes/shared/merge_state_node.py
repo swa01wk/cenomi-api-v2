@@ -316,6 +316,9 @@ _OPTIONAL_SKIPPABLE_FIELDS: frozenset[str] = frozenset(
         "inspectionTime",
         "inspectionEndTime",
         "delay_reason",
+        "entry_gate",
+        "secondperiod",
+        "planned_second_period",
     }
 )
 
@@ -729,7 +732,7 @@ async def merge_state_node(state: ServiceRequestState) -> dict[str, Any]:
     _CONFIRMED_OPTIONAL_DEFAULTS: dict[str, tuple[str, ...]] = {
         "CREATE_SR": ("description", "notes", "comments"),
         "CREATE_HANDED_OVER_SR": ("comments",),
-        "CREATE_WORK_PERMIT": ("description", "title"),
+        "CREATE_WORK_PERMIT": ("description", "title", "notes", "planned_second_period"),
     }
     if state.get("confirmation_status") == "CONFIRMED":
         # Mark still-unanswered optionals as skipped ("") rather than leaving
@@ -777,12 +780,15 @@ async def merge_state_node(state: ServiceRequestState) -> dict[str, Any]:
             if _was_skipped(collected.get("comments")):
                 collected["comments"] = _generate_comments(_lease_for_text)
 
-    # Work Permit: skip-fill empty title & description (lease-code-only templates).
+    # Work Permit: skip-fill empty title, description & notes (lease-code-only templates).
     if workflow_stage == "CREATE_WORK_PERMIT":
         from app.agents.schemas.work_permit_schema import (
             generate_wp_description,
+            generate_wp_notes,
             generate_wp_title,
             wp_location_label,
+            wp_short_flow_enabled,
+            wp_text_should_autofill,
             wp_text_should_skip_or_refresh,
         )
 
@@ -802,6 +808,18 @@ async def merge_state_node(state: ServiceRequestState) -> dict[str, Any]:
                 text = generate_wp_title(collected)
                 if text:
                     collected["title"] = text
+            # Notes: ask-or-skip on Ops/Cold; fill when skipped or short-flow unset.
+            notes_val = collected.get("notes")
+            notes_should_fill = wp_text_should_skip_or_refresh(
+                notes_val, collected, kind="notes"
+            ) or (
+                wp_short_flow_enabled()
+                and wp_text_should_autofill(notes_val, collected, kind="notes")
+            )
+            if notes_should_fill:
+                text = generate_wp_notes(collected)
+                if text:
+                    collected["notes"] = text
 
     # ── Auto-generate title ────────────────────────────────────────────────────
     # Title generation is branched by workflow stage:
@@ -1026,6 +1044,83 @@ async def merge_state_node(state: ServiceRequestState) -> dict[str, Any]:
                     if actual_key:
                         collected[actual_key] = ""
 
+    # Fitout progress: the same "the user actually answered" flag, for the one
+    # field that flow asks about.
+    #
+    # The gate is the turn, not the channel. Both other sources of this value
+    # look exactly like an answer once they reach collected_data: the approver's
+    # SR arrives with a percentage in its stored payload, and on create the web
+    # form computes the same elapsed-time default this agent suggests and writes
+    # it into the field as soon as a lease is picked, which the form→chat bridge
+    # then syncs back through corrected_fields.
+    #
+    # That sync is a *background* turn — no message, no action, nobody at the
+    # keyboard — and a background turn cannot answer a question. Counting it
+    # took DUMMY-CUST-001 from the question straight to "Recording fit-out
+    # progress at 100%", with the user never asked.
+    #
+    # A real turn is one the user took: they typed something (extraction reads
+    # their words), or they tapped a chip or edited the card (an action, or a
+    # chip value that arrives as their message).
+    if active_agent == "rdd_fitout_progress_agent":
+        from app.agents.schemas.fitout_progress_schema import (
+            PROGRESS_CONFIRMED_KEY,
+            PROGRESS_FIELD as _PROGRESS_FIELD,
+        )
+
+        user_spoke = bool(str(state.get("user_message") or "").strip())
+        user_acted = bool(str(state.get("action_override") or "").strip())
+        answered_by_extraction = (
+            user_spoke and _PROGRESS_FIELD in (state.get("extracted_fields") or {})
+        )
+        answered_by_action = (user_spoke or user_acted) and _PROGRESS_FIELD in (
+            state.get("corrected_fields") or {}
+        )
+        # "Leave the form open" means the form is where they answer. A synced
+        # percentage counts when the assistant is asking for one — the form's
+        # own default arrives earlier than that, while the lease question is
+        # open or nothing is being asked at all.
+        answered_in_the_form = str(
+            state.get("active_field") or ""
+        ) == _PROGRESS_FIELD and _PROGRESS_FIELD in (
+            state.get("corrected_fields") or {}
+        )
+        if answered_by_extraction or answered_by_action or answered_in_the_form:
+            collected[PROGRESS_CONFIRMED_KEY] = True
+
+        # …and once they have answered, the form's arithmetic must not quietly
+        # replace their number. corrected_fields is a maximum-confidence write,
+        # so a background sync of the form's own default overwrote it: the user
+        # asked for 30% in one sentence, the form hydrated the lease, computed
+        # 100% from the elapsed window, and the review card offered 100%.
+        #
+        # An edit they make themselves still wins — that arrives with a message
+        # or an action, not on a background turn.
+        previous = (state.get("collected_data") or {}).get(_PROGRESS_FIELD)
+        if (
+            not user_spoke
+            and not user_acted
+            and not answered_in_the_form
+            and collected.get(PROGRESS_CONFIRMED_KEY)
+            and _PROGRESS_FIELD in (state.get("corrected_fields") or {})
+            and previous not in (None, "")
+        ):
+            collected[_PROGRESS_FIELD] = previous
+
+        # The form's two read-only date rows are `fitout_start_date` and
+        # `fitout_end_date` — the payload's own names. The lease lookup writes
+        # the lease's `actual_*` / `base_*` columns, so without this the rows
+        # stayed empty on a lease the assistant had already resolved.
+        from app.agents.services.fitout_progress_suggestions_service import (
+            resolve_window,
+        )
+
+        start, end = resolve_window(collected)
+        if start and not collected.get("fitout_start_date"):
+            collected["fitout_start_date"] = start
+        if end and not collected.get("fitout_end_date"):
+            collected["fitout_end_date"] = end
+
     # RDD status: derive from the actually-uploaded document types now that we
     # show all three types in one document_requirement UI (no chip selection).
     # Rejected upload → auto-set document_status = DISAPPROVED.
@@ -1103,7 +1198,39 @@ async def merge_state_node(state: ServiceRequestState) -> dict[str, Any]:
     # Title/description fill for WP is Handover-style: skip-fill + short-flow
     # via the blocks above / ``autofill_text_fields`` — not ASAP ``wp_auto``.
 
+    if workflow_stage == "CREATE_WORK_PERMIT":
+        from app.agents.schemas.work_permit_form_fields import (
+            apply_cold_worker_iqama_documents,
+        )
+
+        _sync_cold_planned_second_period(collected)
+        workers = collected.get("workers")
+        if isinstance(workers, list):
+            collected["workers"] = apply_cold_worker_iqama_documents(
+                workers, list(state.get("documents") or [])
+            )
+        patch["collected_data"] = collected
+
     return patch
+
+
+def _sync_cold_planned_second_period(collected: dict[str, Any]) -> None:
+    """Copy optional ``planned_second_period`` times into ``planneddate``."""
+    second = collected.get("planned_second_period")
+    if second is None:
+        return
+    planned = collected.get("planneddate")
+    if not isinstance(planned, dict):
+        planned = {}
+    else:
+        planned = dict(planned)
+    if isinstance(second, dict):
+        planned["completionfrom"] = str(second.get("from") or "").strip()
+        planned["completionto"] = str(second.get("to") or "").strip()
+        for src, dest in (("fromLT", "completionfromLT"), ("toLT", "completiontoLT")):
+            if second.get(src) not in (None, ""):
+                planned[dest] = str(second[src])
+    collected["planneddate"] = planned
 
 
 # Portal Create-with-AI seed labels (FE buildCreateSrSeedMessage) + chip labels.

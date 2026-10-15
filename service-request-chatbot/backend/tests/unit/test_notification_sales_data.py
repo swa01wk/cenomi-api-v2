@@ -145,3 +145,34 @@ def test_serialize_sales_data_group_service_category() -> None:
     assert groups[0]["service_category"] == "SALES_DATA"
     assert groups[0]["label"] == "Sales Data"
     assert groups[0]["notifications"][0]["kind"] == "sales_data"
+
+
+def test_extract_period_date_month_with_explicit_year() -> None:
+    """A notification that states the year must be believed.
+
+    Reported from UAT: an admin opened "...corresponding to month August
+    2025" for a row that really was August 2025, but the year was being
+    inferred from today's date (2026-08), so the period filter matched
+    nothing and the agent said the submission was no longer awaiting review.
+    """
+    assert (
+        extract_period_date(
+            "The tenant has re-uploaded sales data for t0094842-Brand I am "
+            "special-Salaam Mall corresponding to month August 2025."
+        )
+        == "2025-08"
+    )
+    assert (
+        extract_period_date("... corresponding to month September 2025.")
+        == "2025-09"
+    )
+
+
+def test_extract_period_date_month_without_year_still_inferred() -> None:
+    """The yearless monthly-frequency case keeps the old behaviour."""
+    from datetime import date
+
+    result = extract_period_date("... corresponding to month May")
+    today = date.today()
+    year = today.year if 5 <= today.month else today.year - 1
+    assert result == f"{year:04d}-05"

@@ -86,6 +86,13 @@ class AnalyticsFilters:
     to_date: datetime | None = None
     agent: str | None = None
     user_id: UUID | None = None
+    # IANA zone the per-day series are bucketed in, so a day on the chart is
+    # the viewer's calendar day rather than a UTC day.
+    tz: str = "UTC"
+
+    def day_bucket(self, column: Any) -> Any:
+        """The local calendar day of a timestamptz column, labelled ``day``."""
+        return func.date_trunc("day", func.timezone(self.tz, column)).label("day")
 
     def scoped_trace_ids(self) -> Any | None:
         """Sub-select of trace ids matching agent/user, or None when unscoped.
@@ -333,7 +340,7 @@ class AnalyticsRepository:
 
     async def daily_series(self, filters: AnalyticsFilters) -> list[dict[str, Any]]:
         """Per-day turn volume, answered share, latency and ratings."""
-        day = func.date_trunc("day", AgentTrace.created_at).label("day")
+        day = filters.day_bucket(AgentTrace.created_at)
         trace_rows = await self._session.execute(
             select(
                 day,
@@ -352,7 +359,7 @@ class AnalyticsRepository:
             .order_by(day)
         )
 
-        rating_day = func.date_trunc("day", AgentFeedback.created_at).label("day")
+        rating_day = filters.day_bucket(AgentFeedback.created_at)
         rating_clauses: list[Any] = [AgentFeedback.feedback_type == _USER_RATING]
         if filters.from_date is not None:
             rating_clauses.append(AgentFeedback.created_at >= filters.from_date)

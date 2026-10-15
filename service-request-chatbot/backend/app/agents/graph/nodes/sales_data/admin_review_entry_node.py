@@ -101,14 +101,11 @@ def _review_list_message(
             first = (page - 1) * _ADMIN_REVIEW_LIST_LIMIT + 1
             last = first + len(rows) - 1
             intro += f" Showing {first}–{last}."
-    first_code = next(
-        (str(r.get("lease_code") or "") for r in rows if r.get("lease_code")), ""
-    )
-    example = f'"Approve {first_code}"' if first_code else '"Approve LC-1234"'
-    return (
-        f"{intro}\n\nUse the buttons on each row, or tell me what to do — "
-        f'for example {example} or "Approve all".'
-    )
+    # The table below already shows an Approve button and an "Ask upload"
+    # dropdown on every row, so explaining the controls ("Use the buttons on
+    # each row, or tell me what to do — for example...") only added noise.
+    # One short line pointing at the table is enough.
+    return f"{intro}\n\nReview them below."
 
 
 def _action_examples(rows: list[dict[str, Any]] | None = None) -> str:
@@ -347,12 +344,11 @@ def _confirm_patch(
         "NEED_UPLOAD_SUPPORTING_DOCUMENT": "Request a supporting document for",
         "NEED_UPLOAD_AUDITED_SALES": "Request audited sales for",
     }.get(action, ADMIN_ACTION_LABELS.get(action, action))
-    button_label = {
-        "APPROVED": "Approve",
-        "NEED_REUPLOAD": "Request reupload",
-        "NEED_UPLOAD_SUPPORTING_DOCUMENT": "Request document",
-        "NEED_UPLOAD_AUDITED_SALES": "Request audited sales",
-    }.get(action, ADMIN_ACTION_LABELS.get(action, action))
+    # The question above the card already names the action in full ("Request
+    # a re-upload for t0094842 for 2025-09 — SAR 30,000.00?"), so repeating
+    # it on the button ("Request reupload") just said the same thing twice.
+    # A plain Confirm/Cancel pair reads as the answer to that question.
+    button_label = "Confirm"
 
     if len(targets) == 1:
         message = f"{action_verb} {_fmt_target(targets[0])}?{comment_str}{unmatched_str}"

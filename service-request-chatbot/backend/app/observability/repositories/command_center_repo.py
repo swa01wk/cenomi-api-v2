@@ -171,7 +171,7 @@ class CommandCenterRepository(AnalyticsRepository):
     async def latency_daily(self, filters: AnalyticsFilters) -> list[dict[str, Any]]:
         """P50 and P95 end-to-end turn latency per day."""
         ordered = AgentTrace.total_latency_ms.asc()
-        day = func.date_trunc("day", AgentTrace.created_at).label("day")
+        day = filters.day_bucket(AgentTrace.created_at)
         rows = await self._session.execute(
             select(
                 day,
@@ -356,7 +356,7 @@ class CommandCenterRepository(AnalyticsRepository):
 
     async def thumbs_daily(self, filters: AnalyticsFilters) -> list[dict[str, Any]]:
         """👍 / 👎 per day of the voted reply."""
-        day = func.date_trunc("day", AgentTrace.created_at).label("day")
+        day = filters.day_bucket(AgentTrace.created_at)
         rows = await self._session.execute(
             select(
                 day,
@@ -481,7 +481,7 @@ class CommandCenterRepository(AnalyticsRepository):
         ``daily_series`` divides by all turns; this divides by classified
         questions so the line matches the Answer Rate card.
         """
-        day = func.date_trunc("day", AgentTrace.created_at).label("day")
+        day = filters.day_bucket(AgentTrace.created_at)
         rows = await self._session.execute(
             select(
                 day,
@@ -1034,7 +1034,7 @@ class CommandCenterRepository(AnalyticsRepository):
 
     async def tasks_daily(self, filters: AnalyticsFilters) -> list[dict[str, Any]]:
         """Per-day SRs created, approvals and rejections (K28)."""
-        day = func.date_trunc("day", AnalyticsEvent.occurred_at).label("day")
+        day = filters.day_bucket(AnalyticsEvent.occurred_at)
         rows = await self._session.execute(
             select(
                 day,

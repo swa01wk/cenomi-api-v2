@@ -72,6 +72,11 @@ class LeaseRecord(BaseModel):
     actual_fitout_start_date: str = ""
     actual_fitout_end_date: str = ""
     actual_trading_date: str = ""
+    # Percentage currently recorded on the lease (``leases.fitout_progress``),
+    # as a plain number string; empty when none is recorded. The Fitout Progress
+    # agent shows it as context and floors its suggestion with it — progress
+    # does not go backwards.
+    fitout_progress: str = ""
 
     @model_validator(mode="before")
     @classmethod
@@ -470,6 +475,31 @@ _MOCK_LEASES: list[dict[str, Any]] = [
         "lease_brand_mall": "t0301144 - Nike - Mall of Arabia",
     },
     {
+        # Fit-out under way: a started, unended window with a percentage already
+        # recorded, which is what the Fitout Progress flow needs to show its
+        # suggestion and its floor. Kept as its own lease rather than added to
+        # t0105712, whose bare milestone dates the FOS/END/TRADING prompts read.
+        # The window is wide on purpose — the elapsed percentage moves with the
+        # calendar, so eval assertions check for a question, never a number.
+        "lease_code": "t0512099",
+        "lease_id": 90218,
+        "contract_id": 90218,
+        "brand": "Levi's",
+        "brand_id": 401,
+        "mall": "Mall of Dhahran",
+        "property_id": 5107,
+        "tenant_profile_id": 318,
+        "unit_codes": ["GF018"],
+        "contracted_area": 260,
+        "city": "Dhahran",
+        "company_name": "Levi Strauss Arabia Ltd",
+        "lease_brand_mall": "t0512099 - Levi's - Mall of Dhahran",
+        "actual_shop_handover_date": "2026-01-05",
+        "actual_fitout_start_date": "2026-01-15",
+        "base_fitout_end_date": "2027-06-30",
+        "fitout_progress": "38",
+    },
+    {
         "lease_code": "t0419977",
         "lease_id": 60511,
         "contract_id": 60511,
@@ -590,6 +620,30 @@ class MockLeaseLookupService(AbstractLeaseLookupService):
         return []
 
 
+class HttpGiLeaseLookupService(HttpLeaseLookupService):
+    """Production adapter — GET /general-inquiry/leases.
+
+    Same response shape as handover GET /leases. Scope comes from the bearer
+    token, so ``purpose`` and ``property_id`` are not sent.
+    """
+
+    _ENDPOINT_PATH = "/general-inquiry/leases"
+
+    @staticmethod
+    def _build_params(query: LeaseLookupQuery) -> dict[str, Any]:
+        params = HttpLeaseLookupService._build_params(query)
+        params.pop("purpose", None)
+        params.pop("property_id", None)
+        return params
+
+
+class MockGiLeaseLookupService(MockLeaseLookupService):
+    """In-memory GI lookup. Includes every mock lease, including ones a
+    handover picker would hide behind an existing handover SR."""
+
+    _MOCK_ENDPOINT = "mock://lease-tenant-api/general-inquiry/leases"
+
+
 # ---------------------------------------------------------------------------
 # Factory helper
 # ---------------------------------------------------------------------------
@@ -606,3 +660,10 @@ def get_lease_lookup_service() -> AbstractLeaseLookupService:
     if settings.lease_tenant_api_base_url and not settings.lease_lookup_use_mock:
         return HttpLeaseLookupService()
     return MockLeaseLookupService()
+
+
+def get_gi_lease_lookup_service() -> AbstractLeaseLookupService:
+    """GI lease lookup. Same base URL as handover; path is /general-inquiry/leases."""
+    if settings.lease_tenant_api_base_url and not settings.lease_lookup_use_mock:
+        return HttpGiLeaseLookupService()
+    return MockGiLeaseLookupService()

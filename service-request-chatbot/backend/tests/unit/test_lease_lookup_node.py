@@ -214,6 +214,34 @@ class TestNoIdentifiers:
         svc.lookup.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_general_inquiry_browse_emits_gi_leases_picker(self) -> None:
+        state = _state(
+            collected_data={},
+            workflow_stage="CREATE_SR",
+            active_agent="general_inquiry_agent",
+        )
+        svc = _MockService(_make_result([]))
+        result = await lease_lookup_node(state, service=svc)
+        spec = result["response_decorations"]["suggestions"]
+        assert result["status"] == "IN_PROGRESS"
+        assert spec["resource"] == "gi_leases"
+        assert spec["filters"]["limit"] == 5
+        assert "purpose" not in spec["filters"]
+        assert "response_ui" not in result
+
+    @pytest.mark.asyncio
+    async def test_general_inquiry_handover_exists_does_not_block(self) -> None:
+        state = _state(
+            collected_data={"lease_code": "t0105712"},
+            workflow_stage="CREATE_SR",
+            active_agent="general_inquiry_agent",
+        )
+        svc = _MockService(_make_result([], reason="handover_exists"))
+        result = await lease_lookup_node(state, service=svc)
+        assert result["status"] == "WAITING_FOR_USER"
+        assert "already has an active Handover" not in result["response_message"]
+
+    @pytest.mark.asyncio
     async def test_no_collected_data_key_browse_on_default_create_sr(self) -> None:
         state = _state(active_agent="rdd_handover_agent")
         svc = _MockService(_make_result([]))

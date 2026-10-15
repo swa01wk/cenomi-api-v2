@@ -233,9 +233,10 @@ def test_legacy_open_action_without_seed_still_detail() -> None:
     [
         # Copilot chip messages (TC-3662)
         ("Show my handover notifications", ("HANDOVER",)),
+        # The Fit-out tab: both confirmations and the weekly progress review.
         (
             "Show my fit-out notifications",
-            ("FIT_OUT_CONFIRM_FOS", "FIT_OUT_CONFIRM_END"),
+            ("FIT_OUT_CONFIRM_FOS", "FIT_OUT_CONFIRM_END", "FITOUT_PROGRESS"),
         ),
         ("Show my trading notifications", ("FIT_OUT_CONFIRM_TRADING",)),
         (
@@ -253,6 +254,8 @@ def test_legacy_open_action_without_seed_still_detail() -> None:
         # A stage keyword still narrows to that one flow.
         ("fit-out start notifications", ("FIT_OUT_CONFIRM_FOS",)),
         ("fit out end notifications", ("FIT_OUT_CONFIRM_END",)),
+        ("show my fitout progress notifications", ("FITOUT_PROGRESS",)),
+        ("fit-out progress notifications", ("FITOUT_PROGRESS",)),
     ],
 )
 def test_copilot_chip_messages_map_to_filters(message, expected) -> None:

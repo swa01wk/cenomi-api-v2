@@ -888,14 +888,20 @@ async def supervisor_node(state: ServiceRequestState) -> dict[str, Any]:  # noqa
                 **_sales_data_unmatched_patch(early_roles, intent=decision.intent),
                 **sr_id_updates,
             }
+        # This used to carry an instruction written AT the LLM ("The intent is
+        # unclear. Ask the user to clarify whether they want to create,
+        # update, approve... Be friendly and offer to guide them.") in
+        # response_message — which is the user-facing field, so it was shown
+        # to tenants verbatim. Speak to the user directly instead.
         return {
             "intent": decision.intent,
             **sr_id_updates,
             "response_message": (
-                "The intent is unclear. Ask the user to clarify whether they want to "
-                "create, update, approve, or check the status of a service request. "
-                "Be friendly and offer to guide them."
+                "I didn't quite catch that. You can ask me to raise a new "
+                "service request, update an existing one, or check its status "
+                "— just tell me which, and I'll take it from there."
             ),
+            "response_ui": {"type": "message", "verbatim": True},
             "status": "WAITING_FOR_USER",
         }
 

@@ -27,6 +27,7 @@ import structlog
 from app.agents.graph.state import ServiceRequestState
 from app.agents.schemas.fitout_confirm_schema import TERMINAL_STAGES
 from app.agents.services.service_request_api_service import get_service_request_api_service
+from app.agents.services.sr_release import released_backend_refs
 from app.observability.decorators import trace_node
 
 log = structlog.get_logger(__name__)
@@ -546,7 +547,7 @@ async def fitout_confirm_entry_node(state: ServiceRequestState) -> dict[str, Any
                 "validation_errors": [],
                 "selected_lease": None,
                 "lease_matches": [],
-                "backend_refs": {},
+                "backend_refs": released_backend_refs(state),
                 "documents": [],
                 "response_ui": {},
                 "status": "IN_PROGRESS",

@@ -123,10 +123,12 @@ def format_pending_list_summary() -> str:
     """Intro + trailing prose for the pending-months chat bubble, without the
     per-lease/month enumeration — that part is shown once, as chips, by
     PendingMonthsListCard (the accompanying response_ui.leases)."""
+    # The months below are clickable now, so lead with that rather than
+    # asking the user to type a lease and month they can simply tap.
     return (
-        "You have pending sales data to submit.\n\n"
-        "Tell me the lease and month to start with, or attach a CSV — one file "
-        "can cover several pending months."
+        "Here's your pending sales data.\n\n"
+        "Tap a month to enter its amount, or attach a CSV to cover several "
+        "months at once."
     )
 
 

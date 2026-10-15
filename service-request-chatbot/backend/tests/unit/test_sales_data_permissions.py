@@ -25,6 +25,9 @@ from app.agents.graph.nodes.sales_data.admin_status_update_node import (
 from app.agents.graph.nodes.sales_data.manual_entry_submission_node import (
     manual_entry_submission_node,
 )
+from app.agents.graph.nodes.sales_data.sales_data_entry_node import (
+    sales_data_entry_node,
+)
 from app.agents.graph.nodes.sales_data.sales_data_api_submission_node import (
     sales_data_api_submission_node,
 )
@@ -73,6 +76,9 @@ _APPROVE_ROLES = ("SALES_DATA_APPROVER", "SALES_DATA_TEAM")
 
 
 class TestSalesDataActionMap:
+    def test_enter_agent_maps_to_sales_agent(self) -> None:
+        assert ACTION_PERMISSION_MAP["ENTER_SALES_DATA_AGENT"] == "SALES_AGENT"
+
     def test_submit_maps_to_sales_data_update(self) -> None:
         assert ACTION_PERMISSION_MAP["SUBMIT_SALES_DATA"] == "SALES_DATA_UPDATE"
 
@@ -87,6 +93,17 @@ class TestSalesDataActionMap:
 
 
 class TestSalesDataRoleMap:
+    def test_csv_roles_have_sales_agent(self) -> None:
+        for role in _CSV_ROLES:
+            assert "SALES_AGENT" in ROLE_PERMISSION_MAP[role], role
+
+    def test_approve_roles_have_sales_agent(self) -> None:
+        for role in _APPROVE_ROLES:
+            assert "SALES_AGENT" in ROLE_PERMISSION_MAP[role], role
+
+    def test_mall_manager_has_no_sales_agent(self) -> None:
+        assert "SALES_AGENT" not in ROLE_PERMISSION_MAP["MALL_MANAGER"]
+
     def test_csv_roles_have_update(self) -> None:
         for role in _CSV_ROLES:
             assert "SALES_DATA_UPDATE" in ROLE_PERMISSION_MAP[role], role
@@ -105,6 +122,7 @@ class TestSalesDataRoleMap:
 
     def test_admin_has_all_sales_permissions(self) -> None:
         perms = ROLE_PERMISSION_MAP["ADMIN"]
+        assert "SALES_AGENT" in perms
         assert "SALES_DATA_UPDATE" in perms
         assert "UPLOAD_SALES_DATA" in perms
         assert "SALES_DATA_APPROVE" in perms
@@ -116,8 +134,12 @@ class TestSalesDataRoleMap:
         assert "SALES_DATA_APPROVE" not in perms
 
     def test_financial_controller_and_shop_manager_are_not_csv_uploaders(self) -> None:
+        # They do get SALES_AGENT (can open the agent, navigate the flow)
+        # but no write permission — denied only at the actual submit step,
+        # same as on the portal.
         for role in ("FINANCIAL_CONTROLLER", "SHOP_MANAGER"):
-            assert role not in ROLE_PERMISSION_MAP
+            perms = ROLE_PERMISSION_MAP[role]
+            assert perms == frozenset({"SALES_AGENT"}), (role, perms)
 
 
 class TestSalesDataCheck:
@@ -175,6 +197,38 @@ class TestSalesDataCheck:
         _svc.ensure_can_approve_sales_data(_auth("SALES_DATA_TEAM"))
         with pytest.raises(PermissionDeniedError):
             _svc.ensure_can_approve_sales_data(_auth("BILLING_CONTACT"))
+
+
+class TestEnterSalesDataAgent:
+    """SALES_AGENT — the front-door gate, checked before any routing."""
+
+    def test_csv_role_can_enter(self) -> None:
+        _svc.check("ENTER_SALES_DATA_AGENT", _auth("BILLING_CONTACT"))
+
+    def test_approver_role_can_enter(self) -> None:
+        _svc.check("ENTER_SALES_DATA_AGENT", _auth("SALES_DATA_TEAM"))
+
+    def test_permission_string_fast_path(self) -> None:
+        _svc.check("ENTER_SALES_DATA_AGENT", _auth("SALES_AGENT"))
+
+    def test_mall_manager_cannot_enter(self) -> None:
+        with pytest.raises(PermissionDeniedError) as exc_info:
+            _svc.check("ENTER_SALES_DATA_AGENT", _auth("MALL_MANAGER"))
+        assert exc_info.value.required_role == "SALES_AGENT"
+
+    def test_shop_manager_can_enter_but_cannot_submit(self) -> None:
+        """Company-level contact: can open the agent, denied only at submit."""
+        _svc.check("ENTER_SALES_DATA_AGENT", _auth("SHOP_MANAGER"))
+        with pytest.raises(PermissionDeniedError):
+            _svc.check("SUBMIT_SALES_DATA", _auth("SHOP_MANAGER"))
+
+    def test_is_global_admin_bypasses(self) -> None:
+        _svc.check("ENTER_SALES_DATA_AGENT", _auth(is_global_admin=True))
+
+    def test_ensure_wrapper(self) -> None:
+        _svc.ensure_can_use_sales_data_agent(_auth("PRIMARY_TENANT_CONTACT"))
+        with pytest.raises(PermissionDeniedError):
+            _svc.ensure_can_use_sales_data_agent(_auth("MALL_MANAGER"))
 
 
 class TestGraphPermissionGuard:
@@ -265,6 +319,42 @@ def _doc_state(**overrides: Any) -> dict[str, Any]:
     }
     state.update(overrides)
     return state
+
+
+class TestSalesDataEntryFrontDoor:
+    """A free-typed sales-data request must be stopped at the entry node,
+    not just at the final submit/approve call — the same SALES_AGENT
+    permission the frontend's AI buttons check."""
+
+    @pytest.mark.asyncio
+    async def test_denied_for_role_without_sales_agent(self) -> None:
+        result = await sales_data_entry_node(
+            {
+                "user_message": "I want to submit sales data",
+                "intent": "UPLOAD_SALES_DATA",
+                "auth_context": _auth("MALL_MANAGER"),
+            }
+        )
+        assert result["status"] == "WAITING_FOR_USER"
+        assert "Permission denied" in result["response_message"]
+
+    @pytest.mark.asyncio
+    async def test_allowed_for_role_with_sales_agent(self) -> None:
+        result = await sales_data_entry_node(
+            {
+                "user_message": "I want to submit sales data",
+                "intent": "UPLOAD_SALES_DATA",
+                "auth_context": _auth("BILLING_CONTACT"),
+            }
+        )
+        assert "Permission denied" not in (result.get("response_message") or "")
+
+    @pytest.mark.asyncio
+    async def test_skips_check_without_auth_context(self) -> None:
+        result = await sales_data_entry_node(
+            {"user_message": "I want to submit sales data", "intent": "UPLOAD_SALES_DATA"}
+        )
+        assert "Permission denied" not in (result.get("response_message") or "")
 
 
 class TestSalesDataWriteNodeGuards:

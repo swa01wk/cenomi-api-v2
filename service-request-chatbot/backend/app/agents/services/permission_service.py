@@ -43,6 +43,9 @@ ACTION_PERMISSION_MAP: dict[str, str] = {
     # ── Work Permit: CREATE stage (Mall Manager / contractor) ─────────────────
     "CREATE_WORK_PERMIT_SR": "CAN_RAISE_WORK_PERMIT_SR",
 
+    # ── General Inquiry: optional attachment (tenant or admin creator) ───────
+    "CREATE_GENERAL_INQUIRY": "CAN_RAISE_GENERAL_INQUIRY",
+
     # ── Work Permit: Read / view ──────────────────────────────────────────────
     "VIEW_WORK_PERMIT_SR": "VIEW_WORK_PERMIT",
 
@@ -51,6 +54,12 @@ ACTION_PERMISSION_MAP: dict[str, str] = {
     "RDD_FINAL_APPROVAL": "CAN_APPROVE_HANDOVER_SR",
 
     # ── Sales Data (platform permission names — same strings as cenomi-api) ──
+    # ENTER_SALES_DATA_AGENT is the front-door gate — same SALES_AGENT
+    # permission the frontend's "Upload with AI" / "Review with AI" buttons
+    # check — enforced once, before any sales-data routing, independent of
+    # the finer SUBMIT_*/APPROVE_SALES_DATA checks below (those still apply
+    # per-action for a caller who did get past the front door).
+    "ENTER_SALES_DATA_AGENT": "SALES_AGENT",
     "SUBMIT_SALES_DATA": "SALES_DATA_UPDATE",
     "SUBMIT_SALES_DATA_SUPPORTING_DOC": "UPLOAD_SALES_DATA",
     "APPROVE_SALES_DATA": "SALES_DATA_APPROVE",
@@ -102,12 +111,23 @@ ROLE_PERMISSION_MAP: dict[str, frozenset[str]] = {
         "VIEW_FIT_OUT_HANDOVER",
         "CAN_RAISE_WORK_PERMIT_SR",
         "VIEW_WORK_PERMIT",
+        "SALES_AGENT",
         "SALES_DATA_UPDATE",
         "UPLOAD_SALES_DATA",
         "REUPLOAD_SALES_DATA",
         "SALES_DATA_APPROVE",
     }),
 }
+
+# SALES_AGENT only (no write permission) — company-level contacts who can
+# open the sales-data agent, see pending items, and navigate the flow, but
+# are denied at the actual submit/approve step by the write-permission sets
+# below, same as on the portal.
+_SALES_AGENT_ONLY_ROLES: frozenset[str] = frozenset({"SHOP_MANAGER", "FINANCIAL_CONTROLLER"})
+for _role in _SALES_AGENT_ONLY_ROLES:
+    ROLE_PERMISSION_MAP[_role] = ROLE_PERMISSION_MAP.get(_role, frozenset()) | frozenset(
+        {"SALES_AGENT"}
+    )
 
 # Platform CSV submit (POST /sales-data) — SALES_DATA_UPDATE only.
 # FINANCIAL_CONTROLLER / SHOP_MANAGER are company-level contacts but do not
@@ -139,11 +159,11 @@ _SALES_DATA_APPROVE_ROLES: frozenset[str] = frozenset(
     {"SALES_DATA_APPROVER", "SALES_DATA_TEAM"}
 )
 
-_SALES_CSV_PERMS = frozenset({"SALES_DATA_UPDATE"})
+_SALES_CSV_PERMS = frozenset({"SALES_AGENT", "SALES_DATA_UPDATE"})
 _SALES_DOC_PERMS = frozenset(
-    {"SALES_DATA_UPDATE", "UPLOAD_SALES_DATA", "REUPLOAD_SALES_DATA"}
+    {"SALES_AGENT", "SALES_DATA_UPDATE", "UPLOAD_SALES_DATA", "REUPLOAD_SALES_DATA"}
 )
-_SALES_APPROVE_PERMS = frozenset({"SALES_DATA_APPROVE"})
+_SALES_APPROVE_PERMS = frozenset({"SALES_AGENT", "SALES_DATA_APPROVE"})
 
 for _role in _SALES_DATA_CSV_ROLES:
     ROLE_PERMISSION_MAP[_role] = ROLE_PERMISSION_MAP.get(_role, frozenset()) | _SALES_CSV_PERMS
@@ -168,6 +188,18 @@ for _role in _TENANT_WORK_PERMIT_CREATE_ROLES:
     ROLE_PERMISSION_MAP[_role] = (
         ROLE_PERMISSION_MAP.get(_role, frozenset()) | _TENANT_WP_CREATE_PERMS
     )
+
+# Same roles that may start a General Inquiry may attach its optional file.
+# Tenant contacts do not hold CAN_RAISE_HANDOVER_SR, so the upload route must
+# not reuse the handover action for SR_GEN_INQ.
+from app.agents.schemas.help_agent_schema import ROLE_PERMITTED_INTENTS  # noqa: E402
+
+_GI_CREATE_PERMS = frozenset({"CAN_RAISE_GENERAL_INQUIRY"})
+for _role, _intents in ROLE_PERMITTED_INTENTS.items():
+    if "CREATE_GENERAL_INQUIRY" in _intents:
+        ROLE_PERMISSION_MAP[_role] = (
+            ROLE_PERMISSION_MAP.get(_role, frozenset()) | _GI_CREATE_PERMS
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -332,6 +364,15 @@ class PermissionService:
             action="APPROVE_WORK_PERMIT_SR",
             required_role="IN_PROGRESS_ASSIGNED_ROLE",
         )
+
+    def ensure_can_use_sales_data_agent(self, auth: AuthContext) -> None:
+        """Assert the caller may even open the Sales Data agent flow.
+
+        The front-door gate — SALES_AGENT — checked once per turn, before
+        the entry node routes to any sub-flow. Distinct from the finer
+        SUBMIT_*/APPROVE_SALES_DATA checks, which still apply per-action.
+        """
+        self.check("ENTER_SALES_DATA_AGENT", auth)
 
     def ensure_can_submit_sales_data(self, auth: AuthContext) -> None:
         """Assert the caller may POST CSV / manual sales data."""

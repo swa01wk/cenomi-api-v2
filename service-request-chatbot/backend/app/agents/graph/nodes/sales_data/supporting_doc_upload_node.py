@@ -165,6 +165,20 @@ def _narrow_to_notification(
     return narrowed
 
 
+def _accept_for_status(status: str) -> str:
+    """Allowed file types for the attach control, per Ask Upload type.
+
+    CSV is offered for every Ask Upload type: NEED_REUPLOAD asks for a
+    corrected **sales data** file (the same CSV the tenant originally
+    uploaded), and the supporting-document / audited-sales evidence a
+    tenant has to hand is just as often a POS or finance CSV export as a
+    PDF. Kept in sync with supporting_doc_upload.py's _ALLOWED_EXTENSIONS,
+    which in turn mirrors cenomi-api's PUT /files allow-list.
+    """
+    del status  # same set for every ask-type
+    return ".csv,.pdf,.png,.jpg,.jpeg,.doc,.xlsx,.zip"
+
+
 def _prompt_for_file(row: dict[str, Any]) -> dict[str, Any]:
     lease_code = row.get("lease_code", "")
     start = row.get("sales_period_start", "")
@@ -186,10 +200,19 @@ def _prompt_for_file(row: dict[str, Any]) -> dict[str, Any]:
     # (after attaching) shows the full detail as an actual table instead of
     # cramming it into this plain-text prompt.
     admin_note = f' Note from the Sales Data team: *"{comment}"*.' if comment else ""
+    if status == "NEED_REUPLOAD":
+        # Corrected sales data can be given either way — a file, or just the
+        # right figure. Only the evidence ask-types truly need a document.
+        how = (
+            "Attach the corrected file below, or simply type the correct "
+            "amount — either works."
+        )
+    else:
+        how = "Attach the file below."
     message = (
         f"Please attach {copy['prompt_verb']} for lease **{lease_code}** "
         f"({start} – {end}).{amt_str}{admin_note}\n\n"
-        "A comment is required — attach the file below."
+        f"{how} You'll be able to add a short note before it's sent."
     )
     return {
         "workflow_stage": "AWAITING_DOC_UPLOAD",
@@ -205,15 +228,23 @@ def _prompt_for_file(row: dict[str, Any]) -> dict[str, Any]:
             "current_status": status,
             "target_status": target,
             "ask_label": ask_label,
+            # Card title and attach-button label — so the tenant sees "Upload
+            # supporting document" / "Upload audited sales" / "Re-upload
+            # sales data" instead of one generic "Attach" for all three.
+            "title": copy["title"],
+            "cta": copy["cta"],
             "sales_amt": amt,
             "comment_text": comment or None,
             "show_file_upload": True,
-            # Kept in sync with supporting_doc_upload.py's _ALLOWED_EXTENSIONS,
-            # which mirrors the live cenomi-api PUT /files allow-list — picking
-            # a format outside this set (e.g. GIF/WEBP/TIFF, which "image/*"
-            # alone would otherwise let through) used to cache fine here and
-            # only fail once forwarded to the real backend.
-            "accept": ".pdf,.png,.jpg,.jpeg,.doc,.xlsx,.zip",
+            # Document formats for NEED_UPLOAD_SUPPORTING_DOCUMENT and
+            # NEED_UPLOAD_AUDITED_SALES; NEED_REUPLOAD (a corrected sales
+            # data file) also accepts .csv. Kept in sync with
+            # supporting_doc_upload.py's _ALLOWED_EXTENSIONS, which mirrors
+            # the live cenomi-api PUT /files allow-list — picking a format
+            # outside this set (e.g. GIF/WEBP/TIFF, which "image/*" alone
+            # would otherwise let through) used to cache fine here and only
+            # fail once forwarded to the real backend.
+            "accept": _accept_for_status(status),
             "message": message,
         },
     }
@@ -300,8 +331,9 @@ def _notification_lease_resolved(
 
     if row is None:
         message = (
-            f"Lease **{lease_code}** isn't linked to your account. "
-            "Please check the lease code and share it again."
+            f"Lease **{lease_code}** isn't linked to your current company. "
+            "If it belongs to another of your companies, switch to that "
+            "company and try again; otherwise, please check the lease code."
         )
     else:
         ym = year_month_from_start(str(row.get("sales_period_start") or ""))

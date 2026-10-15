@@ -61,6 +61,11 @@ _TOOL_LABELS: dict[str, str] = {
     "service_request_api.fitout_confirm.update": "Update fit-out confirmation",
     "service_request_api.work_permit.create": "Create work permit",
     "service_request_api.work_permit.review": "Review work permit",
+    "service_request_api.work_permit.status": "Check work permit status",
+    "service_request_api.fitout_progress.create": "Create fit-out progress",
+    "service_request_api.fitout_progress.update": "Update fit-out progress",
+    "service_request_api.general_inquiry.create": "Create general inquiry",
+    "service_request_api.general_inquiry.review": "Review general inquiry",
     "notification_inbox_api.fetch": "Load notifications",
     "document_upload_api": "Upload document",
 }

@@ -283,6 +283,16 @@ class AbstractServiceRequestAPIService(ABC):
     ) -> ServiceRequestCreationResult:
         """PATCH an existing SR (FM save progress / approve)."""
 
+    async def update_work_permit_status(
+        self,
+        payload: dict[str, Any],
+    ) -> ServiceRequestCreationResult:
+        """POST /service-requests/work-permit/status (extend / cancel).
+
+        Default raises — HTTP and mock adapters override.
+        """
+        raise NotImplementedError("update_work_permit_status")
+
     @abstractmethod
     async def submit_report(
         self,
@@ -459,6 +469,47 @@ class HttpServiceRequestAPIService(AbstractServiceRequestAPIService):
         log.info("sr_api.patch.success", sr_id=confirmed_sr_id, latency_ms=latency_ms)
         return ServiceRequestCreationResult(
             sr_id=confirmed_sr_id,
+            endpoint=result.endpoint,
+            request_payload=payload,
+            response_payload=result.response_payload,
+            latency_ms=latency_ms,
+            status_code=result.status_code,
+            correlation_id=result.correlation_id,
+        )
+
+    async def update_work_permit_status(
+        self,
+        payload: dict[str, Any],
+    ) -> ServiceRequestCreationResult:
+        """POST /service-requests/work-permit/status."""
+        wall_start = time.monotonic()
+        result = await self._client.update_work_permit_status(payload)
+        latency_ms = result.latency_ms or int((time.monotonic() - wall_start) * 1000)
+        sr_id = str(payload.get("service_request_id") or result.sr_id or "")
+        if not result.success:
+            log.warning(
+                "sr_api.work_permit_status.failed",
+                sr_id=sr_id,
+                status_code=result.status_code,
+                error=result.error,
+            )
+            return ServiceRequestCreationResult(
+                sr_id=sr_id or None,
+                endpoint=result.endpoint,
+                request_payload=payload,
+                response_payload=result.response_payload,
+                latency_ms=latency_ms,
+                status_code=result.status_code,
+                correlation_id=result.correlation_id,
+                error=result.error,
+            )
+        log.info(
+            "sr_api.work_permit_status.success",
+            sr_id=sr_id,
+            latency_ms=latency_ms,
+        )
+        return ServiceRequestCreationResult(
+            sr_id=sr_id or result.sr_id,
             endpoint=result.endpoint,
             request_payload=payload,
             response_payload=result.response_payload,
@@ -808,6 +859,33 @@ class MockServiceRequestAPIService(AbstractServiceRequestAPIService):
                             op["status"] = "FINISHED"
         return ServiceRequestCreationResult(
             sr_id=sr_id,
+            endpoint=endpoint,
+            request_payload=payload,
+            response_payload={"success": True, "data": "Successfully processed"},
+            latency_ms=self._latency_ms,
+            status_code=200,
+        )
+
+    async def update_work_permit_status(
+        self,
+        payload: dict[str, Any],
+    ) -> ServiceRequestCreationResult:
+        sr_id = str(payload.get("service_request_id") or "")
+        endpoint = f"{self._MOCK_ENDPOINT_BASE}/work-permit/status"
+        if self._force_error:
+            sc = self._force_status_code or 500
+            return ServiceRequestCreationResult(
+                sr_id=sr_id or None,
+                endpoint=endpoint,
+                request_payload=payload,
+                response_payload=None,
+                latency_ms=self._latency_ms,
+                status_code=sc,
+                error=self._force_error,
+            )
+        self._patched.append({"sr_id": sr_id, "payload": payload, "mode": "wp_status"})
+        return ServiceRequestCreationResult(
+            sr_id=sr_id or None,
             endpoint=endpoint,
             request_payload=payload,
             response_payload={"success": True, "data": "Successfully processed"},

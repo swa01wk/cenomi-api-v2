@@ -177,6 +177,10 @@ _SUB_CATEGORY_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ),
     ("FIT_OUT_CONFIRM_TRADING", re.compile(r"\btrading\b", re.IGNORECASE)),
     (
+        "FITOUT_PROGRESS",
+        re.compile(r"\bfit[\s-]?out\s+progress\b", re.IGNORECASE),
+    ),
+    (
         "OPEN_CEILING_INSPECTION",
         re.compile(r"\bopen\s+ceiling\b|\boci\b", re.IGNORECASE),
     ),
@@ -225,11 +229,13 @@ _SUB_CATEGORY_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
 )
 
 
-# Bare "fit-out notifications" means every confirmation flow, not one stage.
+# Bare "fit-out notifications" means everything under the inbox's Fit-out tab:
+# the start and end confirmations and the weekly progress review.
 _GENERIC_FITOUT_PATTERN = re.compile(r"\bfit[\s-]?out\b", re.IGNORECASE)
 _FITOUT_CONFIRM_SUBS = (
     "FIT_OUT_CONFIRM_FOS",
     "FIT_OUT_CONFIRM_END",
+    "FITOUT_PROGRESS",
 )
 
 # Bare "ceiling inspection notifications" (the Copilot chip) means both.
@@ -269,7 +275,7 @@ def parse_notification_list_filters(message: str) -> NotificationListFilters:
         if pattern.search(text):
             matched.append(sub)
     # Generic "fit-out notifications" (the Copilot chip) with no stage keyword
-    # expands to all three confirmation flows.
+    # expands to every Fit-out tab group.
     if _GENERIC_FITOUT_PATTERN.search(text) and not any(
         sub in matched for sub in _FITOUT_CONFIRM_SUBS
     ):

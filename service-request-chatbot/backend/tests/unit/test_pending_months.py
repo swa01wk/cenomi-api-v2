@@ -85,7 +85,7 @@ def test_pending_list_copy_allows_multi_month_file() -> None:
 def test_pending_list_summary_omits_lease_and_month_enumeration() -> None:
     message = format_pending_list_summary()
     assert "pending sales data" in message
-    assert "several pending months" in message
+    assert "several months" in message
     assert "July 2026" not in message
     assert "LC-1001" not in message
 
@@ -106,27 +106,28 @@ def _state(**overrides: Any) -> dict[str, Any]:
 
 
 @pytest.mark.asyncio
-async def test_gate_caps_display_to_top_leases_and_recent_months() -> None:
-    """A tenant with many leases and years of PENDING history must not render
-    a wall of hundreds of chips — display is capped to 5 leases, and to the
-    2 most recent distinct calendar months *found anywhere in the dataset*
-    (not each lease's own 2 least-old months, and not the real-world "today").
-    Routing itself (uploading a month outside the shown window) must still
-    work, since that reads from the full, uncapped `items`/`_pending_items`
-    cache, not from this display-only list.
+async def test_gate_sends_every_pending_lease_and_month() -> None:
+    """Nothing is hidden from the pending list.
+
+    This used to cap display at 5 leases and at the 2 most recent distinct
+    months found anywhere in the dataset, to avoid a wall of chips for a
+    tenant with years of backlog. But that made the rest unreachable from
+    chat — a month outside the window could only be uploaded by typing its
+    lease code from memory. The full set is sent now and the card pages
+    through it instead.
     """
     from app.agents.graph.nodes.sales_data.pending_months_gate_node import (
         pending_months_gate_node,
     )
 
-    # 7 leases (over the 5-lease cap), one with 4 months (2 of them old).
+    # 7 leases, one with years of backlog alongside recent months.
     rows = [
         _row("LC-1001", "2016-01-01", "2016-01-31"),
         _row("LC-1001", "2016-02-01", "2016-02-28"),
         _row("LC-1001", "2026-07-01", "2026-07-31"),
         _row("LC-1001", "2026-08-01", "2026-08-31"),
     ]
-    for i in range(2, 8):  # LC-1002..LC-1007 — 6 more leases, 1 month each
+    for i in range(2, 8):  # LC-1002..LC-1007
         rows.append(_row(f"LC-100{i}", "2026-08-01", "2026-08-31"))
 
     client = AsyncMock()
@@ -147,27 +148,25 @@ async def test_gate_caps_display_to_top_leases_and_recent_months() -> None:
 
     ui = result["response_ui"]
     assert ui["total_lease_count"] == 7
-    assert len(ui["leases"]) == 5
-    assert ui["more_lease_count"] == 2
+    assert len(ui["leases"]) == 7, "every lease must be sent, not just the first 5"
+    assert ui["total_month_count"] == 10
+    assert ui["more_lease_count"] == 0
     assert ui["older_lease_count"] == 0
 
     lc1001 = next(lease for lease in ui["leases"] if lease["lease_code"] == "LC-1001")
-    # The dataset-wide top-2-months are 2026-07/2026-08 — the 2016 entries
-    # are dropped from display even though they're pending, and even though
-    # per-lease they'd otherwise rank as LC-1001's own "2 most recent" if
-    # July/August weren't also present.
-    assert [m["label"] for m in lc1001["months"]] == ["July 2026", "August 2026"]
-    assert lc1001["more_months"] == 0
+    # The 2016 backlog is kept, in chronological order.
+    assert [m["label"] for m in lc1001["months"]] == [
+        "January 2016",
+        "February 2016",
+        "July 2026",
+        "August 2026",
+    ]
 
 
 @pytest.mark.asyncio
-async def test_gate_drops_leases_entirely_outside_the_recent_window() -> None:
-    """A lease whose ENTIRE backlog is old (nothing in the dataset-wide top-2
-    months) must not appear in the list at all, not even truncated to an
-    empty/misleading row — this is the reported bug: leases showing only
-    their own old months (Dec 2023, June 2024, ...) even though the dataset
-    as a whole has much more recent pending data elsewhere.
-    """
+async def test_gate_keeps_leases_whose_backlog_is_entirely_old() -> None:
+    """A lease with only old pending months must still be listed — it is
+    genuinely overdue, so hiding it was the worst case of the old cap."""
     from app.agents.graph.nodes.sales_data.pending_months_gate_node import (
         pending_months_gate_node,
     )
@@ -177,6 +176,7 @@ async def test_gate_drops_leases_entirely_outside_the_recent_window() -> None:
         _row("LC-2002", "2026-08-01", "2026-08-31"),
         _row("LC-2002", "2026-09-01", "2026-09-30"),
     ]
+
     client = AsyncMock()
     client.get_sales_data = AsyncMock(return_value=rows)
     with (
@@ -195,9 +195,9 @@ async def test_gate_drops_leases_entirely_outside_the_recent_window() -> None:
 
     ui = result["response_ui"]
     lease_codes = [lease["lease_code"] for lease in ui["leases"]]
-    assert lease_codes == ["LC-2002"]
+    assert lease_codes == ["LC-2001", "LC-2002"]
     assert ui["total_lease_count"] == 2
-    assert ui["older_lease_count"] == 1
+    assert ui["older_lease_count"] == 0
 
 
 @pytest.mark.asyncio
@@ -667,3 +667,67 @@ async def test_gate_list_pick_month_reminds_other_months() -> None:
     assert result["workflow_stage"] == "AWAITING_OTHER_MONTHS_REMINDER"
     assert result["response_ui"]["asked_label"] == "August 2026"
     assert result["response_ui"]["other_months"][0]["label"] == "July 2026"
+
+
+@pytest.mark.asyncio
+async def test_gate_refetches_so_a_ui_submission_is_picked_up() -> None:
+    """The listing page beside the chat can submit a month at any time and
+    nothing tells the agent when it does. The gate must re-read rather than
+    reuse its cached snapshot, or it goes on offering months that were
+    already submitted — and tapping one fails."""
+    from app.agents.graph.nodes.sales_data.pending_months_gate_node import (
+        pending_months_gate_node,
+    )
+
+    # Cached from the previous turn: two pending months.
+    stale_cache = [
+        {
+            "lease_code": "LC-3001",
+            "year_month": "2026-08",
+            "label": "August 2026",
+            "sales_period_start": "2026-08-01",
+            "sales_period_end": "2026-08-31",
+            "brand_name": "",
+            "property_name": "",
+        },
+        {
+            "lease_code": "LC-3001",
+            "year_month": "2026-09",
+            "label": "September 2026",
+            "sales_period_start": "2026-09-01",
+            "sales_period_end": "2026-09-30",
+            "brand_name": "",
+            "property_name": "",
+        },
+    ]
+    # Server truth now: August was submitted via the listing page.
+    client = AsyncMock()
+    client.get_sales_data = AsyncMock(
+        return_value=[_row("LC-3001", "2026-09-01", "2026-09-30")]
+    )
+
+    state = _state(user_message="LC-3001")
+    state["workflow_stage"] = "AWAITING_PENDING_MONTHS_CHOICE"
+    state["collected_data"] = {"_pending_items": stale_cache}
+    state["backend_refs"] = {"pending_items": stale_cache}
+
+    with (
+        patch(
+            "app.agents.graph.nodes.sales_data.pending_months_gate_node.get_current_bearer_token",
+            return_value="tok",
+        ),
+        patch(
+            "app.agents.graph.nodes.sales_data.pending_months_gate_node.SalesDataApiClient",
+            return_value=client,
+        ),
+    ):
+        result = await pending_months_gate_node(state)
+
+    # The server was re-read rather than the stale cache being reused.
+    client.get_sales_data.assert_awaited()
+
+    # Only September is left, so the gate goes straight to its upload prompt
+    # instead of listing a month that has already been submitted.
+    items = result["collected_data"]["_pending_items"]
+    assert [i["year_month"] for i in items] == ["2026-09"]
+    assert result["collected_data"]["_asked_period"]["year_month"] == "2026-09"

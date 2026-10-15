@@ -12,6 +12,7 @@ CREATE_SR_INTENTS: frozenset[str] = frozenset(
         "CREATE_FITOUT_CONFIRM_FOS",
         "CREATE_FITOUT_CONFIRM_END",
         "CREATE_FITOUT_CONFIRM_TRADING",
+        "CREATE_FITOUT_PROGRESS",
         "CREATE_WORK_PERMIT_SR",
     }
 )
@@ -120,6 +121,7 @@ FLOW_HANDOVER_FM = "handover_fm"
 FLOW_HANDOVER_RDD = "handover_rdd"
 FLOW_WORK_PERMIT = "work_permit"
 FLOW_FITOUT_CONFIRM = "fitout_confirm"
+FLOW_FITOUT_PROGRESS = "fitout_progress"
 FLOW_CEILING_INSPECTION = "ceiling_inspection"
 
 # Where a chat turn came from.  Sent by the client as ``context.channel``;

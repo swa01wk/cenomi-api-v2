@@ -36,10 +36,26 @@ async def stale_notification_node(state: ServiceRequestState) -> dict[str, Any]:
     no_access_count = sum(1 for e in layer2_errors if "don't have access" in (e.get("_error") or ""))
     no_pending_count = len(layer2_errors) - no_access_count
 
+    # The leases/periods the user actually tried, so "View Sales Data" can
+    # open the listing filtered to them. Without this the link landed on an
+    # unfiltered tab using the page's default date window, which showed "No
+    # data found" for exactly the rows the user was asking about.
+    lease_codes = sorted(
+        {str(e.get("lease_code") or "").strip() for e in layer2_errors} - {""}
+    )
+    starts = sorted(
+        s for s in (str(e.get("sales_period_start") or "")[:10] for e in layer2_errors) if s
+    )
+    ends = sorted(
+        e_ for e_ in (str(e.get("sales_period_end") or "")[:10] for e in layer2_errors) if e_
+    )
+
     if no_access_count > 0 and no_pending_count == 0:
         message = (
             "**No access to these leases** — none of the lease codes in your file "
-            "are associated with your account. Please check the lease codes and try again.\n\n"
+            "are linked to your current company. If they belong to another of your "
+            "companies, switch to that company and upload again; otherwise, please "
+            "check the lease codes.\n\n"
             "If you believe this is an error, please contact your property manager."
         )
     elif no_pending_count > 0:
@@ -73,6 +89,10 @@ async def stale_notification_node(state: ServiceRequestState) -> dict[str, Any]:
             "type": "stale_notification",
             "message": message,
             "show_listing_link": True,
+            # Open the listing filtered to what the user actually tried.
+            "lease_codes": lease_codes,
+            **({"sales_period_start": starts[0]} if starts else {}),
+            **({"sales_period_end": ends[-1]} if ends else {}),
             # Without this, response_generation's LLM rewrite pulls in stale
             # state (e.g. the original notification's period/lease) and
             # produces a specific-sounding sentence that doesn't match what

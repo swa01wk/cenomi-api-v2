@@ -70,6 +70,7 @@ def get_auth_context(
         unique_property_ids=tuple(int(x) for x in payload.get("unique_property_ids", [])),
         mall_names=tuple(payload.get("mall_names", [])),
         is_global_admin=bool(payload.get("is_global_admin", False)),
+        first_name=str(payload.get("first_name") or "").strip() or None,
         bearer_token=raw_token,
     )
 

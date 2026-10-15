@@ -32,10 +32,12 @@ from app.agents.services.lease_lookup_service import (
     AbstractLeaseLookupService,
     LeaseRecord,
     LeaseLookupQuery,
+    get_gi_lease_lookup_service,
     get_lease_lookup_service,
 )
 from app.agents.services.resource_picker_decorations import (
     build_create_lease_picker,
+    build_gi_lease_picker,
     lease_picker_purpose,
     should_browse_leases,
 )
@@ -73,6 +75,9 @@ _LEASE_ENRICHMENT_FIELDS: frozenset[str] = frozenset(
         "actual_fitout_start_date",
         "actual_fitout_end_date",
         "actual_trading_date",
+        # Recorded fit-out percentage — context and suggestion floor for the
+        # Fitout Progress agent, display-only for everyone else.
+        "fitout_progress",
     }
 )
 
@@ -112,6 +117,22 @@ _MULTI_MATCH_MESSAGE = (
     "Multiple leases matched the search. Ask the user to select the correct one "
     "from the list shown."
 )
+
+_GI_AGENT_NAMES: frozenset[str] = frozenset({"general_inquiry_agent"})
+
+
+def _get_lease_service(active_agent: str | None) -> AbstractLeaseLookupService:
+    """GI uses GET /general-inquiry/leases. Every other agent uses GET /leases."""
+    if active_agent in _GI_AGENT_NAMES:
+        return get_gi_lease_lookup_service()
+    return get_lease_lookup_service()
+
+
+def _lease_browse_picker(state: dict[str, Any]) -> dict[str, Any]:
+    """Picker decoration for a CREATE turn that has no lease yet."""
+    if str(state.get("active_agent") or "") in _GI_AGENT_NAMES:
+        return build_gi_lease_picker()
+    return build_create_lease_picker(lease_picker_purpose(state))
 
 
 def _extract_uuid(value: Any) -> UUID | None:
@@ -279,6 +300,35 @@ def _enrich_collected_data(
     return updated
 
 
+async def _with_gi_tenant_contact(
+    state: ServiceRequestState,
+    enriched: dict[str, Any],
+) -> dict[str, Any]:
+    """Fill ``tenant_contact`` for General Inquiry from the company's contacts.
+
+    The classic form requires Tenant Contact. Primary contacts are often
+    company-level, so this uses the same lookup as submit.
+    """
+    if (state.get("active_agent") or "") != "general_inquiry_agent":
+        return enriched
+    if str(enriched.get("tenant_contact") or "").strip():
+        return enriched
+    from app.agents.graph.nodes.general_inquiry.general_inquiry_payload_builder_node import (
+        lookup_primary_tenant_contact,
+    )
+
+    label, user_id = await lookup_primary_tenant_contact(
+        enriched.get("tenant_profile_id")
+    )
+    if not label:
+        return enriched
+    updated = dict(enriched)
+    updated["tenant_contact"] = label
+    if user_id:
+        updated["created_for"] = user_id
+    return updated
+
+
 def _with_mm_optional_offer_after_lease(
     state: ServiceRequestState,
     enriched: dict[str, Any],
@@ -315,7 +365,7 @@ async def lease_lookup_node(
     trace_id: UUID | None = _extract_uuid(state.get("trace_id"))
 
     collected: dict[str, Any] = dict(state.get("collected_data") or {})
-    lookup_service = service or get_lease_lookup_service()
+    lookup_service = service or _get_lease_service(state.get("active_agent"))
 
     # ── Path A: user has already selected a lease from a multi-match list ─────
     selected_lease: dict[str, Any] | None = state.get("selected_lease")
@@ -341,9 +391,12 @@ async def lease_lookup_node(
                 log.warning("lease_lookup.selected_lease.invalid", error=str(exc))
                 return {
                     "status": "WAITING_FOR_USER",
+                    # response_message is user-facing: it must address the
+                    # user, never instruct the model ("Apologise and ask the
+                    # user to...") — that text was being shown verbatim.
                     "response_message": (
-                        "The selected lease could not be validated due to a data error. "
-                        "Apologise and ask the user to try selecting again or provide the lease code."
+                        "Sorry — I couldn't validate that lease. Please select "
+                        "it again, or type the lease code."
                     ),
                     "response_ui": {
                         "type": "text_question",
@@ -359,6 +412,7 @@ async def lease_lookup_node(
             if pause is not None:
                 return pause
             enriched = _enrich_collected_data(collected, record)
+            enriched = await _with_gi_tenant_contact(state, enriched)
             log.info(
                 "lease_lookup.selected_lease.merged",
                 lease_code=record.lease_code,
@@ -383,10 +437,10 @@ async def lease_lookup_node(
         if raw_ids:
             property_ids = [int(pid) for pid in raw_ids if pid is not None]
 
-    # Fitout Start / End / Trading confirmation and ceiling inspection pass an
-    # agent-specific purpose so the platform skips the "no existing handover SR"
-    # eligibility gate used for Initiate Handover (ceiling_inspection also skips
-    # the milestone filter). Same purpose as the lease picker, from one table.
+    # Fitout confirmations, fitout progress, work permit, and ceiling inspection
+    # pass an agent-specific purpose so the platform applies that workflow's
+    # lease rule instead of the Initiate Handover eligibility gate. Same
+    # purpose as the lease picker, from one table.
     active_agent: str | None = state.get("active_agent")
     purpose: str | None = lease_picker_purpose(state)
 
@@ -406,7 +460,7 @@ async def lease_lookup_node(
                 "status": "IN_PROGRESS",
                 "response_decorations": merge_decorations(
                     state.get("response_decorations"),
-                    build_create_lease_picker(lease_picker_purpose(state)),
+                    _lease_browse_picker(state),
                 ),
             }
         return {
@@ -487,6 +541,7 @@ async def lease_lookup_node(
         }
 
     match_count = len(result.matches)
+    is_gi = (active_agent or "") in _GI_AGENT_NAMES
     log.info(
         "lease_lookup.result",
         match_count=match_count,
@@ -506,9 +561,17 @@ async def lease_lookup_node(
                 reason=result.reason,
                 active_agent=active_agent,
             )
+        # GI never gates on an existing handover SR. The dedicated endpoint
+        # should not return this reason; if it does, keep going as not-found.
+        if is_gi and result.reason == "handover_exists":
+            log.warning(
+                "lease_lookup.gi_unexpected_handover_exists",
+                reason=result.reason,
+                active_agent=active_agent,
+            )
         # Handover agent: lease exists but already has an active Handover SR
         # and the platform did not return the lease row (legacy empty matches).
-        if not purpose and result.reason == "handover_exists":
+        elif not purpose and result.reason == "handover_exists":
             return _handover_exists_block()
         # An empty result is not the same as a wrong code. The platform filters
         # the list and says why: a lease with no activation date on record is
@@ -522,7 +585,11 @@ async def lease_lookup_node(
         # not eligible", which is worse than the wording this branch replaced.
         if result.reason == "activation_pending":
             no_match_msg = _ACTIVATION_PENDING_MESSAGE
-        elif result.reason and result.reason != "not_found":
+        elif (
+            result.reason
+            and result.reason != "not_found"
+            and not (is_gi and result.reason == "handover_exists")
+        ):
             log.info("lease_lookup.ineligible", reason=result.reason)
             no_match_msg = _NOT_ELIGIBLE_MESSAGE
         else:
@@ -544,13 +611,16 @@ async def lease_lookup_node(
     # ── 1 match: auto-enrich collected_data + offer optional MM upload ────────
     if match_count == 1:
         record = result.matches[0]
-        handover_exists = (not purpose) and result.reason == "handover_exists"
+        handover_exists = (
+            not is_gi and not purpose and result.reason == "handover_exists"
+        )
         pause = _maybe_pause_for_milestone(
             state, record, collected, handover_exists=handover_exists
         )
         if pause is not None:
             return pause
         enriched = _enrich_collected_data(collected, record)
+        enriched = await _with_gi_tenant_contact(state, enriched)
         log.info(
             "lease_lookup.auto_enriched",
             lease_code=record.lease_code,

@@ -326,6 +326,19 @@ async def test_blank_downloaded_template_is_not_treated_as_data() -> None:
     assert result["response_ui"]["show_file_upload"] is True
     assert "csv_rows_all" not in (result.get("backend_refs") or {})
 
+    # Re-uploading the same blank template says so instead of repeating.
+    again = await csv_validation_node(
+        {
+            "session_id": "sess-blank-tpl",
+            "corrected_fields": {"csv_session_id": "sess-blank-tpl"},
+            "backend_refs": {},
+            "conversation_history": [
+                {"role": "assistant", "content": result["response_message"]},
+            ],
+        }
+    )
+    assert "still has no sales amounts filled in" in again["response_message"]
+
 
 @pytest.mark.asyncio
 async def test_partially_filled_csv_still_asks_for_missing_amounts() -> None:
@@ -397,7 +410,7 @@ async def test_csv_reports_every_problem_in_one_pass() -> None:
 
     message = result["response_message"]
     assert "3 rows need attention" in message
-    assert "**t0111654** is not linked to your account" in message
+    assert "**t0111654** is not linked to your current company" in message
     assert "**t0088828**: the sales amount (-123) must be greater than 0" in message
     assert "**t0112235**: the sales amount is missing" in message
     assert "Ready to submit: **t0092927**" in message

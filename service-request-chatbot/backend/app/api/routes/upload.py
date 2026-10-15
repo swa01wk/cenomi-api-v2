@@ -68,6 +68,9 @@ _ALLOWED_CONTENT_TYPES: frozenset[str] = frozenset(
 # Per-type status is applied for Meeting / Rejected reports on platform upload.
 _RDD_DOC_TYPES: frozenset[str] = frozenset(RDD_ALLOWED_DOCUMENTS)
 _FM_DOC_TYPES: frozenset[str] = frozenset(FM_ALLOWED_DOCUMENTS)
+# General Inquiry optional attachment. Not a handover document type.
+_GI_DOCUMENT_TYPE = "SR_GEN_INQ"
+
 # Optional "Other" is allowed for MM create, FM review, and RDD review.
 # Path B (HANDED_OVER / Already Trading) reuses the same SR_HANDOVER_OTHER type
 # — the platform's HANDED_OVER form skeleton seeds documents with that same
@@ -91,6 +94,8 @@ def _upload_actions_for(document_type: str | None) -> list[str]:
             "UPLOAD_FM_HANDOVER_DOCUMENT",
             "UPLOAD_RDD_HANDOVER_REPORT",
         ]
+    if document_type == _GI_DOCUMENT_TYPE:
+        return ["CREATE_GENERAL_INQUIRY"]
     if not document_type or document_type in _SHARED_OPTIONAL_DOC_TYPES:
         return [
             "CREATE_HANDOVER_SR",
@@ -329,7 +334,7 @@ async def upload_document(
         )
 
     # 3. Document-type validation ---------------------------------------------
-    _valid_types = ALL_DOCUMENT_TYPES | ALL_CEILING_DOC_TYPES
+    _valid_types = ALL_DOCUMENT_TYPES | ALL_CEILING_DOC_TYPES | {_GI_DOCUMENT_TYPE}
     if document_type is not None and document_type not in _valid_types:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,

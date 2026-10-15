@@ -109,16 +109,26 @@ planneddate
       "completionfrom": "HH:MM",
       "completionto": "HH:MM"
     }
+    Cold/hot: worktimedate, completionworkdate, worktimefrom, and worktimeto are
+    required. completionfrom/completionto are the optional second period (omit or
+    leave empty when the user has not provided them yet).
     Accept natural language dates and normalise to DD/MM/YYYY.
     If the user only gives a start and end date, fill worktimedate and
     completionworkdate; leave times empty unless stated.
     Also accept ISO YYYY-MM-DD and convert to DD/MM/YYYY.
 
+planned_second_period
+    Optional second time window for cold permits only. JSON object string:
+    {"from":"HH:MM","to":"HH:MM"}
+    Empty string or {"from":"","to":""} when the user says none/skip.
+
 workers
     Worker list. Shape depends on permit family — emit the matching JSON string:
 
     Cold (listWorker) — JSON array:
-    [{"full_name":"...","designation":"...","company_name":"...","phone":"...","country_code":"966"}]
+    [{"full_name":"...","designation":"...","company_name":"...","phone":"...","country_code":"966","iqama_number":"...","document_id":""}]
+    Include iqama_number whenever the user provides it. Leave document_id empty —
+    the chat upload card fills it.
 
     Hot / roof (addworker) — JSON object:
     {
@@ -167,6 +177,8 @@ effective_starting
               "23 to 24 september 2 to 3pm" (today year=2026) →
                 effective_starting={"datefrom":"23/09/2026","dateto":"24/09/2026"},
                 firstperiod={"from":"14:00","to":"15:00"}
+              "24 sep to 28 sep" (today year=2026) →
+                {"datefrom":"24/09/2026","dateto":"28/09/2026"}
 
 firstperiod
     First time period. JSON object string: {"from":"HH:MM","to":"HH:MM"}

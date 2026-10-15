@@ -28,6 +28,10 @@ from app.agents.schemas.ceiling_schema import AGENT_NAME as CEILING_AGENT_NAME
 from app.agents.schemas.fitout_confirm_schema import (
     get_missing_fields as fitout_confirm_get_missing_fields,
 )
+from app.agents.schemas.fitout_progress_schema import (
+    PROGRESS_FIELD as FITOUT_PROGRESS_FIELD,
+    get_missing_fields as fitout_progress_get_missing_fields,
+)
 from app.agents.schemas.handover_schema import (
     HANDED_OVER_FIELD_GROUP,
     INSPECTION_FIELD_GROUP,
@@ -41,6 +45,10 @@ from app.agents.schemas.handover_schema import (
 )
 from app.agents.services import guided_tour_service
 from app.agents.services.display_formatters import format_field_display_value
+from app.agents.services.fitout_progress_suggestions_service import (
+    build_fitout_progress_decorations,
+    build_progress_question,
+)
 from app.agents.services.inspection_suggestions_service import (
     build_inspection_decorations,
     parse_date as _parse_inspection_date,
@@ -221,6 +229,8 @@ def _carry_sr_decorations(
             carried[key] = value
     return carried
 
+
+FITOUT_PROGRESS_AGENT = "rdd_fitout_progress_agent"
 
 _FITOUT_CONFIRM_AGENTS: frozenset[str] = frozenset({
     "rdd_fitout_start_agent",
@@ -617,16 +627,30 @@ _WP_FIELD_EXPLAINERS: dict[str, str] = {
     "firstperiod": "**First period** — from and to times (HH:MM).",
     "secondperiod": "**Second period** (optional) — or say 'none'.",
     "planneddate": (
-        "**Planned dates** — start date/time and end date/time "
+        "**Planned dates** — from date, to date, and first period times "
         "(DD/MM/YYYY, HH:MM)."
     ),
-    "workers": "**Workers** — at least one full name (and role if you have it).",
+    "planneddate_times": (
+        "**First period times** — from and to (HH:MM), e.g. 09:00 to 17:00."
+    ),
+    "planned_second_period": (
+        "**Second period** (optional) — afternoon/evening times, or say 'none'."
+    ),
+    "workers": (
+        "**Workers** — full name, company, designation, phone, and Iqama number "
+        "for each performer (add another if needed)."
+    ),
     "measureofsafety": "**Measure of safety** — which safety items apply.",
     "typeofwork": "**Type of work** — operations work category.",
     "permission_given_to": (
         "**Permission given to** — who the work permission is issued to."
     ),
+    "entry_gate": (
+        "**Entry gate** (optional) — which gate entry/exit is allowed through, "
+        "or say 'none' to skip."
+    ),
     "work_permit_type": "**Work permit type** — pick a chip or name the subtype.",
+    "notes": "**Notes** (optional) — or say 'none' to skip.",
 }
 
 
@@ -693,6 +717,85 @@ def _build_wp_group_ask(
     return updates
 
 
+def _build_wp_cold_worker_doc_ask(
+    collected: dict[str, Any],
+    all_missing: list[str],
+    *,
+    documents: list[dict[str, Any]] | None = None,
+) -> dict[str, Any] | None:
+    """Iqama document_requirement when cold worker text is done but docs are not."""
+    from app.agents.schemas.work_permit_form_fields import (
+        cold_worker_iqama_doc_key,
+        cold_workers_missing_doc_indexes,
+        cold_workers_text_incomplete,
+    )
+    from app.agents.schemas.work_permit_schema import resolve_wp_sub_category as resolve_sub
+
+    subtype = resolve_sub(None, collected)
+    if subtype not in {"CONSTRUCTION_COLD", "MAINTENANCE_COLD"}:
+        return None
+    workers = collected.get("workers")
+    if cold_workers_text_incomplete(workers):
+        return None
+    missing_idxs = cold_workers_missing_doc_indexes(workers)
+    if not missing_idxs:
+        return None
+
+    documents_state = list(documents or [])
+    doc_rows: list[dict[str, Any]] = []
+    for idx in missing_idxs:
+        row = workers[idx] if isinstance(workers, list) and idx < len(workers) else {}
+        name = str((row or {}).get("full_name") or f"Worker {idx + 1}").strip()
+        key = cold_worker_iqama_doc_key(idx)
+        already = next(
+            (
+                d
+                for d in documents_state
+                if isinstance(d, dict)
+                and str(d.get("document_type_id") or d.get("key") or "") == key
+                and str(d.get("document_id") or "").strip()
+            ),
+            None,
+        )
+        doc_rows.append(
+            {
+                "key": key,
+                "label": f"Iqama document — {name}",
+                "required": True,
+                "status": "uploaded" if already else "missing",
+                **(
+                    {
+                        "document_id": already.get("document_id"),
+                        "documentId": already.get("document_id"),
+                        "fileName": already.get("fileName") or already.get("file_name"),
+                    }
+                    if already
+                    else {}
+                ),
+            }
+        )
+
+    message = (
+        "Please upload the Iqama document for each worker listed below, "
+        "then continue."
+    )
+    return {
+        "missing_fields": list(all_missing),
+        "response_message": message,
+        "response_ui": {
+            "type": "document_requirement",
+            "message": message,
+            "documents": doc_rows,
+            "uploadContext": {
+                "session_id": "",
+                "sr_id": "",
+            },
+        },
+        "status": "WAITING_FOR_USER",
+        "active_field": "workers",
+    }
+
+
 def _build_wp_singleton_ask(
     next_field: str,
     question: str,
@@ -700,15 +803,37 @@ def _build_wp_singleton_ask(
     collected: dict[str, Any],
     *,
     verbatim: bool = False,
+    documents: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Single-field WP ask with suggestion chips when available."""
+    if next_field == "workers":
+        doc_ask = _build_wp_cold_worker_doc_ask(
+            collected, all_missing, documents=documents
+        )
+        if doc_ask is not None:
+            return doc_ask
+
     explainer = _WP_FIELD_EXPLAINERS.get(next_field)
+    if next_field == "planneddate":
+        planned = collected.get("planneddate")
+        if (
+            isinstance(planned, dict)
+            and str(planned.get("worktimedate") or "").strip()
+            and str(planned.get("completionworkdate") or "").strip()
+            and (
+                not str(planned.get("worktimefrom") or "").strip()
+                or not str(planned.get("worktimeto") or "").strip()
+            )
+        ):
+            explainer = _WP_FIELD_EXPLAINERS["planneddate_times"]
     if explainer and next_field in {
         "planneddate",
+        "planned_second_period",
         "workers",
         "measureofsafety",
         "work_permit_type",
         "typeofwork",
+        "notes",
     }:
         question = explainer
         verbatim = True
@@ -1042,9 +1167,14 @@ async def _ask_next_missing_field(state: ServiceRequestState) -> dict[str, Any]:
     workflow_cfg = get_workflow_config(active_agent)
 
     # Gracefully degrade if an unrecognised stage arrives — but only for agents
-    # that use the handover STAGE_REGISTRY (fitout agents have their own stages).
+    # that use the handover STAGE_REGISTRY (the fit-out agents have their own
+    # stages). Fitout progress must be exempt for the same reason: its
+    # APPROVE_SR is not in that registry, and rewriting it to CREATE_SR asked
+    # the approver to identify the lease of the SR they already had open.
+    # Ceiling inspection stages are outside that registry too.
     if (
         active_agent not in _FITOUT_CONFIRM_AGENTS
+        and active_agent != FITOUT_PROGRESS_AGENT
         and active_agent != _CEILING_AGENT
         and workflow_stage not in STAGE_REGISTRY
     ):
@@ -1153,6 +1283,14 @@ async def _ask_next_missing_field(state: ServiceRequestState) -> dict[str, Any]:
             "correction_pending_field": None,
         }
         decorations = _CORRECTION_FIELD_DECORATIONS.get(correction_pending_field)
+        if correction_pending_field == FITOUT_PROGRESS_FIELD:
+            # Computed from the lease's own fit-out window, so it cannot live in
+            # the static table above — and a correction re-ask has to offer the
+            # same chips as the first ask, or the user loses the suggestion
+            # precisely when they are trying to change the number.
+            decorations = build_fitout_progress_decorations(
+                collected, stage=workflow_stage or "CREATE_SR"
+            )
         if decorations:
             correction_update["response_decorations"] = decorations
         return correction_update
@@ -1164,12 +1302,21 @@ async def _ask_next_missing_field(state: ServiceRequestState) -> dict[str, Any]:
 
     # Handover schema owns stage-aware missing logic (e.g. conditional document_status).
     # Fitout confirm agents have their own required-field logic driven by sub_category.
+    # General Inquiry uses its own single-stage schema so it never sees handover
+    # fields (e.g. already_handovered) in its user_missing list.
     if (active_agent or "") == "work_permit_agent":
         from app.agents.schemas.work_permit_schema import get_missing_fields as wp_get_missing
         all_missing: list[str] = wp_get_missing(workflow_stage or "CREATE_WORK_PERMIT", collected)
     elif active_agent in _FITOUT_CONFIRM_AGENTS:
         sub_category: str = state.get("sub_category") or ""  # type: ignore[assignment]
         all_missing = fitout_confirm_get_missing_fields(workflow_stage, sub_category, collected)
+    elif active_agent == FITOUT_PROGRESS_AGENT:
+        all_missing = fitout_progress_get_missing_fields(
+            workflow_stage or "CREATE_SR", collected
+        )
+    elif (active_agent or "") == "general_inquiry_agent":
+        from app.agents.schemas.general_inquiry_schema import get_missing_fields as gi_get_missing
+        all_missing = gi_get_missing(workflow_stage or "CREATE_SR", collected)
     elif active_agent == _CEILING_AGENT:
         from app.agents.schemas.ceiling_schema import (
             get_missing_fields as ceiling_get_missing_fields,
@@ -1227,6 +1374,7 @@ async def _ask_next_missing_field(state: ServiceRequestState) -> dict[str, Any]:
             type_question,
             all_missing,
             collected,
+            documents=documents,
         )
         if str(collected.get("work_permit_type") or "").strip():
             cleared = dict(collected)
@@ -1392,7 +1540,11 @@ async def _ask_next_missing_field(state: ServiceRequestState) -> dict[str, Any]:
         # Work Permit singletons (type, planneddate, workers, MoS, …) get chips.
         if (active_agent or "") == "work_permit_agent":
             return _build_wp_singleton_ask(
-                next_field, next_question, all_missing, collected
+                next_field,
+                next_question,
+                all_missing,
+                collected,
+                documents=documents,
             )
 
         # CREATE/APPROVE: form may pre-fill yes/no — still ask the user to
@@ -1474,6 +1626,29 @@ async def _ask_next_missing_field(state: ServiceRequestState) -> dict[str, Any]:
                 "**Approve with changes** if it needs amendments."
             )
             verbatim_question = True
+
+        # Fitout progress asks one thing, and the question carries the fit-out
+        # window and the elapsed-time suggestion the chips below offer. Built
+        # here rather than left to the LLM rewrite for the same reason as the
+        # status question above: field_questions holds an instruction *about*
+        # asking, and when that rewrite does not land the chips render with no
+        # question above them.
+        elif (
+            active_agent == FITOUT_PROGRESS_AGENT
+            and next_field == FITOUT_PROGRESS_FIELD
+        ):
+            next_question = build_progress_question(
+                collected,
+                stage=workflow_stage or "CREATE_SR",
+                sr_id=str((state.get("backend_refs") or {}).get("sr_id") or "") or None,
+            )
+            verbatim_question = True
+    # General Inquiry questions are already user-facing. The response LLM is
+    # primed for handover ("Please share a short title for this handover
+    # request"), so leaving these to be rewritten swaps "inquiry" for
+    # "handover" on the title turn. Send the configured question as written.
+    if (active_agent or "") == "general_inquiry_agent" and next_question:
+        verbatim_question = True
 
     # When the next question is driven by a non-required validation error (e.g.
     # date_range), the correction target field may already be in collected_data
@@ -1582,6 +1757,14 @@ async def _ask_next_missing_field(state: ServiceRequestState) -> dict[str, Any]:
                     ],
                 }
             }
+        elif next_field == FITOUT_PROGRESS_FIELD:
+            # Value-only chips: the number arrives as the user's own message and
+            # ``active_field`` binds it to this field, which is the same path a
+            # typed percentage takes (fitout_progress_entry_node resolves both
+            # without an extraction round-trip).
+            updates["response_decorations"] = build_fitout_progress_decorations(
+                collected, stage=workflow_stage or "CREATE_SR"
+            )
         elif next_field in (
             "fitout_start_done",
             "fitout_complete_done",

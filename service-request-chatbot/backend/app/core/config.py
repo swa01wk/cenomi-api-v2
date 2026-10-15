@@ -282,6 +282,20 @@ class Settings(BaseSettings):
         validation_alias="AZURE_OPENAI_LLM_DEPLOYMENT",
         description="Azure OpenAI deployment name for chat completions (defaults to LLM_MODEL when absent).",
     )
+    azure_openai_request_timeout_seconds: float = Field(
+        default=20.0,
+        validation_alias="AZURE_OPENAI_REQUEST_TIMEOUT_SECONDS",
+        description=(
+            "Per-attempt timeout for Azure OpenAI chat completions. Healthy calls "
+            "finish in 2-11s; the SDK default (600s) let a stalled request hang a "
+            "chat turn for ten minutes, and 20s retries it long before that."
+        ),
+    )
+    azure_openai_max_retries: int = Field(
+        default=2,
+        validation_alias="AZURE_OPENAI_MAX_RETRIES",
+        description="SDK retries for Azure OpenAI chat completions (timeouts, 429, 5xx).",
+    )
 
     # ── LLM / Embedding — Google Cloud Vertex AI ──────────────────────────────
     # Shared by both LLM_PROVIDER=vertex_ai and EMBEDDING_PROVIDER=vertex_ai.
