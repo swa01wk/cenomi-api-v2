@@ -731,3 +731,54 @@ async def test_gate_refetches_so_a_ui_submission_is_picked_up() -> None:
     items = result["collected_data"]["_pending_items"]
     assert [i["year_month"] for i in items] == ["2026-09"]
     assert result["collected_data"]["_asked_period"]["year_month"] == "2026-09"
+
+
+@pytest.mark.asyncio
+async def test_pending_list_carries_brand_and_mall_per_lease() -> None:
+    """The card labels each group the way the Sales Data page does —
+    several bare lease codes in a row are hard to tell apart."""
+    from app.agents.graph.nodes.sales_data.pending_months_gate_node import (
+        pending_months_gate_node,
+    )
+
+    rows = [
+        {
+            "lease_code": "t0094836",
+            "status": "PENDING",
+            "sales_period_start": "2025-09-01",
+            "sales_period_end": "2025-09-30",
+            "brand_name": "Brand I am special",
+            "property_name": "Tala Mall",
+        },
+        {
+            # mall_name is the alias the platform sometimes sends instead.
+            "lease_code": "t0094842",
+            "status": "PENDING",
+            "sales_period_start": "2025-08-01",
+            "sales_period_end": "2025-08-31",
+            "brand_name": "Brand I am special",
+            "mall_name": "Salaam Mall",
+        },
+    ]
+    client = AsyncMock()
+    client.get_sales_data = AsyncMock(return_value=rows)
+    with (
+        patch(
+            "app.agents.graph.nodes.sales_data.pending_months_gate_node.get_current_bearer_token",
+            return_value="tok",
+        ),
+        patch(
+            "app.agents.graph.nodes.sales_data.pending_months_gate_node.SalesDataApiClient",
+            return_value=client,
+        ),
+    ):
+        result = await pending_months_gate_node(
+            _state(user_message="I want to upload my sales data")
+        )
+
+    by_code = {
+        lease["lease_code"]: lease for lease in result["response_ui"]["leases"]
+    }
+    assert by_code["t0094836"]["brand_name"] == "Brand I am special"
+    assert by_code["t0094836"]["property_name"] == "Tala Mall"
+    assert by_code["t0094842"]["property_name"] == "Salaam Mall"

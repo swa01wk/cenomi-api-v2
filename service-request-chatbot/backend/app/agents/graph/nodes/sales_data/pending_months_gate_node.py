@@ -152,17 +152,31 @@ def _pending_list_payload(
     collected["_pending_items"] = items
     refs["pending_items"] = items
     grouped: dict[str, list[dict[str, str]]] = {}
+    # Brand and mall per lease, so the card can label each group the way the
+    # Sales Data page does ("t0094836 — Brand I am special · Tala Mall"). A
+    # bare lease code is hard to tell apart when several are listed.
+    context: dict[str, dict[str, str]] = {}
     for item in items:
         grouped.setdefault(item["lease_code"], []).append({
             "label": item["label"],
             "year_month": item["year_month"],
         })
+        if item["lease_code"] not in context:
+            context[item["lease_code"]] = {
+                "brand_name": item.get("brand_name") or "",
+                "property_name": item.get("property_name") or "",
+            }
     for months in grouped.values():
         months.sort(key=lambda m: m["year_month"])
 
     total_leases = len(grouped)
     leases = [
-        {"lease_code": lease, "months": months, "more_months": 0}
+        {
+            "lease_code": lease,
+            "months": months,
+            "more_months": 0,
+            **context.get(lease, {}),
+        }
         for lease, months in sorted(grouped.items())
     ]
     month_count = len(items)
