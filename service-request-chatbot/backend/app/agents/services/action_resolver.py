@@ -182,7 +182,11 @@ class WorkPermitActionResolver:
         # Standard in-progress review menu (all WP subtypes and levels share
         # this bar). Work Permit approvers cannot reassign, so no Assign To.
         return [
-            BusinessAction(id=WP_ACTION_APPROVE, label="Approve"),
+            BusinessAction(
+                id=WP_ACTION_APPROVE,
+                label="Approve",
+                requires=ActionRequires(comment=True),
+            ),
             BusinessAction(
                 id=WP_ACTION_MORE_INFO,
                 label="Ask for more info",
