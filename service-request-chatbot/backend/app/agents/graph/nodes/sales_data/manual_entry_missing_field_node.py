@@ -87,7 +87,10 @@ def _build_question(missing: list[str], collected: dict, refs: dict) -> str:
             "What is the total sales amount (SAR) for this period?"
         )
     else:
-        question = f"{ack}What is the total sales amount (SAR) for this period?"
+        question = (
+            f"{ack}What is the total sales amount (SAR) for this period? "
+            "Type it below, or attach a CSV if you have one."
+        )
 
     if not known:
         question += (
@@ -111,6 +114,29 @@ async def manual_entry_missing_field_node(state: ServiceRequestState) -> dict[st
     question = _build_question(missing, collected, refs)
     field = missing[0]
     log.info("manual_entry_missing_field.asking", field=field, missing=missing)
+
+    # Once the lease and month are known, the only thing left is the figure —
+    # and a tenant may just as well have it in a CSV as in their head. The
+    # plain text_prompt had no attach control (and no frontend renderer at
+    # all), so after tapping a month there was no way to upload a file:
+    # "I want to attach the sales data using excel sheet" was answered with
+    # "what is the total sales amount?". sales_data_upload_prompt carries the
+    # attach control and the message, so typing or attaching both work.
+    if field == "sales_amt":
+        return {
+            "active_field": field,
+            "status": "WAITING_FOR_USER",
+            "response_message": question,
+            "response_ui": {
+                "type": "sales_data_upload_prompt",
+                "field": field,
+                "message": question,
+                "show_file_upload": True,
+                "show_template_download": True,
+                "verbatim": True,
+            },
+        }
+
     return {
         "active_field": field,
         "status": "WAITING_FOR_USER",
