@@ -483,6 +483,30 @@ class ServiceRequestPlatformClient:
             result.sr_id = self._extract_sr_id(result.response_payload) or sr_id
         return result
 
+    async def post_comment(
+        self, sr_id: str, comment_text: str, sub_category: str = "GENERAL"
+    ) -> PlatformCallResult:
+        """POST /comments — add a comment to an existing SR.
+
+        Args:
+            sr_id: The service-request ID (used as ``target_id``).
+            comment_text: The comment body.
+            sub_category: Defaults to ``"GENERAL"`` for GI SRs.
+
+        Returns:
+            ``PlatformCallResult`` — ``success=True`` when the platform responds 2xx.
+        """
+        endpoint = f"{self._base_url}/comments"
+        if not self._uses_agentic_bearer("POST", endpoint):
+            await self.ensure_authenticated()
+        payload: dict[str, Any] = {
+            "target_id": sr_id,
+            "category": "SERVICE_REQUEST",
+            "comment_text": comment_text,
+            "sub_category": sub_category,
+        }
+        return await self._post(endpoint, payload)
+
     async def update_work_permit_status(
         self, payload: dict[str, Any]
     ) -> PlatformCallResult:
@@ -798,11 +822,13 @@ class ServiceRequestPlatformClient:
             body = self._parse_body(response)
             correlation_id = self._extract_correlation(response, body)
             success = response.status_code in (200, 201)
+            error = None if success else self._http_error(response.status_code, body)
             if not success:
                 log.warning(
                     "platform_client.post.non_2xx",
                     status_code=response.status_code,
                     endpoint=endpoint,
+                    error=error,
                     request_payload=_truncate_for_log(payload),
                     response_payload=_truncate_for_log(body),
                 )
@@ -815,7 +841,7 @@ class ServiceRequestPlatformClient:
                 sr_id=sr_id,
                 response_payload=body,
                 correlation_id=correlation_id,
-                error=None if success else f"HTTP {response.status_code}",
+                error=error,
             )
         except httpx.RequestError as exc:
             latency_ms = int((time.monotonic() - wall_start) * 1000)

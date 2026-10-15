@@ -345,6 +345,7 @@ async def test_general_inquiry_open_stays_on_crt_review() -> None:
     assert card["readOnly"] is True
     assert card["requestType"] == "General Inquiry"
     assert [item["label"] for item in card["actions"]] == [
+        "Add Comment",
         "Approve",
         "Reject",
         "Ask for more info",

@@ -19,7 +19,11 @@ import logging
 from typing import Any
 
 from app.agents.graph.state import ServiceRequestState
-from app.agents.schemas.general_inquiry_schema import OPTIONAL_FIELDS, get_missing_fields
+from app.agents.schemas.general_inquiry_schema import (
+    OPTIONAL_FIELDS,
+    apply_lease_title_and_description,
+    get_missing_fields,
+)
 from app.agents.services.display_formatters import format_field_display_value
 from app.observability.decorators import trace_node
 
@@ -83,6 +87,23 @@ _UPLOAD_CARD_MESSAGE = (
     "Upload a document below, or tap Skip to continue without one."
 )
 
+# After the lease fills the title and description, the user accepts them or
+# writes both. Stored on collected_data so the choice survives the next turn.
+GI_TITLE_REVIEW_KEY = "gi_title_review_status"
+GI_TITLE_REVIEW_PENDING = "pending"
+GI_TITLE_REVIEW_ACCEPTED = "accepted"
+GI_TITLE_REVIEW_CUSTOM = "custom"
+GI_TITLE_JUST_ASKED_KEY = "gi_title_just_asked"
+# title → description → done. Done is the document upload, and a later form
+# sync must not ask for the description again.
+GI_CUSTOM_STEP_KEY = "gi_custom_step"
+
+_TITLE_YES = frozenset({"yes", "y", "yeah", "yep", "yup"})
+_TITLE_NO = frozenset({"no", "n", "nope"})
+
+_TITLE_QUESTION = "What is the subject of your inquiry? Please provide a short title."
+_DESCRIPTION_QUESTION = "Please describe your inquiry in detail."
+
 _ACCEPT_UPLOAD_ACTIONS = frozenset({"accept_optional_upload"})
 _SKIP_UPLOAD_ACTIONS = frozenset({"skip_optional_upload", "continue_optional_upload"})
 
@@ -124,6 +145,137 @@ def _uploaded_inquiry_row(documents: list[dict[str, Any]]) -> dict[str, Any]:
             row["file_name"] = file_name
         return row
     return {}
+
+
+def build_gi_title_review(collected: dict[str, Any]) -> dict[str, Any]:
+    """Yes keeps the generated title and description. No lets the user write both."""
+    title = str(collected.get("title") or "").strip()
+    description = str(collected.get("description") or "").strip()
+    message = (
+        "I added this title and description from the lease you selected.\n\n"
+        f"Title: {title}\n"
+        f"Description: {description}\n\n"
+        "Is this okay?"
+    )
+    data = {
+        **collected,
+        GI_TITLE_REVIEW_KEY: GI_TITLE_REVIEW_PENDING,
+        GI_TITLE_JUST_ASKED_KEY: False,
+    }
+    return {
+        "collected_data": data,
+        "status": "WAITING_FOR_USER",
+        "response_message": message,
+        "response_ui": {
+            "type": "message",
+            "verbatim": True,
+            "message": message,
+            "suggestions": {
+                "kind": "labeled_options",
+                "options": [
+                    {"label": "Yes", "value": "yes"},
+                    {"label": "No", "value": "no"},
+                ],
+            },
+        },
+        "missing_fields": [],
+        "active_field": None,
+    }
+
+
+def _ask_custom_title_or_description(collected: dict[str, Any]) -> dict[str, Any]:
+    """The next blank field after the user chose to write their own."""
+    if not str(collected.get("title") or "").strip():
+        field_name = "title"
+        message = _TITLE_QUESTION
+    else:
+        field_name = "description"
+        message = _DESCRIPTION_QUESTION
+    data = {**collected, GI_TITLE_JUST_ASKED_KEY: True}
+    return {
+        "collected_data": data,
+        "status": "WAITING_FOR_USER",
+        "response_message": message,
+        "response_ui": {
+            "type": "text_question",
+            "verbatim": True,
+            "field": field_name,
+            "message": message,
+        },
+        "missing_fields": [field_name],
+        "active_field": field_name,
+    }
+
+
+def _quiet_hold(collected: dict[str, Any]) -> dict[str, Any]:
+    """A form sync with nothing new. Do not ask again and do not show a new card."""
+    data = {**collected, GI_TITLE_JUST_ASKED_KEY: False}
+    return {
+        "collected_data": data,
+        "status": "WAITING_FOR_USER",
+        "response_message": " ",
+        "response_ui": {"type": "message", "verbatim": True, "message": " "},
+        "missing_fields": [],
+        "active_field": None,
+    }
+
+
+def handle_gi_title_review(
+    state: dict[str, Any],
+    *,
+    user_message: str,
+    action: str = "",
+) -> dict[str, Any] | None:
+    """Yes / No on the generated title. None when that step is not on screen."""
+    if (state.get("workflow_stage") or "CREATE_SR") != "CREATE_SR":
+        return None
+    collected = dict(state.get("collected_data") or {})
+    review = str(collected.get(GI_TITLE_REVIEW_KEY) or "")
+    text = user_message.strip()
+    if review == GI_TITLE_REVIEW_CUSTOM:
+        # Skip and Upload are button actions with no typed message. A blank
+        # message here is only a form sync; those actions must still reach
+        # the document step.
+        if action in _ACCEPT_UPLOAD_ACTIONS or action in _SKIP_UPLOAD_ACTIONS:
+            return None
+        step = str(collected.get(GI_CUSTOM_STEP_KEY) or "title")
+        upload_status = str(collected.get(GI_OPTIONAL_UPLOAD_KEY) or "")
+        # Title, then description, then the document. A blank form sync stays
+        # on the question still being asked, and once both are written it
+        # must not ask for the description again.
+        if not text:
+            if step == "done" or upload_status in (
+                GI_UPLOAD_AWAITING_UPLOAD,
+                GI_UPLOAD_DONE,
+            ):
+                return _quiet_hold(collected)
+            return _ask_custom_title_or_description(collected)
+        if step == "title":
+            collected["title"] = text
+            collected["description"] = ""
+            collected[GI_CUSTOM_STEP_KEY] = "description"
+            return _ask_custom_title_or_description(collected)
+        if step == "description":
+            collected["description"] = text
+            collected[GI_CUSTOM_STEP_KEY] = "done"
+            collected[GI_TITLE_JUST_ASKED_KEY] = False
+            return build_gi_upload_card(state, collected)
+        return None
+    if review != GI_TITLE_REVIEW_PENDING:
+        return None
+
+    message = text.lower()
+    if message in _TITLE_YES:
+        collected[GI_TITLE_REVIEW_KEY] = GI_TITLE_REVIEW_ACCEPTED
+        collected[GI_TITLE_JUST_ASKED_KEY] = False
+        return build_gi_upload_card(state, collected)
+    if message in _TITLE_NO:
+        collected[GI_TITLE_REVIEW_KEY] = GI_TITLE_REVIEW_CUSTOM
+        collected[GI_CUSTOM_STEP_KEY] = "title"
+        collected["title"] = ""
+        collected["description"] = ""
+        return _ask_custom_title_or_description(collected)
+    return build_gi_title_review(collected)
 
 
 def build_gi_upload_offer(collected: dict[str, Any]) -> dict[str, Any]:
@@ -320,7 +472,9 @@ async def general_inquiry_confirmation_node(state: ServiceRequestState) -> dict[
         if not extracted and not corrected:
             return {}
 
-    collected_data: dict[str, Any] = state.get("collected_data") or {}
+    collected_data: dict[str, Any] = apply_lease_title_and_description(
+        dict(state.get("collected_data") or {})
+    )
     workflow_stage: str = state.get("workflow_stage") or "CREATE_SR"
 
     missing = get_missing_fields(workflow_stage, collected_data)
@@ -334,19 +488,23 @@ async def general_inquiry_confirmation_node(state: ServiceRequestState) -> dict[
         )
         return {}
 
-    # Optional document, after the required answers and before the review card.
-    # Skip does not block submit. The choice is remembered on the draft.
+    # Lease fills the title and description. The user accepts them, or writes
+    # both, and only then sees the document upload.
     if (
         workflow_stage == "CREATE_SR"
         and str(collected_data.get(GI_OPTIONAL_UPLOAD_KEY) or "") != GI_UPLOAD_DONE
     ):
-        logger.info("general_inquiry_confirmation: optional document step")
-        if (
-            str(collected_data.get(GI_OPTIONAL_UPLOAD_KEY) or "")
-            == GI_UPLOAD_AWAITING_UPLOAD
+        review = str(collected_data.get(GI_TITLE_REVIEW_KEY) or "")
+        if review not in (GI_TITLE_REVIEW_ACCEPTED, GI_TITLE_REVIEW_CUSTOM):
+            logger.info("general_inquiry_confirmation: title and description check")
+            return build_gi_title_review(collected_data)
+        if review == GI_TITLE_REVIEW_CUSTOM and (
+            not str(collected_data.get("title") or "").strip()
+            or not str(collected_data.get("description") or "").strip()
         ):
-            return build_gi_upload_card(state, collected_data)
-        return build_gi_upload_offer(collected_data)
+            return {}
+        logger.info("general_inquiry_confirmation: document upload")
+        return build_gi_upload_card(state, collected_data)
 
     logger.info(
         "general_inquiry_confirmation: all required fields present — generating card"
