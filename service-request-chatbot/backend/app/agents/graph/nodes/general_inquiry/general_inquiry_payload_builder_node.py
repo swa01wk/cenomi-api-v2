@@ -10,6 +10,7 @@ import logging
 from typing import Any
 
 from app.agents.graph.state import ServiceRequestState
+from app.agents.schemas.general_inquiry_schema import apply_lease_title_and_description
 from app.observability.decorators import trace_node
 
 logger = logging.getLogger(__name__)
@@ -139,6 +140,13 @@ def _review_body(
             "comment": comment,
             "payload": inner,
         }
+    if action == "add_comment":
+        return {
+            "status": "COMMENT",
+            "sub_category": "GENERAL",
+            "comment": comment,
+            "payload": inner,
+        }
     if action == "reassign":
         return {
             "status": "REASSIGN_TO",
@@ -164,7 +172,7 @@ async def general_inquiry_payload_builder_node(
     Create matches ``POST /service-requests`` for INQUIRY / GENERAL.
     Review matches the platform PATCH statuses used by the approval actions.
     """
-    collected = dict(state.get("collected_data") or {})
+    collected = apply_lease_title_and_description(dict(state.get("collected_data") or {}))
     backend_refs: dict[str, Any] = dict(state.get("backend_refs") or {})
     documents: list[dict[str, Any]] = list(state.get("documents") or [])
     workflow_stage = state.get("workflow_stage") or ""

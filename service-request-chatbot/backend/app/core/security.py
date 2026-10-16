@@ -58,21 +58,38 @@ def get_auth_context(
     tenant_raw = payload.get("tenant_id")
     if tenant_raw in (None, ""):
         tenant_raw = payload.get("tenant_profile_id")
+    # A claim present as JSON null is not the same as a missing key.
+    # dict.get returns that null, and tuple(None) raises TypeError.
+    roles = _string_list(payload.get("roles"))
+    mall_names = _string_list(payload.get("mall_names"))
+    property_ids: list[int] = []
+    for raw in _string_list(payload.get("unique_property_ids")):
+        try:
+            property_ids.append(int(raw))
+        except (TypeError, ValueError):
+            continue
     log.info(
         "security.auth_context_resolved",
         tenant_id=str(tenant_raw) if tenant_raw not in (None, "") else None,
-        roles=payload.get("roles", []),
+        roles=roles,
     )
     return AuthContext(
         subject_id=str(payload.get("user_id", payload.get("sub", "unknown"))),
         tenant_id=str(tenant_raw) if tenant_raw not in (None, "") else None,
-        roles=frozenset(payload.get("roles", [])),
-        unique_property_ids=tuple(int(x) for x in payload.get("unique_property_ids", [])),
-        mall_names=tuple(payload.get("mall_names", [])),
+        roles=frozenset(roles),
+        unique_property_ids=tuple(property_ids),
+        mall_names=tuple(mall_names),
         is_global_admin=bool(payload.get("is_global_admin", False)),
         first_name=str(payload.get("first_name") or "").strip() or None,
         bearer_token=raw_token,
     )
+
+
+def _string_list(value: Any) -> list[str]:
+    """Return a list of strings. Null or a non-list claim becomes empty."""
+    if not isinstance(value, (list, tuple)):
+        return []
+    return [str(item) for item in value if item is not None]
 
 
 def require_bearer(

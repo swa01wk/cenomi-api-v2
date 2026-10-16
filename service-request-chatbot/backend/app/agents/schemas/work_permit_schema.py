@@ -104,12 +104,14 @@ WP_ROLE_ID_TO_NAME: dict[str, str] = {
     "12": "DD_ENGINEER",
     "20": "FM_MANAGER",
     "81": "OPERATIONS",
+    # Seed id differs by environment (local workflow flows use 89).
+    "89": "OPERATIONS",
 }
 
 _DD_ROLES: frozenset[str] = frozenset({"DD_ENGINEER", "12"})
 _FM_ROLES: frozenset[str] = frozenset({"FM_MANAGER", "20"})
 _COLD_L2_ROLES: frozenset[str] = frozenset(
-    {"MALL_MANAGER", "OPERATION_EXECUTIVES", "OPERATIONS", "11", "81"}
+    {"MALL_MANAGER", "OPERATION_EXECUTIVES", "OPERATIONS", "11", "81", "89"}
 )
 
 _PLATFORM_APPROVED: frozenset[str] = frozenset(

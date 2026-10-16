@@ -98,6 +98,8 @@ from app.agents.graph.nodes.work_permit.work_permit_entry_node import (
 )
 from app.agents.graph.nodes.work_permit.work_permit_confirmation_node import work_permit_confirmation_node
 from app.agents.graph.nodes.work_permit.work_permit_status_node import work_permit_status_node
+from app.agents.graph.nodes.work_permit.work_permit_details_node import work_permit_details_node
+from app.agents.services.work_permit_review_summary import wp_details_section
 from app.agents.graph.nodes.work_permit.work_permit_payload_builder_node import work_permit_payload_builder_node
 from app.agents.graph.nodes.work_permit.work_permit_api_submission_node import work_permit_api_submission_node
 
@@ -307,6 +309,27 @@ _FREE_TEXT_ANSWER_FIELDS: frozenset[str] = frozenset(
 )
 
 
+def _wp_details_request(state: dict[str, Any]) -> str | None:
+    """The Work Permit details section the message asks to see, else None.
+
+    Must run before ``_user_wants_preview``: its phrases ("show me", "review")
+    match every "Show me the …" chip. Never while a typed answer is expected
+    (free-text field, or a reject / more-info comment the entry node is
+    waiting for).
+    """
+    if state.get("active_agent") != "work_permit_agent" or state.get("action_override"):
+        return None
+    if state.get("active_field") in _FREE_TEXT_ANSWER_FIELDS:
+        return None
+    if (state.get("backend_refs") or {}).get("wp_pending_action"):
+        return None
+    return wp_details_section(state.get("user_message"))
+
+
+def _is_terminal_stage(workflow_stage: str) -> bool:
+    return any(workflow_stage in c.terminal_stages for c in WORKFLOW_CONFIG_REGISTRY.values())
+
+
 def _route_after_load(state: dict[str, Any]) -> str:
     """Route after document_upload — determines the first live node of a turn.
 
@@ -327,6 +350,16 @@ def _route_after_load(state: dict[str, Any]) -> str:
     # second one from the chat was the duplicate.
     if is_form_action(state.get("action_override")):
         return "form_action_sync"
+    details_section = _wp_details_request(state)
+    if details_section:
+        if not (state.get("backend_refs") or {}).get("sr_id"):
+            # A draft's section words ("schedule") can be field answers.
+            if details_section == "all":
+                return "work_permit_details"
+        elif _is_terminal_stage(state.get("workflow_stage") or ""):
+            return "work_permit_details"
+        else:
+            return "sr_status_sync"
     user_message = state.get("user_message") or ""
     _awaiting_free_text = state.get("active_field") in _FREE_TEXT_ANSWER_FIELDS
     if not _awaiting_free_text and _user_wants_preview(user_message):
@@ -358,7 +391,7 @@ def _route_after_load(state: dict[str, Any]) -> str:
     })
     action = state.get("action_override") or ""
     _GI_REVIEW_ACTIONS: frozenset[str] = frozenset(
-        {"confirm_approve_gi", "reject_gi", "ask_more_info_gi", "reassign_gi"}
+        {"confirm_approve_gi", "reject_gi", "ask_more_info_gi", "reassign_gi", "add_comment_gi"}
     )
     # Pending lives on collected_data: backend_refs is restored as sr_id only,
     # so a reject comment typed on the next turn would otherwise miss this
@@ -389,11 +422,7 @@ def _route_after_load(state: dict[str, Any]) -> str:
         # backend auto-approves SR_CREATED → APPROVE_SR) before the supervisor has
         # a chance to classify the new user intent.  Skip straight to supervisor so
         # a fresh CREATE_SR intent starts with a clean slate.
-        workflow_stage = state.get("workflow_stage") or ""
-        all_terminal: frozenset[str] = frozenset(
-            s for c in WORKFLOW_CONFIG_REGISTRY.values() for s in c.terminal_stages
-        )
-        if workflow_stage in all_terminal:
+        if _is_terminal_stage(state.get("workflow_stage") or ""):
             return "supervisor"
         return "sr_status_sync"
 
@@ -448,6 +477,12 @@ def _route_after_sync(state: dict[str, Any]) -> str:
     """
     workflow_stage: str = state.get("workflow_stage") or ""
     agent: str = state.get("active_agent") or ""
+
+    # 0. A Work Permit details request is answered from the freshly synced
+    # data, read-only — it must not reach the stage entry (review card).
+    sync_refs = state.get("backend_refs") or {}
+    if not sync_refs.get("sync_error") and _wp_details_request(state):
+        return "work_permit_details"
 
     # 1. Per-workflow stage → entry node (keyed by active_agent)
     cfg = get_workflow_config(agent)
@@ -717,6 +752,18 @@ def _route_after_validation(state: dict[str, Any]) -> str:
     elif active_agent == "general_inquiry_agent":
         from app.agents.schemas.general_inquiry_schema import get_missing_fields as gi_missing
         still_missing = gi_missing(original_stage, collected)
+        # Once the lease is chosen, title and description are filled from it.
+        # The user confirms them before the document upload. "No" is the only
+        # case that stops to ask for a title, then a description.
+        if original_stage == "CREATE_SR" and collected.get("lease_id"):
+            if str(collected.get("gi_title_review_status") or "") == "custom":
+                still_missing = [
+                    name
+                    for name in ("title", "description")
+                    if not str(collected.get(name) or "").strip()
+                ]
+            else:
+                still_missing = []
     elif active_agent == _CEILING_AGENT:
         from app.agents.schemas.ceiling_schema import get_missing_fields as ceiling_missing
         still_missing = ceiling_missing(original_stage, state.get("sub_category"), collected)
@@ -1103,6 +1150,10 @@ def _route_after_general_inquiry_entry(state: dict[str, Any]) -> str:
         return "field_extraction"
     if state.get("status") == "CANCELLED":
         return "response_generation"
+    # "No" on the title check asks for a title on this same turn. The answer
+    # arrives on the next turn; only the ask itself should stop here.
+    if (state.get("collected_data") or {}).get("gi_title_just_asked"):
+        return "response_generation"
     # Chip selection carries the lease id. Merge keeps it, then lease lookup
     # resolves the row the same way a handover chip does.
     if state.get("selected_lease"):
@@ -1352,6 +1403,7 @@ def build_help_agent_graph():
     graph.add_node("work_permit_entry", work_permit_entry_node)
     graph.add_node("work_permit_confirmation", work_permit_confirmation_node)
     graph.add_node("work_permit_status", work_permit_status_node)
+    graph.add_node("work_permit_details", work_permit_details_node)
     graph.add_node("work_permit_payload_builder", work_permit_payload_builder_node)
     graph.add_node("work_permit_api_submission", work_permit_api_submission_node)
     # ── Fitout Confirm agent nodes ────────────────────────────────────────────
@@ -1417,6 +1469,7 @@ def build_help_agent_graph():
             "sr_status_sync": "sr_status_sync",
             "new_request": "new_request",
             "form_action_sync": "form_action_sync",
+            "work_permit_details": "work_permit_details",
             "supervisor": "supervisor",
             "handover_entry": "handover_entry",
             "work_permit_entry": "work_permit_entry",
@@ -1453,6 +1506,7 @@ def build_help_agent_graph():
             "ceiling_ack_entry": "ceiling_ack_entry",
             "preview": "preview",
             "work_permit_status": "work_permit_status",
+            "work_permit_details": "work_permit_details",
             "supervisor": "supervisor",
             # Sync GET failure sets sync_error and returns response_generation
             # (_route_after_sync); must be registered or LangGraph raises KeyError.
@@ -1496,6 +1550,7 @@ def build_help_agent_graph():
     )
     graph.add_edge("preview", "response_generation")
     graph.add_edge("work_permit_status", "response_generation")
+    graph.add_edge("work_permit_details", "response_generation")
     graph.add_conditional_edges(
         "registry",
         _route_after_registry,

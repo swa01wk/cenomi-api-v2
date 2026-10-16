@@ -77,7 +77,13 @@ async def general_inquiry_api_submission_node(
     svc = get_service_request_api_service()
     review_status = str(payload.get("status") or "").strip()
     sr_id = str(backend_refs.get("sr_id") or payload.get("service_request_id") or "").strip()
-    if review_status and sr_id:
+
+    # "Add Comment" uses POST /comments instead of PATCH /service-requests
+    if review_status == "COMMENT":
+        comment_text = str(payload.get("comment") or "").strip()
+        result = await svc.post_comment(sr_id, comment_text, sub_category="GENERAL")
+        tool_name = "service_request_api.general_inquiry.comment"
+    elif review_status and sr_id:
         result = await svc.patch_service_request(sr_id, payload)
         tool_name = "service_request_api.general_inquiry.review"
     else:
@@ -101,7 +107,13 @@ async def general_inquiry_api_submission_node(
     if result.error or (not review_status and not result.sr_id):
         backend_refs["service_request_status"] = "FAILED"
         detail = f" Detail: {result.error}" if result.error else ""
-        if review_status:
+        expired = "lease has expired" in (result.error or "").lower()
+        if expired:
+            message = (
+                "This lease has expired, so the inquiry cannot be submitted. "
+                "Start again and choose a lease that has not ended."
+            )
+        elif review_status:
             message = (
                 "Unable to complete the review due to a platform error. "
                 f"Please try again or act from the Service Request page.{detail}"
@@ -142,6 +154,13 @@ async def general_inquiry_api_submission_node(
         stage = "GI_CRT_REVIEW"
         role = payload.get("assign_to") or "the selected role"
         message = f"General Inquiry SR **{resolved_id}** has been reassigned to **{role}**."
+        status = "WAITING_FOR_USER"
+    elif review_status == "COMMENT":
+        stage = "GI_CRT_REVIEW"
+        message = (
+            f"Your comment has been added to General Inquiry SR **{resolved_id}**. "
+            "You can continue reviewing, approve, reject, or reassign."
+        )
         status = "WAITING_FOR_USER"
     else:
         stage = "SR_CREATED"

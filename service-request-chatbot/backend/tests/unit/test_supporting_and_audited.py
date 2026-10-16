@@ -969,3 +969,98 @@ async def test_amount_only_reupload_submits_without_a_document_id() -> None:
     assert payload["sales_amt"] == 303021.0
     # Not sent at all, rather than sent as null.
     assert "document_id" not in payload
+
+
+def test_reupload_csv_amount_is_read_for_the_matching_row_only() -> None:
+    """The corrected figure must come from the re-uploaded CSV.
+
+    Reported from UAT: the file said 785,000 but the confirm card showed
+    789,458 — the old platform amount — and that stale value was submitted.
+    """
+    from app.agents.graph.nodes.sales_data.supporting_doc_upload_node import (
+        _amount_from_csv,
+    )
+
+    csv_bytes = (
+        b"Lease code,Brand,Property,Start date(DD-MM-YYYY),"
+        b"End date(DD-MM-YYYY),Sales amount\n"
+        b"t0108264,Brand,Salaam Mall,01-09-2025,30-09-2025,785000\n"
+        b"t0108264,Brand,Salaam Mall,01-08-2025,31-08-2025,111111\n"
+    )
+
+    assert (
+        _amount_from_csv(
+            csv_bytes, "f.csv", lease_code="t0108264", period_start="2025-09-01"
+        )
+        == 785000.0
+    )
+    # A multi-month file must not write another month's figure onto this one.
+    assert (
+        _amount_from_csv(
+            csv_bytes, "f.csv", lease_code="t0108264", period_start="2025-08-01"
+        )
+        == 111111.0
+    )
+    # Nothing to take: wrong lease, a non-CSV, or junk — keep what we have.
+    assert (
+        _amount_from_csv(
+            csv_bytes, "f.csv", lease_code="t0094836", period_start="2025-09-01"
+        )
+        is None
+    )
+    assert (
+        _amount_from_csv(
+            b"%PDF-1.4", "report.pdf", lease_code="t0108264", period_start="2025-09-01"
+        )
+        is None
+    )
+    assert (
+        _amount_from_csv(
+            b"not,a,sales,csv\n1,2,3,4\n",
+            "f.csv",
+            lease_code="t0108264",
+            period_start="2025-09-01",
+        )
+        is None
+    )
+
+
+@pytest.mark.asyncio
+async def test_resolved_row_handled_elsewhere_is_reported_not_re_asked() -> None:
+    """A row handled on the listing page beside the chat must be noticed.
+
+    The node skipped its lookup entirely once lease_id was in session, so it
+    went on asking for a file for a row that had already been approved.
+    """
+    from app.agents.graph.nodes.sales_data import supporting_doc_upload_node as mod
+
+    approved = [{
+        "lease_id": 7,
+        "lease_code": "t0108264",
+        "status": "APPROVED",
+        "sales_period_start": "2025-09-01",
+        "sales_period_end": "2025-09-30",
+        "sales_amt": 785000.0,
+    }]
+    client = AsyncMock()
+    client.get_sales_data = AsyncMock(return_value=approved)
+
+    with (
+        patch.object(mod, "get_current_bearer_token", return_value="tok"),
+        patch.object(mod, "SalesDataApiClient", return_value=client),
+    ):
+        result = await mod.supporting_doc_upload_node({
+            "collected_data": {
+                "lease_id": 7,
+                "lease_code": "t0108264",
+                "sales_period_start": "2025-09-01",
+                "sales_period_end": "2025-09-30",
+                "current_status": "NEED_REUPLOAD",
+            },
+            "backend_refs": {},
+            "corrected_fields": {},
+            "user_message": "",
+        })
+
+    assert "no longer needs a file" in result["response_message"]
+    assert result["workflow_stage"] == "SALES_DATA_COMPLETE"

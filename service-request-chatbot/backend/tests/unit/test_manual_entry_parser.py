@@ -144,3 +144,51 @@ def test_non_upload_messages_are_not_hijacked(message) -> None:
 
     result = _sales_data_shortcut(message, ["SHOP_MANAGER"], allow_typed_entry=True)
     assert not result or result["intent"] != "UPLOAD_SALES_DATA"
+
+
+@pytest.mark.asyncio
+async def test_amount_step_offers_the_csv_attach_control() -> None:
+    """After picking a lease and month the only thing left is the figure —
+    which a tenant may have in a CSV. The plain text_prompt had no attach
+    control (and no frontend renderer), so "I want to attach the sales data
+    using excel sheet" was answered with "what is the total sales amount?".
+    """
+    from app.agents.graph.nodes.sales_data.manual_entry_missing_field_node import (
+        manual_entry_missing_field_node,
+    )
+
+    result = await manual_entry_missing_field_node({
+        "collected_data": {
+            "lease_code": "t0094842",
+            "sales_period_start": "2025-04-01",
+            "sales_period_end": "2025-04-30",
+        },
+        "backend_refs": {},
+    })
+
+    assert result["active_field"] == "sales_amt"
+    ui = result["response_ui"]
+    assert ui["type"] == "sales_data_upload_prompt"
+    assert ui["show_file_upload"] is True
+    assert "attach a csv" in result["response_message"].lower()
+
+
+@pytest.mark.asyncio
+async def test_lease_and_month_steps_stay_plain_text_prompts() -> None:
+    """Only the amount step gains the attach control — asking which lease or
+    month it is has nothing to upload yet."""
+    from app.agents.graph.nodes.sales_data.manual_entry_missing_field_node import (
+        manual_entry_missing_field_node,
+    )
+
+    lease_step = await manual_entry_missing_field_node(
+        {"collected_data": {}, "backend_refs": {}}
+    )
+    assert lease_step["active_field"] == "lease_code"
+    assert lease_step["response_ui"]["type"] == "text_prompt"
+
+    month_step = await manual_entry_missing_field_node(
+        {"collected_data": {"lease_code": "t0094842"}, "backend_refs": {}}
+    )
+    assert month_step["active_field"] == "sales_period_start"
+    assert month_step["response_ui"]["type"] == "text_prompt"

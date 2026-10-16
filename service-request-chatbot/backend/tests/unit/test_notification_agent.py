@@ -58,6 +58,33 @@ async def test_detail_uses_viewing_snapshot() -> None:
 
 
 @pytest.mark.asyncio
+async def test_detail_explain_omits_read_status_and_placeholder_title() -> None:
+    body = (
+        "Service request (reference no: 342207) for construction hot, work permit "
+        "has been assigned to you for review"
+    )
+    result = await notification_entry_node(
+        _state(
+            user_message="Explain this notification",
+            viewing_notification_id="3f2b6c1e-9a4d-4e2b-8c7f-1a2b3c4d5e6f",
+            viewing_notification={
+                "id": "3f2b6c1e-9a4d-4e2b-8c7f-1a2b3c4d5e6f",
+                "body": body,
+                "read": False,
+                "status": "unread",
+                "related_sr_id": "342207",
+            },
+        )
+    )
+    message = result["response_message"]
+    assert "Status:" not in message
+    assert not message.startswith("Notification")
+    assert message.startswith(body)
+    assert "Related service request: 342207." in message
+    assert result["response_ui"]["status"] == "unread"
+
+
+@pytest.mark.asyncio
 async def test_detail_without_snapshot_still_resolves_id() -> None:
     result = await notification_entry_node(
         _state(

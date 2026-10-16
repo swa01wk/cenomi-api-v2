@@ -35,6 +35,16 @@ from app.core.request_context import get_current_bearer_token
 
 log = structlog.get_logger(__name__)
 
+
+def normalise_lease_code(value: Any) -> str:
+    """Canonical lease code: trimmed, lower case, no spaces (``" T0 105712 "`` → ``"t0105712"``).
+
+    Lease codes are stored lower case on the platform, and users type them
+    with stray capitals or spaces. Empty for ``None`` / blank input.
+    """
+    return str(value or "").strip().lower().replace(" ", "")
+
+
 # ---------------------------------------------------------------------------
 # Models
 # ---------------------------------------------------------------------------

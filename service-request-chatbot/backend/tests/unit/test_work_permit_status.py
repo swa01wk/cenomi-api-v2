@@ -106,16 +106,19 @@ async def test_message_per_status(
 
 
 @pytest.mark.asyncio
-async def test_open_full_request_chip_only_off_the_sr_page() -> None:
+async def test_open_full_request_chip_asks_chat_and_navigation_only_off_page() -> None:
     off_page = await work_permit_status_node(_state())
-    assert _chip_labels(off_page["response_ui"]) == ["Open full request"]
-    assert off_page["response_decorations"]["suggestions"]["options"][0]["value"] == "341529"
+    assert _chip_labels(off_page["response_ui"]) == ["Open full request", "Go to request page"]
+    options = off_page["response_decorations"]["suggestions"]["options"]
+    assert options[0] == {"label": "Open full request", "value": "Show the full request"}
+    assert options[1]["action"] == "view_service_request"
+    assert options[1]["value"] == "341529"
 
     on_page = await work_permit_status_node(
         _state(msp_context={"current_sr_id": "341529"})
     )
-    assert "suggestions" not in on_page["response_ui"]
-    assert on_page["response_decorations"] == {}
+    assert _chip_labels(on_page["response_ui"]) == ["Open full request"]
+    assert on_page["response_decorations"]["suggestions"] == on_page["response_ui"]["suggestions"]
 
 
 @pytest.mark.asyncio

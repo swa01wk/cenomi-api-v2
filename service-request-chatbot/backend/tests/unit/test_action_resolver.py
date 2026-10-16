@@ -41,7 +41,7 @@ class TestWorkPermitActionResolver:
             WP_ACTION_REJECT,
         ]
         by_id = {a.id: a for a in actions}
-        assert by_id[WP_ACTION_APPROVE].requires.comment is False
+        assert by_id[WP_ACTION_APPROVE].requires.comment is True
         assert by_id[WP_ACTION_REJECT].requires.comment is True
         assert by_id[WP_ACTION_MORE_INFO].requires.comment is True
 

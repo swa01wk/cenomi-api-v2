@@ -53,6 +53,27 @@ from app.types.chat import AuthContext
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
+
+def _upload_failure(error: str | None) -> tuple[int, str]:
+    """Turn a platform upload error into the status and text the chat shows.
+
+    An expired lease is a final answer. Asking the user to retry or contact
+    support sends them back to the same rejection.
+    """
+    text = (error or "").strip()
+    if "lease has expired" in text.lower():
+        return (
+            status.HTTP_400_BAD_REQUEST,
+            "This lease has expired, so a document cannot be attached and the "
+            "inquiry cannot be created. Start again and choose a lease that "
+            "has not ended.",
+        )
+    return (
+        status.HTTP_502_BAD_GATEWAY,
+        f"Platform upload failed: {text}. Please try again or contact support.",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Allowed MIME types for uploaded files
 # ---------------------------------------------------------------------------
@@ -438,13 +459,8 @@ async def upload_document(
         )
 
         if upload_result.error:
-            raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY,
-                detail=(
-                    f"Platform upload failed: {upload_result.error}. "
-                    "Please try again or contact support."
-                ),
-            )
+            status_code, detail = _upload_failure(upload_result.error)
+            raise HTTPException(status_code=status_code, detail=detail)
 
         document_id = upload_result.document_id
 

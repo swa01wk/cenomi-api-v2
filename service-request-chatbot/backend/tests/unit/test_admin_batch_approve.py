@@ -601,3 +601,108 @@ def test_review_window_matches_the_admin_page_filter() -> None:
     # Same as the page: getDateBeforeNDays(60) → today.
     assert _review_window(date(2026, 9, 29)) == ("2026-07-31", "2026-09-29")
     assert _review_window_label(date(2026, 9, 29)) == "2026-07-31 to 2026-09-29"
+
+
+@pytest.mark.asyncio
+async def test_named_lease_is_reread_not_served_from_a_stale_cache() -> None:
+    """Acting on a named lease must re-read that lease.
+
+    A status can change from outside the conversation at any moment — the
+    tenant re-uploads, or someone acts on the listing page beside the chat.
+    Serving a named lease from the cached snapshot meant approving against
+    figures that had already moved on.
+    """
+    from app.agents.graph.nodes.sales_data.admin_review_entry_node import (
+        _load_reviewable,
+    )
+
+    stale = [{
+        "lease_id": 1,
+        "lease_code": "LC-9001",
+        "status": "SUBMITTED",
+        "sales_period_start": "2026-08-01",
+        "sales_period_end": "2026-08-31",
+        "sales_amt": 1000.0,
+    }]
+    fresh = [{
+        "lease_id": 1,
+        "lease_code": "LC-9001",
+        "status": "SUBMITTED",
+        "sales_period_start": "2026-08-01",
+        "sales_period_end": "2026-08-31",
+        "sales_amt": 999999.0,
+    }]
+
+    client = AsyncMock()
+    client.get_sales_data = AsyncMock(return_value=fresh)
+    with (
+        patch(
+            "app.agents.graph.nodes.sales_data.admin_review_entry_node.get_current_bearer_token",
+            return_value="tok",
+        ),
+        patch(
+            "app.agents.graph.nodes.sales_data.admin_review_entry_node.SalesDataApiClient",
+            return_value=client,
+        ),
+    ):
+        rows = await _load_reviewable(
+            {"admin_review_rows": stale}, lease_codes=["LC-9001"]
+        )
+
+    client.get_sales_data.assert_awaited()
+    assert rows[0]["sales_amt"] == 999999.0, "must use the freshly read row"
+
+
+@pytest.mark.asyncio
+async def test_admin_result_carries_the_tab_and_period_for_view_sales_data() -> None:
+    """After approving, the admin needs a way through to the row.
+
+    The chat rendered nothing at all for admin_action_success, so there was
+    no "View Sales Data" button, and the listing stayed on the tab the row
+    had just left — showing "No data found in selected date range".
+    """
+    from app.agents.graph.nodes.sales_data.admin_status_update_node import (
+        admin_status_update_node,
+    )
+
+    client = AsyncMock()
+    client.update_sales_data_statuses = AsyncMock(
+        return_value=[{"lease_code": "t0108264", "success": True}]
+    )
+    targets = [{
+        "lease_id": 4,
+        "lease_code": "t0108264",
+        "sales_period_start": "2025-09-01",
+        "sales_period_end": "2025-09-30",
+    }]
+
+    with (
+        patch(
+            "app.agents.graph.nodes.sales_data.admin_status_update_node.get_current_bearer_token",
+            return_value="tok",
+        ),
+        patch(
+            "app.agents.graph.nodes.sales_data.admin_status_update_node.SalesDataApiClient",
+            return_value=client,
+        ),
+    ):
+        approved = await admin_status_update_node({
+            "collected_data": {"admin_action": "APPROVED", "admin_targets": targets},
+            "backend_refs": {},
+        })
+        asked = await admin_status_update_node({
+            "collected_data": {
+                "admin_action": "NEED_REUPLOAD",
+                "admin_targets": targets,
+            },
+            "backend_refs": {},
+        })
+
+    ui = approved["response_ui"]
+    assert ui["listing_section"] == "Approved"
+    assert ui["sales_period_start"] == "2025-09-01"
+    assert ui["sales_period_end"] == "2025-09-30"
+    assert ui["lease_codes"] == ["t0108264"]
+
+    # An ask-upload sends it back to the tenant, so Pending is the right tab.
+    assert asked["response_ui"]["listing_section"] == "Pending"

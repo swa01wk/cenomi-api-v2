@@ -274,6 +274,19 @@ class TestSelectedLeaseMerge:
         assert cd["tenant_profile_id"] == 116
         assert cd["property_id"] == 3041
         assert cd["company"] == "Under Armour Trading Co"
+        assert cd["company_lease_code"] == "t0105712"
+
+    @pytest.mark.asyncio
+    async def test_lease_company_replaces_the_search_text(self) -> None:
+        state = _state(
+            collected_data={"company": "under armour"},
+            selected_lease=_UA_RECORD.model_dump(),
+        )
+        svc = MagicMock(spec=AbstractLeaseLookupService)
+        svc.lookup = AsyncMock()
+        cd = (await lease_lookup_node(state, service=svc))["collected_data"]
+        assert cd["company"] == "Under Armour Trading Co"
+        assert cd["company_lease_code"] == "t0105712"
 
     @pytest.mark.asyncio
     async def test_selected_lease_preserves_existing_user_fields(self) -> None:

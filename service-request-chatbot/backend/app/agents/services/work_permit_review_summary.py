@@ -6,17 +6,22 @@ composer over those facts — not a field dump and not LLM-authored action lists
 
 from __future__ import annotations
 
-from typing import Any
+import difflib
+import re
+from typing import Any, TypedDict
 
 from app.agents.schemas.work_permit_form_fields import (
     FIELD_LABELS,
     WP_DEPARTMENT_OPTIONS,
+    WP_MEASURE_OF_SAFETY_LABELS,
     WP_TYPEOFWORK_OPTIONS,
     form_spec_for,
     format_wp_field_display,
     summarize_effective_starting,
     summarize_period,
     summarize_typeofwork,
+    wp_english_part,
+    wp_safety_answer,
 )
 from app.agents.schemas.work_permit_schema import (
     STAGE_LABELS,
@@ -29,6 +34,8 @@ from app.agents.schemas.work_permit_schema import (
     resolve_wp_sub_category,
 )
 from app.agents.services.display_formatters import format_enum_label
+from app.agents.services.general_inquiry_review_summary import company_name_from_lease_label
+from app.agents.services.lease_lookup_service import normalise_lease_code
 
 # Keys emphasized on the review card (who/where, work/when, people/safety, hop).
 _EMPHASIS_KEYS: frozenset[str] = frozenset(
@@ -191,38 +198,8 @@ def build_wp_review_facts(
 
 def _schedule_parts(collected: dict[str, Any], subtype: str) -> tuple[str, str, str]:
     """``(date_from, date_to, times)`` — dates for the headline, times as detail."""
-    if subtype == "OPERATIONS":
-        effective = collected.get("effective_starting")
-        date_from = date_to = ""
-        if isinstance(effective, dict):
-            date_from = _str(effective.get("datefrom"))
-            date_to = _str(effective.get("dateto"))
-        periods: list[str] = []
-        for key in ("firstperiod", "secondperiod"):
-            period = collected.get(key)
-            if isinstance(period, dict):
-                label = summarize_period(period)
-                if label:
-                    periods.append(label)
-        return date_from, date_to, " · ".join(periods)
-
-    planned = collected.get("planneddate")
-    if not isinstance(planned, dict):
-        return "", "", ""
-    date_from = _str(planned.get("worktimedate"))
-    date_to = _str(planned.get("completionworkdate"))
-    windows: list[str] = []
-    for from_keys, to_keys in (
-        (("worktimefromLT", "worktimefrom"), ("worktimetoLT", "worktimeto")),
-        (("completionfromLT", "completionfrom"), ("completiontoLT", "completionto")),
-    ):
-        t_from = next((_str(planned.get(k)) for k in from_keys if _str(planned.get(k))), "")
-        t_to = next((_str(planned.get(k)) for k in to_keys if _str(planned.get(k))), "")
-        if t_from and t_to:
-            windows.append(f"{t_from} – {t_to}")
-        elif t_from or t_to:
-            windows.append(t_from or t_to)
-    return date_from, date_to, " · ".join(windows)
+    date_from, date_to, first, second = _schedule_windows(collected, subtype)
+    return date_from, date_to, " · ".join(w for w in (first, second) if w)
 
 
 def _date_range(date_from: str, date_to: str, sep: str) -> str:
@@ -240,6 +217,12 @@ def build_wp_review_summary(
     token = resolve_wp_sub_category(subtype, collected)
     date_from, date_to, times = _schedule_parts(collected, token)
     candidates: list[dict[str, Any]] = [
+        {
+            "key": "company",
+            "label": "Company",
+            "value": readable_wp_company(collected),
+            "icon": "briefcase",
+        },
         {"key": "brand", "label": "Brand", "value": _str(collected.get("brand")), "icon": "store"},
         {"key": "mall", "label": "Mall", "value": _str(collected.get("mall")), "icon": "location"},
         {"key": "unit", "label": "Unit", "value": _str(collected.get("unit_codes")), "icon": "building"},
@@ -261,6 +244,12 @@ def build_wp_review_summary(
             "label": "Type of work",
             "value": _type_of_work_text(collected, token),
             "icon": "tool",
+        },
+        {
+            "key": "lease",
+            "label": "Lease",
+            "value": _str(collected.get("lease_code") or collected.get("lease")),
+            "icon": "key",
         },
     ]
     items: list[dict[str, Any]] = []
@@ -286,31 +275,8 @@ _DETAIL_SKIP_KEYS: frozenset[str] = frozenset(
     }
 )
 
-_DETAIL_EXTRA_LABELS: dict[str, str] = {
-    "mall": "Mall",
-    "brand": "Brand",
-    "unit_codes": "Unit",
-    "company_name": "Company Name",
-}
-
 _DEPARTMENT_LABEL_BY_KEY: dict[str, str] = {
     key: label for label, key in WP_DEPARTMENT_OPTIONS
-}
-
-# Detail key → the ``build_wp_review_summary`` item that already shows it, so the
-# expanded card appends only what the compact summary leaves out.
-_DETAIL_SUMMARY_KEYS: dict[str, str] = {
-    "brand": "brand",
-    "mall": "mall",
-    "unit_codes": "unit",
-    "work_permit_type": "request_type",
-    "work_type": "type_of_work",
-    "type_work": "type_of_work",
-    "typeofwork": "type_of_work",
-    "planneddate": "schedule",
-    "effective_starting": "schedule",
-    "firstperiod": "schedule",
-    "secondperiod": "schedule",
 }
 
 
@@ -322,49 +288,402 @@ def _detail_value(key: str, value: Any) -> str:
         return WORK_PERMIT_TYPE_LABELS.get(token.upper(), token) if token else ""
     if key == "department":
         token = _str(value)
-        return _DEPARTMENT_LABEL_BY_KEY.get(token.lower(), token)
+        return _DEPARTMENT_LABEL_BY_KEY.get(token.lower(), wp_english_part(token))
     if isinstance(value, dict) or (isinstance(value, list) and key != "unit_codes"):
         return _str(format_wp_field_display(key, value))
-    return _str(value)
+    if isinstance(value, list):
+        return _str(value)
+    return wp_english_part(value)
+
+
+class WpDetailRow(TypedDict, total=False):
+    """One request-detail row; serialized as-is into ``summary`` / ``details`` UI."""
+
+    key: str
+    label: str
+    value: str
+    section: str
+    summaryKey: str
+
+
+# Row sections, used to answer "show the schedule / safety / work details".
+SECTION_LOCATION = "location"
+SECTION_PERMIT = "permit"
+SECTION_SCHEDULE = "schedule"
+SECTION_SAFETY = "safety"
+SECTION_WORK = "work"
+SECTION_WORKERS = "workers"
+SECTION_OTHER = "other"
+
+# Display groups for a full-request card: (id, title, icon, row sections).
+# Field order inside a group follows the source rows; empty groups are omitted
+# by the grouping helper. Icons are names the chat card's icon set knows.
+_DETAIL_SECTION_GROUPS: tuple[tuple[str, str, str, tuple[str, ...]], ...] = (
+    ("request", "Request and location", "location", (SECTION_LOCATION, SECTION_PERMIT)),
+    ("work", "Work details", "tool", (SECTION_WORK, SECTION_OTHER)),
+    ("schedule", "Schedule", "calendar", (SECTION_SCHEDULE,)),
+    ("safety", "Safety", "shield", (SECTION_SAFETY,)),
+    ("workers", "Workers", "person", (SECTION_WORKERS,)),
+)
+
+_SECTION_BY_KEY: dict[str, str] = {
+    "work_permit_type": SECTION_PERMIT,
+    "department": SECTION_PERMIT,
+    "unit_type": SECTION_PERMIT,
+    "owner": SECTION_PERMIT,
+    "trade_name": SECTION_PERMIT,
+    "permission_given_to": SECTION_PERMIT,
+    "responsible_person": SECTION_WORK,
+    "phone": SECTION_WORK,
+    "type_work": SECTION_WORK,
+    "work_type": SECTION_WORK,
+    "typeofwork": SECTION_WORK,
+    "list_equipment": SECTION_WORK,
+    "work_info": SECTION_WORK,
+    "contractor_name": SECTION_WORK,
+    "work_location": SECTION_WORK,
+    "demand_appendices": SECTION_WORK,
+    "special_conditions": SECTION_WORK,
+    "entry_gate": SECTION_WORK,
+    "description": SECTION_WORK,
+    "notes": SECTION_WORK,
+}
+
+# Keys rendered by dedicated row builders (or never shown), not the generic loop.
+_DETAIL_DEDICATED_KEYS: frozenset[str] = frozenset(
+    {
+        "company_name",
+        "lease_code",
+        "work_permit_type",
+        "planneddate",
+        "effective_starting",
+        "firstperiod",
+        "secondperiod",
+        "measureofsafety",
+        "workers",
+    }
+)
+
+_TYPE_OF_WORK_KEYS: tuple[str, ...] = ("type_work", "work_type", "typeofwork")
+
+
+def _row(
+    key: str,
+    label: str,
+    value: str,
+    section: str,
+    summary_key: str | None = None,
+) -> WpDetailRow:
+    row: WpDetailRow = {"key": key, "label": label, "value": value, "section": section}
+    if summary_key:
+        row["summaryKey"] = summary_key
+    return row
+
+
+def wp_lease_code(collected: dict[str, Any]) -> str:
+    """Normalised lease code of the request (``lease_code``, else the ``lease`` picker)."""
+    return normalise_lease_code(collected.get("lease_code") or collected.get("lease"))
+
+
+def readable_wp_company(collected: dict[str, Any]) -> str:
+    """Tenant company name for display, or ``""``.
+
+    With a lease code only lease-tied sources count: ``company`` when
+    ``company_lease_code`` marks it as verified for this lease, else the
+    company part of ``lease_brand_mall``. ``company`` alone may be the user's
+    search text or a previous request's name. ``company_name`` usually holds
+    the tenant profile id, so digits are never a name.
+    """
+    lease_code = wp_lease_code(collected)
+    if lease_code:
+        if normalise_lease_code(collected.get("company_lease_code")) == lease_code:
+            company = _str(collected.get("company"))
+            if company:
+                return company
+        return company_name_from_lease_label(
+            collected.get("lease_brand_mall"),
+            lease_code=collected.get("lease_code") or collected.get("lease"),
+            brand=collected.get("brand"),
+            mall=collected.get("mall"),
+        )
+    company = _str(collected.get("company"))
+    if company:
+        return company
+    company_name = _str(collected.get("company_name"))
+    if company_name and not company_name.isdigit():
+        return company_name
+    return ""
+
+
+def _plain_time(value: Any) -> str:
+    """Display time; ISO timestamps (no LT twin) are not user-facing."""
+    text = _str(value)
+    if not text or "T" in text:
+        return ""
+    return text
+
+
+def _time_window(t_from: str, t_to: str) -> str:
+    if t_from and t_to and t_from != t_to:
+        return f"{t_from} – {t_to}"
+    return t_from or t_to
+
+
+def _schedule_windows(collected: dict[str, Any], subtype: str) -> tuple[str, str, str, str]:
+    """``(date_from, date_to, first_window, second_window)`` from the stored schedule."""
+    if subtype == "OPERATIONS":
+        effective = collected.get("effective_starting")
+        date_from = date_to = ""
+        if isinstance(effective, dict):
+            date_from = _str(effective.get("datefrom"))
+            date_to = _str(effective.get("dateto"))
+        windows = []
+        for key in ("firstperiod", "secondperiod"):
+            period = collected.get(key)
+            windows.append(summarize_period(period) if isinstance(period, dict) else "")
+        return date_from, date_to, windows[0], windows[1]
+
+    planned = collected.get("planneddate")
+    if not isinstance(planned, dict):
+        return "", "", "", ""
+    windows = []
+    for from_keys, to_keys in (
+        (("worktimefromLT", "worktimefrom"), ("worktimetoLT", "worktimeto")),
+        (("completionfromLT", "completionfrom"), ("completiontoLT", "completionto")),
+    ):
+        t_from = next((t for k in from_keys if (t := _plain_time(planned.get(k)))), "")
+        t_to = next((t for k in to_keys if (t := _plain_time(planned.get(k)))), "")
+        windows.append(_time_window(t_from, t_to))
+    return (
+        _str(planned.get("worktimedate")),
+        _str(planned.get("completionworkdate")),
+        windows[0],
+        windows[1],
+    )
+
+
+def _schedule_rows(collected: dict[str, Any], subtype: str) -> list[WpDetailRow]:
+    date_from, date_to, first, second = _schedule_windows(collected, subtype)
+    rows: list[WpDetailRow] = []
+    for key, label, value in (
+        ("schedule_dates", "Work dates", _date_range(date_from, date_to, " – ")),
+        ("schedule_time", "Work time", first),
+        ("schedule_second_period", "Second period", second),
+    ):
+        if value:
+            rows.append(_row(key, label, value, SECTION_SCHEDULE, "schedule"))
+    return rows
+
+
+def _safety_rows(value: Any) -> list[WpDetailRow]:
+    if not isinstance(value, dict):
+        return []
+    rows: list[WpDetailRow] = []
+    for item_key, answer in value.items():
+        shown = wp_safety_answer(answer)
+        if not shown:
+            continue
+        label = WP_MEASURE_OF_SAFETY_LABELS.get(item_key) or format_enum_label(item_key)
+        rows.append(_row(f"measureofsafety.{item_key}", label, shown, SECTION_SAFETY))
+    return rows
+
+
+def _worker_line(parts: list[tuple[str, Any]]) -> str:
+    shown: list[str] = []
+    for prefix, raw in parts:
+        text = wp_english_part(raw)
+        if text:
+            shown.append(f"{prefix}{text}")
+    return " · ".join(shown)
+
+
+def _worker_rows(value: Any) -> list[WpDetailRow]:
+    """One row per worker for both stored shapes (cold ``listWorker`` / hot ``addworker``)."""
+    rows: list[WpDetailRow] = []
+    if isinstance(value, list):
+        for row in value:
+            if not isinstance(row, dict):
+                continue
+            company = _str(row.get("company_name"))
+            line = _worker_line(
+                [
+                    ("", row.get("full_name")),
+                    ("", row.get("designation")),
+                    ("", "" if company.isdigit() else company),
+                    ("Phone ", row.get("phone")),
+                    ("Iqama ", row.get("iqama_number")),
+                ]
+            )
+            if line:
+                n = len(rows) + 1
+                rows.append(_row(f"workers.{n}", f"Worker {n}", line, SECTION_WORKERS))
+        return rows
+    if isinstance(value, dict):
+        workers = value.get("worker")
+        for row in workers if isinstance(workers, list) else []:
+            if not isinstance(row, dict):
+                continue
+            line = _worker_line(
+                [
+                    ("", row.get("name")),
+                    ("", row.get("designation")),
+                    ("", row.get("worker_qualification")),
+                    ("Iqama ", row.get("iqama_number")),
+                ]
+            )
+            if line:
+                n = len(rows) + 1
+                rows.append(_row(f"workers.{n}", f"Worker {n}", line, SECTION_WORKERS))
+        instructor = _str(value.get("instructor_name"))
+        if instructor:
+            rows.append(_row("workers.instructor", "Instructor name", instructor, SECTION_WORKERS))
+    return rows
+
+
+def group_wp_detail_sections(rows: list[WpDetailRow]) -> list[dict[str, Any]]:
+    """Full-request sections in display order, without rearranging their fields.
+
+    A field stays in the position it already has inside ``rows``. Groups with
+    no filled fields are left out.
+    """
+    grouped: dict[str, list[dict[str, str]]] = {
+        group_id: [] for group_id, _title, _icon, _sections in _DETAIL_SECTION_GROUPS
+    }
+    membership = {
+        section: group_id
+        for group_id, _title, _icon, sections in _DETAIL_SECTION_GROUPS
+        for section in sections
+    }
+    for row in rows:
+        group_id = membership.get(str(row.get("section") or ""))
+        label = _str(row.get("label"))
+        value = _str(row.get("value"))
+        if not group_id or not label or not value:
+            continue
+        grouped[group_id].append({"label": label, "value": value})
+    return [
+        {"id": group_id, "title": title, "icon": icon, "fields": grouped[group_id]}
+        for group_id, title, icon, _sections in _DETAIL_SECTION_GROUPS
+        if grouped[group_id]
+    ]
 
 
 def build_wp_review_details(
     collected: dict[str, Any],
     *,
     subtype: str | None = None,
-) -> list[dict[str, Any]]:
-    """Every filled Work Permit form field for the card's "View details".
+) -> list[WpDetailRow]:
+    """Every filled Work Permit detail as human-readable rows — the one source for
+    the review / status card details, the details reply, and the model's context.
 
-    Keys come from the subtype's form spec (all subtypes when unknown), labels
-    from ``FIELD_LABELS``; empty values are skipped. Rows already shown by the
-    compact summary carry ``summaryKey`` naming that summary item.
+    Order: who and where, permit type, type of work, schedule, then the remaining
+    form fields (safety and workers one row per item). Empty values are skipped.
+    Rows already shown by the compact summary carry ``summaryKey``.
     """
     token = resolve_wp_sub_category(subtype, collected)
     spec = form_spec_for(token)
     if spec is not None:
-        form_keys = {*spec.common_keys, *spec.field_types.keys(), "work_permit_type"}
+        form_keys = {*spec.common_keys, *spec.field_types.keys()}
     else:
-        form_keys = {*FIELD_LABELS.keys(), *_DETAIL_EXTRA_LABELS.keys()}
+        form_keys = set(FIELD_LABELS.keys())
 
-    ordered = ["mall", "brand", "unit_codes", *FIELD_LABELS.keys(), "company_name"]
-    items: list[dict[str, Any]] = []
-    for key in ordered:
-        if key not in form_keys or key in _DETAIL_SKIP_KEYS:
+    rows: list[WpDetailRow] = []
+    for key, label, value, summary_key in (
+        ("company", "Company", readable_wp_company(collected), "company"),
+        ("brand", "Brand", _str(collected.get("brand")), "brand"),
+        ("mall", "Mall", _str(collected.get("mall")), "mall"),
+        ("unit_codes", "Unit", _str(collected.get("unit_codes")), "unit"),
+        ("lease_code", "Lease", _str(collected.get("lease_code") or collected.get("lease")), "lease"),
+    ):
+        if value:
+            rows.append(_row(key, label, value, SECTION_LOCATION, summary_key))
+
+    permit = _detail_value("work_permit_type", collected.get("work_permit_type") or token)
+    if permit:
+        rows.append(
+            _row("work_permit_type", "Permit / Request Type", permit, SECTION_PERMIT, "request_type")
+        )
+    # SR-level fields: not in any form spec, but part of the request.
+    for key, label, section in (
+        ("title", "Title", SECTION_PERMIT),
+        ("description", "Description", SECTION_WORK),
+    ):
+        value = _str(collected.get(key))
+        if value:
+            rows.append(_row(key, label, value, section))
+
+    for key in _TYPE_OF_WORK_KEYS:
+        if key not in form_keys:
             continue
         value = _detail_value(key, collected.get(key))
-        if not value:
+        if value:
+            rows.append(_row(key, FIELD_LABELS[key], value, SECTION_WORK, "type_of_work"))
+
+    rows.extend(_schedule_rows(collected, token))
+
+    for key in FIELD_LABELS:
+        if (
+            key not in form_keys
+            or key in _DETAIL_SKIP_KEYS
+            or key in _DETAIL_DEDICATED_KEYS
+            or key in _TYPE_OF_WORK_KEYS
+            or key in {"title", "description"}
+        ):
             continue
-        label = FIELD_LABELS.get(key) or _DETAIL_EXTRA_LABELS[key]
-        item: dict[str, Any] = {"key": key, "label": label, "value": value}
-        summary_key = _DETAIL_SUMMARY_KEYS.get(key)
-        if summary_key:
-            item["summaryKey"] = summary_key
-        items.append(item)
-    return items
+        value = _detail_value(key, collected.get(key))
+        if value:
+            rows.append(_row(key, FIELD_LABELS[key], value, _SECTION_BY_KEY.get(key, SECTION_OTHER)))
+
+    if "measureofsafety" in form_keys:
+        rows.extend(_safety_rows(collected.get("measureofsafety")))
+    if "workers" in form_keys:
+        rows.extend(_worker_rows(collected.get("workers")))
+    return rows
+
+
+def _document_id(row: dict[str, Any]) -> str:
+    return str(row.get("document_id") or row.get("documentId") or "").strip()
+
+
+def build_wp_detail_files(
+    collected: dict[str, Any],
+    documents: list[dict[str, Any]] | None = None,
+) -> list[dict[str, str]]:
+    """Every file on the request as ``{label, fileName, documentId}``.
+
+    SR attachments come from ``documents``; worker Iqamas live only on the
+    ``workers`` rows (the platform does not list them as attachments).
+    """
+    names: dict[str, str] = {
+        _document_id(doc): str(doc.get("file_name") or doc.get("fileName") or "").strip()
+        for doc in documents or []
+        if isinstance(doc, dict)
+    }
+    files: list[dict[str, str]] = []
+    seen: set[str] = set()
+
+    def add(doc_id: str, label: str) -> None:
+        if not doc_id or doc_id in seen:
+            return
+        seen.add(doc_id)
+        files.append({"label": label, "fileName": names.get(doc_id) or label, "documentId": doc_id})
+
+    for doc in documents or []:
+        if isinstance(doc, dict):
+            add(_document_id(doc), names.get(_document_id(doc)) or "Document")
+
+    workers = collected.get("workers")
+    if isinstance(workers, dict):
+        workers = workers.get("worker")
+    for n, row in enumerate(workers if isinstance(workers, list) else [], start=1):
+        if isinstance(row, dict):
+            who = wp_english_part(row.get("full_name") or row.get("name")) or f"Worker {n}"
+            add(_document_id(row), f"Iqama — {who}")
+    return files
 
 
 # Subtypes whose workflow has a single approval hop — the pending line names the
-# permit ("the Operations review") rather than the hop ("your FM review").
+# permit ("the Operations review") rather than the hop ("pending FM review").
 _SINGLE_HOP_SUBTYPES: frozenset[str] = frozenset({"OPERATIONS"})
 
 
@@ -647,7 +966,7 @@ def compose_wp_review_message(
         hop = STAGE_LABELS.get(workflow_stage, "")
         base = hop[: -len("review")].strip() if hop.lower().endswith("review") else hop
         hop_phrase = f"{base} review" if base else "review"
-        pending = f"This **{permit}** permit is now pending your **{hop_phrase}**."
+        pending = f"This **{permit}** permit is now pending **{hop_phrase}**."
 
     question = "What would you like to do?"
     history = compose_wp_history_sentence(request_history, creator)
@@ -735,6 +1054,86 @@ def compose_wp_status_message(
         f"{subject} {in_progress}.\n\n"
         f"There is no step waiting on you right now. {_VIEW_DETAILS_HINT}"
     )
+
+
+FULL_REQUEST_CHIP_VALUE = "Show the full request"
+
+
+def build_wp_full_request_chips(sr_id: Any, *, on_sr_page: bool) -> list[dict[str, str]]:
+    """"Open full request" asks the chat for the details; navigation is its own chip."""
+    chips = [{"label": "Open full request", "value": FULL_REQUEST_CHIP_VALUE}]
+    if sr_id and not on_sr_page:
+        chips.append(
+            {"label": "Go to request page", "value": str(sr_id), "action": "view_service_request"}
+        )
+    return chips
+
+
+# Sections a "show me …" message can ask for; rows carry ``section`` (see
+# build_wp_review_details). "work" shows the permit and work rows together.
+WP_DETAILS_SECTIONS: dict[str, frozenset[str]] = {
+    "schedule": frozenset({SECTION_SCHEDULE}),
+    "safety": frozenset({SECTION_SAFETY}),
+    "work": frozenset({SECTION_PERMIT, SECTION_WORK}),
+}
+
+_SECTION_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    (
+        "all",
+        re.compile(
+            r"\b(full|all|complete|entire|whole)\s+(the\s+)?"
+            r"(request|details?|fields?|information|info|permit)\b"
+            r"|\brequest\s+details\b"
+        ),
+    ),
+    (
+        "safety",
+        re.compile(r"\b(measures?\s+)?safety(\s+(measures?|details|checklist))?\b"),
+    ),
+    (
+        "schedule",
+        re.compile(
+            r"\b(planned\s+)?(work\s+)?sch?edu?le?s?\b|\bplanned\s+(work|dates?|times?)\b"
+            r"|\bwork(ing)?\s+(times?|hours|dates?)\b|\btimings?\b"
+        ),
+    ),
+    ("work", re.compile(r"\bwork\s+details\b|\bdetails\s+of\s+(the\s+)?work\b")),
+)
+
+_SHOW_VERB_RE = re.compile(
+    r"\b(show|view|see|display|open|give|list|check|tell\s+me|what(?:'s|\s+is|\s+are))\b"
+)
+# A message that also asks to act is a review decision, never a details request.
+_ACTION_WORD_RE = re.compile(
+    r"\b(approve|approved|reject|rejected|assign|reassign|cancel|extend|"
+    r"more\s+info|ask\s+for|send\s+back|confirm|submit)\b"
+)
+_FILLER_RE = re.compile(r"\b(the|a|an|please|me|for|this|that|permit|work\s+permit|of)\b")
+
+
+def _schedule_typo(text: str) -> bool:
+    return any(
+        difflib.get_close_matches(word, ["schedule"], n=1, cutoff=0.8)
+        for word in re.findall(r"[a-z]+", text)
+    )
+
+
+def wp_details_section(message: str | None) -> str | None:
+    """``"all" | "schedule" | "safety" | "work"`` when the message asks to see
+    Work Permit details, else None. Needs a show-verb, or the message must be
+    just the section name; any review action word disqualifies it."""
+    text = re.sub(r"\s+", " ", str(message or "").casefold()).strip(" .?!")
+    if not text or _ACTION_WORD_RE.search(text):
+        return None
+    has_verb = bool(_SHOW_VERB_RE.search(text))
+    bare = re.sub(r"\s+", " ", _FILLER_RE.sub(" ", text)).strip()
+    for section, pattern in _SECTION_PATTERNS:
+        match = pattern.search(text)
+        if match and (has_verb or pattern.fullmatch(bare)):
+            return section
+    if (has_verb or len(bare.split()) == 1) and _schedule_typo(text):
+        return "schedule"
+    return None
 
 
 def build_wp_review_prompt_suggestions(

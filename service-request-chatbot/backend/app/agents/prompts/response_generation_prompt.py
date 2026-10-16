@@ -12,6 +12,7 @@ from typing import Any
 # ---------------------------------------------------------------------------
 
 FIELD_LABELS: dict[str, str] = {
+    "company": "company",
     "lease_code": "lease code",
     "lease_brand_mall": "lease, brand, or mall",
     "description": "description",
@@ -154,6 +155,8 @@ You may show stored details as a card instead of writing them into the sentence.
 - "fields": label/value pairs whose values are copied from DATA COLLECTED SO FAR,
   as plain text. For several items (e.g. people), repeat the same labels for
   each item in turn.
+- When the card describes the request itself, include Company and Lease Code
+  if they are in DATA COLLECTED SO FAR.
 - "files": only documents listed under AVAILABLE DOCUMENTS, referenced by their
   doc_N handle with a short label. Never invent a handle.
 - With a card, "message" is one short sentence introducing it; do not repeat the
@@ -266,8 +269,14 @@ def build_response_generation_context(
     asking_field: str | None = None,
     doc_refs: dict[str, str] | None = None,
     documents: list[dict] | None = None,
+    readable_rows: list[dict[str, Any]] | None = None,
+    request_type: str | None = None,
 ) -> str:
-    """Build the user-content string sent to the LLM for response generation."""
+    """Build the user-content string sent to the LLM for response generation.
+
+    ``readable_rows`` (label/value rows already formatted for people) replace
+    the raw ``collected_data`` dump in DATA COLLECTED SO FAR.
+    """
 
     doc_refs = doc_refs or {}
     lines: list[str] = []
@@ -287,6 +296,8 @@ def build_response_generation_context(
     lines.append("## WORKFLOW CONTEXT")
     stage_label = STAGE_DESCRIPTIONS.get(workflow_stage or "", workflow_stage or "unknown")
     lines.append(f"Current task: {stage_label}")
+    if request_type:
+        lines.append(f"Request type: {request_type}")
     if intent:
         lines.append(f"User intent: {intent.replace('_', ' ').title()}")
     if intent == "PREVIEW_SERVICE_REQUEST":
@@ -320,10 +331,25 @@ def build_response_generation_context(
         "lease",
         "mall",
         "brand",
+        # Often a numeric profile id; ``company`` holds the readable name.
+        "company_name",
+        "company_lease_code",
     }
 
     # ── 3. Data collected so far ─────────────────────────────────────────────
-    if collected_data:
+    if readable_rows:
+        shown_rows = [
+            (str(row.get("label") or ""), str(row.get("value") or "").strip())
+            for row in readable_rows
+            if isinstance(row, dict)
+        ]
+        shown_rows = [(label, value) for label, value in shown_rows if label and value]
+        if shown_rows:
+            lines.append("## DATA COLLECTED SO FAR")
+            for label, value in shown_rows:
+                lines.append(f"- {label}: {value}")
+            lines.append("")
+    elif collected_data:
         readable_data: dict[str, str] = {}
         for k, v in collected_data.items():
             if v is None or v == "" or v == []:

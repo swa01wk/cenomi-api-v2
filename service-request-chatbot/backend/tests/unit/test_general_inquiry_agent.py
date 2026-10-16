@@ -40,6 +40,7 @@ from app.agents.schemas.general_inquiry_schema import (
     SERVICE_CATEGORY,
     SUB_CATEGORY,
     get_missing_fields,
+    infer_title_and_description,
 )
 from app.agents.schemas.help_agent_schema import (
     ALL_INTENTS,
@@ -75,6 +76,9 @@ def _complete_collected() -> dict[str, Any]:
         # The optional document step is already answered, so confirmation
         # builds the review card instead of offering Upload / Skip.
         "gi_optional_upload_status": "done",
+        # The title check is already answered, so a finished upload still
+        # builds the review card.
+        "gi_title_review_status": "accepted",
     }
 
 
@@ -142,8 +146,8 @@ class TestGeneralInquiryRegistry:
 class TestGeneralInquirySchema:
     def test_empty_draft_missing_required(self) -> None:
         missing = get_missing_fields("CREATE_SR", {})
-        assert "title" in missing
-        assert "description" in missing
+        assert "title" not in missing
+        assert "description" not in missing
         assert "lease_code" in missing
         assert "lease_id" in missing
 
@@ -230,15 +234,32 @@ class TestGeneralInquiryRouting:
         assert _route_after_general_inquiry_entry(state) == "merge_state"
 
     @pytest.mark.asyncio
-    async def test_approve_action_confirms_review(self) -> None:
+    async def test_approve_action_asks_for_a_comment(self) -> None:
         state = _state(
             workflow_stage="GI_CRT_REVIEW",
             action_override="confirm_approve_gi",
             backend_refs={"sr_id": "8898"},
         )
         result = await general_inquiry_entry_node(state)
+        assert result["confirmation_status"] is None
+        assert result["backend_refs"]["gi_pending_action"] == "approve"
+        assert result["collected_data"]["gi_pending_action"] == "approve"
+        assert "comment" in result["response_message"].lower()
+        assert _route_after_general_inquiry_entry({**state, **result}) == "response_generation"
+
+    @pytest.mark.asyncio
+    async def test_approve_comment_confirms_review(self) -> None:
+        state = _state(
+            workflow_stage="GI_CRT_REVIEW",
+            user_message="Approved — tenant can proceed",
+            action_override=None,
+            backend_refs={"sr_id": "8898"},
+            collected_data={"gi_pending_action": "approve", "title": "Hours"},
+        )
+        result = await general_inquiry_entry_node(state)
         assert result["confirmation_status"] == "CONFIRMED"
         assert result["backend_refs"]["gi_action"] == "approve"
+        assert result["collected_data"]["review_comment"] == "Approved — tenant can proceed"
 
     @pytest.mark.asyncio
     async def test_reject_action_asks_for_a_comment(self) -> None:
@@ -266,6 +287,59 @@ class TestGeneralInquiryRouting:
         assert "gi_pending_action" not in result["collected_data"]
         assert result["collected_data"]["review_comment"] == "Out of scope for mall management"
         assert _route_after_load(state) == "general_inquiry_entry"
+
+    @pytest.mark.asyncio
+    async def test_ask_more_info_requires_a_comment(self) -> None:
+        state = _state(
+            workflow_stage="GI_CRT_REVIEW",
+            action_override="ask_more_info_gi",
+        )
+        result = await general_inquiry_entry_node(state)
+        assert result["collected_data"]["gi_pending_action"] == "ask_more_info"
+        assert result["confirmation_status"] is None
+        assert "comment" in result["response_message"].lower()
+
+    @pytest.mark.asyncio
+    async def test_reassign_asks_for_a_role_then_a_comment(self) -> None:
+        state = _state(
+            workflow_stage="GI_CRT_REVIEW",
+            action_override="reassign_gi",
+        )
+        asked = await general_inquiry_entry_node(state)
+        assert asked["collected_data"]["gi_pending_action"] == "reassign"
+        assert asked["confirmation_status"] is None
+
+        picked = _state(
+            workflow_stage="GI_CRT_REVIEW",
+            user_message="MALL_MANAGER",
+            collected_data={"gi_pending_action": "reassign", "title": "Hours"},
+        )
+        role_turn = await general_inquiry_entry_node(picked)
+        assert role_turn["confirmation_status"] is None
+        assert role_turn["collected_data"]["gi_pending_action"] == "reassign_comment"
+        assert role_turn["collected_data"]["assign_to"] == "MALL_MANAGER"
+        assert "comment" in role_turn["response_message"].lower()
+
+        commented = _state(
+            workflow_stage="GI_CRT_REVIEW",
+            user_message="Please check the shop front",
+            collected_data=role_turn["collected_data"],
+        )
+        done = await general_inquiry_entry_node(commented)
+        assert done["confirmation_status"] == "CONFIRMED"
+        assert done["collected_data"]["gi_action"] == "reassign"
+        assert done["collected_data"]["assign_to"] == "MALL_MANAGER"
+        assert done["collected_data"]["review_comment"] == "Please check the shop front"
+
+    def test_review_card_has_no_add_comment_button(self) -> None:
+        from app.agents.services.general_inquiry_review_summary import build_gi_review_card
+
+        card = build_gi_review_card({"title": "Hours"}, sr_id="1")
+        actions = {item["action"] for item in card["actions"]}
+        assert "add_comment_gi" not in actions
+        assert "confirm_approve_gi" in actions
+        assert "reassign_gi" in actions
+        assert "ask_more_info_gi" in actions
 
     def test_entry_rejected_goes_to_extraction(self) -> None:
         state = _state(confirmation_status="REJECTED")
@@ -418,15 +492,16 @@ class TestGeneralInquiryConfirmationNode:
         assert "lease_code" in keys
 
     @pytest.mark.asyncio
-    async def test_offers_upload_and_skip_before_the_card(self) -> None:
+    async def test_shows_the_document_upload_before_the_card(self) -> None:
         collected = _complete_collected()
         collected.pop("gi_optional_upload_status")
         state = _state(collected_data=collected)
         result = await general_inquiry_confirmation_node(state)
-        options = result["response_ui"]["suggestions"]["options"]
-        assert [opt["label"] for opt in options] == ["Upload", "Skip"]
-        assert result["collected_data"]["gi_optional_upload_status"] == "awaiting_choice"
-        assert result["response_ui"]["type"] == "message"
+        ui = result["response_ui"]
+        assert ui["type"] == "document_requirement"
+        options = ui["suggestions"]["options"]
+        assert [opt["label"] for opt in options] == ["Skip"]
+        assert result["collected_data"]["gi_optional_upload_status"] == "awaiting_upload"
 
     @pytest.mark.asyncio
     async def test_skips_when_missing_required(self) -> None:
@@ -625,6 +700,39 @@ class TestGeneralInquiryApiSubmission:
         assert result["status"] == "FAILED"
         assert "API error" in result["response_message"]
 
+    @pytest.mark.asyncio
+    async def test_expired_lease_asks_for_another_lease(self) -> None:
+        mock_result = ServiceRequestCreationResult(
+            sr_id=None,
+            endpoint="/service-requests",
+            request_payload={},
+            response_payload=None,
+            latency_ms=5,
+            status_code=400,
+            error="HTTP 400: This lease has expired and cannot be used to create a service request.",
+        )
+        mock_svc = MagicMock()
+        mock_svc.create_service_request = AsyncMock(return_value=mock_result)
+
+        state = _state(
+            confirmation_status="CONFIRMED",
+            backend_refs={"create_payload": {"service_category": "INQUIRY"}},
+        )
+        with (
+            patch(
+                "app.agents.graph.nodes.general_inquiry.general_inquiry_api_submission_node.get_service_request_api_service",
+                return_value=mock_svc,
+            ),
+            patch(
+                "app.agents.graph.nodes.general_inquiry.general_inquiry_api_submission_node.record_sr_api_call",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await general_inquiry_api_submission_node(state)
+
+        assert result["status"] == "FAILED"
+        assert "has not ended" in result["response_message"]
+
 
 # ---------------------------------------------------------------------------
 # Regression: missing_field_node must never ask handover questions for GI
@@ -673,32 +781,148 @@ class TestMissingFieldNodeGI:
         )
 
     @pytest.mark.asyncio
-    async def test_asks_for_title_after_lease_resolved(self) -> None:
-        """After lease resolution, missing_field_node must ask for title or description."""
-        from app.agents.graph.nodes.shared.missing_field_node import missing_field_node
-
-        # All backend fields filled (lease resolved), but title and description missing
-        state = _state(
-            collected_data={
-                **{k: v for k, v in _complete_collected().items() if k not in ("title", "description")},
-                "guided_tour": "guided",  # guided tour already answered
-            },
-            workflow_stage="CREATE_SR",
+    async def test_lease_selection_asks_if_the_title_is_ok(self) -> None:
+        """Lease fills the title and description, then Yes or No is offered."""
+        from app.agents.graph.help_agent_graph import _route_after_validation
+        from app.agents.graph.nodes.general_inquiry.general_inquiry_confirmation_node import (
+            general_inquiry_confirmation_node,
         )
-        result = await missing_field_node(state)  # type: ignore[arg-type]
 
-        active_field = result.get("active_field")
-        assert active_field in ("title", "description"), (
-            f"Expected missing_field_node to ask for title or description after lease resolve, "
-            f"got active_field={active_field!r}. Response: {result.get('response_message')!r}"
-        )
-        # Must not ask handover question, and must skip the handover rewriter.
-        msg = (result.get("response_message") or "").lower()
-        assert "handover" not in msg
+        collected = {
+            k: v
+            for k, v in _complete_collected().items()
+            if k not in (
+                "title",
+                "description",
+                "gi_optional_upload_status",
+                "gi_title_review_status",
+            )
+        }
+        state = _state(collected_data=collected, workflow_stage="CREATE_SR")
+        assert _route_after_validation(state) == "general_inquiry_confirmation"
+
+        result = await general_inquiry_confirmation_node(state)  # type: ignore[arg-type]
         ui = result.get("response_ui") or {}
-        assert ui.get("verbatim") is True
-        if active_field == "title":
-            assert "inquiry" in msg
+        assert ui.get("type") == "message"
+        assert [opt["label"] for opt in ui["suggestions"]["options"]] == ["Yes", "No"]
+        saved = result["collected_data"]
+        assert saved["title"] == (
+            "General Inquiry - Brand Under Armour - Jawharat Jeddah"
+        )
+        assert saved["description"] == (
+            "General Inquiry for Brand Under Armour at Jawharat Jeddah, lease t0105712."
+        )
+        assert saved["title"] in (result.get("response_message") or "")
+        assert saved["description"] in (result.get("response_message") or "")
+        assert "guide you through the form" not in (result.get("response_message") or "").lower()
+
+    @pytest.mark.asyncio
+    async def test_yes_continues_to_the_document_upload(self) -> None:
+        collected = {
+            k: v
+            for k, v in _complete_collected().items()
+            if k != "gi_optional_upload_status"
+        }
+        collected["gi_title_review_status"] = "pending"
+        state = _state(
+            collected_data=collected,
+            workflow_stage="CREATE_SR",
+            user_message="yes",
+        )
+        result = await general_inquiry_entry_node(state)  # type: ignore[arg-type]
+        ui = result["response_ui"]
+        assert ui["type"] == "document_requirement"
+        assert result["collected_data"]["gi_title_review_status"] == "accepted"
+        assert result["collected_data"]["title"] == collected["title"]
+
+    @pytest.mark.asyncio
+    async def test_no_asks_for_a_title_then_a_description(self) -> None:
+        collected = {
+            k: v
+            for k, v in _complete_collected().items()
+            if k != "gi_optional_upload_status"
+        }
+        collected["gi_title_review_status"] = "pending"
+        state = _state(
+            collected_data=collected,
+            workflow_stage="CREATE_SR",
+            user_message="no",
+        )
+        result = await general_inquiry_entry_node(state)  # type: ignore[arg-type]
+        assert result["collected_data"]["gi_title_review_status"] == "custom"
+        assert result["collected_data"]["title"] == ""
+        assert result["collected_data"]["description"] == ""
+        assert result["active_field"] == "title"
+        assert "subject of your inquiry" in (result.get("response_message") or "").lower()
+        assert _route_after_general_inquiry_entry(result) == "response_generation"
+
+        # The form sync that follows "No" has an empty message and the
+        # generated title still in the form. It must not skip to the upload.
+        sync = _state(
+            collected_data=result["collected_data"],
+            workflow_stage="CREATE_SR",
+            user_message=" ",
+            corrected_fields={
+                "title": collected["title"],
+                "description": collected["description"],
+            },
+        )
+        held = await general_inquiry_entry_node(sync)  # type: ignore[arg-type]
+        assert held["active_field"] == "title"
+        assert held["collected_data"]["title"] == ""
+        assert held["collected_data"]["description"] == ""
+        assert "subject of your inquiry" in (held.get("response_message") or "").lower()
+        assert _route_after_general_inquiry_entry(held) == "response_generation"
+
+        titled = _state(
+            collected_data=result["collected_data"],
+            workflow_stage="CREATE_SR",
+            user_message="Shop front light",
+        )
+        described = await general_inquiry_entry_node(titled)  # type: ignore[arg-type]
+        assert described["collected_data"]["title"] == "Shop front light"
+        assert described["collected_data"]["description"] == ""
+        assert described["collected_data"]["gi_custom_step"] == "description"
+        assert described["active_field"] == "description"
+        assert "describe your inquiry" in (described.get("response_message") or "").lower()
+        assert described["response_ui"]["type"] == "text_question"
+
+        uploaded = await general_inquiry_entry_node(  # type: ignore[arg-type]
+            _state(
+                collected_data=described["collected_data"],
+                workflow_stage="CREATE_SR",
+                user_message="The light at the shop front is out",
+            )
+        )
+        assert uploaded["response_ui"]["type"] == "document_requirement"
+        assert uploaded["collected_data"]["gi_custom_step"] == "done"
+        assert (
+            uploaded["collected_data"]["description"]
+            == "The light at the shop front is out"
+        )
+
+        # A form sync after the upload must not ask for the description again.
+        again = await general_inquiry_entry_node(  # type: ignore[arg-type]
+            _state(
+                collected_data=uploaded["collected_data"],
+                workflow_stage="CREATE_SR",
+                user_message=" ",
+            )
+        )
+        assert again["response_ui"]["type"] == "message"
+        assert "describe your inquiry" not in (again.get("response_message") or "").lower()
+
+        # Skip is a button with no typed text. It must leave the upload step.
+        skipped = await general_inquiry_entry_node(  # type: ignore[arg-type]
+            _state(
+                collected_data=uploaded["collected_data"],
+                workflow_stage="CREATE_SR",
+                user_message=" ",
+                action_override="skip_optional_upload",
+            )
+        )
+        assert skipped["collected_data"]["gi_optional_upload_status"] == "done"
+        assert skipped["status"] == "IN_PROGRESS"
 
 
 def test_draft_fields_include_title_as_soon_as_it_is_collected() -> None:
@@ -721,3 +945,23 @@ def test_draft_fields_include_title_as_soon_as_it_is_collected() -> None:
     assert "guided_tour" not in by_key
     assert "description" not in by_key
     assert "gi_optional_upload_status" not in by_key
+
+
+def test_one_typed_intent_fills_title_and_description() -> None:
+    """A single message is the subject and the description. The latest one wins."""
+    assert infer_title_and_description(["Guide me", "yes"]) is None
+    assert infer_title_and_description(
+        ["I want to create a General Inquiry service request"]
+    ) is None
+    title, description = infer_title_and_description(
+        [
+            "Guide me",
+            "I want to create a General Inquiry service request",
+            "water leak in the store",
+        ]
+    )
+    assert title == "water leak in the store"
+    assert description == "water leak in the store"
+    short_title, short_description = infer_title_and_description(["uuby"])
+    assert short_title == "uuby"
+    assert short_description == "uuby"

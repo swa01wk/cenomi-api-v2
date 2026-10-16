@@ -681,7 +681,21 @@ class ChatOrchestrationService:
         fm_status: str | None = final_backend_refs.get("fm_status")
         # faq_sources already extracted in step 9 above
 
-        if graph_status in ("SUBMITTED", "COMPLETED"):
+        response_message = str(result_state.get("response_message") or "")
+        lowered_message = response_message.lower()
+        # These review writes stay on GI_CRT_REVIEW with WAITING_FOR_USER
+        # (the reviewer keeps the card). The portal reloads Approval Status
+        # only when action_result is success, so a reassignment would otherwise
+        # leave Customer Relations stuck on Pending.
+        review_written = result_state.get("workflow_stage") == "GI_CRT_REVIEW" and any(
+            phrase in lowered_message
+            for phrase in (
+                "comment has been added",
+                "has been reassigned",
+                "asked for more information",
+            )
+        )
+        if graph_status in ("SUBMITTED", "COMPLETED") or review_written:
             action_result: str | None = "success"
         elif graph_status == "FAILED":
             action_result = "failed"
@@ -766,7 +780,15 @@ class ChatOrchestrationService:
             )
 
             fields = general_inquiry_draft_fields(collected)
-            if fields:
+            # "No" clears the generated title and description so the form
+            # boxes empty before the user types their own.
+            title_cleared = [
+                key
+                for key in ("title", "description")
+                if str(collected.get("gi_title_review_status") or "") == "custom"
+                and not str(collected.get(key) or "").strip()
+            ]
+            if fields or title_cleared:
                 draft_preview = {
                     "type": "sr_preview_card",
                     "requestType": "General Inquiry",
@@ -775,6 +797,8 @@ class ChatOrchestrationService:
                     "isSubmitted": bool(sr_id),
                     "fields": fields,
                 }
+                if title_cleared:
+                    draft_preview["cleared_fields"] = title_cleared
         elif (
             active_for_preview == "rdd_ceiling_inspection_agent"
             and (collected or cleared_fields)

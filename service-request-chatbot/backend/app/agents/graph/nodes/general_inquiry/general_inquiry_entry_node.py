@@ -23,6 +23,7 @@ import structlog
 
 from app.agents.graph.nodes.general_inquiry.general_inquiry_confirmation_node import (
     handle_gi_optional_upload,
+    handle_gi_title_review,
 )
 from app.agents.graph.state import ServiceRequestState
 from app.observability.decorators import trace_node
@@ -61,6 +62,7 @@ _REVIEW_ACTIONS: dict[str, str] = {
     "reject_gi": "reject",
     "ask_more_info_gi": "ask_more_info",
     "reassign_gi": "reassign",
+    "add_comment_gi": "add_comment",
 }
 
 _REASSIGN_ROLES: tuple[tuple[str, str], ...] = (
@@ -84,6 +86,19 @@ def _pending_action(state: ServiceRequestState) -> str:
     return str(refs.get("gi_pending_action") or collected.get("gi_pending_action") or "")
 
 
+def _role_from_text(text: str) -> str | None:
+    """Role code from a reassign chip or a typed role name."""
+    raw = " ".join(str(text or "").split())
+    if not raw:
+        return None
+    codes = {role for _, role in _REASSIGN_ROLES}
+    code = raw.upper().replace(" ", "_")
+    if code in codes:
+        return code
+    labels = {label.lower(): role for label, role in _REASSIGN_ROLES}
+    return labels.get(raw.lower())
+
+
 def _review_ready(state: ServiceRequestState, gi_action: str, comment: str) -> dict[str, Any]:
     backend_refs = dict(state.get("backend_refs") or {})
     collected = dict(state.get("collected_data") or {})
@@ -93,9 +108,6 @@ def _review_ready(state: ServiceRequestState, gi_action: str, comment: str) -> d
     collected.pop("gi_pending_action", None)
     if comment:
         collected["review_comment"] = comment
-    if gi_action == "reassign" and comment:
-        collected["assign_to"] = comment
-        collected["review_comment"] = ""
     return {
         "backend_refs": backend_refs,
         "collected_data": collected,
@@ -145,10 +157,40 @@ async def general_inquiry_entry_node(state: ServiceRequestState) -> dict[str, An
     action = state.get("action_override") or ""
     pending = _pending_action(state)
     if stage == "GI_CRT_REVIEW" or action in _REVIEW_ACTIONS or pending:
+        # Reassign is two steps: the role, then a comment. The role must not
+        # be submitted as the comment.
+        if pending == "reassign" and raw_message and action not in _REVIEW_ACTIONS:
+            role = _role_from_text(raw_message)
+            if not role:
+                return _ask(
+                    state,
+                    "reassign",
+                    "Which role should this inquiry be reassigned to?",
+                    {
+                        "kind": "labeled_options",
+                        "options": [
+                            {"label": label, "value": role}
+                            for label, role in _REASSIGN_ROLES
+                        ],
+                    },
+                )
+            asked = _ask(
+                state,
+                "reassign_comment",
+                "Please enter a comment. Reassignment cannot be submitted without one.",
+            )
+            asked["collected_data"]["assign_to"] = role
+            return asked
+        if pending == "reassign_comment" and raw_message and action not in _REVIEW_ACTIONS:
+            return _review_ready(state, "reassign", raw_message)
         if pending and raw_message and action not in _REVIEW_ACTIONS:
             return _review_ready(state, pending, raw_message)
         if action == "confirm_approve_gi":
-            return _review_ready(state, "approve", "")
+            return _ask(
+                state,
+                "approve",
+                "Please enter a comment. Approval cannot be submitted without one.",
+            )
         if action == "reject_gi":
             return _ask(
                 state,
@@ -159,7 +201,7 @@ async def general_inquiry_entry_node(state: ServiceRequestState) -> dict[str, An
             return _ask(
                 state,
                 "ask_more_info",
-                "What information should I request from the requester?",
+                "Please enter a comment. Asking for more information cannot be submitted without one.",
             )
         if action == "reassign_gi":
             return _ask(
@@ -174,8 +216,27 @@ async def general_inquiry_entry_node(state: ServiceRequestState) -> dict[str, An
                     ],
                 },
             )
+        if action == "add_comment_gi":
+            return _ask(
+                state,
+                "add_comment",
+                "Please enter your comment for this inquiry.",
+            )
         if pending:
             return {}
+
+    # Yes keeps the generated title. No asks the user to write both.
+    # An empty follow-up (the form syncing the old title) stays on that question.
+    title_gate = handle_gi_title_review(
+        state, user_message=raw_message, action=action
+    )
+    if title_gate is not None:
+        return title_gate
+
+    collected_now = dict(state.get("collected_data") or {})
+    if collected_now.get("gi_title_just_asked"):
+        collected_now["gi_title_just_asked"] = False
+        updates["collected_data"] = collected_now
 
     # Optional document. Upload shows the card; Skip continues to confirmation.
     upload_gate = handle_gi_optional_upload(

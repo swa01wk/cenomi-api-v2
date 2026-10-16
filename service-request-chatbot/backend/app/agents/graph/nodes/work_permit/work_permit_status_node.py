@@ -15,7 +15,9 @@ from app.agents.graph.nodes.work_permit.work_permit_confirmation_node import _is
 from app.agents.graph.state import ServiceRequestState
 from app.agents.schemas.work_permit_schema import STAGE_LABELS, resolve_wp_sub_category
 from app.agents.services.display_formatters import format_enum_label
+from app.agents.services.work_permit_company_service import with_wp_company
 from app.agents.services.work_permit_review_summary import (
+    build_wp_full_request_chips,
     build_wp_review_details,
     build_wp_review_summary,
     compose_wp_status_message,
@@ -67,16 +69,12 @@ def build_wp_status_card(state: ServiceRequestState) -> dict[str, Any]:
         "details": build_wp_review_details(collected, subtype=subtype),
         "actions": [],
     }
-    if sr_id and not _is_on_sr_page(state, sr_id):
+    if sr_id:
         card["suggestions"] = {
             "kind": "labeled_options",
-            "options": [
-                {
-                    "label": "Open full request",
-                    "value": str(sr_id),
-                    "action": "view_service_request",
-                }
-            ],
+            "options": build_wp_full_request_chips(
+                sr_id, on_sr_page=_is_on_sr_page(state, sr_id)
+            ),
         }
     return card
 
@@ -84,7 +82,9 @@ def build_wp_status_card(state: ServiceRequestState) -> dict[str, Any]:
 @trace_node("work_permit_status", "AGENT")
 async def work_permit_status_node(state: ServiceRequestState) -> dict[str, Any]:
     """Read-only Work Permit card: status message, summary, details, no actions."""
-    card = build_wp_status_card(state)
+    collected: dict[str, Any] = state.get("collected_data") or {}
+    enriched = await with_wp_company(collected)
+    card = build_wp_status_card({**state, "collected_data": enriched})
     logger.info(
         "work_permit_status_node: stage=%s platform_status=%s",
         state.get("workflow_stage"),
@@ -95,11 +95,13 @@ async def work_permit_status_node(state: ServiceRequestState) -> dict[str, Any]:
         "response_ui": card,
         # None keeps the card's own bolded wording (no LLM rewrite).
         "response_message": None,
-        # This reply owns its chips (none while the SR form is already open).
+        # This reply owns its chips.
         "response_decorations": (
             {"suggestions": card["suggestions"]} if "suggestions" in card else {}
         ),
     }
+    if enriched is not collected:
+        result["collected_data"] = enriched
     # A draft preview must not void a pending create confirmation.
     if (state.get("backend_refs") or {}).get("sr_id"):
         result["confirmation_required"] = False

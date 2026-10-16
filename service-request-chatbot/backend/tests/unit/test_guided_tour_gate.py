@@ -175,6 +175,9 @@ class TestEveryWorkflow:
         get_workflow_config("rdd_handover_agent")
         assert WORKFLOW_CONFIG_REGISTRY
         for name, cfg in WORKFLOW_CONFIG_REGISTRY.items():
+            if name == "general_inquiry_agent":
+                assert cfg.guided_tour_gate is False, name
+                continue
             assert cfg.guided_tour_gate is True, name
 
     @pytest.mark.asyncio

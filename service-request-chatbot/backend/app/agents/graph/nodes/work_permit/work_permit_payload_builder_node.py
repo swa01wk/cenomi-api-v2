@@ -155,6 +155,13 @@ def _apply_company_name_from_tenant_profile(
             return
         except (TypeError, ValueError):
             pass
+    _coerce_company_name(inner)
+
+
+def _coerce_company_name(inner: dict[str, Any]) -> None:
+    """Make an existing ``company_name`` an int, or drop it when not numeric."""
+    if "company_name" not in inner:
+        return
     existing = inner.get("company_name")
     if existing in (None, ""):
         inner.pop("company_name", None)
@@ -215,6 +222,9 @@ def build_review_work_permit_payload(
     if approve is not None and action == "approve":
         action = "approve" if approve else "reject"
     cleaned = _strip_review_inner_envelope(dict(inner_payload or {}))
+    # A tenant RE_EXAMINE resubmit skips Go validation, so the stored
+    # snapshot may hold company_name as a string; Go's structs need an int.
+    _coerce_company_name(cleaned)
     if action == "assign_to":
         body: dict[str, Any] = {
             "status": "REASSIGN_TO",

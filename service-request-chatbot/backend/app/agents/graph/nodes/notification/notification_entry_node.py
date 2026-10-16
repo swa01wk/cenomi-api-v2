@@ -52,31 +52,32 @@ _UUID_LIKE = __import__("re").compile(
 
 
 def _summarize_snapshot(notification_id: str, snapshot: dict[str, Any]) -> str:
-    title = snapshot.get("title") or snapshot.get("subject") or "Notification"
-    body = (
+    """Title (when the snapshot has one), body, related SR.
+
+    No read status: the user has the notification open, so it is noise (the
+    detail card still carries ``status``).
+    """
+    title = str(snapshot.get("title") or snapshot.get("subject") or "").strip()
+    body = str(
         snapshot.get("body")
         or snapshot.get("message")
         or snapshot.get("description")
         or ""
     ).strip()
     related = snapshot.get("related_sr_id") or snapshot.get("sr_id")
-    status = snapshot.get("status")
-    if snapshot.get("read") is True:
-        status = status or "read"
-    elif snapshot.get("read") is False:
-        status = status or "unread"
-
     # Platform row ids are UUIDs — meaningless to the user, so omit them.
-    parts = [
-        f"{title}." if _UUID_LIKE.match(notification_id) else f"{title} ({notification_id})."
-    ]
-    if status:
-        parts.append(f"Status: {status}.")
+    show_id = bool(notification_id) and not _UUID_LIKE.match(notification_id)
+
+    parts: list[str] = []
+    if title:
+        parts.append(f"{title} ({notification_id})." if show_id else f"{title}.")
     if body:
         parts.append(body if body.endswith(".") else f"{body}.")
+    if not title and show_id:
+        parts.append(f"Notification ID: {notification_id}.")
     if related:
         parts.append(f"Related service request: {related}.")
-    return " ".join(parts)
+    return " ".join(parts) or "Notification."
 
 
 def _detail_response(state: ServiceRequestState) -> dict[str, Any]:

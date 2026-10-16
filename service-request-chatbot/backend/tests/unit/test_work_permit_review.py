@@ -116,6 +116,14 @@ class TestMapWpOperationsToStage:
         ops = _ops(("MALL_MANAGER", "IN_PROGRESS"),)
         assert map_wp_operations_to_stage(ops, sub_category="OPERATIONS") == WP_MM_REVIEW
 
+    def test_operations_role_id_89_joins_mm(self) -> None:
+        ops = [
+            {"assigned_role": 11, "workflow_level": 1, "status": "IN_PROGRESS"},
+            {"assigned_role": 89, "workflow_level": 1, "status": "IN_PROGRESS"},
+        ]
+        assert normalize_wp_role(89) == "OPERATIONS"
+        assert map_wp_operations_to_stage(ops, sub_category="OPERATIONS") == WP_MM_OPS_REVIEW
+
     def test_roof_access_shares_hot_hops(self) -> None:
         ops = _ops(
             ("DD_ENGINEER", "IN_PROGRESS"),
@@ -649,8 +657,32 @@ class TestWpPayloadBuilderNode:
 
 
 @pytest.mark.asyncio
+class TestWpEntryOpenSr:
+    async def test_unmapped_open_sr_does_not_start_create(self) -> None:
+        result = await work_permit_entry_node(
+            {
+                "workflow_stage": None,
+                "user_message": "Open Work Permit SR 341533",
+                "backend_refs": {
+                    "sr_id": "341533",
+                    "sr_operations": _ops(("999", "IN_PROGRESS")),
+                },
+            }
+        )
+        assert result.get("workflow_stage") != "CREATE_WORK_PERMIT"
+        assert result["status"] == "WAITING_FOR_USER"
+        assert "341533" in result["response_message"]
+
+    async def test_first_create_turn_still_pins_create(self) -> None:
+        result = await work_permit_entry_node(
+            {"workflow_stage": None, "user_message": "create a work permit", "backend_refs": {}}
+        )
+        assert result["workflow_stage"] == "CREATE_WORK_PERMIT"
+
+
+@pytest.mark.asyncio
 class TestWpEntryReviewActions:
-    async def test_confirm_approve_wp_asks_for_optional_comment_then_sets_action(
+    async def test_confirm_approve_wp_asks_for_comment_then_sets_action(
         self,
     ) -> None:
         state = {
@@ -665,13 +697,14 @@ class TestWpEntryReviewActions:
         result = await work_permit_entry_node(
             {
                 "workflow_stage": WP_DD_REVIEW,
-                "user_message": "approve without comment",
+                "user_message": "Site checks done",
                 "confirmation_status": "PENDING",
                 "backend_refs": prompt["backend_refs"],
             }
         )
         assert result["confirmation_status"] == "CONFIRMED"
         assert result["backend_refs"]["wp_action"] == "approve"
+        assert result["backend_refs"]["wp_review_comment"] == "Site checks done"
         assert result["status"] == "IN_PROGRESS"
 
     async def test_reject_wp_asks_for_reason_then_sets_action(self) -> None:

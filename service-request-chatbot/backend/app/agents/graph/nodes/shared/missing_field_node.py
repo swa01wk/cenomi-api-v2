@@ -1529,6 +1529,40 @@ async def _ask_next_missing_field(state: ServiceRequestState) -> dict[str, Any]:
         group = resolve_wp_group(subtype, user_missing) or ()
         return _build_wp_group_ask(collected, list(group), all_missing)
 
+    elif (
+        (active_agent or "") == "general_inquiry_agent"
+        and str(collected.get("gi_title_review_status") or "") == "custom"
+        and (
+            not str(collected.get("title") or "").strip()
+            or not str(collected.get("description") or "").strip()
+        )
+    ):
+        # The user declined the generated title and description. Ask for each
+        # one they still have to write. These are not required until then.
+        field_name = (
+            "title"
+            if not str(collected.get("title") or "").strip()
+            else "description"
+        )
+        question = field_questions.get(
+            field_name,
+            "What is the subject of your inquiry? Please provide a short title."
+            if field_name == "title"
+            else "Please describe your inquiry in detail.",
+        )
+        return {
+            "missing_fields": [field_name],
+            "response_message": question,
+            "response_ui": {
+                "type": "text_question",
+                "field": field_name,
+                "message": question,
+                "verbatim": True,
+            },
+            "status": "WAITING_FOR_USER",
+            "active_field": field_name,
+        }
+
     elif user_missing:
         # All backend fields are resolved; ask for the first user-supplied gap.
         next_field = user_missing[0]

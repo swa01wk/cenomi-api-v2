@@ -11,6 +11,28 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
+@pytest.fixture(autouse=True)
+def _no_wp_company_lookup(monkeypatch: pytest.MonkeyPatch) -> None:
+    """WP review/status/details nodes look the company up by lease code; the
+    local ``.env`` points that at the real API. Default it to "no match" — tests
+    that cover the lookup patch the service themselves."""
+    from app.agents.services import work_permit_company_service
+    from app.agents.services.lease_lookup_service import LeaseLookupResult
+
+    service = MagicMock()
+    service.lookup = AsyncMock(
+        return_value=LeaseLookupResult(
+            matches=[],
+            endpoint="stub",
+            request_payload={},
+            response_payload=None,
+            latency_ms=0,
+            status_code=200,
+        )
+    )
+    monkeypatch.setattr(work_permit_company_service, "get_lease_lookup_service", lambda: service)
+
+
 @pytest.fixture()
 def mock_session() -> AsyncMock:
     """Return a mocked AsyncSession with the most-used hooks pre-configured.

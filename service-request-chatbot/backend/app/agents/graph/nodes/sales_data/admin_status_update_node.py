@@ -19,6 +19,30 @@ from app.observability.decorators import trace_node
 
 log = structlog.get_logger(__name__)
 
+# Where the row lands after each action — the tab the listing should open,
+# matching SalesDataSectionEnum on the frontend. An ask-upload sends it back
+# to Pending for the tenant; an approval moves it to Approved.
+_LISTING_SECTION = {
+    "APPROVED": "Approved",
+    "NEED_REUPLOAD": "Pending",
+    "NEED_UPLOAD_SUPPORTING_DOCUMENT": "Pending",
+    "NEED_UPLOAD_AUDITED_SALES": "Pending",
+}
+
+
+def _updated_period(targets: list[dict[str, Any]]) -> dict[str, str]:
+    """Widest period across the rows just updated, as bare ISO dates."""
+    starts = sorted(
+        s for s in (str(t.get("sales_period_start") or "")[:10] for t in targets) if s
+    )
+    ends = sorted(
+        e for e in (str(t.get("sales_period_end") or "")[:10] for t in targets) if e
+    )
+    if not starts or not ends:
+        return {}
+    return {"sales_period_start": starts[0], "sales_period_end": ends[-1]}
+
+
 _ACTION_LABELS = {
     "APPROVED": "approved",
     "NEED_REUPLOAD": "asked to re-upload sales data",
@@ -163,6 +187,12 @@ async def admin_status_update_node(state: ServiceRequestState) -> dict[str, Any]
             "failed_lease_codes": codes_fail,
             "succeeded": len(succeeded),
             "failed": len(failed),
+            # Lets the chat offer a "View Sales Data" link that lands on the
+            # tab the rows just moved TO, filtered to their period. Without
+            # these the admin was left with no way through from the chat,
+            # and the listing stayed on the tab the row had just left.
+            "listing_section": _LISTING_SECTION.get(action, "All"),
+            **_updated_period(targets),
             "message": message,
             # Precise, exact-count wording matters here (partial vs full
             # success, which leases failed and why) — the LLM rewrite would
