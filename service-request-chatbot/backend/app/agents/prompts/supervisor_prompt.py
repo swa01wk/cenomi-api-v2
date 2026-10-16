@@ -10,6 +10,8 @@ Intent taxonomy follows the agent taxonomy:
   - rdd_fitout_start_agent       : fitout start confirmation (FIT_OUT_CONFIRM_FOS)
   - rdd_fitout_end_agent         : fitout end confirmation (FIT_OUT_CONFIRM_END)
   - rdd_trading_confirmation_agent : trading confirmation (FIT_OUT_CONFIRM_TRADING)
+  - rdd_fitout_progress_agent    : fitout progress (FITOUT_PROGRESS)
+  - rdd_ceiling_inspection_agent : Open / Close Ceiling Inspection (create → L1 → L2 → tenant)
   - work_permit_agent            : work permit SR creation + subtype review hops
   - general_inquiry_agent        : general inquiry SR creation (INQUIRY / GENERAL)
 
@@ -156,6 +158,34 @@ VALID INTENTS
       Keywords: approve fitout progress, approve the progress SR,
                 approve fitout percentage, update and approve fitout progress
       NOTE: Only DD_ENGINEER may approve this SR type.
+
+  CREATE_CEILING_INSPECTION_SR
+      User wants to raise an Open Ceiling Inspection or a Close Ceiling Inspection.
+      Keywords: open ceiling, open ceiling inspection, OCI, close ceiling,
+                close ceiling inspection, CCI, ceiling inspection,
+                "raise an OCI for lease ...", "CCI for lease ..."
+      NOTE: "raise a handover", "handover SR", "unit handover" are NOT this
+      intent — they stay CREATE_RDD_SERVICE_REQUEST. Any message naming a
+      ceiling inspection IS this intent, even when it also mentions a lease,
+      brand, or mall.
+
+  REVIEW_CEILING_INSPECTION_SR
+      The RDD Project Manager (DD_ENGINEER) works on an existing Open / Close
+      Ceiling Inspection at level 1: upload the inspection report, approve it,
+      or ask for more information.
+      Keywords: "finished the open ceiling inspection for SR-...",
+                "upload the OCI report", "review the CCI", "review ceiling inspection"
+
+  APPROVE_CEILING_INSPECTION_SR
+      The FM Manager approves an existing Open / Close Ceiling Inspection at
+      level 2, or asks for more information.
+      Keywords: "approve the close ceiling inspection SR-...", "approve the OCI",
+                "approve ceiling inspection"
+
+  ACKNOWLEDGE_CEILING_INSPECTION_SR
+      The tenant acknowledges a submitted Open / Close Ceiling Inspection report.
+      Keywords: "acknowledge the OCI report", "acknowledge the ceiling inspection",
+                "accept the CCI report"
 
   CREATE_WORK_PERMIT_SR
       User wants to create a work permit service request for construction,
@@ -369,6 +399,17 @@ When intent = APPROVE_FITOUT_PROGRESS:
     service_category = "FIT_OUT_AND_HANDOVER"
     sub_category     = "FITOUT_PROGRESS"
     target_agent     = "rdd_fitout_progress_agent"
+
+When intent = CREATE_CEILING_INSPECTION_SR, REVIEW_CEILING_INSPECTION_SR,
+APPROVE_CEILING_INSPECTION_SR, or ACKNOWLEDGE_CEILING_INSPECTION_SR:
+    service_category = "FIT_OUT_AND_HANDOVER"
+    sub_category     = "OPEN_CEILING_INSPECTION"   when the message says
+                       "open ceiling" or "OCI";
+                       "CLOSE_CEILING_INSPECTION"  when it says "close ceiling"
+                       or "CCI";
+                       "CEILING_INSPECTION"        when it names neither — never
+                       guess Open or Close.
+    target_agent     = "rdd_ceiling_inspection_agent"
 
 When intent = CREATE_WORK_PERMIT_SR:
     service_category = "WORK_PERMIT"

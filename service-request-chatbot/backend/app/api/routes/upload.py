@@ -9,7 +9,8 @@ Guards applied (in order)
 2. **Content-type allowlist** — only PDF, JPEG, and PNG are accepted; returns
    415 for anything else.
 3. **Document-type validation** — ``document_type`` must be a member of
-   ``ALL_DOCUMENT_TYPES`` from ``handover_schema``; returns 422 otherwise.
+   ``ALL_DOCUMENT_TYPES`` from ``handover_schema`` or ``ALL_CEILING_DOC_TYPES``
+   from ``ceiling_schema``; returns 422 otherwise.
 
 When ``session_id`` is provided, the route loads the draft to extract
 ``backend_refs`` (sr_id, lease_id, brand_id, etc.) needed by the platform
@@ -26,6 +27,12 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 
+from app.agents.schemas.ceiling_schema import (
+    ALL_CEILING_DOC_TYPES,
+    DRAFT_REPORT_DOC_TYPES as CEILING_DRAFT_REPORT_DOC_TYPES,
+    OTHER_DOC_TYPE as CEILING_OTHER_DOC_TYPE,
+    REJECTED_REPORT_DOC_TYPES as CEILING_REJECTED_REPORT_DOC_TYPES,
+)
 from app.agents.schemas.handover_schema import (
     ALL_DOCUMENT_TYPES,
     FM_ALLOWED_DOCUMENTS,
@@ -98,6 +105,16 @@ _upload_service = DocumentUploadService()
 
 def _upload_actions_for(document_type: str | None) -> list[str]:
     """Return upload actions that authorize this document type (OR semantics)."""
+    # Ceiling inspection reports are the RDD Project Manager's (DD_ENGINEER);
+    # "Inspection Other" may come from the creator, FM or RDD.
+    if document_type in (CEILING_DRAFT_REPORT_DOC_TYPES | CEILING_REJECTED_REPORT_DOC_TYPES):
+        return ["UPLOAD_RDD_HANDOVER_REPORT"]
+    if document_type == CEILING_OTHER_DOC_TYPE:
+        return [
+            "CREATE_HANDOVER_SR",
+            "UPLOAD_FM_HANDOVER_DOCUMENT",
+            "UPLOAD_RDD_HANDOVER_REPORT",
+        ]
     if document_type == _GI_DOCUMENT_TYPE:
         return ["CREATE_GENERAL_INQUIRY"]
     if not document_type or document_type in _SHARED_OPTIONAL_DOC_TYPES:
@@ -338,16 +355,13 @@ async def upload_document(
         )
 
     # 3. Document-type validation ---------------------------------------------
-    if (
-        document_type is not None
-        and document_type not in ALL_DOCUMENT_TYPES
-        and document_type != _GI_DOCUMENT_TYPE
-    ):
+    _valid_types = ALL_DOCUMENT_TYPES | ALL_CEILING_DOC_TYPES | {_GI_DOCUMENT_TYPE}
+    if document_type is not None and document_type not in _valid_types:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=(
                 f"Unknown document_type '{document_type}'. "
-                f"Valid types: {sorted(ALL_DOCUMENT_TYPES)}."
+                f"Valid types: {sorted(_valid_types)}."
             ),
         )
 
@@ -404,6 +418,8 @@ async def upload_document(
 
         # Per-type status for platform PUT /files.
         if document_type == "SR_REJECTED_HANDOVER_REPORT":
+            doc_type_status = "DISAPPROVED"
+        elif document_type in CEILING_REJECTED_REPORT_DOC_TYPES:
             doc_type_status = "DISAPPROVED"
         elif document_type == "DR_SR_HANDOVER_REPORT":
             doc_type_status = (

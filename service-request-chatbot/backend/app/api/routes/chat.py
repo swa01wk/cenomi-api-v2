@@ -283,6 +283,14 @@ class ServiceRequestChatResponse(BaseModel):
             "card in sync even when `ui` is a plain message or confirmation type."
         ),
     )
+    form_state: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Ceiling Inspection only: live form snapshot (values, missing, "
+            "active_field, documents, locked) so a form rendered beside the "
+            "chat fills as the agent collects fields."
+        ),
+    )
     faq_sources: list[dict[str, Any]] = Field(
         default_factory=list,
         description=(
@@ -413,6 +421,7 @@ async def post_service_request_chat(
         message=result.message,
         ui=result.ui,
         draft_preview=result.draft_preview,
+        form_state=result.form_state,
         faq_sources=result.faq_sources,
         state=ChatStatePayload(
             intent=result.state.intent,

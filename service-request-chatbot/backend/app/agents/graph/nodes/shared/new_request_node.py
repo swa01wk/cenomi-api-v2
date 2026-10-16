@@ -42,6 +42,7 @@ _CREATE_VERB = re.compile(r"\b(create|raise|initiate)\b")
 # The SR types the assistant can create.
 _SR_NOUN = re.compile(
     r"\b(handover|handed over|fit[\s-]?out|trading|work permit|"
+    r"ceiling inspection|oci|cci|"
     r"service request|request|sr)\b"
 )
 

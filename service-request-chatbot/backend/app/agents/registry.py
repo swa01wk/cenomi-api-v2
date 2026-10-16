@@ -63,6 +63,23 @@ SERVICE_REQUEST_AGENT_REGISTRY: dict[str, dict[str, AgentConfig]] = {
             "display_name": "RDD Fitout Progress Agent",
             "schema_key": "fitout_progress_schema",
         },
+        "OPEN_CEILING_INSPECTION": {
+            "agent_name": "rdd_ceiling_inspection_agent",
+            "display_name": "RDD Ceiling Inspection Agent",
+            "schema_key": "ceiling_schema",
+        },
+        "CLOSE_CEILING_INSPECTION": {
+            "agent_name": "rdd_ceiling_inspection_agent",
+            "display_name": "RDD Ceiling Inspection Agent",
+            "schema_key": "ceiling_schema",
+        },
+        # "Raise a ceiling inspection" naming neither — the entry node asks
+        # which one before anything is collected.
+        "CEILING_INSPECTION": {
+            "agent_name": "rdd_ceiling_inspection_agent",
+            "display_name": "RDD Ceiling Inspection Agent",
+            "schema_key": "ceiling_schema",
+        },
     },
     "WORK_PERMIT": {
         # Legacy registry key used by supervisor CREATE before subtype is known.

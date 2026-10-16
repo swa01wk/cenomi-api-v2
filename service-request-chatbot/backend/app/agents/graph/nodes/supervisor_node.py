@@ -581,6 +581,7 @@ _CREATE_NEW_SR_INTENTS: frozenset[str] = frozenset(
     {
         "CREATE_RDD_SERVICE_REQUEST",
         "CREATE_WORK_PERMIT_SR",
+        "CREATE_CEILING_INSPECTION_SR",
     }
 )
 
@@ -835,6 +836,24 @@ async def supervisor_node(state: ServiceRequestState) -> dict[str, Any]:  # noqa
 
     # ── 5. Handle LLM/parse failure → graceful degradation ────────────────
     if decision is None:
+        # A ceiling inspection request refused for lack of LLM credits is told
+        # so plainly, instead of the generic (or sales-data) fallback.
+        from app.agents.schemas.ceiling_schema import (
+            OUT_OF_CREDITS_MESSAGE,
+            is_out_of_credits_error,
+            mentions_ceiling_inspection,
+        )
+
+        if is_out_of_credits_error(parse_error) and mentions_ceiling_inspection(user_message):
+            return {
+                "status": "WAITING_FOR_USER",
+                "response_message": OUT_OF_CREDITS_MESSAGE,
+                "response_ui": {
+                    "type": "message",
+                    "message": OUT_OF_CREDITS_MESSAGE,
+                    "verbatim": True,
+                },
+            }
         if _is_sales_data_only_user(early_roles):
             return _sales_data_unmatched_patch(early_roles)
         return {

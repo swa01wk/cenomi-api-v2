@@ -30,6 +30,7 @@ import logging
 from typing import Any
 
 from app.agents.graph.state import ServiceRequestState
+from app.agents.schemas import ceiling_schema
 from app.agents.schemas.fitout_confirm_schema import (
     get_missing_fields as fitout_get_missing_fields,
 )
@@ -92,7 +93,22 @@ async def validation_node(state: ServiceRequestState) -> dict[str, Any]:
     role: str | None = state.get("role")  # type: ignore[arg-type]
     active_agent: str | None = state.get("active_agent")
 
-    if active_agent in _FITOUT_CONFIRM_AGENTS:
+    if active_agent == ceiling_schema.AGENT_NAME:
+        # Ceiling inspection: its own required create fields, plus end >= start.
+        validation_errors = [
+            {
+                "field": f,
+                "validation_type": "required",
+                "status": "FAILED",
+                "message": f"Required field '{f}' is missing.",
+                "blocking": f not in ceiling_schema.OPTIONAL_FIELDS,
+            }
+            for f in ceiling_schema.get_missing_fields(
+                workflow_stage, state.get("sub_category"), collected_data
+            )
+        ]
+        validation_errors.extend(ceiling_schema.validate_date_order(collected_data))
+    elif active_agent in _FITOUT_CONFIRM_AGENTS:
         # Use fitout-specific required-field check — the handover STAGE_REGISTRY
         # requires description / startDate / title which fitout does not use.
         sub_category: str = state.get("sub_category") or ""  # type: ignore[assignment]
@@ -226,7 +242,9 @@ async def validation_node(state: ServiceRequestState) -> dict[str, Any]:
     # field reported missing does not refuse a confirmed draft, so it must not
     # void the confirmation either.
     if has_blocking and state.get("confirmation_status") == "CONFIRMED":
-        if active_agent in _FITOUT_CONFIRM_AGENTS:
+        if active_agent == ceiling_schema.AGENT_NAME:
+            _OPTIONAL = ceiling_schema.OPTIONAL_FIELDS
+        elif active_agent in _FITOUT_CONFIRM_AGENTS:
             from app.agents.schemas.fitout_confirm_schema import (
                 OPTIONAL_FIELDS as _OPTIONAL,
             )

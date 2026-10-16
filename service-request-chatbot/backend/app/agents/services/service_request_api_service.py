@@ -73,6 +73,108 @@ def _wp_operations_for_subtype(sub_category: str) -> list[dict[str, Any]]:
     return []
 
 
+_CEILING_SUB_CATEGORIES: frozenset[str] = frozenset(
+    {"OPEN_CEILING_INSPECTION", "CLOSE_CEILING_INSPECTION"}
+)
+
+
+def _ceiling_operations() -> list[dict[str, Any]]:
+    """Open / Close Ceiling: RDD Project Manager (L1) → FM Manager (L2)."""
+    return [
+        {"assigned_role": "DD_ENGINEER", "workflow_level": 1, "status": "IN_PROGRESS"},
+        {"assigned_role": "FM_MANAGER", "workflow_level": 2, "status": "YET_TO_START"},
+    ]
+
+
+def _notify_ceiling_next_party(sr_id: str, sr_state: dict[str, Any], event: str) -> None:
+    """Record the action-required row for whoever acts next (mock inbox).
+
+    Stands in for the platform's ``notifyActionOnHandoverInspectionSR`` so the
+    POC's notification bell shows the right party each step:
+    create → DD_ENGINEER, L1 approve → FM_MANAGER, L2 approve / more info →
+    tenant, closed / cancelled → nobody.
+    """
+    from app.agents.schemas.ceiling_schema import CEILING_SUBCAT_CONFIG, TENANT_ROLES
+    from app.agents.services.notification_inbox_service import (
+        clear_mock_notifications,
+        record_mock_notification,
+    )
+
+    sub_category = str(sr_state.get("sub_category") or "").upper()
+    short = CEILING_SUBCAT_CONFIG.get(sub_category, {}).get("short_label", "Ceiling inspection")
+    inner = sr_state.get("payload") or {}
+    lease = inner.get("lease_brand_mall") or inner.get("lease") or ""
+    subject = f"{short} request{f' for {lease}' if lease else ''}"
+    targets: dict[str, tuple[frozenset[str], str, str]] = {
+        "created": (
+            frozenset({"DD_ENGINEER"}),
+            f"New {subject} needs your Level 1 review.",
+            "CEILING_L1_REVIEW",
+        ),
+        "l1_approved": (
+            frozenset({"FM_MANAGER"}),
+            f"{subject} was approved by the RDD Project Manager and needs your Level 2 approval.",
+            "CEILING_L2_REVIEW",
+        ),
+        "report_submitted": (
+            TENANT_ROLES,
+            f"The report for your {subject} is submitted. Please acknowledge it.",
+            "CEILING_REPORT_SUBMITTED",
+        ),
+        "action_required": (
+            TENANT_ROLES,
+            f"More information was requested on your {subject}.",
+            "CEILING_ACTION_REQUIRED",
+        ),
+    }
+    if event not in targets:
+        clear_mock_notifications(sr_id)
+        return
+    roles, message, key = targets[event]
+    record_mock_notification(
+        sub_category=sub_category,
+        sr_id=sr_id,
+        audience_roles=roles,
+        message=message,
+        key=key,
+    )
+
+
+def _advance_ceiling(sr_state: dict[str, Any], status: str) -> None:
+    """Mirror cenomi-api for OCI / CCI.
+
+    L1 APPROVED keeps the SR IN_PROCESS and opens L2. L2 APPROVED sets
+    REPORT_SUBMITTED. A tenant APPROVED on REPORT_SUBMITTED completes the SR.
+    ACTION_REQUIRED sends it back without moving the level.
+    """
+    submitted = (status or "").upper()
+    ops: list[dict[str, Any]] = sr_state.get("service_request_operations", [])
+    if submitted in ("CANCELLED", "ACTION_REQUIRED"):
+        sr_state["status"] = submitted
+        return
+    if submitted != "APPROVED":
+        return
+    if (sr_state.get("status") or "").upper() == "REPORT_SUBMITTED":
+        for op in ops:
+            op["status"] = "FINISHED"
+        sr_state["status"] = "CLOSED"
+        return
+    active = [op for op in ops if (op.get("status") or "").upper() == "IN_PROGRESS"]
+    if not active:
+        return
+    level = min(int(op.get("workflow_level") or 0) for op in active)
+    for op in active:
+        if int(op.get("workflow_level") or 0) == level:
+            op["status"] = "SUBMITTED" if level == 2 else "FINISHED"
+    if level == 2:
+        sr_state["status"] = "REPORT_SUBMITTED"
+        return
+    for op in ops:
+        if int(op.get("workflow_level") or 0) == level + 1:
+            op["status"] = "IN_PROGRESS"
+    sr_state["status"] = "IN_PROCESS"
+
+
 def _advance_wp_operations(
     ops: list[dict[str, Any]],
     status: str,
@@ -215,6 +317,36 @@ class AbstractServiceRequestAPIService(ABC):
         ``status=REPORT_SUBMITTED``.
         """
 
+    async def get_form_field_value(
+        self,
+        service_category: str,
+        sub_category: str,
+        field_name: str,
+    ) -> Any | None:
+        """The ``value`` of a form skeleton field, or None when unavailable.
+
+        Adapters without a platform form (the mock) return None; callers fall
+        back to their own default.
+        """
+        return None
+
+
+def find_form_field(node: Any, field_name: str) -> dict[str, Any] | None:
+    """Depth-first search of a form skeleton for the field named *field_name*."""
+    if isinstance(node, dict):
+        if node.get("name") == field_name and "value" in node:
+            return node
+        children = node.values()
+    elif isinstance(node, list):
+        children = node
+    else:
+        return None
+    for child in children:
+        found = find_form_field(child, field_name)
+        if found is not None:
+            return found
+    return None
+
 
 # ---------------------------------------------------------------------------
 # HTTP adapter (production)
@@ -288,6 +420,32 @@ class HttpServiceRequestAPIService(AbstractServiceRequestAPIService):
     async def get_service_request(self, sr_id: str) -> ServiceRequestGetResult:
         """GET /service-requests/{sr_id}."""
         return await self._client.get_service_request(sr_id)
+
+    async def get_form_field_value(
+        self,
+        service_category: str,
+        sub_category: str,
+        field_name: str,
+    ) -> Any | None:
+        """GET /service-requests/workflows and read one skeleton field's value."""
+        from app.core.request_context import get_current_bearer_token
+
+        # Without the user's token or a service login there is nothing to
+        # authenticate with; skip the round trip and let the caller default.
+        if get_current_bearer_token() is None and not settings.platform_login_email:
+            return None
+        # Network errors come back as an unsuccessful result, never raised.
+        result = await self._client.get_workflows(service_category, sub_category)
+        if not result.success:
+            log.warning(
+                "sr_api.form_field.non_2xx",
+                field=field_name,
+                sub_category=sub_category,
+                status_code=result.status_code,
+            )
+            return None
+        found = find_form_field(result.response_payload, field_name)
+        return found.get("value") if found else None
 
     async def post_comment(
         self,
@@ -571,6 +729,10 @@ class MockServiceRequestAPIService(AbstractServiceRequestAPIService):
             ops = [{"assigned_role": "MALL_MANAGER", "workflow_level": 1, "status": "IN_PROGRESS"}]
             sr_status = "SUBMITTED"
             sr_category = "FIT_OUT_AND_HANDOVER"
+        elif sub_category in _CEILING_SUB_CATEGORIES:
+            ops = _ceiling_operations()
+            sr_status = "IN_PROCESS"
+            sr_category = "FIT_OUT_AND_HANDOVER"
         else:
             ops = [
                 {"assigned_role": "MALL_MANAGER", "workflow_level": 1, "status": "FINISHED"},
@@ -597,7 +759,18 @@ class MockServiceRequestAPIService(AbstractServiceRequestAPIService):
             "service_request_operations": ops,
             "workflow_version": 1,
             "payload": inner_payload,
+            # Returned as service_request_attachments on GET.
+            "attachments": [
+                {
+                    "document_id": row["document_id"],
+                    "document_type_id": row.get("document_type_id") or "",
+                }
+                for row in inner_payload.get("documents") or []
+                if isinstance(row, dict) and row.get("document_id")
+            ],
         }
+        if sub_category in _CEILING_SUB_CATEGORIES:
+            _notify_ceiling_next_party(sr_id, self._sr_states[sr_id], "created")
         return ServiceRequestCreationResult(
             sr_id=sr_id,
             endpoint=endpoint,
@@ -636,6 +809,7 @@ class MockServiceRequestAPIService(AbstractServiceRequestAPIService):
             sr_id=sr_id,
             status=state.get("status"),
             service_request_operations=state.get("service_request_operations", []),
+            service_request_attachments=list(state.get("attachments") or []),
             payload=payload or None,
             endpoint=f"{self._MOCK_ENDPOINT_BASE}/{sr_id}",
             status_code=200,
@@ -694,15 +868,45 @@ class MockServiceRequestAPIService(AbstractServiceRequestAPIService):
                 self._sr_states[sr_id].get("category") == "WORK_PERMIT"
                 or str(self._sr_states[sr_id].get("sub_category") or "").upper() in _WP_SUBTYPES
             )
+            sr_state = self._sr_states[sr_id]
+            is_ceiling = (
+                str(sr_state.get("sub_category") or "").upper() in _CEILING_SUB_CATEGORIES
+            )
+            if is_ceiling:
+                # Keep what the reviewer attached, so the next reviewer's GET
+                # sees it as the platform would (service_request_attachments).
+                inner = payload.get("payload") or {}
+                attachments: list[dict[str, Any]] = list(sr_state.get("attachments") or [])
+                known = {a.get("document_id") for a in attachments}
+                for row in inner.get("documents") or []:
+                    if row.get("document_id") and row["document_id"] not in known:
+                        attachments.append(
+                            {
+                                "document_id": row["document_id"],
+                                "document_type_id": row.get("document_type_id") or "",
+                            }
+                        )
+                sr_state["attachments"] = attachments
+                before = (sr_state.get("status") or "").upper()
+                _advance_ceiling(sr_state, status)
+                after = (sr_state.get("status") or "").upper()
+                if after == "REPORT_SUBMITTED" and before != "REPORT_SUBMITTED":
+                    _notify_ceiling_next_party(sr_id, sr_state, "report_submitted")
+                elif after == "ACTION_REQUIRED":
+                    _notify_ceiling_next_party(sr_id, sr_state, "action_required")
+                elif after in ("CLOSED", "CANCELLED"):
+                    _notify_ceiling_next_party(sr_id, sr_state, "closed")
+                elif str(status or "").upper() == "APPROVED" and after == "IN_PROCESS":
+                    _notify_ceiling_next_party(sr_id, sr_state, "l1_approved")
             # V2 UPDATE (RE_EXAMINE) keeps FM IN_PROGRESS — same as platform TransitionTypeStay.
-            if status == "RE_EXAMINE":
+            elif status == "RE_EXAMINE":
                 self._sr_states[sr_id]["status"] = "IN_PROCESS"
             elif is_wp:
                 ops = self._sr_states[sr_id].get("service_request_operations", [])
                 self._sr_states[sr_id]["status"] = _advance_wp_operations(ops, status)
             else:
                 self._sr_states[sr_id]["status"] = status
-            if (not is_wp) and status == "APPROVED":
+            if (not is_wp) and (not is_ceiling) and status == "APPROVED":
                 ops = self._sr_states[sr_id].get("service_request_operations", [])
                 # Determine who was active before this PATCH so we can correctly
                 # advance the workflow:

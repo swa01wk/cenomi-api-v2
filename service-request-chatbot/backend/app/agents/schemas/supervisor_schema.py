@@ -38,6 +38,11 @@ class SupervisorDecision(BaseModel):
         "APPROVE_FITOUT_CONFIRM_TRADING",
         "CREATE_FITOUT_PROGRESS",
         "APPROVE_FITOUT_PROGRESS",
+        # ── Ceiling Inspection (Open / Close) ─────────────────────────────────
+        "CREATE_CEILING_INSPECTION_SR",
+        "REVIEW_CEILING_INSPECTION_SR",
+        "APPROVE_CEILING_INSPECTION_SR",
+        "ACKNOWLEDGE_CEILING_INSPECTION_SR",
         # ── Work Permit ───────────────────────────────────────────────────────
         "CREATE_WORK_PERMIT_SR",
         "APPROVE_WORK_PERMIT_SR",

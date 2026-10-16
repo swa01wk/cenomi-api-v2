@@ -61,6 +61,10 @@ LEASE_PICKER_PURPOSE_BY_AGENT: dict[str, str] = {
     # Fitout progress lists fit-outs under way: started, and not yet ended.
     "rdd_fitout_progress_agent": "fitout_progress",
     "work_permit_agent": "work_permit",
+    # A ceiling inspection can be raised on any lease the caller can access:
+    # this purpose carries neither the handover-eligibility gate nor a
+    # milestone filter on the platform.
+    "rdd_ceiling_inspection_agent": "ceiling_inspection",
 }
 
 _WORK_PERMIT_LEASE_PURPOSE = "work_permit"
@@ -114,6 +118,13 @@ def build_create_lease_picker(purpose: str | None = None) -> dict[str, Any]:
 
 _LEASE_BROWSE_STAGES: frozenset[str] = frozenset({"CREATE_SR", "CREATE_WORK_PERMIT"})
 
+# Create stages of the RDD agents that browse leases: Handover and the fitout
+# confirmations collect in CREATE_SR; ceiling inspection has its own stage
+# (ceiling_schema.STAGE_CREATE).
+_RDD_CREATE_BROWSE_STAGES: frozenset[str] = frozenset(
+    {"CREATE_SR", "CREATE_CEILING_INSPECTION_SR"}
+)
+
 
 def lease_picker_purpose(state: dict[str, Any]) -> str | None:
     """The ``purpose`` this state's lease picker must carry, if any."""
@@ -130,11 +141,12 @@ def should_browse_leases(state: dict[str, Any]) -> bool:
     """True when a CREATE turn should offer lease browse chips.
 
     Handover, Work Permit create, General Inquiry, the three fitout
-    confirmations and fitout progress each get a list.
+    confirmations, fitout progress, and ceiling inspection each get a list.
     ``lease_picker_purpose`` carries the platform rule (handover has none;
     WP uses ``work_permit``; fitout confirmations use milestone purposes;
-    fitout progress uses ``fitout_progress``). General Inquiry uses
-    ``gi_leases`` (GET /general-inquiry/leases).
+    fitout progress uses ``fitout_progress``; ceiling inspection uses
+    ``ceiling_inspection``). General Inquiry uses ``gi_leases``
+    (GET /general-inquiry/leases).
     """
     from app.core.config import settings
 
@@ -167,4 +179,4 @@ def should_browse_leases(state: dict[str, Any]) -> bool:
     # leases are the right ones.
     if agent != "rdd_handover_agent" and agent not in LEASE_PICKER_PURPOSE_BY_AGENT:
         return False
-    return stage == "CREATE_SR"
+    return stage in _RDD_CREATE_BROWSE_STAGES

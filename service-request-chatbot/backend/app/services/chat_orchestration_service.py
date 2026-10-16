@@ -200,6 +200,8 @@ class ChatTurnResult:
     state: ChatTurnState
     trace_id: UUID | None
     draft_preview: dict[str, Any] | None = None
+    # Ceiling Inspection only: live form snapshot for the split-screen POC.
+    form_state: dict[str, Any] | None = None
     faq_sources: list[dict] = field(default_factory=list)
     # Persisted chat_messages.id of the assistant reply — the durable
     # per-message identity clients use to attach feedback.
@@ -797,6 +799,31 @@ class ChatOrchestrationService:
                 }
                 if title_cleared:
                     draft_preview["cleared_fields"] = title_cleared
+        elif (
+            active_for_preview == "rdd_ceiling_inspection_agent"
+            and (collected or cleared_fields)
+        ):
+            # The platform's OCI / CCI form fills from these rows (Handover field
+            # names); sub_category tells the portal which of the two forms to open.
+            from app.agents.schemas.ceiling_schema import sub_category_label
+            from app.agents.services.ceiling_form_state import ceiling_draft_fields
+
+            draft_preview = {
+                "type": "sr_preview_card",
+                "requestType": f"{sub_category_label(result_state.get('sub_category'))} Service Request",
+                "srId": sr_id,
+                "status": "SUBMITTED" if sr_id else "DRAFT",
+                "isSubmitted": bool(sr_id),
+                "fields": ceiling_draft_fields(result_state),
+            }
+            if cleared_fields:
+                draft_preview["cleared_fields"] = cleared_fields
+
+        form_state: dict[str, Any] | None = None
+        if result_state.get("active_agent") == "rdd_ceiling_inspection_agent":
+            from app.agents.services.ceiling_form_state import build_ceiling_form_state
+
+            form_state = build_ceiling_form_state(result_state)
 
         # Published on every turn so the form knows whether to lock itself.
         from app.agents.services import guided_tour_service
@@ -834,6 +861,7 @@ class ChatOrchestrationService:
             ),
             trace_id=trace_id,
             draft_preview=draft_preview,
+            form_state=form_state,
             faq_sources=faq_sources,
             assistant_message_id=assistant_msg.id,
         )

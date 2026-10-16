@@ -529,6 +529,11 @@ _MOCK_LEASES: list[dict[str, Any]] = [
 _MOCK_RECORDS: list[LeaseRecord] = [LeaseRecord.model_validate(r) for r in _MOCK_LEASES]
 
 
+def list_mock_lease_records() -> list[LeaseRecord]:
+    """The POC lease seed — backs the lookup dropdowns (``api/routes/lookups.py``)."""
+    return list(_MOCK_RECORDS)
+
+
 class MockLeaseLookupService(AbstractLeaseLookupService):
     """In-memory lease lookup for local POC development and unit tests.
 

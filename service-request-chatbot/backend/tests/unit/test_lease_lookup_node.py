@@ -1060,3 +1060,103 @@ class TestMilestoneAlreadyConfirmed:
         assert result["status"] == "IN_PROGRESS"
         assert result.get("confirmation_status") != "MILESTONE_PENDING"
 
+
+
+# ---------------------------------------------------------------------------
+# TestCeilingLeaseEligibility — ceiling inspection can be raised at any time
+# ---------------------------------------------------------------------------
+
+
+
+class _CapturingService(_MockService):
+    def __init__(self, result: LeaseLookupResult) -> None:
+        super().__init__(result)
+        self.queries: list[LeaseLookupQuery] = []
+
+    async def lookup(self, query: LeaseLookupQuery) -> LeaseLookupResult:
+        self.queries.append(query)
+        return await super().lookup(query)
+
+
+class TestCeilingLeaseEligibility:
+    _AGENT = "rdd_ceiling_inspection_agent"
+
+    @pytest.mark.asyncio
+    async def test_typed_code_lookup_uses_the_ceiling_purpose(self) -> None:
+        svc = _CapturingService(_make_result([_UA_RECORD]))
+        await lease_lookup_node(
+            _state(collected_data={"lease_code": "t0105712"}, active_agent=self._AGENT),
+            service=svc,
+        )
+        assert svc.queries[0].purpose == "ceiling_inspection"
+
+    @pytest.mark.asyncio
+    async def test_no_lease_yet_offers_the_lease_list(self) -> None:
+        # The ceiling create stage is CREATE_CEILING_INSPECTION_SR, not
+        # CREATE_SR; the list must still be offered instead of asking the user
+        # to type a lease code.
+        state = _state(
+            collected_data={},
+            active_agent=self._AGENT,
+            workflow_stage="CREATE_CEILING_INSPECTION_SR",
+        )
+        result = await lease_lookup_node(state, service=_MockService(_make_result([])))
+        assert result["status"] == "IN_PROGRESS"
+        assert "response_message" not in result
+        picker = result["response_decorations"]["suggestions"]
+        assert picker["kind"] == "resource_picker"
+        assert picker["resource"] == "leases"
+        assert picker["filters"]["purpose"] == "ceiling_inspection"
+
+    def test_browse_stops_once_a_lease_is_chosen(self) -> None:
+        from app.agents.services.resource_picker_decorations import should_browse_leases
+
+        base = {"active_agent": self._AGENT, "workflow_stage": "CREATE_CEILING_INSPECTION_SR"}
+        assert should_browse_leases({**base, "collected_data": {}}) is True
+        assert should_browse_leases({**base, "collected_data": {"lease_id": 95404}}) is False
+        # A ceiling review stage never browses.
+        assert should_browse_leases({**base, "workflow_stage": "CEILING_L1_REVIEW"}) is False
+
+    def test_picker_lists_every_accessible_lease(self) -> None:
+        # ceiling_inspection: no handover-eligibility gate and no milestone
+        # filter on the platform — the same leases the web form lists.
+        from app.agents.services.resource_picker_decorations import lease_picker_purpose
+
+        assert lease_picker_purpose({"active_agent": self._AGENT}) == "ceiling_inspection"
+
+    @pytest.mark.asyncio
+    async def test_typed_code_without_fitout_start_is_enriched(self) -> None:
+        state = _state(collected_data={"lease_code": "t0105712"}, active_agent=self._AGENT)
+        result = await lease_lookup_node(state, service=_MockService(_make_result([_UA_RECORD])))
+        assert result["status"] == "IN_PROGRESS"
+        assert result["collected_data"]["lease_id"] == _UA_RECORD.lease_id
+
+    @pytest.mark.asyncio
+    async def test_typed_code_with_fitout_start_is_enriched(self) -> None:
+        record = _record_with_actual(actual_fitout_start_date="2026-05-01")
+        state = _state(collected_data={"lease_code": "t0105712"}, active_agent=self._AGENT)
+        result = await lease_lookup_node(state, service=_MockService(_make_result([record])))
+        assert result["status"] == "IN_PROGRESS"
+        assert result["collected_data"]["lease_id"] == record.lease_id
+
+    @pytest.mark.asyncio
+    async def test_selected_lease_without_fitout_start_is_enriched(self) -> None:
+        state = _state(
+            collected_data={},
+            selected_lease=_UA_RECORD.model_dump(),
+            active_agent=self._AGENT,
+        )
+        result = await lease_lookup_node(state, service=_MockService(_make_result([])))
+        assert result["status"] == "IN_PROGRESS"
+        assert result["collected_data"]["lease_id"] == _UA_RECORD.lease_id
+
+    @pytest.mark.asyncio
+    async def test_multi_match_keeps_every_lease(self) -> None:
+        started = LeaseRecord.model_validate(
+            {**_NIKE_RYD.model_dump(), "actual_fitout_start_date": "2026-04-01"}
+        )
+        state = _state(collected_data={"brand": "Nike"}, active_agent=self._AGENT)
+        svc = _MockService(_make_result([started, _NIKE_MOA]))
+        result = await lease_lookup_node(state, service=svc)
+        assert result["status"] == "WAITING_FOR_USER"
+        assert len(result["lease_matches"]) == 2

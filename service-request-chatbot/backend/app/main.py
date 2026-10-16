@@ -16,6 +16,7 @@ from app.api.routes.command_center import router as command_center_router
 from app.api.routes.msp_chat import msp_chat_router
 from app.api.routes.sales_data_upload import router as sales_data_upload_router
 from app.api.routes.supporting_doc_upload import router as supporting_doc_upload_router
+from app.api.routes import lookups as lookups_routes
 from app.api.routes import notifications as notifications_routes
 from app.api.routes import session_analytics as session_analytics_routes
 from app.core.config import settings
@@ -75,6 +76,7 @@ def create_app() -> FastAPI:
         prefix=settings.api_v1_prefix,
         tags=["notifications-v1"],
     )
+    application.include_router(lookups_routes.router, prefix=settings.api_v1_prefix, tags=["lookups-v1"])
     application.include_router(upload.router, prefix=settings.api_v1_prefix, tags=["upload-v1"])
     # RAG indexer status / re-index request (admin-only)
     application.include_router(indexer.router, prefix=settings.api_v1_prefix, tags=["indexer-v1"])

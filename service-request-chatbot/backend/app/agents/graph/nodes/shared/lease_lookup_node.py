@@ -438,19 +438,12 @@ async def lease_lookup_node(
         if raw_ids:
             property_ids = [int(pid) for pid in raw_ids if pid is not None]
 
-    # Fitout Start / End / Trading confirmation need leases that already have a
-    # handover SR.  Pass an agent-specific purpose so the platform skips the
-    # "no existing handover SR" eligibility gate used for Initiate Handover.
-    _LEASE_LOOKUP_PURPOSE_BY_AGENT: dict[str, str] = {
-        "rdd_fitout_start_agent": "fitout_confirm",
-        "rdd_fitout_end_agent": "fitout_end",
-        "rdd_trading_confirmation_agent": "trading_confirm",
-        # Fitout progress reports on a fitout still in flight, so its rule is
-        # started-and-not-ended rather than a single prior milestone.
-        "rdd_fitout_progress_agent": "fitout_progress",
-    }
+    # Fitout confirmations, fitout progress, work permit, and ceiling inspection
+    # pass an agent-specific purpose so the platform applies that workflow's
+    # lease rule instead of the Initiate Handover eligibility gate. Same
+    # purpose as the lease picker, from one table.
     active_agent: str | None = state.get("active_agent")
-    purpose: str | None = _LEASE_LOOKUP_PURPOSE_BY_AGENT.get(active_agent or "")
+    purpose: str | None = lease_picker_purpose(state)
 
     query = LeaseLookupQuery(
         lease_code=normalised_lease_code,

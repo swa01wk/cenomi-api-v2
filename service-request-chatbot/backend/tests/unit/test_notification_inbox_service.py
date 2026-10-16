@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from app.agents.services.notification_inbox_service import (
+    MOCK_ONLY_SUB_CATEGORIES,
     NOTIFICATION_SUB_CATEGORIES,
     HttpNotificationInboxService,
     MockNotificationInboxService,
@@ -45,6 +46,8 @@ class TestAudienceSelection:
             "MAINTENANCE_HOT",
             "MAINTENANCE_COLD",
             "MAINTENANCE_ROOF_ACCESS",
+            "OPEN_CEILING_INSPECTION",
+            "CLOSE_CEILING_INSPECTION",
         )
 
     def test_tenant_sales_data_only(self) -> None:
@@ -52,10 +55,11 @@ class TestAudienceSelection:
             frozenset({"TENANT_CSV_UPLOADER"}), None
         ) == ("SALES_DATA",)
 
-    def test_platform_billing_contact_sales_data_only(self) -> None:
+    def test_platform_billing_contact_sales_data_and_ceiling_ack(self) -> None:
+        # Tenant roles acknowledge ceiling inspection reports.
         assert _select_sub_categories(
             frozenset({"BILLING_CONTACT", "LEASING_MANAGER"}), None
-        ) == ("SALES_DATA",)
+        ) == ("SALES_DATA", "OPEN_CEILING_INSPECTION", "CLOSE_CEILING_INSPECTION")
 
     def test_sales_approver_sales_data_only(self) -> None:
         assert _select_sub_categories(
@@ -79,6 +83,8 @@ class TestAudienceSelection:
             "CONSTRUCTION_COLD",
             "CONSTRUCTION_ROOF_ACCESS",
             "MAINTENANCE_ROOF_ACCESS",
+            "OPEN_CEILING_INSPECTION",
+            "CLOSE_CEILING_INSPECTION",
         )
 
     def test_fitout_progress_is_the_rdd_project_managers_alone(self) -> None:
@@ -386,12 +392,52 @@ class TestHttpFetch:
 # ---------------------------------------------------------------------------
 
 
+class TestCeilingLiveRoutes:
+    def test_nothing_is_mock_only(self) -> None:
+        # The platform now serves both ceiling inspection routes.
+        assert MOCK_ONLY_SUB_CATEGORIES == frozenset()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("sub", "path"),
+        [
+            ("OPEN_CEILING_INSPECTION", "/notifications/agent/open-ceiling-inspection"),
+            ("CLOSE_CEILING_INSPECTION", "/notifications/agent/close-ceiling-inspection"),
+        ],
+    )
+    async def test_ceiling_is_fetched_from_the_platform(self, sub: str, path: str) -> None:
+        item = {
+            "id": "ntf-9",
+            "text_content": {"message": "Review SR 30001", "type": "SERVICE_REQUEST", "id": "30001"},
+            "created_at": "2026-09-29T09:00:00Z",
+            "read_at": None,
+            "action_required": True,
+        }
+        with patch("httpx.AsyncClient") as mock_httpx:
+            get = AsyncMock(return_value=_mock_response(200, _platform_body(sub, [item])))
+            mock_httpx.return_value.__aenter__.return_value.get = get
+            result = await _http_service().fetch_inbox(
+                user_id="7",
+                roles=frozenset({"DD_ENGINEER"}),
+                filters=NotificationListFilters(sub_categories=(sub,)),
+            )
+        assert result.success
+        assert [g.sub_category for g in result.groups] == [sub]
+        assert result.groups[0].items[0].sr_id == "30001"
+        args, _ = get.call_args
+        assert args[0] == f"https://platform.example/v1{path}"
+
+
 class TestMockAndFactory:
     @pytest.mark.asyncio
     async def test_mock_deterministic_and_filtered(self) -> None:
         svc = MockNotificationInboxService()
         all_groups = await svc.fetch_inbox(user_id="1", roles=frozenset({"ADMIN"}))
-        assert [g.sub_category for g in all_groups.groups] == list(NOTIFICATION_SUB_CATEGORIES)
+        # Ceiling rows exist only once a mock SR records them — no fixtures.
+        ceiling = {"OPEN_CEILING_INSPECTION", "CLOSE_CEILING_INSPECTION"}
+        assert [g.sub_category for g in all_groups.groups] == [
+            s for s in NOTIFICATION_SUB_CATEGORIES if s not in ceiling
+        ]
         unread = await svc.fetch_inbox(
             user_id="1",
             roles=frozenset({"FM_MANAGER"}),

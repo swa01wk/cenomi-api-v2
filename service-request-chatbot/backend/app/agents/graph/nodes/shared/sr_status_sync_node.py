@@ -43,6 +43,11 @@ from app.agents.services.review_decorations_service import (
     payload_to_collected_data,
 )
 from app.agents.registries.workflow_config import get_workflow_config
+from app.agents.schemas.ceiling_schema import (
+    AGENT_NAME as CEILING_AGENT_NAME,
+    CEILING_SUB_CATEGORIES,
+    map_operations_to_stage as map_ceiling_operations_to_stage,
+)
 from app.agents.services.display_formatters import format_enum_label
 from app.agents.services.service_request_api_service import get_service_request_api_service
 from app.agents.schemas.work_permit_schema import (
@@ -143,6 +148,12 @@ def _map_operations_to_stage(
             if (op.get("status") or "").upper() == "IN_PROGRESS":
                 return "APPROVE_SR"
         return current_stage
+
+    # Open / Close Ceiling: DD_ENGINEER (L1) → FM_MANAGER (L2) → tenant. Must
+    # run before the Handover DD/FM mapping, which would read a DD_ENGINEER
+    # IN_PROGRESS operation as RDD_REVIEW.
+    if sub_category in CEILING_SUB_CATEGORIES:
+        return map_ceiling_operations_to_stage(operations, platform_status, current_stage)
 
     # Fitout confirm early exit: single approval step — any in-progress → APPROVE_SR,
     # terminal → SR_APPROVED.
@@ -601,6 +612,12 @@ async def sr_status_sync_node(state: ServiceRequestState) -> dict[str, Any]:
         updates["active_agent"] = "general_inquiry_agent"
         updates["service_category"] = "INQUIRY"
         updates["sub_category"] = "GENERAL"
+    elif sr_sub_category in CEILING_SUB_CATEGORIES:
+        # Always, like Work Permit: a session that was on another agent must
+        # not reopen a ceiling inspection as a handover.
+        updates["active_agent"] = CEILING_AGENT_NAME
+        updates["service_category"] = "FIT_OUT_AND_HANDOVER"
+        updates["sub_category"] = sr_sub_category
     elif not state.get("active_agent"):
         if effective_stage in ("FM_REVIEW", "RDD_REVIEW"):
             updates["active_agent"] = "rdd_handover_agent"
@@ -627,7 +644,12 @@ async def sr_status_sync_node(state: ServiceRequestState) -> dict[str, Any]:
                 updates["sub_category"] = sr_sub_category
 
     merged_state = {**dict(state), **updates}
-    review_deco = build_review_decorations(merged_state)
+    # The ceiling review node builds its own upload card and chips; the
+    # handover review decorations would add Save Progress / Approve Review.
+    is_ceiling_sr = sr_sub_category in CEILING_SUB_CATEGORIES
+    review_deco = (
+        None if (is_ceiling_sr or gi_sr) else build_review_decorations(merged_state)
+    )
     if review_deco:
         updates["response_decorations"] = merge_decorations(
             state.get("response_decorations"),

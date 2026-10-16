@@ -122,6 +122,7 @@ FLOW_HANDOVER_RDD = "handover_rdd"
 FLOW_WORK_PERMIT = "work_permit"
 FLOW_FITOUT_CONFIRM = "fitout_confirm"
 FLOW_FITOUT_PROGRESS = "fitout_progress"
+FLOW_CEILING_INSPECTION = "ceiling_inspection"
 
 # Where a chat turn came from.  Sent by the client as ``context.channel``;
 # anything else is stored as ``unknown`` rather than trusted verbatim.

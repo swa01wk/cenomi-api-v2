@@ -13,6 +13,7 @@ START
   → rdd_review_entry       (RDD_REVIEW stage boundary)
   → work_permit_entry      (CREATE_WORK_PERMIT — HITL confirmation parser)
   → fitout_confirm_entry   (FIT_OUT_CONFIRM_* — HITL confirmation parser)
+  → ceiling_entry          (OPEN_/CLOSE_CEILING_INSPECTION create; review / ack via sync)
   → field_extraction
   → merge_state
   → lease_lookup
@@ -35,6 +36,7 @@ Agent taxonomy
 - rdd_fitout_start_agent       : fitout start confirmation (FIT_OUT_CONFIRM_FOS)
 - rdd_fitout_end_agent         : fitout end confirmation (FIT_OUT_CONFIRM_END)
 - rdd_trading_confirmation_agent : trading confirmation (FIT_OUT_CONFIRM_TRADING)
+- rdd_ceiling_inspection_agent : Open / Close Ceiling Inspection (create → DD L1 → FM L2 → tenant ack)
 
 RBAC enforcement
 ----------------
@@ -114,6 +116,17 @@ from app.agents.graph.nodes.fitout_progress.fitout_progress_confirmation_node im
 from app.agents.graph.nodes.fitout_progress.fitout_progress_payload_builder_node import fitout_progress_payload_builder_node
 from app.agents.graph.nodes.fitout_progress.fitout_progress_api_submission_node import fitout_progress_api_submission_node
 
+# ── Ceiling Inspection agent nodes (OPEN_ / CLOSE_CEILING_INSPECTION) ─────────
+from app.agents.graph.nodes.ceiling.ceiling_entry_node import ceiling_entry_node
+from app.agents.graph.nodes.ceiling.ceiling_confirmation_node import ceiling_confirmation_node
+from app.agents.graph.nodes.ceiling.ceiling_payload_builder_node import ceiling_payload_builder_node
+from app.agents.graph.nodes.ceiling.ceiling_api_submission_node import ceiling_api_submission_node
+from app.agents.graph.nodes.ceiling.ceiling_review_entry_node import ceiling_review_entry_node
+from app.agents.graph.nodes.ceiling.ceiling_review_submission_node import (
+    ceiling_review_submission_node,
+)
+from app.agents.graph.nodes.ceiling.ceiling_ack_entry_node import ceiling_ack_entry_node
+
 # ── Sales Data agent nodes ────────────────────────────────────────────────────
 from app.agents.graph.nodes.sales_data.sales_data_entry_node import sales_data_entry_node
 from app.agents.graph.nodes.sales_data.csv_validation_node import csv_validation_node
@@ -188,6 +201,10 @@ from app.agents.schemas.fitout_progress_schema import (
 from app.agents.schemas.work_permit_schema import OPTIONAL_FIELDS as WP_OPTIONAL_FIELDS
 from app.agents.schemas.handover_schema import OPTIONAL_FIELDS as HANDOVER_OPTIONAL_FIELDS
 from app.agents.schemas.general_inquiry_schema import OPTIONAL_FIELDS as GI_OPTIONAL_FIELDS
+from app.agents.schemas.ceiling_schema import (
+    AGENT_NAME as CEILING_AGENT_NAME,
+    OPTIONAL_FIELDS as CEILING_OPTIONAL_FIELDS,
+)
 
 # ---------------------------------------------------------------------------
 # Agent entry-node dispatch table
@@ -200,9 +217,12 @@ _AGENT_ENTRY_NODES: dict[str, str] = {
     "rdd_fitout_end_agent": "fitout_confirm_entry",
     "rdd_trading_confirmation_agent": "fitout_confirm_entry",
     "rdd_fitout_progress_agent": "fitout_progress_entry",
+    "rdd_ceiling_inspection_agent": "ceiling_entry",
     "sales_data_agent": "sales_data_entry",
     "general_inquiry_agent": "general_inquiry_entry",
 }
+
+_CEILING_AGENT = CEILING_AGENT_NAME
 
 # Intents that route to the FAQ node (Q&A path — no SR workflow activation)
 _FAQ_INTENTS: frozenset[str] = frozenset({"ASK_HELP", "UNKNOWN"})
@@ -223,6 +243,7 @@ _CREATE_NEW_SR_INTENTS: frozenset[str] = frozenset(
         "CREATE_FITOUT_CONFIRM_END",
         "CREATE_FITOUT_CONFIRM_TRADING",
         "CREATE_FITOUT_PROGRESS",
+        "CREATE_CEILING_INSPECTION_SR",
         # Sales data intents never open an existing platform SR
         "UPLOAD_SALES_DATA",
         "ENTER_SALES_DATA_MANUAL",
@@ -658,6 +679,8 @@ def _route_after_validation(state: dict[str, Any]) -> str:
         if active_agent_for_optional in _FITOUT_AGENTS
         else FITOUT_PROGRESS_OPTIONAL_FIELDS
         if active_agent_for_optional == FITOUT_PROGRESS_AGENT
+        else CEILING_OPTIONAL_FIELDS
+        if active_agent_for_optional == _CEILING_AGENT
         else WP_OPTIONAL_FIELDS
         if active_agent_for_optional == "work_permit_agent"
         else GI_OPTIONAL_FIELDS
@@ -741,6 +764,9 @@ def _route_after_validation(state: dict[str, Any]) -> str:
                 ]
             else:
                 still_missing = []
+    elif active_agent == _CEILING_AGENT:
+        from app.agents.schemas.ceiling_schema import get_missing_fields as ceiling_missing
+        still_missing = ceiling_missing(original_stage, state.get("sub_category"), collected)
     else:
         from app.agents.schemas.handover_schema import get_missing_fields as rdd_missing
         still_missing = rdd_missing(original_stage, collected)
@@ -1145,6 +1171,38 @@ def _route_after_general_inquiry_confirmation(state: dict[str, Any]) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Ceiling Inspection routing
+# ---------------------------------------------------------------------------
+
+
+def _route_after_ceiling_entry(state: dict[str, Any]) -> str:
+    # Same order as _route_after_fitout_confirm_entry: a confirm set this turn
+    # must win over a WAITING_FOR_USER the entry node did not set.
+    if _guided_tour_service.has_pending_answer(state):
+        return "merge_state"
+    if state.get("confirmation_status") == "CONFIRMED":
+        return "merge_state"
+    if state.get("confirmation_status") == "REJECTED":
+        return "field_extraction"
+    # Refusal, cancel prompt, or the "Open or Close?" question.
+    if state.get("status") == "WAITING_FOR_USER":
+        return _form_patch_target(state) or "response_generation"
+    return _form_patch_target(state) or "field_extraction"
+
+
+def _route_after_ceiling_confirmation(state: dict[str, Any]) -> str:
+    if state.get("confirmation_status") == "CONFIRMED":
+        return "ceiling_payload_builder"
+    return "response_generation"
+
+
+def _route_after_ceiling_review_entry(state: dict[str, Any]) -> str:
+    if state.get("confirmation_status") == "CONFIRMED":
+        return "ceiling_review_submission"
+    return "response_generation"
+
+
+# ---------------------------------------------------------------------------
 # Sales Data Agent routing
 # ---------------------------------------------------------------------------
 
@@ -1362,6 +1420,14 @@ def build_help_agent_graph():
     graph.add_node("general_inquiry_confirmation", general_inquiry_confirmation_node)
     graph.add_node("general_inquiry_payload_builder", general_inquiry_payload_builder_node)
     graph.add_node("general_inquiry_api_submission", general_inquiry_api_submission_node)
+    # Ceiling Inspection agent nodes
+    graph.add_node("ceiling_entry", ceiling_entry_node)
+    graph.add_node("ceiling_confirmation", ceiling_confirmation_node)
+    graph.add_node("ceiling_payload_builder", ceiling_payload_builder_node)
+    graph.add_node("ceiling_api_submission", ceiling_api_submission_node)
+    graph.add_node("ceiling_review_entry", ceiling_review_entry_node)
+    graph.add_node("ceiling_review_submission", ceiling_review_submission_node)
+    graph.add_node("ceiling_ack_entry", ceiling_ack_entry_node)
     # ── Sales Data agent nodes ─────────────────────────────────────────────────
     graph.add_node("sales_data_entry", sales_data_entry_node)
     graph.add_node("pending_months_gate", pending_months_gate_node)
@@ -1409,6 +1475,7 @@ def build_help_agent_graph():
             "work_permit_entry": "work_permit_entry",
             "fitout_confirm_entry": "fitout_confirm_entry",
             "fitout_progress_entry": "fitout_progress_entry",
+            "ceiling_entry": "ceiling_entry",
             "sales_data_entry": "sales_data_entry",
             "general_inquiry_entry": "general_inquiry_entry",
             # Help question asked mid-collection — answered without disturbing
@@ -1433,7 +1500,10 @@ def build_help_agent_graph():
             "rdd_review_entry": "rdd_review_entry",
             "fitout_confirm_entry": "fitout_confirm_entry",
             "fitout_progress_entry": "fitout_progress_entry",
+            "ceiling_entry": "ceiling_entry",
             "work_permit_entry": "work_permit_entry",
+            "ceiling_review_entry": "ceiling_review_entry",
+            "ceiling_ack_entry": "ceiling_ack_entry",
             "preview": "preview",
             "work_permit_status": "work_permit_status",
             "work_permit_details": "work_permit_details",
@@ -1489,6 +1559,7 @@ def build_help_agent_graph():
             "work_permit_entry": "work_permit_entry",
             "fitout_confirm_entry": "fitout_confirm_entry",
             "fitout_progress_entry": "fitout_progress_entry",
+            "ceiling_entry": "ceiling_entry",
             "sales_data_entry": "sales_data_entry",
             "general_inquiry_entry": "general_inquiry_entry",
             "response_generation": "response_generation",
@@ -1600,6 +1671,7 @@ def build_help_agent_graph():
             "fitout_confirm_confirmation": "fitout_confirm_confirmation",
             "fitout_progress_confirmation": "fitout_progress_confirmation",
             "general_inquiry_confirmation": "general_inquiry_confirmation",
+            "ceiling_confirmation": "ceiling_confirmation",
             "response_generation": "response_generation",
         },
     )
@@ -1673,6 +1745,37 @@ def build_help_agent_graph():
     graph.add_edge("fitout_progress_api_submission", "response_generation")
     graph.add_edge("general_inquiry_payload_builder", "general_inquiry_api_submission")
     graph.add_edge("general_inquiry_api_submission", "response_generation")
+
+    # ── Ceiling Inspection ────────────────────────────────────────────────────
+    graph.add_conditional_edges(
+        "ceiling_entry",
+        _route_after_ceiling_entry,
+        {
+            "field_extraction": "field_extraction",
+            "merge_state": "merge_state",
+            "response_generation": "response_generation",
+        },
+    )
+    graph.add_conditional_edges(
+        "ceiling_confirmation",
+        _route_after_ceiling_confirmation,
+        {
+            "ceiling_payload_builder": "ceiling_payload_builder",
+            "response_generation": "response_generation",
+        },
+    )
+    graph.add_edge("ceiling_payload_builder", "ceiling_api_submission")
+    graph.add_edge("ceiling_api_submission", "response_generation")
+    graph.add_conditional_edges(
+        "ceiling_review_entry",
+        _route_after_ceiling_review_entry,
+        {
+            "ceiling_review_submission": "ceiling_review_submission",
+            "response_generation": "response_generation",
+        },
+    )
+    graph.add_edge("ceiling_review_submission", "response_generation")
+    graph.add_edge("ceiling_ack_entry", "response_generation")
 
     # ── Sales Data agent edges ─────────────────────────────────────────────────
     graph.add_conditional_edges(
